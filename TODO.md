@@ -4,3 +4,4 @@
 - [ ] Ack for delivered just Reply? No need on ConnectedResponse?
 - [ ] PublishWithReply, or option.
 - [ ] Data Races in Server.
+- [ ] Manual Ack?
