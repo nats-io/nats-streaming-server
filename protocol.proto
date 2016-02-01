@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+// Uses https://github.com/gogo/protobuf
+// compiled via `protoc --gofast_out=. protocol.proto`
+
+package stan;
+
+// How messages are delivered to the STAN cluster
+message PubEnvelope {
+  string id      = 1;  // guid
+  bytes  data    = 2;  // payload
+  string subject = 3;  // subject
+  string reply   = 4;  // reply
+}
+
+// Used to ACK to publishers
+message PubAck {
+  string id    = 1; // guid
+  string error = 2; // err string, empty/omitted if no error
+}
+
+// Response to a client connect
+message ConnectResponse {
+  string pubPrefix   = 1; // Prefix to use when publishing to this STAN cluster.
+  string subRequests = 2; // Subject to use for subscription requests.
+  string publicKey   = 100; // Possibly used to sign acks.
+}
+
+
+// Enum for start position type.
+enum StartPosition {
+    NewOnly       = 0;
+    LastReceived  = 1;
+    TimeStart     = 2;
+    SequenceStart = 3;
+  }
+
+// Protocol for a client to subscribe
+message SubscriptionRequest {
+  string        subject       = 1; // Formal subject to subscribe to, e.g. foo.bar
+  string        queue         = 2; // Optional queue group
+  string        inbox         = 3; // Inbox subject to delibver messages on.
+  int32         maxInFlight   = 4; // Maximum inflight messages without an ack allowed.
+  int32         ackWaitInSecs = 5; // Timeout for receiving an ack from the client.
+  string        durableName   = 6; // Optional durable name which survives client restarts.
+  StartPosition startPosition = 7; // Start position
+}
+
+// Used to Respond to SubscriptionRequest
+message SubscriptionResponse {
+  string ackInbox = 1; // ackInbox for sending acks.
+  string error    = 2; // err string, empty/omitted if no error
+}
+
+// Msg is what is delivered to the client.
+message Msg {
+  uint64 seq   = 1;
+  string reply = 2;
+  bytes  data  = 3;
+}
+
+// Ack will deliver an ack for a delivered msg.
+message Ack {
+  uint64 seq   = 1;
+}
