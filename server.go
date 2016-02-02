@@ -5,6 +5,7 @@ package stan
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/nats"
@@ -31,10 +32,12 @@ type stanServer struct {
 	nc          *nats.Conn
 
 	// Msg Storage
+	msgStoreLock  sync.RWMutex
 	msgStores     map[string]*msgStore
 	msgStoreLimit int
 
 	// Subscription Storage
+	subLock  sync.RWMutex
 	subStore map[string][]*serverSubscription
 	// Used to lookup subscriptions by the INBOX they came in on.
 	ackStore map[string]*serverSubscription
@@ -49,6 +52,7 @@ type msg struct {
 
 // Per channel/subject store
 type msgStore struct {
+	sync.RWMutex
 	subject string // Can't be wildcard
 	cur     uint64
 	first   uint64
@@ -58,6 +62,7 @@ type msgStore struct {
 
 // Holds Subscription state
 type serverSubscription struct {
+	sync.Mutex
 	subject       string
 	queue         string
 	inbox         string
@@ -189,12 +194,15 @@ func (s *stanServer) processClientPublish(m *nats.Msg) {
 // processMsg will proces a message, and possibly send to clients, etc.
 func (s *stanServer) processMsg(subject string, m *msg) {
 	// Grab active subscriptions
+	s.subLock.RLock()
 	sl := s.subStore[subject]
 	if sl == nil || len(sl) == 0 {
+		s.subLock.RUnlock()
 		return
 	}
 	// Walk the subscribers
 	for _, sub := range sl {
+		sub.Lock()
 		sub.lastQueued = m.seq
 		// Check if we have too many outstanding. Ack receipt will unblock
 		if sub.lastSent-sub.lastAck <= sub.maxInFlight {
@@ -202,7 +210,9 @@ func (s *stanServer) processMsg(subject string, m *msg) {
 			sub.lastSent = m.seq
 			s.sendMsgToSub(sub.inbox, m)
 		}
+		sub.Unlock()
 	}
+	s.subLock.RUnlock()
 }
 
 func (s *stanServer) sendMsgToSub(inbox string, m *msg) {
@@ -213,13 +223,18 @@ func (s *stanServer) sendMsgToSub(inbox string, m *msg) {
 
 // assignAndStore will assign a sequencId and then store the message.
 func (s *stanServer) assignAndStore(pe *PubEnvelope) (*msg, error) {
+	s.msgStoreLock.RLock()
 	store := s.msgStores[pe.Subject]
+	s.msgStoreLock.RUnlock()
 	if store == nil {
 		store = &msgStore{subject: pe.Subject, cur: 1, first: 1, last: 1}
 		store.msgs = make(map[uint64]*msg, s.msgStoreLimit)
+		s.msgStoreLock.Lock()
 		s.msgStores[pe.Subject] = store
+		s.msgStoreLock.Unlock()
 	}
 	m := &msg{seq: store.cur, reply: pe.Reply, data: pe.Data}
+	store.Lock()
 	store.msgs[store.cur] = m
 	store.cur++
 	store.last = store.cur
@@ -230,6 +245,7 @@ func (s *stanServer) assignAndStore(pe *PubEnvelope) (*msg, error) {
 		delete(store.msgs, store.first)
 		store.first++
 	}
+	store.Unlock()
 	return m, nil
 }
 
@@ -244,12 +260,14 @@ func (s *stanServer) ackPublisher(pe *PubEnvelope, reply string) {
 
 // storeSubscription will store the subscription.
 func (s *stanServer) storeSubscription(sub *serverSubscription) {
+	s.subLock.Lock()
 	sl := s.subStore[sub.subject]
 	if sl == nil {
 		sl = make([]*serverSubscription, 0, 8)
 	}
 	s.subStore[sub.subject] = append(sl, sub)
 	s.ackStore[sub.ackInbox] = sub
+	s.subLock.Unlock()
 }
 
 // processSubscriptionRequest will process a subscription request
@@ -294,18 +312,27 @@ func (s *stanServer) processAck(m *nats.Msg) {
 	ack := &Ack{}
 	ack.Unmarshal(m.Data)
 	sub := s.ackStore[m.Subject]
+	sub.Lock()
 	if ack.Seq > sub.lastAck {
 		sub.lastAck = ack.Seq
 	}
+
+	s.msgStoreLock.RLock()
 	store := s.msgStores[sub.subject]
+	s.msgStoreLock.RUnlock()
+
 	// Check to see if we should send more messages
 	for d := sub.lastQueued - sub.lastSent; d > 0; d = sub.lastQueued - sub.lastSent {
 		nextSeq := sub.lastSent + 1
-		if nextMsg := store.msgs[nextSeq]; nextMsg != nil {
+		store.RLock()
+		nextMsg := store.msgs[nextSeq]
+		store.RUnlock()
+		if nextMsg != nil {
 			sub.lastSent++
 			s.sendMsgToSub(sub.inbox, nextMsg)
 		}
 	}
+	sub.Unlock()
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.

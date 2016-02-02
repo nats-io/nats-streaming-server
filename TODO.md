@@ -5,3 +5,4 @@
 - [ ] PublishWithReply, or option.
 - [ ] Data Races in Server.
 - [ ] Manual Ack?
+- [ ] Server Store Limits (time, msgs, byte)

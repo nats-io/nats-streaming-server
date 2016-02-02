@@ -7,6 +7,7 @@ package stan
 import (
 	"bytes"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,14 +87,19 @@ func TestBasicPublishAsync(t *testing.T) {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
 	ch := make(chan bool)
+	var glock sync.Mutex
 	var guid string
 	acb := func(lguid string, err error) {
+		glock.Lock()
+		defer glock.Unlock()
 		if lguid != guid {
 			t.Fatalf("Expected a matching guid in ack callback, got %s vs %s\n", lguid, guid)
 		}
 		ch <- true
 	}
+	glock.Lock()
 	guid = sc.PublishAsync("foo", []byte("Hello World!"), acb)
+	glock.Unlock()
 	if guid == "" {
 		t.Fatalf("Expected non-empty guid to be returned.")
 	}
@@ -112,8 +118,11 @@ func TestTimeoutPublishAsync(t *testing.T) {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
 	ch := make(chan bool)
+	var glock sync.Mutex
 	var guid string
 	acb := func(lguid string, err error) {
+		glock.Lock()
+		defer glock.Unlock()
 		if lguid != guid {
 			t.Fatalf("Expected a matching guid in ack callback, got %s vs %s\n", lguid, guid)
 		}
@@ -124,7 +133,9 @@ func TestTimeoutPublishAsync(t *testing.T) {
 	}
 	// Kill the STAN server so we timeout.
 	s.Shutdown()
+	glock.Lock()
 	guid = sc.PublishAsync("foo", []byte("Hello World!"), acb)
+	glock.Unlock()
 	if guid == "" {
 		t.Fatalf("Expected non-empty guid to be returned.")
 	}

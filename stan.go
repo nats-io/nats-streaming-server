@@ -249,7 +249,9 @@ func (sc *conn) PublishAsync(subject string, data []byte, ah AckHandler) string 
 	} else {
 		// Setup the timer for expiration.
 		a.t = time.AfterFunc(sc.opts.AckTimeout, func() {
+			sc.Lock()
 			sc.removeAck(pe.Id)
+			sc.Unlock()
 			a.ah(pe.Id, ErrTimeout)
 		})
 	}
