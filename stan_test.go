@@ -7,6 +7,7 @@ package stan
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -197,6 +198,43 @@ func TestBasicPubSub(t *testing.T) {
 	}
 	if err := WaitTime(ch, 1*time.Second); err != nil {
 		t.Fatal("Did not receive our messages")
+	}
+}
+
+func TestSubscriptionStartPositionLast(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+	// Publish ten messages
+	for i := 0; i < 10; i++ {
+		data := []byte(fmt.Sprintf("%d", i))
+		sc.Publish("foo", data)
+	}
+
+	// Now subscribe and set start position to last received.
+	ch := make(chan bool)
+	mcb := func(m *nats.Msg) {
+		ch <- true
+	}
+	sub, err := sc.Subscribe("foo", mcb, StartWithLastReceived())
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Check for sub setup
+	rsub := sub.(*subscription)
+	if rsub.opts.StartAt != StartPosition_LastReceived {
+		t.Fatalf("Incorrect StartAt state: %s\n", rsub.opts.StartAt)
+	}
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not receive our message")
 	}
 }
 

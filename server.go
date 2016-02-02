@@ -73,6 +73,7 @@ type serverSubscription struct {
 	lastAck       uint64
 	maxInFlight   uint64
 	ackWaitInSecs int32
+	startAt       StartPosition
 	ackSub        *nats.Subscription
 }
 
@@ -236,8 +237,8 @@ func (s *stanServer) assignAndStore(pe *PubEnvelope) (*msg, error) {
 	m := &msg{seq: store.cur, reply: pe.Reply, data: pe.Data}
 	store.Lock()
 	store.msgs[store.cur] = m
-	store.cur++
 	store.last = store.cur
+	store.cur++
 
 	// Check if we need to remove any.
 	if len(store.msgs) >= s.msgStoreLimit {
@@ -278,6 +279,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		resp := &SubscriptionResponse{Error: err.Error()}
 		b, _ := resp.Marshal()
 		s.nc.Publish(m.Reply, b)
+		return
 	}
 
 	// FIXME(dlc) check for errors, mis-configurations, etc.
@@ -291,6 +293,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		name:          sr.DurableName,
 		maxInFlight:   uint64(sr.MaxInFlight),
 		ackWaitInSecs: sr.AckWaitInSecs,
+		startAt:       sr.StartPosition,
 	}
 	// Store this subscription
 	s.storeSubscription(ss)
@@ -305,6 +308,19 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	r := &SubscriptionResponse{AckInbox: ss.ackInbox}
 	b, _ := r.Marshal()
 	s.nc.Publish(m.Reply, b)
+
+	// Now see if StartPosition dictates we have messages to send.
+	switch ss.startAt {
+	case StartPosition_NewOnly:
+		// No-Op
+	case StartPosition_LastReceived:
+		// Send the last message received.
+		s.sendLastMessageToSub(ss)
+	case StartPosition_TimeStart:
+		// FIXME(dlc) - impl
+	case StartPosition_SequenceStart:
+		// FIXME(dlc) - impl
+	}
 }
 
 // processAck processes inbound acks from clients for delivered messages.
@@ -333,6 +349,20 @@ func (s *stanServer) processAck(m *nats.Msg) {
 		}
 	}
 	sub.Unlock()
+}
+
+// Send the last message we have to the subscriber
+func (s *stanServer) sendLastMessageToSub(sub *serverSubscription) {
+	s.msgStoreLock.RLock()
+	store := s.msgStores[sub.subject]
+	s.msgStoreLock.RUnlock()
+
+	store.RLock()
+	msg := store.msgs[store.last]
+	store.RUnlock()
+	if msg != nil {
+		s.sendMsgToSub(sub.inbox, msg)
+	}
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.

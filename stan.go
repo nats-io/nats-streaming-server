@@ -83,6 +83,22 @@ func AckWait(t time.Duration) SubscriptionOption {
 	}
 }
 
+// StartPosition sets the desired start position for the message stream.
+func StartAt(sp StartPosition) SubscriptionOption {
+	return func(o *SubscriptionOptions) error {
+		o.StartAt = sp
+		return nil
+	}
+}
+
+// StartWithLastReceived is a helper function to set start position to last received.
+func StartWithLastReceived() SubscriptionOption {
+	return func(o *SubscriptionOptions) error {
+		o.StartAt = StartPosition_LastReceived
+		return nil
+	}
+}
+
 // A conn represents a bare connection to a stan cluster.
 type conn struct {
 	sync.Mutex
@@ -334,6 +350,7 @@ func (sc *conn) Subscribe(subject string, cb nats.MsgHandler, options ...Subscri
 		Inbox:         sub.inbox,
 		MaxInFlight:   int32(sub.opts.MaxInflight),
 		AckWaitInSecs: int32(sub.opts.AckWait / time.Second),
+		StartPosition: sub.opts.StartAt,
 	}
 	b, _ := sr.Marshal()
 	reply, err := sc.nc.Request(sc.subRequests, b, 2*time.Second)
