@@ -201,6 +201,84 @@ func TestBasicPubSub(t *testing.T) {
 	}
 }
 
+func TestBasicPubSubWithReply(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	ch := make(chan bool)
+	hw := []byte("Hello World")
+
+	inbox := newInbox()
+
+	sub, err := sc.Subscribe("foo", func(m *nats.Msg) {
+		if m.Subject != "foo" {
+			t.Fatalf("Expected subject of 'foo', got '%s'\n", m.Subject)
+		}
+		if !bytes.Equal(m.Data, hw) {
+			t.Fatalf("Wrong payload, got %q\n", m.Data)
+		}
+		if m.Reply != inbox {
+			t.Fatalf("Expected reply subject of '%s', got '%s'\n", inbox, m.Reply)
+		}
+		ch <- true
+	})
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer sub.Unsubscribe()
+
+	sc.PublishWithReply("foo", inbox, hw)
+
+	if err := WaitTime(ch, 1*time.Second); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
+}
+
+func TestAsyncPubSubWithReply(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	ch := make(chan bool)
+	hw := []byte("Hello World")
+
+	inbox := newInbox()
+
+	sub, err := sc.Subscribe("foo", func(m *nats.Msg) {
+		if m.Subject != "foo" {
+			t.Fatalf("Expected subject of 'foo', got '%s'\n", m.Subject)
+		}
+		if !bytes.Equal(m.Data, hw) {
+			t.Fatalf("Wrong payload, got %q\n", m.Data)
+		}
+		if m.Reply != inbox {
+			t.Fatalf("Expected reply subject of '%s', got '%s'\n", inbox, m.Reply)
+		}
+		ch <- true
+	})
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer sub.Unsubscribe()
+
+	sc.PublishAsyncWithReply("foo", inbox, hw, nil)
+
+	if err := WaitTime(ch, 1*time.Second); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
+}
+
 func TestSubscriptionStartPositionLast(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)
@@ -348,4 +426,11 @@ func BenchmarkPublishSubscribe(b *testing.B) {
 
 	//	msgs, bytes, _ := sc.(*conn).ackSubscription.MaxPending()
 	//	fmt.Printf("max pending msgs:%d bytes:%d\n", msgs, bytes)
+}
+
+func BenchmarkTimeNow(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		now := time.Now()
+		now.Add(10 * time.Nanosecond)
+	}
 }

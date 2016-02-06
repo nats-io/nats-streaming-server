@@ -18,7 +18,8 @@ const (
 	DefaultConnectWait    = 2 * time.Second
 	DefaultAckWait        = 2 * time.Second
 	DefaultMaxInflight    = 1024
-	DefaultDiscoverPrefix = "STAN.discover"
+	DefaultDiscoverPrefix = "_STAN.discover"
+	DefaultACKPrefix      = "_STAN.acks"
 )
 
 // Errors
@@ -35,6 +36,10 @@ type Conn interface {
 	// Publish
 	Publish(subject string, data []byte) error
 	PublishAsync(subject string, data []byte, ah AckHandler) string
+	// Publish with Reply
+	PublishWithReply(subject, reply string, data []byte) error
+	PublishAsyncWithReply(subject, reply string, data []byte, ah AckHandler) string
+
 	// Subscribe
 	Subscribe(subject string, cb nats.MsgHandler, opts ...SubscriptionOption) (Subscription, error)
 }
@@ -199,7 +204,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	c.subRequests = cr.SubRequests
 
 	// Setup the ACK subscription
-	c.ackSubject = fmt.Sprintf("STAN.ACK.%s", newGUID())
+	c.ackSubject = fmt.Sprintf("%s.%s", DefaultACKPrefix, newGUID())
 	if c.ackSubscription, err = c.nc.Subscribe(c.ackSubject, c.processAck); err != nil {
 		return nil, err
 	}
@@ -231,26 +236,35 @@ func (sc *conn) processAck(m *nats.Msg) {
 	}
 }
 
-// Publish will publish to the cluster on pubPrefix+subject and wait for an ACK.
-// Currently we use a simple Request, but should move to something that allows
-// async with the same mechanism.
+// Publish will publish to the cluster and wait for an ACK.
 func (sc *conn) Publish(subject string, data []byte) (e error) {
-
-	ch := make(chan bool)
-	ah := func(guid string, err error) {
-		e = err
-		ch <- true
-	}
-	sc.PublishAsync(subject, data, ah)
-	<-ch
-	return e
+	return sc.PublishWithReply(subject, "", data)
 }
 
 // PublishAsync will publish to the cluster on pubPrefix+subject and asynchronously
 // process the ACK or error state. It will return the GUID for the message being sent.
 func (sc *conn) PublishAsync(subject string, data []byte, ah AckHandler) string {
+	return sc.PublishAsyncWithReply(subject, "", data, ah)
+}
+
+// PublishWithReply will publish to the cluster and wait for an ACK.
+func (sc *conn) PublishWithReply(subject, reply string, data []byte) (e error) {
+	// FIXME(dlc) Pool?
+	ch := make(chan bool)
+	ah := func(guid string, err error) {
+		e = err
+		ch <- true
+	}
+	sc.PublishAsyncWithReply(subject, reply, data, ah)
+	<-ch
+	return e
+}
+
+// PublishAsyncWithReply will publish to the cluster and asynchronously
+// process the ACK or error state. It will return the GUID for the message being sent.
+func (sc *conn) PublishAsyncWithReply(subject, reply string, data []byte, ah AckHandler) string {
 	subj := fmt.Sprintf("%s.%s", sc.pubPrefix, subject)
-	pe := &PubEnvelope{Id: newGUID(), Subject: subject, Data: data}
+	pe := &PubMsg{Id: newGUID(), Subject: subject, Reply: reply, Data: data}
 	b, _ := pe.Marshal()
 	a := &ack{ah: ah}
 

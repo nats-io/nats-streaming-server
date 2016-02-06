@@ -9,7 +9,7 @@
 		protocol.proto
 
 	It has these top-level messages:
-		PubEnvelope
+		PubMsg
 		PubAck
 		ConnectResponse
 		SubscriptionRequest
@@ -19,7 +19,7 @@
 */
 package stan
 
-import proto "github.com/golang/protobuf/proto"
+import proto "github.com/gogo/protobuf/proto"
 import fmt "fmt"
 import math "math"
 
@@ -58,16 +58,17 @@ func (x StartPosition) String() string {
 }
 
 // How messages are delivered to the STAN cluster
-type PubEnvelope struct {
+type PubMsg struct {
 	Id      string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Data    []byte `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
 	Subject string `protobuf:"bytes,3,opt,name=subject,proto3" json:"subject,omitempty"`
 	Reply   string `protobuf:"bytes,4,opt,name=reply,proto3" json:"reply,omitempty"`
+	Sha256  []byte `protobuf:"bytes,5,opt,name=sha256,proto3" json:"sha256,omitempty"`
 }
 
-func (m *PubEnvelope) Reset()         { *m = PubEnvelope{} }
-func (m *PubEnvelope) String() string { return proto.CompactTextString(m) }
-func (*PubEnvelope) ProtoMessage()    {}
+func (m *PubMsg) Reset()         { *m = PubMsg{} }
+func (m *PubMsg) String() string { return proto.CompactTextString(m) }
+func (*PubMsg) ProtoMessage()    {}
 
 // Used to ACK to publishers
 type PubAck struct {
@@ -115,11 +116,15 @@ func (m *SubscriptionResponse) Reset()         { *m = SubscriptionResponse{} }
 func (m *SubscriptionResponse) String() string { return proto.CompactTextString(m) }
 func (*SubscriptionResponse) ProtoMessage()    {}
 
-// Msg is what is delivered to the client.
+// Msg struct. Only one of seq or id will be set. Id will be the guid
+// sent from the publishers. Seq is assigned for global ordering by
+// the cluster after the publisher has been acknowledged.
 type Msg struct {
-	Seq   uint64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	Reply string `protobuf:"bytes,2,opt,name=reply,proto3" json:"reply,omitempty"`
-	Data  []byte `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	Seq     uint64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	Id      string `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
+	Subject string `protobuf:"bytes,3,opt,name=subject,proto3" json:"subject,omitempty"`
+	Reply   string `protobuf:"bytes,4,opt,name=reply,proto3" json:"reply,omitempty"`
+	Data    []byte `protobuf:"bytes,5,opt,name=data,proto3" json:"data,omitempty"`
 }
 
 func (m *Msg) Reset()         { *m = Msg{} }
@@ -136,7 +141,7 @@ func (m *Ack) String() string { return proto.CompactTextString(m) }
 func (*Ack) ProtoMessage()    {}
 
 func init() {
-	proto.RegisterType((*PubEnvelope)(nil), "stan.PubEnvelope")
+	proto.RegisterType((*PubMsg)(nil), "stan.PubMsg")
 	proto.RegisterType((*PubAck)(nil), "stan.PubAck")
 	proto.RegisterType((*ConnectResponse)(nil), "stan.ConnectResponse")
 	proto.RegisterType((*SubscriptionRequest)(nil), "stan.SubscriptionRequest")
@@ -145,7 +150,7 @@ func init() {
 	proto.RegisterType((*Ack)(nil), "stan.Ack")
 	proto.RegisterEnum("stan.StartPosition", StartPosition_name, StartPosition_value)
 }
-func (m *PubEnvelope) Marshal() (data []byte, err error) {
+func (m *PubMsg) Marshal() (data []byte, err error) {
 	size := m.Size()
 	data = make([]byte, size)
 	n, err := m.MarshalTo(data)
@@ -155,7 +160,7 @@ func (m *PubEnvelope) Marshal() (data []byte, err error) {
 	return data[:n], nil
 }
 
-func (m *PubEnvelope) MarshalTo(data []byte) (int, error) {
+func (m *PubMsg) MarshalTo(data []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
@@ -185,6 +190,14 @@ func (m *PubEnvelope) MarshalTo(data []byte) (int, error) {
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.Reply)))
 		i += copy(data[i:], m.Reply)
+	}
+	if m.Sha256 != nil {
+		if len(m.Sha256) > 0 {
+			data[i] = 0x2a
+			i++
+			i = encodeVarintProtocol(data, i, uint64(len(m.Sha256)))
+			i += copy(data[i:], m.Sha256)
+		}
 	}
 	return i, nil
 }
@@ -364,15 +377,27 @@ func (m *Msg) MarshalTo(data []byte) (int, error) {
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.Seq))
 	}
-	if len(m.Reply) > 0 {
+	if len(m.Id) > 0 {
 		data[i] = 0x12
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Id)))
+		i += copy(data[i:], m.Id)
+	}
+	if len(m.Subject) > 0 {
+		data[i] = 0x1a
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Subject)))
+		i += copy(data[i:], m.Subject)
+	}
+	if len(m.Reply) > 0 {
+		data[i] = 0x22
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.Reply)))
 		i += copy(data[i:], m.Reply)
 	}
 	if m.Data != nil {
 		if len(m.Data) > 0 {
-			data[i] = 0x1a
+			data[i] = 0x2a
 			i++
 			i = encodeVarintProtocol(data, i, uint64(len(m.Data)))
 			i += copy(data[i:], m.Data)
@@ -431,7 +456,7 @@ func encodeVarintProtocol(data []byte, offset int, v uint64) int {
 	data[offset] = uint8(v)
 	return offset + 1
 }
-func (m *PubEnvelope) Size() (n int) {
+func (m *PubMsg) Size() (n int) {
 	var l int
 	_ = l
 	l = len(m.Id)
@@ -451,6 +476,12 @@ func (m *PubEnvelope) Size() (n int) {
 	l = len(m.Reply)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
+	}
+	if m.Sha256 != nil {
+		l = len(m.Sha256)
+		if l > 0 {
+			n += 1 + l + sovProtocol(uint64(l))
+		}
 	}
 	return n
 }
@@ -538,6 +569,14 @@ func (m *Msg) Size() (n int) {
 	if m.Seq != 0 {
 		n += 1 + sovProtocol(uint64(m.Seq))
 	}
+	l = len(m.Id)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.Subject)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
 	l = len(m.Reply)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
@@ -573,7 +612,7 @@ func sovProtocol(x uint64) (n int) {
 func sozProtocol(x uint64) (n int) {
 	return sovProtocol(uint64((x << 1) ^ uint64((int64(x) >> 63))))
 }
-func (m *PubEnvelope) Unmarshal(data []byte) error {
+func (m *PubMsg) Unmarshal(data []byte) error {
 	l := len(data)
 	iNdEx := 0
 	for iNdEx < l {
@@ -596,10 +635,10 @@ func (m *PubEnvelope) Unmarshal(data []byte) error {
 		fieldNum := int32(wire >> 3)
 		wireType := int(wire & 0x7)
 		if wireType == 4 {
-			return fmt.Errorf("proto: PubEnvelope: wiretype end group for non-group")
+			return fmt.Errorf("proto: PubMsg: wiretype end group for non-group")
 		}
 		if fieldNum <= 0 {
-			return fmt.Errorf("proto: PubEnvelope: illegal tag %d (wire type %d)", fieldNum, wire)
+			return fmt.Errorf("proto: PubMsg: illegal tag %d (wire type %d)", fieldNum, wire)
 		}
 		switch fieldNum {
 		case 1:
@@ -657,7 +696,10 @@ func (m *PubEnvelope) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Data = append([]byte{}, data[iNdEx:postIndex]...)
+			m.Data = append(m.Data[:0], data[iNdEx:postIndex]...)
+			if m.Data == nil {
+				m.Data = []byte{}
+			}
 			iNdEx = postIndex
 		case 3:
 			if wireType != 2 {
@@ -716,6 +758,37 @@ func (m *PubEnvelope) Unmarshal(data []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.Reply = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Sha256", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				byteLen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Sha256 = append(m.Sha256[:0], data[iNdEx:postIndex]...)
+			if m.Sha256 == nil {
+				m.Sha256 = []byte{}
+			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
@@ -1364,6 +1437,64 @@ func (m *Msg) Unmarshal(data []byte) error {
 			}
 		case 2:
 			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Id", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Id = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Subject", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Subject = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Reply", wireType)
 			}
 			var stringLen uint64
@@ -1391,7 +1522,7 @@ func (m *Msg) Unmarshal(data []byte) error {
 			}
 			m.Reply = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
-		case 3:
+		case 5:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Data", wireType)
 			}
@@ -1417,7 +1548,10 @@ func (m *Msg) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Data = append([]byte{}, data[iNdEx:postIndex]...)
+			m.Data = append(m.Data[:0], data[iNdEx:postIndex]...)
+			if m.Data == nil {
+				m.Data = []byte{}
+			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex

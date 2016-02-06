@@ -16,8 +16,8 @@ import (
 // A mock single STAN server
 
 const (
-	DefaultPubPrefix = "stan.pub" // We will add on GUID here.
-	DefaultSubPrefix = "stan.sub" // We will add on GUID here.
+	DefaultPubPrefix = "_STAN.pub" // We will add on GUID here.
+	DefaultSubPrefix = "_STAN.sub" // We will add on GUID here.
 
 	DefaultMsgStoreLimit = 1024 * 1024
 )
@@ -43,13 +43,6 @@ type stanServer struct {
 	ackStore map[string]*serverSubscription
 }
 
-// What is stored in the log/store
-type msg struct {
-	seq   uint64
-	reply string
-	data  []byte
-}
-
 // Per channel/subject store
 type msgStore struct {
 	sync.RWMutex
@@ -57,7 +50,7 @@ type msgStore struct {
 	cur     uint64
 	first   uint64
 	last    uint64
-	msgs    map[uint64]*msg
+	msgs    map[uint64]*Msg
 }
 
 // Holds Subscription state
@@ -159,7 +152,7 @@ func (s *stanServer) connectCB(m *nats.Msg) {
 
 // processClientPublish process inbound messages from clients.
 func (s *stanServer) processClientPublish(m *nats.Msg) {
-	pe := &PubEnvelope{}
+	pe := &PubMsg{}
 	err := pe.Unmarshal(m.Data)
 	//	err := json.Unmarshal(m.Data, &pe)
 	if err != nil {
@@ -189,14 +182,14 @@ func (s *stanServer) processClientPublish(m *nats.Msg) {
 	// Now trigger sends to any active subscribers
 	////////////////////////////////////////////////////////////////////////////
 
-	s.processMsg(pe.Subject, msg)
+	s.processMsg(msg)
 }
 
 // processMsg will proces a message, and possibly send to clients, etc.
-func (s *stanServer) processMsg(subject string, m *msg) {
+func (s *stanServer) processMsg(m *Msg) {
 	// Grab active subscriptions
 	s.subLock.RLock()
-	sl := s.subStore[subject]
+	sl := s.subStore[m.Subject]
 	if sl == nil || len(sl) == 0 {
 		s.subLock.RUnlock()
 		return
@@ -204,11 +197,11 @@ func (s *stanServer) processMsg(subject string, m *msg) {
 	// Walk the subscribers
 	for _, sub := range sl {
 		sub.Lock()
-		sub.lastQueued = m.seq
+		sub.lastQueued = m.Seq
 		// Check if we have too many outstanding. Ack receipt will unblock
 		if sub.lastSent-sub.lastAck <= sub.maxInFlight {
 			// We can send direct here.
-			sub.lastSent = m.seq
+			sub.lastSent = m.Seq
 			s.sendMsgToSub(sub.inbox, m)
 		}
 		sub.Unlock()
@@ -216,25 +209,24 @@ func (s *stanServer) processMsg(subject string, m *msg) {
 	s.subLock.RUnlock()
 }
 
-func (s *stanServer) sendMsgToSub(inbox string, m *msg) {
-	pmsg := &Msg{Seq: m.seq, Reply: m.reply, Data: m.data}
-	b, _ := pmsg.Marshal()
+func (s *stanServer) sendMsgToSub(inbox string, m *Msg) {
+	b, _ := m.Marshal()
 	s.nc.Publish(inbox, b)
 }
 
 // assignAndStore will assign a sequencId and then store the message.
-func (s *stanServer) assignAndStore(pe *PubEnvelope) (*msg, error) {
+func (s *stanServer) assignAndStore(pm *PubMsg) (*Msg, error) {
 	s.msgStoreLock.RLock()
-	store := s.msgStores[pe.Subject]
+	store := s.msgStores[pm.Subject]
 	s.msgStoreLock.RUnlock()
 	if store == nil {
-		store = &msgStore{subject: pe.Subject, cur: 1, first: 1, last: 1}
-		store.msgs = make(map[uint64]*msg, s.msgStoreLimit)
+		store = &msgStore{subject: pm.Subject, cur: 1, first: 1, last: 1}
+		store.msgs = make(map[uint64]*Msg, s.msgStoreLimit)
 		s.msgStoreLock.Lock()
-		s.msgStores[pe.Subject] = store
+		s.msgStores[pm.Subject] = store
 		s.msgStoreLock.Unlock()
 	}
-	m := &msg{seq: store.cur, reply: pe.Reply, data: pe.Data}
+	m := &Msg{Seq: store.cur, Subject: pm.Subject, Reply: pm.Reply, Data: pm.Data}
 	store.Lock()
 	store.msgs[store.cur] = m
 	store.last = store.cur
@@ -242,7 +234,7 @@ func (s *stanServer) assignAndStore(pe *PubEnvelope) (*msg, error) {
 
 	// Check if we need to remove any.
 	if len(store.msgs) >= s.msgStoreLimit {
-		fmt.Printf("Removing message[%d] from the store for [`%s`]\n", store.first, pe.Subject)
+		fmt.Printf("Removing message[%d] from the store for [`%s`]\n", store.first, pm.Subject)
 		delete(store.msgs, store.first)
 		store.first++
 	}
@@ -251,8 +243,8 @@ func (s *stanServer) assignAndStore(pe *PubEnvelope) (*msg, error) {
 }
 
 // ackPublisher sends the ack for a message.
-func (s *stanServer) ackPublisher(pe *PubEnvelope, reply string) {
-	msgAck := &PubAck{Id: pe.Id}
+func (s *stanServer) ackPublisher(pm *PubMsg, reply string) {
+	msgAck := &PubAck{Id: pm.Id}
 	var buf [32]byte
 	b := buf[:]
 	n, _ := msgAck.MarshalTo(b)

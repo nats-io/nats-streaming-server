@@ -1,16 +1,17 @@
 syntax = "proto3";
 
 // Uses https://github.com/gogo/protobuf
-// compiled via `protoc --gofast_out=. protocol.proto`
+// compiled via `protoc --gogofaster_out=. protocol.proto`
 
 package stan;
 
 // How messages are delivered to the STAN cluster
-message PubEnvelope {
+message PubMsg {
   string id      = 1;  // guid
-  bytes  data    = 2;  // payload
-  string subject = 3;  // subject
-  string reply   = 4;  // reply
+  string subject = 2;  // subject
+  string reply   = 3;  // optional reply
+  bytes  data    = 4;  // payload
+  bytes  sha256  = 10; // optional sha256 of data
 }
 
 // Used to ACK to publishers
@@ -19,11 +20,27 @@ message PubAck {
   string error = 2; // err string, empty/omitted if no error
 }
 
+// Msg struct. Only one of seq or id will be set. Id will be the guid
+// sent from the publishers. Seq is assigned for global ordering by
+// the cluster after the publisher has been acknowledged.
+message Msg {
+  uint64 seq     = 1;  // globally ordered sequence number for the subject's channel.
+  string subject = 2;  // subject
+  string reply   = 3;  // optional reply
+  bytes  data    = 4;  // payload
+  bytes  sha256  = 10; // optional sha256 of data
+}
+
+// Ack will deliver an ack for a delivered msg.
+message Ack {
+  uint64 seq   = 1;
+}
+
 // Response to a client connect
 message ConnectResponse {
-  string pubPrefix   = 1; // Prefix to use when publishing to this STAN cluster.
-  string subRequests = 2; // Subject to use for subscription requests.
-  string publicKey   = 100; // Possibly used to sign acks.
+  string pubPrefix   = 1;   // Prefix to use when publishing to this STAN cluster.
+  string subRequests = 2;   // Subject to use for subscription requests.
+  string publicKey   = 100; // Possibly used to sign acks, etc.
 }
 
 
@@ -50,16 +67,4 @@ message SubscriptionRequest {
 message SubscriptionResponse {
   string ackInbox = 1; // ackInbox for sending acks.
   string error    = 2; // err string, empty/omitted if no error
-}
-
-// Msg is what is delivered to the client.
-message Msg {
-  uint64 seq   = 1;
-  string reply = 2;
-  bytes  data  = 3;
-}
-
-// Ack will deliver an ack for a delivered msg.
-message Ack {
-  uint64 seq   = 1;
 }
