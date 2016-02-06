@@ -41,7 +41,7 @@ type Conn interface {
 	PublishAsyncWithReply(subject, reply string, data []byte, ah AckHandler) string
 
 	// Subscribe
-	Subscribe(subject string, cb nats.MsgHandler, opts ...SubscriptionOption) (Subscription, error)
+	Subscribe(subject string, cb MsgHandler, opts ...SubscriptionOption) (Subscription, error)
 }
 
 // Subscription represents a subscription within the STAN cluster. Subscriptions
@@ -52,6 +52,10 @@ type Subscription interface {
 
 // SubscriptionOption is a function on the options for a subscription.
 type SubscriptionOption func(*SubscriptionOptions) error
+
+// MsgHandler is a callback function that processes messages delivered to
+// asynchronous subscribers.
+type MsgHandler func(msg *Msg)
 
 // SubscriptionOptions are used to control the Subscription's behavior.
 type SubscriptionOptions struct {
@@ -306,7 +310,7 @@ type subscription struct {
 	ackInbox string
 	inboxSub *nats.Subscription
 	opts     SubscriptionOptions
-	cb       nats.MsgHandler
+	cb       MsgHandler
 }
 
 // New style Inbox
@@ -329,8 +333,7 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 	if sub == nil {
 		return
 	}
-	m := nats.Msg{Subject: sub.subject, Reply: msg.Reply, Data: msg.Data}
-	sub.cb(&m)
+	sub.cb(msg)
 	// Now auto-ack
 	ack := &Ack{Seq: msg.Seq}
 	b, _ := ack.Marshal()
@@ -338,7 +341,7 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 }
 
 // Subscribe will perform a subscription with the given options to the STAN cluster.
-func (sc *conn) Subscribe(subject string, cb nats.MsgHandler, options ...SubscriptionOption) (Subscription, error) {
+func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...SubscriptionOption) (Subscription, error) {
 	sub := &subscription{subject: subject, inbox: newInbox(), cb: cb, opts: DefaultSubscriptionOptions}
 	for _, opt := range options {
 		if err := opt(&sub.opts); err != nil {

@@ -1,9 +1,17 @@
-syntax = "proto3";
-
+// Copyright 2016 Apcera Inc. All rights reserved.
+//
 // Uses https://github.com/gogo/protobuf
-// compiled via `protoc --gogofaster_out=. protocol.proto`
+// compiled via `protoc -I=. -I=$GOPATH/src  --gogofaster_out=. protocol.proto`
 
+syntax = "proto3";
 package stan;
+
+import "github.com/gogo/protobuf/gogoproto/gogo.proto";
+
+option (gogoproto.marshaler_all) = true;
+option (gogoproto.sizer_all) = true;
+option (gogoproto.unmarshaler_all) = true;
+option (gogoproto.goproto_getters_all) = false;
 
 // How messages are delivered to the STAN cluster
 message PubMsg {
@@ -24,11 +32,12 @@ message PubAck {
 // sent from the publishers. Seq is assigned for global ordering by
 // the cluster after the publisher has been acknowledged.
 message Msg {
-  uint64 seq     = 1;  // globally ordered sequence number for the subject's channel.
-  string subject = 2;  // subject
-  string reply   = 3;  // optional reply
-  bytes  data    = 4;  // payload
-  bytes  sha256  = 10; // optional sha256 of data
+  uint64 seq       = 1;  // globally ordered sequence number for the subject's channel.
+  string subject   = 2;  // subject
+  string reply     = 3;  // optional reply
+  bytes  data      = 4;  // payload
+  int64  timestamp = 5;  // received timestamp
+  uint32 crc       = 10; // optional IEEE CRC32
 }
 
 // Ack will deliver an ack for a delivered msg.

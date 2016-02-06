@@ -154,7 +154,7 @@ func TestBasicSubscription(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
-	sub, err := sc.Subscribe("foo", func(m *nats.Msg) {
+	sub, err := sc.Subscribe("foo", func(m *Msg) {
 	})
 	if err != nil {
 		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
@@ -177,7 +177,7 @@ func TestBasicPubSub(t *testing.T) {
 	toSend := int32(100)
 	hw := []byte("Hello World")
 
-	sub, err := sc.Subscribe("foo", func(m *nats.Msg) {
+	sub, err := sc.Subscribe("foo", func(m *Msg) {
 		if m.Subject != "foo" {
 			t.Fatalf("Expected subject of 'foo', got '%s'\n", m.Subject)
 		}
@@ -216,7 +216,7 @@ func TestBasicPubSubWithReply(t *testing.T) {
 
 	inbox := newInbox()
 
-	sub, err := sc.Subscribe("foo", func(m *nats.Msg) {
+	sub, err := sc.Subscribe("foo", func(m *Msg) {
 		if m.Subject != "foo" {
 			t.Fatalf("Expected subject of 'foo', got '%s'\n", m.Subject)
 		}
@@ -255,7 +255,7 @@ func TestAsyncPubSubWithReply(t *testing.T) {
 
 	inbox := newInbox()
 
-	sub, err := sc.Subscribe("foo", func(m *nats.Msg) {
+	sub, err := sc.Subscribe("foo", func(m *Msg) {
 		if m.Subject != "foo" {
 			t.Fatalf("Expected subject of 'foo', got '%s'\n", m.Subject)
 		}
@@ -296,7 +296,7 @@ func TestSubscriptionStartPositionLast(t *testing.T) {
 
 	// Now subscribe and set start position to last received.
 	ch := make(chan bool)
-	mcb := func(m *nats.Msg) {
+	mcb := func(m *Msg) {
 		ch <- true
 	}
 	sub, err := sc.Subscribe("foo", mcb, StartWithLastReceived())
@@ -399,7 +399,7 @@ func BenchmarkPublishSubscribe(b *testing.B) {
 	received := int32(0)
 
 	// Subscribe callback, counts msgs received.
-	sc.Subscribe("foo", func(m *nats.Msg) {
+	sc.Subscribe("foo", func(m *Msg) {
 		if nr := atomic.AddInt32(&received, 1); nr >= int32(b.N) {
 			ch <- true
 		}
