@@ -104,7 +104,7 @@ func StartAt(sp StartPosition) SubscriptionOption {
 	}
 }
 
-// StartSequence sets the desired start sequence position.
+// StartSequence sets the desired start sequence position and state.
 func StartAtSequence(seq uint64) SubscriptionOption {
 	return func(o *SubscriptionOptions) error {
 		o.StartAt = StartPosition_SequenceStart
@@ -113,7 +113,7 @@ func StartAtSequence(seq uint64) SubscriptionOption {
 	}
 }
 
-// StartTime sets the desired start time position.
+// StartTime sets the desired start time position and state.
 func StartAtTime(start time.Time) SubscriptionOption {
 	return func(o *SubscriptionOptions) error {
 		o.StartAt = StartPosition_TimeStart
@@ -126,6 +126,14 @@ func StartAtTime(start time.Time) SubscriptionOption {
 func StartWithLastReceived() SubscriptionOption {
 	return func(o *SubscriptionOptions) error {
 		o.StartAt = StartPosition_LastReceived
+		return nil
+	}
+}
+
+// DeliverAllAvailable will deliver all messages available.
+func DeliverAllAvailable() SubscriptionOption {
+	return func(o *SubscriptionOptions) error {
+		o.StartAt = StartPosition_First
 		return nil
 	}
 }

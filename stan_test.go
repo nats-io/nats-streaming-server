@@ -473,6 +473,68 @@ func TestSubscriptionStartAtTime(t *testing.T) {
 	}
 }
 
+func TestSubscriptionStartAtFirst(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+	// Publish ten messages
+	for i := 1; i <= 10; i++ {
+		data := []byte(fmt.Sprintf("%d", i))
+		sc.Publish("foo", data)
+	}
+
+	ch := make(chan bool)
+	received := int32(0)
+	shouldReceive := int32(10)
+
+	// Capture the messages that are delivered.
+	savedMsgs := make([]*Msg, 0, 10)
+
+	mcb := func(m *Msg) {
+		savedMsgs = append(savedMsgs, m)
+		if nr := atomic.AddInt32(&received, 1); nr >= int32(shouldReceive) {
+			ch <- true
+		}
+	}
+
+	// Now subscribe and set start position to #6, so should received 6-10.
+	sub, err := sc.Subscribe("foo", mcb, DeliverAllAvailable())
+	if err != nil {
+		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Check for sub setup
+	rsub := sub.(*subscription)
+	if rsub.opts.StartAt != StartPosition_First {
+		t.Fatalf("Incorrect StartAt state: %s\n", rsub.opts.StartAt)
+	}
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
+
+	// Check we received them in order.
+	for i, seq := 0, uint64(1); i < 10; i++ {
+		m := savedMsgs[i]
+		// Check Sequence
+		if m.Seq != seq {
+			t.Fatalf("Expected seq: %d, got %d\n", seq, m.Seq)
+		}
+		// Check payload
+		dseq, _ := strconv.Atoi(string(m.Data))
+		if dseq != int(seq) {
+			t.Fatalf("Expected payload: %d, got %d\n", seq, dseq)
+		}
+		seq++
+	}
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Benchmarks
 ////////////////////////////////////////////////////////////////////////////////

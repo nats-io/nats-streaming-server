@@ -39,6 +39,7 @@ const (
 	StartPosition_LastReceived  StartPosition = 1
 	StartPosition_TimeStart     StartPosition = 2
 	StartPosition_SequenceStart StartPosition = 3
+	StartPosition_First         StartPosition = 4
 )
 
 var StartPosition_name = map[int32]string{
@@ -46,12 +47,14 @@ var StartPosition_name = map[int32]string{
 	1: "LastReceived",
 	2: "TimeStart",
 	3: "SequenceStart",
+	4: "First",
 }
 var StartPosition_value = map[string]int32{
 	"NewOnly":       0,
 	"LastReceived":  1,
 	"TimeStart":     2,
 	"SequenceStart": 3,
+	"First":         4,
 }
 
 func (x StartPosition) String() string {

@@ -59,6 +59,7 @@ enum StartPosition {
     LastReceived  = 1;
     TimeStart     = 2;
     SequenceStart = 3;
+    First         = 4;
   }
 
 // Protocol for a client to subscribe

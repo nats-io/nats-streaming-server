@@ -335,6 +335,8 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		s.sendMessagesToSubFromTime(sub, sr.StartTime)
 	case StartPosition_SequenceStart:
 		s.sendMessagesToSubFromSequence(sub, sr.StartSequence)
+	case StartPosition_First:
+		s.sendMessagesFromBeginning(sub)
 	}
 }
 
@@ -444,6 +446,19 @@ func (s *stanServer) sendMessagesToSubFromTime(sub *serverSubscription, startTim
 	store.RUnlock()
 	startSeq := uint64(index) + store.first
 	s.sendMessagesToSubFromSequence(sub, startSeq)
+}
+
+// Send all messages to the subscriber.
+func (s *stanServer) sendMessagesFromBeginning(sub *serverSubscription) {
+	s.msgStoreLock.RLock()
+	store := s.msgStores[sub.subject]
+	s.msgStoreLock.RUnlock()
+
+	// Do binary search to find starting sequence.
+	store.RLock()
+	first := store.first
+	store.RUnlock()
+	s.sendMessagesToSubFromSequence(sub, first)
 }
 
 // Send the last message we have to the subscriber
