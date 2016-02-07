@@ -662,6 +662,90 @@ func TestClose(t *testing.T) {
 	}
 }
 
+func TestManualAck(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	toSend := int32(100)
+	hw := []byte("Hello World")
+
+	for i := int32(0); i < toSend; i++ {
+		sc.PublishAsync("foo", hw, nil)
+	}
+	sc.Publish("foo", hw)
+
+	fch := make(chan bool)
+
+	// Test that we can't Ack if not in manual mode.
+	sub, err := sc.Subscribe("foo", func(m *Msg) {
+		if err := m.Ack(); err != ErrManualAck {
+			t.Fatalf("Expected an error trying to ack an auto-ack subscription")
+		}
+		fch <- true
+	}, DeliverAllAvailable())
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+
+	if err := Wait(fch); err != nil {
+		t.Fatal("Did not receive our first message")
+	}
+	sub.Unsubscribe()
+
+	ch := make(chan bool)
+	sch := make(chan bool)
+	received := int32(0)
+
+	msgs := make([]*Msg, 0, 101)
+
+	// Test we only receive MaxInflight if we do not ack
+	sub, err = sc.Subscribe("foo", func(m *Msg) {
+		msgs = append(msgs, m)
+		if nr := atomic.AddInt32(&received, 1); nr == int32(10) {
+			ch <- true
+		} else if nr > 10 {
+			m.Ack()
+			if nr >= toSend+1 { // sync Publish +1
+				sch <- true
+			}
+		}
+	}, DeliverAllAvailable(), MaxInflight(10), SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer sub.Unsubscribe()
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not receive at least 10 messages")
+	}
+	// Wiat a bit longer for other messages which would be an error.
+	time.Sleep(50 * time.Millisecond)
+
+	if nr := atomic.LoadInt32(&received); nr != 10 {
+		t.Fatalf("Only expected to get 10 messages to match MaxInflight without Acks, got %d\n", nr)
+	}
+
+	// Now make sure we get the rest of them. So ack the ones we have so far.
+	for _, m := range msgs {
+		if err := m.Ack(); err != nil {
+			t.Fatalf("Unexpected error on Ack: %v\n", err)
+		}
+	}
+	if err := Wait(sch); err != nil {
+		t.Fatal("Did not receive all our messages")
+	}
+
+	if nr := atomic.LoadInt32(&received); nr != toSend+1 {
+		t.Fatalf("Did not receive correct number of messages: %d vs %d\n", nr, toSend+1)
+	}
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Benchmarks
 ////////////////////////////////////////////////////////////////////////////////

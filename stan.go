@@ -16,8 +16,6 @@ const (
 	Version               = "0.0.1"
 	DefaultNatsURL        = "nats://localhost:4222"
 	DefaultConnectWait    = 2 * time.Second
-	DefaultAckWait        = 2 * time.Second
-	DefaultMaxInflight    = 1024
 	DefaultDiscoverPrefix = "_STAN.discover"
 	DefaultACKPrefix      = "_STAN.acks"
 )
@@ -31,6 +29,8 @@ var (
 	ErrBadAck            = errors.New("stan: malformed ack")
 	ErrBadSubscription   = errors.New("stan: invalid subscription")
 	ErrBadConnection     = errors.New("stan: invalid connection")
+	ErrManualAck         = errors.New("stan: can not manually ack in auto-ack mode")
+	ErrNilMsg            = errors.New("stan: nil message")
 )
 
 // Conn represents a connection to the STAN subsystem. It can Publish and
@@ -50,100 +50,6 @@ type Conn interface {
 	Close() error
 }
 
-// Subscription represents a subscription within the STAN cluster. Subscriptions
-// will be rate matched and follow at-least delivery semantics.
-type Subscription interface {
-	Unsubscribe() error
-}
-
-// SubscriptionOption is a function on the options for a subscription.
-type SubscriptionOption func(*SubscriptionOptions) error
-
-// MsgHandler is a callback function that processes messages delivered to
-// asynchronous subscribers.
-type MsgHandler func(msg *Msg)
-
-// SubscriptionOptions are used to control the Subscription's behavior.
-type SubscriptionOptions struct {
-	// DurableName, if set will survive client restarts.
-	DurableName string
-	// Controls the number of messages the cluster will have inflight without an ACK.
-	MaxInflight int
-	// Controls the time the cluster will wait for an ACK for a given message.
-	AckWait time.Duration
-	// StartPosition enum from proto.
-	StartAt StartPosition
-	// Optional start sequence number.
-	StartSequence uint64
-	// Optional start time.
-	StartTime time.Time
-}
-
-var DefaultSubscriptionOptions = SubscriptionOptions{
-	MaxInflight: DefaultMaxInflight,
-	AckWait:     DefaultAckWait,
-}
-
-// MaxInflight is an Option to set the maximum number of messages the cluster will send
-// without an ACK.
-func MaxInflight(m int) SubscriptionOption {
-	return func(o *SubscriptionOptions) error {
-		o.MaxInflight = m
-		return nil
-	}
-}
-
-// AckWait is an Option to set the timeout for waiting for an ACK from the cluster's
-// point of view for delivered messages.
-func AckWait(t time.Duration) SubscriptionOption {
-	return func(o *SubscriptionOptions) error {
-		o.AckWait = t
-		return nil
-	}
-}
-
-// StartPosition sets the desired start position for the message stream.
-func StartAt(sp StartPosition) SubscriptionOption {
-	return func(o *SubscriptionOptions) error {
-		o.StartAt = sp
-		return nil
-	}
-}
-
-// StartSequence sets the desired start sequence position and state.
-func StartAtSequence(seq uint64) SubscriptionOption {
-	return func(o *SubscriptionOptions) error {
-		o.StartAt = StartPosition_SequenceStart
-		o.StartSequence = seq
-		return nil
-	}
-}
-
-// StartTime sets the desired start time position and state.
-func StartAtTime(start time.Time) SubscriptionOption {
-	return func(o *SubscriptionOptions) error {
-		o.StartAt = StartPosition_TimeStart
-		o.StartTime = start
-		return nil
-	}
-}
-
-// StartWithLastReceived is a helper function to set start position to last received.
-func StartWithLastReceived() SubscriptionOption {
-	return func(o *SubscriptionOptions) error {
-		o.StartAt = StartPosition_LastReceived
-		return nil
-	}
-}
-
-// DeliverAllAvailable will deliver all messages available.
-func DeliverAllAvailable() SubscriptionOption {
-	return func(o *SubscriptionOptions) error {
-		o.StartAt = StartPosition_First
-		return nil
-	}
-}
-
 // A conn represents a bare connection to a stan cluster.
 type conn struct {
 	sync.Mutex
@@ -156,7 +62,7 @@ type conn struct {
 	ackSubject      string // publish acks
 	ackSubscription *nats.Subscription
 	subMap          map[string]*subscription
-	ackMap          map[string]*ack
+	pubAckMap       map[string]*ack
 	opts            Options
 	nc              *nats.Conn
 }
@@ -259,7 +165,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 		return nil, err
 	}
 	c.ackSubscription.SetPendingLimits(1024*1024, 32*1024*1024)
-	c.ackMap = make(map[string]*ack)
+	c.pubAckMap = make(map[string]*ack)
 
 	// Create Subscription map
 	c.subMap = make(map[string]*subscription)
@@ -314,7 +220,7 @@ func (sc *conn) processAck(m *nats.Msg) {
 		fmt.Printf("Error processing unmarshal\n")
 	}
 	sc.Lock()
-	a := sc.ackMap[pa.Id]
+	a := sc.pubAckMap[pa.Id]
 	sc.removeAck(pa.Id)
 	sc.Unlock()
 
@@ -364,7 +270,7 @@ func (sc *conn) PublishAsyncWithReply(subject, reply string, data []byte, ah Ack
 		return "", ErrConnectionClosed
 	}
 
-	sc.ackMap[pe.Id] = a
+	sc.pubAckMap[pe.Id] = a
 	err := sc.nc.PublishRequest(subj, sc.ackSubject, b)
 	if err != nil {
 		// Handle error by calling ah
@@ -377,33 +283,23 @@ func (sc *conn) PublishAsyncWithReply(subject, reply string, data []byte, ah Ack
 			sc.Lock()
 			sc.removeAck(pe.Id)
 			sc.Unlock()
-			a.ah(pe.Id, ErrTimeout)
+			if ah != nil {
+				ah(pe.Id, ErrTimeout)
+			}
 		})
 	}
 	sc.Unlock()
 	return pe.Id, nil
 }
 
-// removeAck removes the ack from the ackMap and cancels any state, e.g. timers
+// removeAck removes the ack from the pubAckMap and cancels any state, e.g. timers
 // Assumes lock is held.
 func (sc *conn) removeAck(guid string) {
-	a := sc.ackMap[guid]
+	a := sc.pubAckMap[guid]
 	if a != nil && a.t != nil {
 		a.t.Stop()
 	}
-	delete(sc.ackMap, guid)
-}
-
-// A subscription represents a subscription to a stan cluster.
-type subscription struct {
-	sync.RWMutex
-	sc       *conn
-	subject  string
-	inbox    string
-	ackInbox string
-	inboxSub *nats.Subscription
-	opts     SubscriptionOptions
-	cb       MsgHandler
+	delete(sc.pubAckMap, guid)
 }
 
 // New style Inbox
@@ -431,9 +327,14 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 	if sub == nil {
 		return
 	}
+
+	// Store in msg for backlink
+	msg.sub = sub
+
 	sub.RLock()
 	cb := sub.cb
 	ackSubject := sub.ackInbox
+	isManualAck := sub.opts.ManualAcks
 	sub.RUnlock()
 
 	// Perform the callback
@@ -441,128 +342,10 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 		cb(msg)
 	}
 
-	// Now auto-ack
-	ack := &Ack{Seq: msg.Seq}
-	b, _ := ack.Marshal()
-	sc.nc.Publish(ackSubject, b)
-}
-
-// Subscribe will perform a subscription with the given options to the STAN cluster.
-func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...SubscriptionOption) (Subscription, error) {
-	sub := &subscription{subject: subject, inbox: newInbox(), cb: cb, sc: sc, opts: DefaultSubscriptionOptions}
-	for _, opt := range options {
-		if err := opt(&sub.opts); err != nil {
-			return nil, err
-		}
+	// Proces auto-ack
+	if !isManualAck {
+		ack := &Ack{Seq: msg.Seq}
+		b, _ := ack.Marshal()
+		sc.nc.Publish(ackSubject, b)
 	}
-	sc.Lock()
-	if sc.nc == nil {
-		sc.Unlock()
-		return nil, ErrConnectionClosed
-	}
-
-	// Listen for actual messages.
-	if nsub, err := sc.nc.Subscribe(sub.inbox, sc.processMsg); err != nil {
-		sc.Unlock()
-		return nil, err
-	} else {
-		sub.inboxSub = nsub
-	}
-	// Register subscription.
-	sc.subMap[sub.inbox] = sub
-	sc.Unlock()
-
-	// Create a subscription request
-	// FIXME(dlc) add others.
-	sr := &SubscriptionRequest{
-		ClientID:      sc.clientID,
-		Subject:       subject,
-		Inbox:         sub.inbox,
-		MaxInFlight:   int32(sub.opts.MaxInflight),
-		AckWaitInSecs: int32(sub.opts.AckWait / time.Second),
-		StartPosition: sub.opts.StartAt,
-	}
-
-	// Conditionals
-	switch sr.StartPosition {
-	case StartPosition_TimeStart:
-		sr.StartTime = sub.opts.StartTime.UnixNano()
-	case StartPosition_SequenceStart:
-		sr.StartSequence = sub.opts.StartSequence
-	}
-
-	b, _ := sr.Marshal()
-	reply, err := sc.nc.Request(sc.subRequests, b, 2*time.Second)
-	if err != nil {
-		// FIXME(dlc) unwind subscription from above.
-		return nil, err
-	}
-	r := &SubscriptionResponse{}
-	if err := r.Unmarshal(reply.Data); err != nil {
-		// FIXME(dlc) unwind subscription from above.
-		return nil, err
-	}
-	if r.Error != "" {
-		// FIXME(dlc) unwind subscription from above.
-		return nil, errors.New(r.Error)
-	}
-	sub.Lock()
-	sub.ackInbox = r.AckInbox
-	sub.Unlock()
-
-	return sub, nil
-}
-
-// Unsubscribe removes interest in the subscription
-func (sub *subscription) Unsubscribe() error {
-	if sub == nil {
-		return ErrBadSubscription
-	}
-	sub.Lock()
-	sc := sub.sc
-	if sc == nil {
-		// Already closed.
-		return ErrBadSubscription
-	}
-	sub.sc = nil
-	sub.inboxSub.Unsubscribe()
-	sub.inboxSub = nil
-	inbox := sub.inbox
-	sub.Unlock()
-
-	if sc == nil {
-		return ErrBadSubscription
-	}
-
-	sc.Lock()
-	if sc.nc == nil {
-		return ErrConnectionClosed
-	}
-
-	delete(sc.subMap, inbox)
-	reqSubject := sc.unsubRequests
-	sc.Unlock()
-
-	// Send Unsubscribe to server.
-
-	// FIXME(dlc) - Add in durable
-	usr := &UnsubscribeRequest{
-		Subject: sub.subject,
-		Inbox:   sub.ackInbox,
-	}
-	b, _ := usr.Marshal()
-	// FIXME(dlc) - make timeout configurable.
-	reply, err := sc.nc.Request(reqSubject, b, 2*time.Second)
-	if err != nil {
-		return err
-	}
-	r := &SubscriptionResponse{}
-	if err := r.Unmarshal(reply.Data); err != nil {
-		return err
-	}
-	if r.Error != "" {
-		return errors.New(r.Error)
-	}
-
-	return nil
 }

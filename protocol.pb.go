@@ -11,7 +11,7 @@
 	It has these top-level messages:
 		PubMsg
 		PubAck
-		Msg
+		MsgProto
 		Ack
 		ConnectRequest
 		ConnectResponse
@@ -88,10 +88,9 @@ func (m *PubAck) Reset()         { *m = PubAck{} }
 func (m *PubAck) String() string { return proto.CompactTextString(m) }
 func (*PubAck) ProtoMessage()    {}
 
-// Msg struct. Only one of seq or id will be set. Id will be the guid
-// sent from the publishers. Seq is assigned for global ordering by
+// Msg struct. Seq is assigned for global ordering by
 // the cluster after the publisher has been acknowledged.
-type Msg struct {
+type MsgProto struct {
 	Seq       uint64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
 	Subject   string `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
 	Reply     string `protobuf:"bytes,3,opt,name=reply,proto3" json:"reply,omitempty"`
@@ -100,9 +99,9 @@ type Msg struct {
 	Crc       uint32 `protobuf:"varint,10,opt,name=crc,proto3" json:"crc,omitempty"`
 }
 
-func (m *Msg) Reset()         { *m = Msg{} }
-func (m *Msg) String() string { return proto.CompactTextString(m) }
-func (*Msg) ProtoMessage()    {}
+func (m *MsgProto) Reset()         { *m = MsgProto{} }
+func (m *MsgProto) String() string { return proto.CompactTextString(m) }
+func (*MsgProto) ProtoMessage()    {}
 
 // Ack will deliver an ack for a delivered msg.
 type Ack struct {
@@ -196,7 +195,7 @@ func (*CloseResponse) ProtoMessage()    {}
 func init() {
 	proto.RegisterType((*PubMsg)(nil), "stan.PubMsg")
 	proto.RegisterType((*PubAck)(nil), "stan.PubAck")
-	proto.RegisterType((*Msg)(nil), "stan.Msg")
+	proto.RegisterType((*MsgProto)(nil), "stan.MsgProto")
 	proto.RegisterType((*Ack)(nil), "stan.Ack")
 	proto.RegisterType((*ConnectRequest)(nil), "stan.ConnectRequest")
 	proto.RegisterType((*ConnectResponse)(nil), "stan.ConnectResponse")
@@ -289,7 +288,7 @@ func (m *PubAck) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
-func (m *Msg) Marshal() (data []byte, err error) {
+func (m *MsgProto) Marshal() (data []byte, err error) {
 	size := m.Size()
 	data = make([]byte, size)
 	n, err := m.MarshalTo(data)
@@ -299,7 +298,7 @@ func (m *Msg) Marshal() (data []byte, err error) {
 	return data[:n], nil
 }
 
-func (m *Msg) MarshalTo(data []byte) (int, error) {
+func (m *MsgProto) MarshalTo(data []byte) (int, error) {
 	var i int
 	_ = i
 	var l int
@@ -703,7 +702,7 @@ func (m *PubAck) Size() (n int) {
 	return n
 }
 
-func (m *Msg) Size() (n int) {
+func (m *MsgProto) Size() (n int) {
 	var l int
 	_ = l
 	if m.Seq != 0 {
@@ -1194,7 +1193,7 @@ func (m *PubAck) Unmarshal(data []byte) error {
 	}
 	return nil
 }
-func (m *Msg) Unmarshal(data []byte) error {
+func (m *MsgProto) Unmarshal(data []byte) error {
 	l := len(data)
 	iNdEx := 0
 	for iNdEx < l {
@@ -1217,10 +1216,10 @@ func (m *Msg) Unmarshal(data []byte) error {
 		fieldNum := int32(wire >> 3)
 		wireType := int(wire & 0x7)
 		if wireType == 4 {
-			return fmt.Errorf("proto: Msg: wiretype end group for non-group")
+			return fmt.Errorf("proto: MsgProto: wiretype end group for non-group")
 		}
 		if fieldNum <= 0 {
-			return fmt.Errorf("proto: Msg: illegal tag %d (wire type %d)", fieldNum, wire)
+			return fmt.Errorf("proto: MsgProto: illegal tag %d (wire type %d)", fieldNum, wire)
 		}
 		switch fieldNum {
 		case 1:

@@ -77,7 +77,7 @@ type msgStore struct {
 	cur     uint64
 	first   uint64
 	last    uint64
-	msgs    map[uint64]*Msg
+	msgs    map[uint64]*MsgProto
 }
 
 // Holds Subscription state
@@ -274,7 +274,7 @@ func (s *stanServer) processClientPublish(m *nats.Msg) {
 }
 
 // processMsg will proces a message, and possibly send to clients, etc.
-func (s *stanServer) processMsg(m *Msg) {
+func (s *stanServer) processMsg(m *MsgProto) {
 	// Grab active subscriptions
 	s.subLock.RLock()
 	sl := s.subStore[m.Subject]
@@ -287,7 +287,7 @@ func (s *stanServer) processMsg(m *Msg) {
 		sub.Lock()
 		sub.lastQueued = m.Seq
 		// Check if we have too many outstanding. Ack receipt will unblock
-		if sub.lastSent-sub.lastAck <= sub.maxInFlight {
+		if sub.lastSent-sub.lastAck < sub.maxInFlight {
 			// We can send direct here.
 			sub.lastSent = m.Seq
 			s.sendMsgToSub(sub.inbox, m)
@@ -297,24 +297,24 @@ func (s *stanServer) processMsg(m *Msg) {
 	s.subLock.RUnlock()
 }
 
-func (s *stanServer) sendMsgToSub(inbox string, m *Msg) {
+func (s *stanServer) sendMsgToSub(inbox string, m *MsgProto) {
 	b, _ := m.Marshal()
 	s.nc.Publish(inbox, b)
 }
 
 // assignAndStore will assign a sequencId and then store the message.
-func (s *stanServer) assignAndStore(pm *PubMsg) (*Msg, error) {
+func (s *stanServer) assignAndStore(pm *PubMsg) (*MsgProto, error) {
 	s.msgStoreLock.RLock()
 	store := s.msgStores[pm.Subject]
 	s.msgStoreLock.RUnlock()
 	if store == nil {
 		store = &msgStore{subject: pm.Subject, cur: 1, first: 1, last: 1}
-		store.msgs = make(map[uint64]*Msg, s.msgStoreLimit)
+		store.msgs = make(map[uint64]*MsgProto, s.msgStoreLimit)
 		s.msgStoreLock.Lock()
 		s.msgStores[pm.Subject] = store
 		s.msgStoreLock.Unlock()
 	}
-	m := &Msg{Seq: store.cur, Subject: pm.Subject, Reply: pm.Reply, Data: pm.Data, Timestamp: time.Now().UnixNano()}
+	m := &MsgProto{Seq: store.cur, Subject: pm.Subject, Reply: pm.Reply, Data: pm.Data, Timestamp: time.Now().UnixNano()}
 	store.Lock()
 	store.msgs[store.cur] = m
 	store.last = store.cur
@@ -322,7 +322,7 @@ func (s *stanServer) assignAndStore(pm *PubMsg) (*Msg, error) {
 
 	// Check if we need to remove any.
 	if len(store.msgs) >= s.msgStoreLimit {
-		fmt.Printf("Removing message[%d] from the store for [`%s`]\n", store.first, pm.Subject)
+		fmt.Printf("WARNING: Removing message[%d] from the store for [`%s`]\n", store.first, pm.Subject)
 		delete(store.msgs, store.first)
 		store.first++
 	}
@@ -539,7 +539,10 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 func (s *stanServer) processAckMsg(m *nats.Msg) {
 	ack := &Ack{}
 	ack.Unmarshal(m.Data)
-	s.processAck(s.subAckInboxStore[m.Subject], ack)
+	s.subLock.RLock()
+	sub := s.subAckInboxStore[m.Subject]
+	s.subLock.RUnlock()
+	s.processAck(sub, ack)
 }
 
 // processAck processes an ack and if needed sends more messages.
@@ -570,6 +573,10 @@ func (s *stanServer) sendQueuedMessages(sub *serverSubscription) {
 	s.msgStoreLock.RUnlock()
 
 	for d := sub.lastQueued - sub.lastSent; d > 0; d = sub.lastQueued - sub.lastSent {
+		// Throttle based on maxInflight
+		if sub.lastSent-sub.lastAck >= sub.maxInFlight {
+			break
+		}
 		nextSeq := sub.lastSent + 1
 		store.RLock()
 		nextMsg := store.msgs[nextSeq]
@@ -629,6 +636,10 @@ func (s *stanServer) sendMessagesToSubFromTime(sub *serverSubscription, startTim
 	store := s.msgStores[sub.subject]
 	s.msgStoreLock.RUnlock()
 
+	if store == nil {
+		return
+	}
+
 	// Do binary search to find starting sequence.
 	store.RLock()
 	index := sort.Search(len(store.msgs), func(i int) bool {
@@ -649,6 +660,10 @@ func (s *stanServer) sendMessagesFromBeginning(sub *serverSubscription) {
 	store := s.msgStores[sub.subject]
 	s.msgStoreLock.RUnlock()
 
+	if store == nil {
+		return
+	}
+
 	// Do binary search to find starting sequence.
 	store.RLock()
 	first := store.first
@@ -661,6 +676,10 @@ func (s *stanServer) sendLastMessageToSub(sub *serverSubscription) {
 	s.msgStoreLock.RLock()
 	store := s.msgStores[sub.subject]
 	s.msgStoreLock.RUnlock()
+
+	if store == nil {
+		return
+	}
 
 	store.RLock()
 	last := store.last

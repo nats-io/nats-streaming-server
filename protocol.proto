@@ -28,10 +28,9 @@ message PubAck {
   string error = 2; // err string, empty/omitted if no error
 }
 
-// Msg struct. Only one of seq or id will be set. Id will be the guid
-// sent from the publishers. Seq is assigned for global ordering by
+// Msg struct. Seq is assigned for global ordering by
 // the cluster after the publisher has been acknowledged.
-message Msg {
+message MsgProto {
   uint64 seq       = 1;  // globally ordered sequence number for the subject's channel.
   string subject   = 2;  // subject
   string reply     = 3;  // optional reply
