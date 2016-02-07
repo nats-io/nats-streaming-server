@@ -45,11 +45,19 @@ message Ack {
   uint64 seq   = 1;
 }
 
+// Connection Request
+message ConnectRequest {
+  string clientID = 1;  // Client name/identifier.
+}
+
 // Response to a client connect
 message ConnectResponse {
   string pubPrefix     = 1;   // Prefix to use when publishing to this STAN cluster.
   string subRequests   = 2;   // Subject to use for subscription requests.
   string unsubRequests = 3;   // Subject to use for unsubscribe requests.
+  string closeRequests = 4;   // Subject for closing the stan connection.
+  string error         = 5;   // err string, empty/omitted if no error
+
   string publicKey     = 100; // Possibly used to sign acks, etc.
 }
 
@@ -65,18 +73,19 @@ enum StartPosition {
 
 // Protocol for a client to subscribe
 message SubscriptionRequest {
-  string        subject       = 1;  // Formal subject to subscribe to, e.g. foo.bar
-  string        queue         = 2;  // Optional queue group
-  string        inbox         = 3;  // Inbox subject to deliver messages on.
-  int32         maxInFlight   = 4;  // Maximum inflight messages without an ack allowed.
-  int32         ackWaitInSecs = 5;  // Timeout for receiving an ack from the client.
-  string        durableName   = 6;  // Optional durable name which survives client restarts.
+  string        clientID      = 1;  // ClientID
+  string        subject       = 2;  // Formal subject to subscribe to, e.g. foo.bar
+  string        queue         = 3;  // Optional queue group
+  string        inbox         = 4;  // Inbox subject to deliver messages on.
+  int32         maxInFlight   = 5;  // Maximum inflight messages without an ack allowed.
+  int32         ackWaitInSecs = 6;  // Timeout for receiving an ack from the client.
+  string        durableName   = 7;  // Optional durable name which survives client restarts.
   StartPosition startPosition = 10; // Start position.
   uint64        startSequence = 11; // Optional start sequence number.
   int64         startTime     = 12; // Optional start time.
 }
 
-// Used to Respond to SubscriptionRequest and UnsubscribeRequests
+// Response for SubscriptionRequest and UnsubscribeRequests
 message SubscriptionResponse {
   string ackInbox = 2; // ackInbox for sending acks.
   string error    = 3; // err string, empty/omitted if no error
@@ -87,4 +96,14 @@ message UnsubscribeRequest {
   string subject     = 1; // subject for the subscription.
   string inbox       = 2;  // Inbox subject to identify subscription.
   string durableName = 3;  // Optional durable name which survives client restarts.
+}
+
+// Protocol for a client to close a connection
+message CloseRequest {
+  string clientID = 1;  // Client name provided to Connect() requests.
+}
+
+// Response for CloseRequest
+message CloseResponse {
+  string error = 1; // err string, empty/omitted if no error
 }

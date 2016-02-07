@@ -13,10 +13,13 @@
 		PubAck
 		Msg
 		Ack
+		ConnectRequest
 		ConnectResponse
 		SubscriptionRequest
 		SubscriptionResponse
 		UnsubscribeRequest
+		CloseRequest
+		CloseResponse
 */
 package stan
 
@@ -110,11 +113,22 @@ func (m *Ack) Reset()         { *m = Ack{} }
 func (m *Ack) String() string { return proto.CompactTextString(m) }
 func (*Ack) ProtoMessage()    {}
 
+// Connection Request
+type ConnectRequest struct {
+	ClientID string `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
+}
+
+func (m *ConnectRequest) Reset()         { *m = ConnectRequest{} }
+func (m *ConnectRequest) String() string { return proto.CompactTextString(m) }
+func (*ConnectRequest) ProtoMessage()    {}
+
 // Response to a client connect
 type ConnectResponse struct {
 	PubPrefix     string `protobuf:"bytes,1,opt,name=pubPrefix,proto3" json:"pubPrefix,omitempty"`
 	SubRequests   string `protobuf:"bytes,2,opt,name=subRequests,proto3" json:"subRequests,omitempty"`
 	UnsubRequests string `protobuf:"bytes,3,opt,name=unsubRequests,proto3" json:"unsubRequests,omitempty"`
+	CloseRequests string `protobuf:"bytes,4,opt,name=closeRequests,proto3" json:"closeRequests,omitempty"`
+	Error         string `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
 	PublicKey     string `protobuf:"bytes,100,opt,name=publicKey,proto3" json:"publicKey,omitempty"`
 }
 
@@ -124,12 +138,13 @@ func (*ConnectResponse) ProtoMessage()    {}
 
 // Protocol for a client to subscribe
 type SubscriptionRequest struct {
-	Subject       string        `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
-	Queue         string        `protobuf:"bytes,2,opt,name=queue,proto3" json:"queue,omitempty"`
-	Inbox         string        `protobuf:"bytes,3,opt,name=inbox,proto3" json:"inbox,omitempty"`
-	MaxInFlight   int32         `protobuf:"varint,4,opt,name=maxInFlight,proto3" json:"maxInFlight,omitempty"`
-	AckWaitInSecs int32         `protobuf:"varint,5,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
-	DurableName   string        `protobuf:"bytes,6,opt,name=durableName,proto3" json:"durableName,omitempty"`
+	ClientID      string        `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
+	Subject       string        `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
+	Queue         string        `protobuf:"bytes,3,opt,name=queue,proto3" json:"queue,omitempty"`
+	Inbox         string        `protobuf:"bytes,4,opt,name=inbox,proto3" json:"inbox,omitempty"`
+	MaxInFlight   int32         `protobuf:"varint,5,opt,name=maxInFlight,proto3" json:"maxInFlight,omitempty"`
+	AckWaitInSecs int32         `protobuf:"varint,6,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
+	DurableName   string        `protobuf:"bytes,7,opt,name=durableName,proto3" json:"durableName,omitempty"`
 	StartPosition StartPosition `protobuf:"varint,10,opt,name=startPosition,proto3,enum=stan.StartPosition" json:"startPosition,omitempty"`
 	StartSequence uint64        `protobuf:"varint,11,opt,name=startSequence,proto3" json:"startSequence,omitempty"`
 	StartTime     int64         `protobuf:"varint,12,opt,name=startTime,proto3" json:"startTime,omitempty"`
@@ -139,7 +154,7 @@ func (m *SubscriptionRequest) Reset()         { *m = SubscriptionRequest{} }
 func (m *SubscriptionRequest) String() string { return proto.CompactTextString(m) }
 func (*SubscriptionRequest) ProtoMessage()    {}
 
-// Used to Respond to SubscriptionRequest and UnsubscribeRequests
+// Response for SubscriptionRequest and UnsubscribeRequests
 type SubscriptionResponse struct {
 	AckInbox string `protobuf:"bytes,2,opt,name=ackInbox,proto3" json:"ackInbox,omitempty"`
 	Error    string `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
@@ -160,15 +175,36 @@ func (m *UnsubscribeRequest) Reset()         { *m = UnsubscribeRequest{} }
 func (m *UnsubscribeRequest) String() string { return proto.CompactTextString(m) }
 func (*UnsubscribeRequest) ProtoMessage()    {}
 
+// Protocol for a client to close a connection
+type CloseRequest struct {
+	ClientID string `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
+}
+
+func (m *CloseRequest) Reset()         { *m = CloseRequest{} }
+func (m *CloseRequest) String() string { return proto.CompactTextString(m) }
+func (*CloseRequest) ProtoMessage()    {}
+
+// Response for CloseRequest
+type CloseResponse struct {
+	Error string `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+}
+
+func (m *CloseResponse) Reset()         { *m = CloseResponse{} }
+func (m *CloseResponse) String() string { return proto.CompactTextString(m) }
+func (*CloseResponse) ProtoMessage()    {}
+
 func init() {
 	proto.RegisterType((*PubMsg)(nil), "stan.PubMsg")
 	proto.RegisterType((*PubAck)(nil), "stan.PubAck")
 	proto.RegisterType((*Msg)(nil), "stan.Msg")
 	proto.RegisterType((*Ack)(nil), "stan.Ack")
+	proto.RegisterType((*ConnectRequest)(nil), "stan.ConnectRequest")
 	proto.RegisterType((*ConnectResponse)(nil), "stan.ConnectResponse")
 	proto.RegisterType((*SubscriptionRequest)(nil), "stan.SubscriptionRequest")
 	proto.RegisterType((*SubscriptionResponse)(nil), "stan.SubscriptionResponse")
 	proto.RegisterType((*UnsubscribeRequest)(nil), "stan.UnsubscribeRequest")
+	proto.RegisterType((*CloseRequest)(nil), "stan.CloseRequest")
+	proto.RegisterType((*CloseResponse)(nil), "stan.CloseResponse")
 	proto.RegisterEnum("stan.StartPosition", StartPosition_name, StartPosition_value)
 }
 func (m *PubMsg) Marshal() (data []byte, err error) {
@@ -329,6 +365,30 @@ func (m *Ack) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
+func (m *ConnectRequest) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *ConnectRequest) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if len(m.ClientID) > 0 {
+		data[i] = 0xa
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.ClientID)))
+		i += copy(data[i:], m.ClientID)
+	}
+	return i, nil
+}
+
 func (m *ConnectResponse) Marshal() (data []byte, err error) {
 	size := m.Size()
 	data = make([]byte, size)
@@ -362,6 +422,18 @@ func (m *ConnectResponse) MarshalTo(data []byte) (int, error) {
 		i = encodeVarintProtocol(data, i, uint64(len(m.UnsubRequests)))
 		i += copy(data[i:], m.UnsubRequests)
 	}
+	if len(m.CloseRequests) > 0 {
+		data[i] = 0x22
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.CloseRequests)))
+		i += copy(data[i:], m.CloseRequests)
+	}
+	if len(m.Error) > 0 {
+		data[i] = 0x2a
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Error)))
+		i += copy(data[i:], m.Error)
+	}
 	if len(m.PublicKey) > 0 {
 		data[i] = 0xa2
 		i++
@@ -388,36 +460,42 @@ func (m *SubscriptionRequest) MarshalTo(data []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
-	if len(m.Subject) > 0 {
+	if len(m.ClientID) > 0 {
 		data[i] = 0xa
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.ClientID)))
+		i += copy(data[i:], m.ClientID)
+	}
+	if len(m.Subject) > 0 {
+		data[i] = 0x12
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.Subject)))
 		i += copy(data[i:], m.Subject)
 	}
 	if len(m.Queue) > 0 {
-		data[i] = 0x12
+		data[i] = 0x1a
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.Queue)))
 		i += copy(data[i:], m.Queue)
 	}
 	if len(m.Inbox) > 0 {
-		data[i] = 0x1a
+		data[i] = 0x22
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.Inbox)))
 		i += copy(data[i:], m.Inbox)
 	}
 	if m.MaxInFlight != 0 {
-		data[i] = 0x20
+		data[i] = 0x28
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.MaxInFlight))
 	}
 	if m.AckWaitInSecs != 0 {
-		data[i] = 0x28
+		data[i] = 0x30
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.AckWaitInSecs))
 	}
 	if len(m.DurableName) > 0 {
-		data[i] = 0x32
+		data[i] = 0x3a
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.DurableName)))
 		i += copy(data[i:], m.DurableName)
@@ -502,6 +580,54 @@ func (m *UnsubscribeRequest) MarshalTo(data []byte) (int, error) {
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.DurableName)))
 		i += copy(data[i:], m.DurableName)
+	}
+	return i, nil
+}
+
+func (m *CloseRequest) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *CloseRequest) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if len(m.ClientID) > 0 {
+		data[i] = 0xa
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.ClientID)))
+		i += copy(data[i:], m.ClientID)
+	}
+	return i, nil
+}
+
+func (m *CloseResponse) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *CloseResponse) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if len(m.Error) > 0 {
+		data[i] = 0xa
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Error)))
+		i += copy(data[i:], m.Error)
 	}
 	return i, nil
 }
@@ -615,6 +741,16 @@ func (m *Ack) Size() (n int) {
 	return n
 }
 
+func (m *ConnectRequest) Size() (n int) {
+	var l int
+	_ = l
+	l = len(m.ClientID)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	return n
+}
+
 func (m *ConnectResponse) Size() (n int) {
 	var l int
 	_ = l
@@ -630,6 +766,14 @@ func (m *ConnectResponse) Size() (n int) {
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
+	l = len(m.CloseRequests)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.Error)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
 	l = len(m.PublicKey)
 	if l > 0 {
 		n += 2 + l + sovProtocol(uint64(l))
@@ -640,6 +784,10 @@ func (m *ConnectResponse) Size() (n int) {
 func (m *SubscriptionRequest) Size() (n int) {
 	var l int
 	_ = l
+	l = len(m.ClientID)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
 	l = len(m.Subject)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
@@ -700,6 +848,26 @@ func (m *UnsubscribeRequest) Size() (n int) {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
 	l = len(m.DurableName)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	return n
+}
+
+func (m *CloseRequest) Size() (n int) {
+	var l int
+	_ = l
+	l = len(m.ClientID)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	return n
+}
+
+func (m *CloseResponse) Size() (n int) {
+	var l int
+	_ = l
+	l = len(m.Error)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
@@ -1291,6 +1459,85 @@ func (m *Ack) Unmarshal(data []byte) error {
 	}
 	return nil
 }
+func (m *ConnectRequest) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProtocol
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ConnectRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ConnectRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ClientID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ClientID = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProtocol(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
 func (m *ConnectResponse) Unmarshal(data []byte) error {
 	l := len(data)
 	iNdEx := 0
@@ -1407,6 +1654,64 @@ func (m *ConnectResponse) Unmarshal(data []byte) error {
 			}
 			m.UnsubRequests = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CloseRequests", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.CloseRequests = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Error", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Error = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
 		case 100:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field PublicKey", wireType)
@@ -1488,6 +1793,35 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 		switch fieldNum {
 		case 1:
 			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ClientID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ClientID = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Subject", wireType)
 			}
 			var stringLen uint64
@@ -1515,7 +1849,7 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 			}
 			m.Subject = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
-		case 2:
+		case 3:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Queue", wireType)
 			}
@@ -1544,7 +1878,7 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 			}
 			m.Queue = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
-		case 3:
+		case 4:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Inbox", wireType)
 			}
@@ -1573,7 +1907,7 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 			}
 			m.Inbox = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
-		case 4:
+		case 5:
 			if wireType != 0 {
 				return fmt.Errorf("proto: wrong wireType = %d for field MaxInFlight", wireType)
 			}
@@ -1592,7 +1926,7 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 					break
 				}
 			}
-		case 5:
+		case 6:
 			if wireType != 0 {
 				return fmt.Errorf("proto: wrong wireType = %d for field AckWaitInSecs", wireType)
 			}
@@ -1611,7 +1945,7 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 					break
 				}
 			}
-		case 6:
+		case 7:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field DurableName", wireType)
 			}
@@ -1941,6 +2275,164 @@ func (m *UnsubscribeRequest) Unmarshal(data []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.DurableName = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProtocol(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *CloseRequest) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProtocol
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: CloseRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: CloseRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ClientID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ClientID = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProtocol(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *CloseResponse) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProtocol
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: CloseResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: CloseResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Error", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Error = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex

@@ -18,9 +18,10 @@ import (
 // A single STAN server
 
 const (
-	DefaultPubPrefix   = "_STAN.pub"   // We will add on GUID here.
-	DefaultSubPrefix   = "_STAN.sub"   // We will add on GUID here.
-	DefaultUnSubPrefix = "_STAN.unsub" // We will add on GUID here.
+	DefaultPubPrefix   = "_STAN.pub"
+	DefaultSubPrefix   = "_STAN.sub"
+	DefaultUnSubPrefix = "_STAN.unsub"
+	DefaultClosePrefix = "_STAN.close"
 
 	DefaultMsgStoreLimit = 1024 * 1024
 )
@@ -32,6 +33,9 @@ var (
 	ErrInvalidSequence = errors.New("stan: invalid start sequence")
 	ErrInvalidTime     = errors.New("stan: invalid start time")
 	ErrInvalidSub      = errors.New("stan: invalid subscription")
+	ErrInvalidConnReq  = errors.New("stan: invalid connection request")
+	ErrInvalidClient   = errors.New("stan: clientID already registered")
+	ErrInvalidCloseReq = errors.New("stan: invalid close request")
 )
 
 type stanServer struct {
@@ -40,9 +44,14 @@ type stanServer struct {
 	pubPrefix     string // Subject prefix we received published messages on.
 	subRequests   string // Subject we receive subscription requests on.
 	unsubRequests string // Subject we receive unsubscribe requests on.
+	closeRequests string // Subject we receive close requests on.
 	natsServer    *server.Server
 	opts          *ServerOptions
 	nc            *nats.Conn
+
+	// Track clients
+	clientStoreLock sync.RWMutex
+	clientStore     map[string]*client
 
 	// Msg Storage
 	msgStoreLock  sync.RWMutex
@@ -57,7 +66,11 @@ type stanServer struct {
 	subAckInboxStore map[string]*serverSubscription
 }
 
-// Per channel/subject store
+type client struct {
+	clientID string
+}
+
+// Per channel/subject message store
 type msgStore struct {
 	sync.RWMutex
 	subject string // Can't be wildcard
@@ -69,7 +82,8 @@ type msgStore struct {
 
 // Holds Subscription state
 type serverSubscription struct {
-	sync.Mutex
+	sync.RWMutex
+	clientID      string
 	subject       string
 	queue         string
 	inbox         string
@@ -98,7 +112,10 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 	// Run a nats server by default
 	s := stanServer{clusterID: ID, serverID: newGUID(), opts: &DefaultServerOptions}
 
-	// Create fake msgStores
+	// Create clientStore
+	s.clientStore = make(map[string]*client)
+
+	// Create msgStores
 	s.msgStores = make(map[string]*msgStore)
 	s.msgStoreLimit = DefaultMsgStoreLimit
 
@@ -106,11 +123,12 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 	s.subStore = make(map[string][]*serverSubscription)
 	s.subAckInboxStore = make(map[string]*serverSubscription)
 
-	// Generate pubPrefix
+	// Generate Subjects
 	// FIXME(dlc) guid needs to be shared in cluster mode
 	s.pubPrefix = fmt.Sprintf("%s.%s", DefaultPubPrefix, newGUID())
 	s.subRequests = fmt.Sprintf("%s.%s", DefaultSubPrefix, newGUID())
 	s.unsubRequests = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, newGUID())
+	s.closeRequests = fmt.Sprintf("%s.%s", DefaultClosePrefix, newGUID())
 
 	// hack
 	var opts *server.Options
@@ -154,14 +172,70 @@ func (s *stanServer) initSubscriptions() {
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to unsubscribe request subject, %v\n", err))
 	}
-
+	// Receive close requests from clients.
+	_, err = s.nc.Subscribe(s.closeRequests, s.processCloseRequest)
+	if err != nil {
+		panic(fmt.Sprintf("Could not subscribe to close request subject, %v\n", err))
+	}
 }
 
 // Process a client connect request
 func (s *stanServer) connectCB(m *nats.Msg) {
+	req := &ConnectRequest{}
+	err := req.Unmarshal(m.Data)
+	if err != nil || req.ClientID == "" {
+		cr := &ConnectResponse{Error: ErrInvalidConnReq.Error()}
+		b, _ := cr.Marshal()
+		s.nc.Publish(m.Reply, b)
+		return
+	}
+	s.clientStoreLock.RLock()
+	c := s.clientStore[req.ClientID]
+	s.clientStoreLock.RUnlock()
+	if c != nil {
+		cr := &ConnectResponse{Error: ErrInvalidClient.Error()}
+		b, _ := cr.Marshal()
+		s.nc.Publish(m.Reply, b)
+		return
+	}
+
+	// Register the new connection.
+	s.clientStoreLock.Lock()
+	s.clientStore[req.ClientID] = &client{clientID: req.ClientID}
+	s.clientStoreLock.Unlock()
+
 	// Respond with our ConnectResponse
-	cr := &ConnectResponse{PubPrefix: s.pubPrefix, SubRequests: s.subRequests, UnsubRequests: s.unsubRequests}
+	cr := &ConnectResponse{
+		PubPrefix:     s.pubPrefix,
+		SubRequests:   s.subRequests,
+		UnsubRequests: s.unsubRequests,
+		CloseRequests: s.closeRequests,
+	}
 	b, _ := cr.Marshal()
+	s.nc.Publish(m.Reply, b)
+}
+
+// processCloseRequest process inbound messages from clients.
+func (s *stanServer) processCloseRequest(m *nats.Msg) {
+	req := &CloseRequest{}
+	err := req.Unmarshal(m.Data)
+	if err != nil {
+		resp := &CloseResponse{Error: ErrInvalidCloseReq.Error()}
+		if b, err := resp.Marshal(); err != nil {
+			s.nc.Publish(m.Reply, b)
+		}
+	}
+
+	// Remove from our clientStore
+	s.clientStoreLock.Lock()
+	delete(s.clientStore, req.ClientID)
+	s.clientStoreLock.Unlock()
+
+	// Remove non-durable subscribers.
+	s.removeAllNonDurableSubscribers(req.ClientID)
+
+	resp := &CloseResponse{}
+	b, _ := resp.Marshal()
 	s.nc.Publish(m.Reply, b)
 }
 
@@ -169,7 +243,6 @@ func (s *stanServer) connectCB(m *nats.Msg) {
 func (s *stanServer) processClientPublish(m *nats.Msg) {
 	pe := &PubMsg{}
 	err := pe.Unmarshal(m.Data)
-	//	err := json.Unmarshal(m.Data, &pe)
 	if err != nil {
 		badMsgAck := &PubAck{Error: ErrBadPubMsg.Error()}
 		if b, err := badMsgAck.Marshal(); err != nil {
@@ -268,15 +341,54 @@ func (s *stanServer) ackPublisher(pm *PubMsg, reply string) {
 
 // storeSubscription will store the subscription.
 func (s *stanServer) storeSubscription(sub *serverSubscription) {
+	if sub == nil {
+		return
+	}
+	sub.RLock()
+	subject := sub.subject
+	ackInbox := sub.ackInbox
+	sub.RUnlock()
+
 	s.subLock.Lock()
 	defer s.subLock.Unlock()
 
-	sl := s.subStore[sub.subject]
+	sl := s.subStore[subject]
 	if sl == nil {
 		sl = make([]*serverSubscription, 0, 8)
 	}
-	s.subStore[sub.subject] = append(sl, sub)
-	s.subAckInboxStore[sub.ackInbox] = sub
+	s.subStore[subject] = append(sl, sub)
+	s.subAckInboxStore[ackInbox] = sub
+}
+
+// removeSubscription will remove references to the subscription.
+func (s *stanServer) removeSubscription(sub *serverSubscription) {
+	if sub == nil {
+		return
+	}
+	sub.Lock()
+	sub.ackSub.Unsubscribe()
+	subject := sub.subject
+	ackInbox := sub.ackInbox
+	sub.Unlock()
+
+	s.subLock.Lock()
+	defer s.subLock.Unlock()
+
+	// Delete from ackInbox lookup.
+	delete(s.subAckInboxStore, ackInbox)
+
+	// Delete ourselves from the list
+	sl := s.subStore[subject]
+	for i := 0; i < len(sl); i++ {
+		if sl[i] == sub {
+			sl[i] = sl[len(sl)-1]
+			sl[len(sl)-1] = nil
+			sl = sl[:len(sl)-1]
+			s.subStore[subject] = sl
+			s.checkForResizeOfSubscriberList(subject)
+			break
+		}
+	}
 }
 
 // Checks if we need to do a resize. Assume lock is held for subStore.
@@ -295,47 +407,44 @@ func (s *stanServer) checkForResizeOfSubscriberList(subject string) {
 	}
 }
 
+// removeAllNonDurableSubscribers will remove all non-durable subscribers for the client.
+func (s *stanServer) removeAllNonDurableSubscribers(clientID string) {
+	dlist := []*serverSubscription{}
+
+	s.subLock.RLock()
+	for _, sub := range s.subAckInboxStore {
+		if sub.clientID == clientID && sub.durableName == "" {
+			dlist = append(dlist, sub)
+		}
+	}
+	s.subLock.RUnlock()
+
+	// Now delete them
+	for _, sub := range dlist {
+		s.removeSubscription(sub)
+	}
+}
+
 // processUnSubscribeRequest will process a unsubscribe request.
 func (s *stanServer) processUnSubscribeRequest(m *nats.Msg) {
 	usr := &UnsubscribeRequest{}
 	err := usr.Unmarshal(m.Data)
 	if err != nil {
-		resp := &SubscriptionResponse{Error: err.Error()}
-		b, _ := resp.Marshal()
-		s.nc.Publish(m.Reply, b)
+		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
 	}
 
+	s.subLock.RLock()
 	sub := s.subAckInboxStore[usr.Inbox]
+	s.subLock.RUnlock()
+
 	if sub == nil {
-		resp := &SubscriptionResponse{Error: ErrInvalidSub.Error()}
-		b, _ := resp.Marshal()
-		s.nc.Publish(m.Reply, b)
+		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
 	}
 
-	sub.Lock()
-	// Unwind the subscription state
-	sub.ackSub.Unsubscribe()
-	subject := sub.subject
-	ackInbox := sub.ackInbox
-	sub.Unlock()
-
-	s.subLock.Lock()
-	delete(s.subAckInboxStore, ackInbox)
-	// Delete ourselves from the list
-	sl := s.subStore[subject]
-
-	for i := 0; i < len(sl); i++ {
-		if sl[i] == sub {
-			sl[i] = sl[len(sl)-1]
-			sl = sl[:len(sl)-1]
-			s.subStore[subject] = sl
-			s.checkForResizeOfSubscriberList(subject)
-			break
-		}
-	}
-	s.subLock.Unlock()
+	// Remove the subscription.
+	s.removeSubscription(sub)
 
 	// Create a non-error response
 	resp := &SubscriptionResponse{AckInbox: usr.Inbox}
@@ -343,18 +452,27 @@ func (s *stanServer) processUnSubscribeRequest(m *nats.Msg) {
 	s.nc.Publish(m.Reply, b)
 }
 
+func (s *stanServer) sendSubscriptionResponseErr(reply string, err error) {
+	resp := &SubscriptionResponse{Error: err.Error()}
+	b, _ := resp.Marshal()
+	s.nc.Publish(reply, b)
+}
+
 // processSubscriptionRequest will process a subscription request.
 func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	sr := &SubscriptionRequest{}
 	err := sr.Unmarshal(m.Data)
 	if err != nil {
-		resp := &SubscriptionResponse{Error: err.Error()}
-		b, _ := resp.Marshal()
-		s.nc.Publish(m.Reply, b)
+		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
 	}
 
 	// FIXME(dlc) check for multiple errors, mis-configurations, etc.
+
+	if sr.ClientID == "" {
+		s.sendSubscriptionResponseErr(m.Reply, errors.New("stan: malformed subscription request, clientID missing"))
+		return
+	}
 
 	// Check SequenceStart out of range
 	if sr.StartPosition == StartPosition_SequenceStart {
@@ -377,6 +495,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	// Create a serverSubscription
 	sub := &serverSubscription{
+		clientID:      sr.ClientID,
 		subject:       sr.Subject,
 		queue:         sr.Queue,
 		inbox:         sr.Inbox,

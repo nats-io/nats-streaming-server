@@ -45,7 +45,7 @@ func TestUnreachable(t *testing.T) {
 	// Non-Existant or Unreachable
 	connectTime := 25 * time.Millisecond
 	start := time.Now()
-	if _, err := Connect("someNonExistantServerID", "myTestClient", ConnectWait(connectTime)); err != ErrClusterUnreachable {
+	if _, err := Connect("someNonExistantServerID", "myTestClient", ConnectWait(connectTime)); err != ErrConnectReqTimeout {
 		t.Fatalf("Expected Unreachable err, got %v\n", err)
 	}
 	if delta := time.Since(start); delta < connectTime {
@@ -100,7 +100,7 @@ func TestBasicPublishAsync(t *testing.T) {
 		ch <- true
 	}
 	glock.Lock()
-	guid = sc.PublishAsync("foo", []byte("Hello World!"), acb)
+	guid, _ = sc.PublishAsync("foo", []byte("Hello World!"), acb)
 	glock.Unlock()
 	if guid == "" {
 		t.Fatalf("Expected non-empty guid to be returned.")
@@ -136,7 +136,7 @@ func TestTimeoutPublishAsync(t *testing.T) {
 	// Kill the STAN server so we timeout.
 	s.Shutdown()
 	glock.Lock()
-	guid = sc.PublishAsync("foo", []byte("Hello World!"), acb)
+	guid, _ = sc.PublishAsync("foo", []byte("Hello World!"), acb)
 	glock.Unlock()
 	if guid == "" {
 		t.Fatalf("Expected non-empty guid to be returned.")
@@ -609,6 +609,56 @@ func TestSubscribeShrink(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Got an error on unsubscribe: %v\n", err)
 		}
+	}
+}
+
+func TestDupClientID(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	_, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+	_, err = Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err == nil {
+		t.Fatalf("Expected to get an error for duplicate clientID\n")
+	}
+}
+
+func TestClose(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	sub, err := sc.Subscribe("foo", func(m *Msg) {
+		t.Fatalf("Did not expect to receive any messages\n")
+	})
+	if err != nil {
+		t.Fatalf("Expected no errors when subscribing, got %v\n", err)
+	}
+
+	err = sc.Close()
+	if err != nil {
+		t.Fatalf("Did not expect error on Close(), got %v\n", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		sc.Publish("foo", []byte("ok"))
+	}
+
+	if err := sc.Publish("foo", []byte("Hello World!")); err == nil || err != ErrConnectionClosed {
+		t.Fatalf("Expected an ErrConnectionClosed error on publish to a closed connection, got %v\n", err)
+	}
+
+	if err := sub.Unsubscribe(); err == nil || err != ErrConnectionClosed {
+		t.Fatalf("Expected an ErrConnectionClosed error on unsubscribe to a closed connection, got %v\n", err)
 	}
 }
 

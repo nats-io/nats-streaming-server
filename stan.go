@@ -24,11 +24,13 @@ const (
 
 // Errors
 var (
-	ErrClusterUnreachable = errors.New("stan: cluster unreachable")
-	ErrConnectionClosed   = errors.New("stan: connection closed")
-	ErrTimeout            = errors.New("stan: publish ack timeout")
-	ErrBadAck             = errors.New("stan: malformed ack")
-	ErrBadSubscription    = errors.New("stan: invalid subscription")
+	ErrConnectReqTimeout = errors.New("stan: connect request timeout")
+	ErrCloseReqTimeout   = errors.New("stan: close request timeout")
+	ErrConnectionClosed  = errors.New("stan: connection closed")
+	ErrTimeout           = errors.New("stan: publish ack timeout")
+	ErrBadAck            = errors.New("stan: malformed ack")
+	ErrBadSubscription   = errors.New("stan: invalid subscription")
+	ErrBadConnection     = errors.New("stan: invalid connection")
 )
 
 // Conn represents a connection to the STAN subsystem. It can Publish and
@@ -36,13 +38,16 @@ var (
 type Conn interface {
 	// Publish
 	Publish(subject string, data []byte) error
-	PublishAsync(subject string, data []byte, ah AckHandler) string
+	PublishAsync(subject string, data []byte, ah AckHandler) (string, error)
 	// Publish with Reply
 	PublishWithReply(subject, reply string, data []byte) error
-	PublishAsyncWithReply(subject, reply string, data []byte, ah AckHandler) string
+	PublishAsyncWithReply(subject, reply string, data []byte, ah AckHandler) (string, error)
 
 	// Subscribe
 	Subscribe(subject string, cb MsgHandler, opts ...SubscriptionOption) (Subscription, error)
+
+	// Close
+	Close() error
 }
 
 // Subscription represents a subscription within the STAN cluster. Subscriptions
@@ -147,6 +152,7 @@ type conn struct {
 	pubPrefix       string // Publish prefix set by stan, append our subject.
 	subRequests     string // Subject to send subscription requests.
 	unsubRequests   string // Subject to send unsubscribe requests.
+	closeRequests   string // Subject to send close requests.
 	ackSubject      string // publish acks
 	ackSubscription *nats.Subscription
 	subMap          map[string]*subscription
@@ -205,7 +211,7 @@ func PubAckWait(t time.Duration) Option {
 // Connect will form a connection to the STAN subsystem.
 func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	// Process Options
-	c := conn{opts: DefaultOptions}
+	c := conn{clientID: clientID, opts: DefaultOptions}
 	for _, opt := range options {
 		if err := opt(&c.opts); err != nil {
 			return nil, err
@@ -221,10 +227,12 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	}
 	// Send Request to discover the cluster
 	discoverSubject := fmt.Sprintf("%s.%s", c.opts.DiscoverPrefix, stanClusterID)
-	reply, err := c.nc.Request(discoverSubject, nil, c.opts.ConnectTimeout)
+	req := &ConnectRequest{ClientID: clientID}
+	b, _ := req.Marshal()
+	reply, err := c.nc.Request(discoverSubject, b, c.opts.ConnectTimeout)
 	if err != nil {
 		if err == nats.ErrTimeout {
-			return nil, ErrClusterUnreachable
+			return nil, ErrConnectReqTimeout
 		} else {
 			return nil, err
 		}
@@ -232,15 +240,18 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	// Process the response, grab server pubPrefix
 	cr := &ConnectResponse{}
 	err = cr.Unmarshal(reply.Data)
-	//	err = json.Unmarshal(reply.Data, &cr)
 	if err != nil {
 		return nil, err
+	}
+	if cr.Error != "" {
+		return nil, errors.New(cr.Error)
 	}
 
 	// Capture cluster configuration endpoints to publish and subscribe/unsubscribe.
 	c.pubPrefix = cr.PubPrefix
 	c.subRequests = cr.SubRequests
 	c.unsubRequests = cr.UnsubRequests
+	c.closeRequests = cr.CloseRequests
 
 	// Setup the ACK subscription
 	c.ackSubject = fmt.Sprintf("%s.%s", DefaultACKPrefix, newGUID())
@@ -254,6 +265,44 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	c.subMap = make(map[string]*subscription)
 
 	return &c, nil
+}
+
+// Close a connection to the stan system.
+func (sc *conn) Close() error {
+	if sc == nil {
+		return ErrBadConnection
+	}
+
+	sc.Lock()
+	defer sc.Unlock()
+
+	req := &CloseRequest{ClientID: sc.clientID}
+	b, _ := req.Marshal()
+	reply, err := sc.nc.Request(sc.closeRequests, b, sc.opts.ConnectTimeout)
+	if err != nil {
+		if err == nats.ErrTimeout {
+			return ErrCloseReqTimeout
+		} else {
+			return err
+		}
+	}
+	cr := &CloseResponse{}
+	err = cr.Unmarshal(reply.Data)
+	if err != nil {
+		return err
+	}
+	if cr.Error != "" {
+		return errors.New(cr.Error)
+	}
+	// Now close ourselves.
+	if sc.ackSubscription != nil {
+		sc.ackSubscription.Unsubscribe()
+	}
+	if sc.nc != nil {
+		sc.nc.Close()
+		sc.nc = nil
+	}
+	return nil
 }
 
 // Process an ack from the STAN cluster
@@ -282,7 +331,7 @@ func (sc *conn) Publish(subject string, data []byte) (e error) {
 
 // PublishAsync will publish to the cluster on pubPrefix+subject and asynchronously
 // process the ACK or error state. It will return the GUID for the message being sent.
-func (sc *conn) PublishAsync(subject string, data []byte, ah AckHandler) string {
+func (sc *conn) PublishAsync(subject string, data []byte, ah AckHandler) (string, error) {
 	return sc.PublishAsyncWithReply(subject, "", data, ah)
 }
 
@@ -294,20 +343,27 @@ func (sc *conn) PublishWithReply(subject, reply string, data []byte) (e error) {
 		e = err
 		ch <- true
 	}
-	sc.PublishAsyncWithReply(subject, reply, data, ah)
+	if _, err := sc.PublishAsyncWithReply(subject, reply, data, ah); err != nil {
+		return err
+	}
 	<-ch
 	return e
 }
 
 // PublishAsyncWithReply will publish to the cluster and asynchronously
 // process the ACK or error state. It will return the GUID for the message being sent.
-func (sc *conn) PublishAsyncWithReply(subject, reply string, data []byte, ah AckHandler) string {
+func (sc *conn) PublishAsyncWithReply(subject, reply string, data []byte, ah AckHandler) (string, error) {
 	subj := fmt.Sprintf("%s.%s", sc.pubPrefix, subject)
 	pe := &PubMsg{Id: newGUID(), Subject: subject, Reply: reply, Data: data}
 	b, _ := pe.Marshal()
 	a := &ack{ah: ah}
 
 	sc.Lock()
+	if sc.nc == nil {
+		sc.Unlock()
+		return "", ErrConnectionClosed
+	}
+
 	sc.ackMap[pe.Id] = a
 	err := sc.nc.PublishRequest(subj, sc.ackSubject, b)
 	if err != nil {
@@ -325,7 +381,7 @@ func (sc *conn) PublishAsyncWithReply(subject, reply string, data []byte, ah Ack
 		})
 	}
 	sc.Unlock()
-	return pe.Id
+	return pe.Id, nil
 }
 
 // removeAck removes the ack from the ackMap and cancels any state, e.g. timers
@@ -400,6 +456,11 @@ func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...Subscription
 		}
 	}
 	sc.Lock()
+	if sc.nc == nil {
+		sc.Unlock()
+		return nil, ErrConnectionClosed
+	}
+
 	// Listen for actual messages.
 	if nsub, err := sc.nc.Subscribe(sub.inbox, sc.processMsg); err != nil {
 		sc.Unlock()
@@ -414,6 +475,7 @@ func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...Subscription
 	// Create a subscription request
 	// FIXME(dlc) add others.
 	sr := &SubscriptionRequest{
+		ClientID:      sc.clientID,
 		Subject:       subject,
 		Inbox:         sub.inbox,
 		MaxInFlight:   int32(sub.opts.MaxInflight),
@@ -469,10 +531,14 @@ func (sub *subscription) Unsubscribe() error {
 	sub.Unlock()
 
 	if sc == nil {
-		return nil
+		return ErrBadSubscription
 	}
 
 	sc.Lock()
+	if sc.nc == nil {
+		return ErrConnectionClosed
+	}
+
 	delete(sc.subMap, inbox)
 	reqSubject := sc.unsubRequests
 	sc.Unlock()
