@@ -685,6 +685,7 @@ func TestManualAck(t *testing.T) {
 	// Test that we can't Ack if not in manual mode.
 	sub, err := sc.Subscribe("foo", func(m *Msg) {
 		if err := m.Ack(); err != ErrManualAck {
+			fmt.Printf("err is %v\n", err)
 			t.Fatalf("Expected an error trying to ack an auto-ack subscription")
 		}
 		fch <- true
@@ -724,7 +725,7 @@ func TestManualAck(t *testing.T) {
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not receive at least 10 messages")
 	}
-	// Wiat a bit longer for other messages which would be an error.
+	// Wait a bit longer for other messages which would be an error.
 	time.Sleep(50 * time.Millisecond)
 
 	if nr := atomic.LoadInt32(&received); nr != 10 {
@@ -743,6 +744,60 @@ func TestManualAck(t *testing.T) {
 
 	if nr := atomic.LoadInt32(&received); nr != toSend+1 {
 		t.Fatalf("Did not receive correct number of messages: %d vs %d\n", nr, toSend+1)
+	}
+}
+
+func TestRedelivery(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	toSend := int32(100)
+	hw := []byte("Hello World")
+
+	for i := int32(0); i < toSend; i++ {
+		sc.Publish("foo", hw)
+	}
+
+	// Make sure we get an error on bad ackWait
+	if _, err := sc.Subscribe("foo", nil, AckWait(20*time.Millisecond)); err == nil {
+		t.Fatalf("Expected an error for back AckWait time under 1 second\n")
+	}
+
+	ch := make(chan bool)
+	sch := make(chan bool)
+	received := int32(0)
+
+	ackRedeliverTime := 1 * time.Second
+
+	sub, err := sc.Subscribe("foo", func(m *Msg) {
+		if nr := atomic.AddInt32(&received, 1); nr == toSend {
+			ch <- true
+		} else if nr == 2*toSend {
+			sch <- true
+		}
+	}, DeliverAllAvailable(), MaxInflight(100), AckWait(ackRedeliverTime), SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer sub.Unsubscribe()
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not receive first delivery of all messages")
+	}
+	if nr := atomic.LoadInt32(&received); nr != toSend {
+		t.Fatalf("Expected to get 100 messages, got %d\n", nr)
+	}
+	if err := Wait(sch); err != nil {
+		t.Fatal("Did not receive second re-delivery of all messages")
+	}
+	if nr := atomic.LoadInt32(&received); nr != 2*toSend {
+		t.Fatalf("Expected to get 200 messages, got %d\n", nr)
 	}
 }
 

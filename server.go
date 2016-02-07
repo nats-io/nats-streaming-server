@@ -36,6 +36,7 @@ var (
 	ErrInvalidConnReq  = errors.New("stan: invalid connection request")
 	ErrInvalidClient   = errors.New("stan: clientID already registered")
 	ErrInvalidCloseReq = errors.New("stan: invalid close request")
+	ErrInvalidAckWait  = errors.New("stan: invalid ack wait time, should be >= 1s")
 )
 
 type stanServer struct {
@@ -93,7 +94,8 @@ type serverSubscription struct {
 	lastSent      uint64
 	lastAck       uint64
 	maxInFlight   uint64
-	ackWaitInSecs int32
+	ackWaitInSecs time.Duration
+	ackTimer      *time.Timer
 	ackSub        *nats.Subscription
 }
 
@@ -289,17 +291,35 @@ func (s *stanServer) processMsg(m *MsgProto) {
 		// Check if we have too many outstanding. Ack receipt will unblock
 		if sub.lastSent-sub.lastAck < sub.maxInFlight {
 			// We can send direct here.
-			sub.lastSent = m.Seq
-			s.sendMsgToSub(sub.inbox, m)
+			s.sendMsgToSub(sub, m)
 		}
 		sub.Unlock()
 	}
 	s.subLock.RUnlock()
 }
 
-func (s *stanServer) sendMsgToSub(inbox string, m *MsgProto) {
+// Sends the message to the subscriber, assumes sub lock is held.
+func (s *stanServer) sendMsgToSub(sub *serverSubscription, m *MsgProto) {
+	sub.lastSent = m.Seq
 	b, _ := m.Marshal()
-	s.nc.Publish(inbox, b)
+	s.nc.Publish(sub.inbox, b)
+
+	// Setup the ackTimer as needed.
+	if sub.ackTimer == nil {
+		sub.ackTimer = time.AfterFunc(sub.ackWaitInSecs*time.Second, func() {
+			sub.Lock()
+			sub.ackTimer = nil
+			needsRetransmit := sub.lastSent > sub.lastAck
+			sub.Unlock()
+			if needsRetransmit {
+				// Reaqcuire lock and reset lastSent to lastAck
+				sub.Lock()
+				sub.lastSent = sub.lastAck
+				sub.Unlock()
+				s.sendQueuedMessages(sub)
+			}
+		})
+	}
 }
 
 // assignAndStore will assign a sequencId and then store the message.
@@ -469,6 +489,13 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	// FIXME(dlc) check for multiple errors, mis-configurations, etc.
 
+	// AckWait must be >= 1s
+	if sr.AckWaitInSecs <= 0 {
+		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidAckWait)
+		return
+	}
+
+	// ClientID must not be empty.
 	if sr.ClientID == "" {
 		s.sendSubscriptionResponseErr(m.Reply, errors.New("stan: malformed subscription request, clientID missing"))
 		return
@@ -502,7 +529,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		ackInbox:      newInbox(),
 		durableName:   sr.DurableName,
 		maxInFlight:   uint64(sr.MaxInFlight),
-		ackWaitInSecs: sr.AckWaitInSecs,
+		ackWaitInSecs: time.Duration(sr.AckWaitInSecs),
 	}
 
 	// Store this subscription
@@ -552,9 +579,19 @@ func (s *stanServer) processAck(sub *serverSubscription, ack *Ack) {
 	}
 
 	sub.Lock()
+
 	// Update our notion of lastAck.
 	if ack.Seq > sub.lastAck {
 		sub.lastAck = ack.Seq
+	}
+	// If we have the ackTimer running, either reset or cancel it.
+	if sub.ackTimer != nil {
+		if sub.lastAck == sub.lastSent {
+			sub.ackTimer.Stop()
+			sub.ackTimer = nil
+		} else {
+			sub.ackTimer.Reset(sub.ackWaitInSecs * time.Second)
+		}
 	}
 	sub.Unlock()
 
@@ -563,7 +600,6 @@ func (s *stanServer) processAck(sub *serverSubscription, ack *Ack) {
 }
 
 // Send any messages that are ready to be sent that have been queued.
-// Lock for sub should be held.
 func (s *stanServer) sendQueuedMessages(sub *serverSubscription) {
 	sub.Lock()
 	defer sub.Unlock()
@@ -582,8 +618,7 @@ func (s *stanServer) sendQueuedMessages(sub *serverSubscription) {
 		nextMsg := store.msgs[nextSeq]
 		store.RUnlock()
 		if nextMsg != nil {
-			sub.lastSent++
-			s.sendMsgToSub(sub.inbox, nextMsg)
+			s.sendMsgToSub(sub, nextMsg)
 		}
 	}
 }
@@ -623,8 +658,10 @@ func (s *stanServer) sendMessagesToSubFromSequence(sub *serverSubscription, star
 	s.msgStoreLock.RUnlock()
 
 	store.RLock()
+	sub.Lock()
 	sub.lastSent = startSeq - 1 // FIXME(dlc) - wrap?
 	sub.lastQueued = store.last
+	sub.Unlock()
 	store.RUnlock()
 
 	s.sendQueuedMessages(sub)

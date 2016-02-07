@@ -242,18 +242,17 @@ func (sc *conn) PublishAsync(subject string, data []byte, ah AckHandler) (string
 }
 
 // PublishWithReply will publish to the cluster and wait for an ACK.
-func (sc *conn) PublishWithReply(subject, reply string, data []byte) (e error) {
+func (sc *conn) PublishWithReply(subject, reply string, data []byte) error {
 	// FIXME(dlc) Pool?
-	ch := make(chan bool)
+	ch := make(chan error)
 	ah := func(guid string, err error) {
-		e = err
-		ch <- true
+		ch <- err
 	}
 	if _, err := sc.PublishAsyncWithReply(subject, reply, data, ah); err != nil {
 		return err
 	}
-	<-ch
-	return e
+	err := <-ch
+	return err
 }
 
 // PublishAsyncWithReply will publish to the cluster and asynchronously
@@ -335,10 +334,11 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 	cb := sub.cb
 	ackSubject := sub.ackInbox
 	isManualAck := sub.opts.ManualAcks
+	subsc := sub.sc
 	sub.RUnlock()
 
 	// Perform the callback
-	if cb != nil {
+	if cb != nil && subsc != nil {
 		cb(msg)
 	}
 

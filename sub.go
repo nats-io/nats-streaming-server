@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	DefaultAckWait     = 2 * time.Second
+	DefaultAckWait     = 30 * time.Second
 	DefaultMaxInflight = 1024
 )
 
@@ -154,16 +154,21 @@ func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...Subscription
 		return nil, ErrConnectionClosed
 	}
 
+	// Register subscription.
+	sc.subMap[sub.inbox] = sub
+	nc := sc.nc
+	sc.Unlock()
+
+	// Hold lock throughout.
+	sub.Lock()
+	defer sub.Unlock()
+
 	// Listen for actual messages.
-	if nsub, err := sc.nc.Subscribe(sub.inbox, sc.processMsg); err != nil {
-		sc.Unlock()
+	if nsub, err := nc.Subscribe(sub.inbox, sc.processMsg); err != nil {
 		return nil, err
 	} else {
 		sub.inboxSub = nsub
 	}
-	// Register subscription.
-	sc.subMap[sub.inbox] = sub
-	sc.Unlock()
 
 	// Create a subscription request
 	// FIXME(dlc) add others.
@@ -199,9 +204,7 @@ func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...Subscription
 		// FIXME(dlc) unwind subscription from above.
 		return nil, errors.New(r.Error)
 	}
-	sub.Lock()
 	sub.ackInbox = r.AckInbox
-	sub.Unlock()
 
 	return sub, nil
 }
