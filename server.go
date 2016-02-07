@@ -15,23 +15,34 @@ import (
 	natsd "github.com/nats-io/gnatsd/test"
 )
 
-// A mock single STAN server
+// A single STAN server
 
 const (
-	DefaultPubPrefix = "_STAN.pub" // We will add on GUID here.
-	DefaultSubPrefix = "_STAN.sub" // We will add on GUID here.
+	DefaultPubPrefix   = "_STAN.pub"   // We will add on GUID here.
+	DefaultSubPrefix   = "_STAN.sub"   // We will add on GUID here.
+	DefaultUnSubPrefix = "_STAN.unsub" // We will add on GUID here.
 
 	DefaultMsgStoreLimit = 1024 * 1024
 )
 
+// Errors.
+var (
+	ErrBadPubMsg       = errors.New("stan: malformed message")
+	ErrBadSubRequest   = errors.New("stan: malformed subscription request")
+	ErrInvalidSequence = errors.New("stan: invalid start sequence")
+	ErrInvalidTime     = errors.New("stan: invalid start time")
+	ErrInvalidSub      = errors.New("stan: invalid subscription")
+)
+
 type stanServer struct {
-	clusterID   string
-	serverID    string
-	pubPrefix   string
-	subRequests string
-	natsServer  *server.Server
-	opts        *ServerOptions
-	nc          *nats.Conn
+	clusterID     string
+	serverID      string
+	pubPrefix     string // Subject prefix we received published messages on.
+	subRequests   string // Subject we receive subscription requests on.
+	unsubRequests string // Subject we receive unsubscribe requests on.
+	natsServer    *server.Server
+	opts          *ServerOptions
+	nc            *nats.Conn
 
 	// Msg Storage
 	msgStoreLock  sync.RWMutex
@@ -63,7 +74,7 @@ type serverSubscription struct {
 	queue         string
 	inbox         string
 	ackInbox      string
-	name          string
+	durableName   string
 	lastQueued    uint64
 	lastSent      uint64
 	lastAck       uint64
@@ -71,13 +82,6 @@ type serverSubscription struct {
 	ackWaitInSecs int32
 	ackSub        *nats.Subscription
 }
-
-var (
-	ErrBadPubMsg       = errors.New("stan: malformed message")
-	ErrBadSubscription = errors.New("stan: malformed subscription request")
-	ErrInvalidSequence = errors.New("stan: invalid start sequence")
-	ErrInvalidTime     = errors.New("stan: invalid start time")
-)
 
 // ServerOptions
 type ServerOptions struct {
@@ -106,6 +110,7 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 	// FIXME(dlc) guid needs to be shared in cluster mode
 	s.pubPrefix = fmt.Sprintf("%s.%s", DefaultPubPrefix, newGUID())
 	s.subRequests = fmt.Sprintf("%s.%s", DefaultSubPrefix, newGUID())
+	s.unsubRequests = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, newGUID())
 
 	// hack
 	var opts *server.Options
@@ -144,12 +149,18 @@ func (s *stanServer) initSubscriptions() {
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to subscribe request subject, %v\n", err))
 	}
+	// Receive unsubscribe requests from clients.
+	_, err = s.nc.Subscribe(s.unsubRequests, s.processUnSubscribeRequest)
+	if err != nil {
+		panic(fmt.Sprintf("Could not subscribe to unsubscribe request subject, %v\n", err))
+	}
+
 }
 
 // Process a client connect request
 func (s *stanServer) connectCB(m *nats.Msg) {
 	// Respond with our ConnectResponse
-	cr := &ConnectResponse{PubPrefix: s.pubPrefix, SubRequests: s.subRequests}
+	cr := &ConnectResponse{PubPrefix: s.pubPrefix, SubRequests: s.subRequests, UnsubRequests: s.unsubRequests}
 	b, _ := cr.Marshal()
 	s.nc.Publish(m.Reply, b)
 }
@@ -258,16 +269,81 @@ func (s *stanServer) ackPublisher(pm *PubMsg, reply string) {
 // storeSubscription will store the subscription.
 func (s *stanServer) storeSubscription(sub *serverSubscription) {
 	s.subLock.Lock()
+	defer s.subLock.Unlock()
+
 	sl := s.subStore[sub.subject]
 	if sl == nil {
 		sl = make([]*serverSubscription, 0, 8)
 	}
 	s.subStore[sub.subject] = append(sl, sub)
 	s.subAckInboxStore[sub.ackInbox] = sub
-	s.subLock.Unlock()
 }
 
-// processSubscriptionRequest will process a subscription request
+// Checks if we need to do a resize. Assume lock is held for subStore.
+func (s *stanServer) checkForResizeOfSubscriberList(subject string) {
+	sl := s.subStore[subject]
+	lsl := len(sl)
+	csl := cap(sl)
+	// Don't bother if list not too big
+	if csl <= 8 {
+		return
+	}
+	pFree := float32(csl-lsl) / float32(csl)
+	if pFree > 0.50 {
+		nsl := append([]*serverSubscription(nil), sl...)
+		s.subStore[subject] = nsl
+	}
+}
+
+// processUnSubscribeRequest will process a unsubscribe request.
+func (s *stanServer) processUnSubscribeRequest(m *nats.Msg) {
+	usr := &UnsubscribeRequest{}
+	err := usr.Unmarshal(m.Data)
+	if err != nil {
+		resp := &SubscriptionResponse{Error: err.Error()}
+		b, _ := resp.Marshal()
+		s.nc.Publish(m.Reply, b)
+		return
+	}
+
+	sub := s.subAckInboxStore[usr.Inbox]
+	if sub == nil {
+		resp := &SubscriptionResponse{Error: ErrInvalidSub.Error()}
+		b, _ := resp.Marshal()
+		s.nc.Publish(m.Reply, b)
+		return
+	}
+
+	sub.Lock()
+	// Unwind the subscription state
+	sub.ackSub.Unsubscribe()
+	subject := sub.subject
+	ackInbox := sub.ackInbox
+	sub.Unlock()
+
+	s.subLock.Lock()
+	delete(s.subAckInboxStore, ackInbox)
+	// Delete ourselves from the list
+	sl := s.subStore[subject]
+
+	for i := 0; i < len(sl); i++ {
+		if sl[i] == sub {
+			sl[i] = sl[len(sl)-1]
+			sl = sl[:len(sl)-1]
+			s.subStore[subject] = sl
+			s.checkForResizeOfSubscriberList(subject)
+			break
+		}
+	}
+	s.subLock.Unlock()
+
+	// Create a non-error response
+	resp := &SubscriptionResponse{AckInbox: usr.Inbox}
+	b, _ := resp.Marshal()
+	s.nc.Publish(m.Reply, b)
+}
+
+// processSubscriptionRequest will process a subscription request.
 func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	sr := &SubscriptionRequest{}
 	err := sr.Unmarshal(m.Data)
@@ -305,7 +381,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		queue:         sr.Queue,
 		inbox:         sr.Inbox,
 		ackInbox:      newInbox(),
-		name:          sr.DurableName,
+		durableName:   sr.DurableName,
 		maxInFlight:   uint64(sr.MaxInFlight),
 		ackWaitInSecs: sr.AckWaitInSecs,
 	}
@@ -319,7 +395,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
 	}
 
-	// Create a response
+	// Create a non-error response
 	resp := &SubscriptionResponse{AckInbox: sub.ackInbox}
 	b, _ := resp.Marshal()
 	s.nc.Publish(m.Reply, b)

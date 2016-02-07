@@ -47,9 +47,10 @@ message Ack {
 
 // Response to a client connect
 message ConnectResponse {
-  string pubPrefix   = 1;   // Prefix to use when publishing to this STAN cluster.
-  string subRequests = 2;   // Subject to use for subscription requests.
-  string publicKey   = 100; // Possibly used to sign acks, etc.
+  string pubPrefix     = 1;   // Prefix to use when publishing to this STAN cluster.
+  string subRequests   = 2;   // Subject to use for subscription requests.
+  string unsubRequests = 3;   // Subject to use for unsubscribe requests.
+  string publicKey     = 100; // Possibly used to sign acks, etc.
 }
 
 
@@ -66,7 +67,7 @@ enum StartPosition {
 message SubscriptionRequest {
   string        subject       = 1;  // Formal subject to subscribe to, e.g. foo.bar
   string        queue         = 2;  // Optional queue group
-  string        inbox         = 3;  // Inbox subject to delibver messages on.
+  string        inbox         = 3;  // Inbox subject to deliver messages on.
   int32         maxInFlight   = 4;  // Maximum inflight messages without an ack allowed.
   int32         ackWaitInSecs = 5;  // Timeout for receiving an ack from the client.
   string        durableName   = 6;  // Optional durable name which survives client restarts.
@@ -75,8 +76,15 @@ message SubscriptionRequest {
   int64         startTime     = 12; // Optional start time.
 }
 
-// Used to Respond to SubscriptionRequest
+// Used to Respond to SubscriptionRequest and UnsubscribeRequests
 message SubscriptionResponse {
-  string ackInbox = 1; // ackInbox for sending acks.
-  string error    = 2; // err string, empty/omitted if no error
+  string ackInbox = 2; // ackInbox for sending acks.
+  string error    = 3; // err string, empty/omitted if no error
+}
+
+// Protocol for a clients to unsubscribe. Will return a SubscriptionResponse
+message UnsubscribeRequest {
+  string subject     = 1; // subject for the subscription.
+  string inbox       = 2;  // Inbox subject to identify subscription.
+  string durableName = 3;  // Optional durable name which survives client restarts.
 }

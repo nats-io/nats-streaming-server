@@ -28,6 +28,7 @@ var (
 	ErrConnectionClosed   = errors.New("stan: connection closed")
 	ErrTimeout            = errors.New("stan: publish ack timeout")
 	ErrBadAck             = errors.New("stan: malformed ack")
+	ErrBadSubscription    = errors.New("stan: invalid subscription")
 )
 
 // Conn represents a connection to the STAN subsystem. It can Publish and
@@ -143,8 +144,9 @@ type conn struct {
 	sync.Mutex
 	clientID        string
 	serverID        string
-	pubPrefix       string
-	subRequests     string
+	pubPrefix       string // Publish prefix set by stan, append our subject.
+	subRequests     string // Subject to send subscription requests.
+	unsubRequests   string // Subject to send unsubscribe requests.
 	ackSubject      string // publish acks
 	ackSubscription *nats.Subscription
 	subMap          map[string]*subscription
@@ -234,8 +236,11 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Capture cluster configuration endpoints to publish and subscribe/unsubscribe.
 	c.pubPrefix = cr.PubPrefix
 	c.subRequests = cr.SubRequests
+	c.unsubRequests = cr.UnsubRequests
 
 	// Setup the ACK subscription
 	c.ackSubject = fmt.Sprintf("%s.%s", DefaultACKPrefix, newGUID())
@@ -336,6 +341,7 @@ func (sc *conn) removeAck(guid string) {
 // A subscription represents a subscription to a stan cluster.
 type subscription struct {
 	sync.RWMutex
+	sc       *conn
 	subject  string
 	inbox    string
 	ackInbox string
@@ -387,7 +393,7 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 
 // Subscribe will perform a subscription with the given options to the STAN cluster.
 func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...SubscriptionOption) (Subscription, error) {
-	sub := &subscription{subject: subject, inbox: newInbox(), cb: cb, opts: DefaultSubscriptionOptions}
+	sub := &subscription{subject: subject, inbox: newInbox(), cb: cb, sc: sc, opts: DefaultSubscriptionOptions}
 	for _, opt := range options {
 		if err := opt(&sub.opts); err != nil {
 			return nil, err
@@ -447,5 +453,50 @@ func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...Subscription
 
 // Unsubscribe removes interest in the subscription
 func (sub *subscription) Unsubscribe() error {
-	return errors.New("Not implemented")
+	if sub == nil {
+		return ErrBadSubscription
+	}
+	sub.Lock()
+	sc := sub.sc
+	if sc == nil {
+		// Already closed.
+		return ErrBadSubscription
+	}
+	sub.sc = nil
+	sub.inboxSub.Unsubscribe()
+	sub.inboxSub = nil
+	inbox := sub.inbox
+	sub.Unlock()
+
+	if sc == nil {
+		return nil
+	}
+
+	sc.Lock()
+	delete(sc.subMap, inbox)
+	reqSubject := sc.unsubRequests
+	sc.Unlock()
+
+	// Send Unsubscribe to server.
+
+	// FIXME(dlc) - Add in durable
+	usr := &UnsubscribeRequest{
+		Subject: sub.subject,
+		Inbox:   sub.ackInbox,
+	}
+	b, _ := usr.Marshal()
+	// FIXME(dlc) - make timeout configurable.
+	reply, err := sc.nc.Request(reqSubject, b, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	r := &SubscriptionResponse{}
+	if err := r.Unmarshal(reply.Data); err != nil {
+		return err
+	}
+	if r.Error != "" {
+		return errors.New(r.Error)
+	}
+
+	return nil
 }

@@ -535,6 +535,83 @@ func TestSubscriptionStartAtFirst(t *testing.T) {
 	}
 }
 
+func TestUnsubscribe(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	// test nil
+	var nsub *subscription
+	err = nsub.Unsubscribe()
+	if err == nil || err != ErrBadSubscription {
+		t.Fatalf("Expected a bad subscription err, got %v\n", err)
+	}
+
+	// Create a valid one
+	sc.Subscribe("foo", nil)
+
+	// Now subscribe, but we will unsubscribe before sending any messages.
+	sub, err := sc.Subscribe("foo", func(m *Msg) {
+		t.Fatalf("Did not expect to receive any messages\n")
+	})
+	if err != nil {
+		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
+	}
+	// Create another valid one
+	sc.Subscribe("foo", nil)
+
+	// Unsubscribe middle one.
+	err = sub.Unsubscribe()
+	if err != nil {
+		t.Fatalf("Expected no errors from unsubscribe: got %v\n", err)
+	}
+	// Do it again, should not dump, but should get error.
+	err = sub.Unsubscribe()
+	if err == nil || err != ErrBadSubscription {
+		t.Fatalf("Expected a bad subscription err, got %v\n", err)
+	}
+
+	// Publish ten messages
+	for i := 1; i <= 10; i++ {
+		data := []byte(fmt.Sprintf("%d", i))
+		sc.Publish("foo", data)
+	}
+}
+
+func TestSubscribeShrink(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	nsubs := 1000
+	subs := make([]Subscription, 0, nsubs)
+	for i := 1; i <= nsubs; i++ {
+		// Create a valid one
+		sub, err := sc.Subscribe("foo", nil)
+		if err != nil {
+			t.Fatalf("Got an error on subscribe: %v\n", err)
+		}
+		subs = append(subs, sub)
+	}
+	// Now unsubsribe them all
+	for _, sub := range subs {
+		err := sub.Unsubscribe()
+		if err != nil {
+			t.Fatalf("Got an error on unsubscribe: %v\n", err)
+		}
+	}
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Benchmarks
 ////////////////////////////////////////////////////////////////////////////////
