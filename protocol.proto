@@ -63,13 +63,15 @@ enum StartPosition {
 
 // Protocol for a client to subscribe
 message SubscriptionRequest {
-  string        subject       = 1; // Formal subject to subscribe to, e.g. foo.bar
-  string        queue         = 2; // Optional queue group
-  string        inbox         = 3; // Inbox subject to delibver messages on.
-  int32         maxInFlight   = 4; // Maximum inflight messages without an ack allowed.
-  int32         ackWaitInSecs = 5; // Timeout for receiving an ack from the client.
-  string        durableName   = 6; // Optional durable name which survives client restarts.
-  StartPosition startPosition = 7; // Start position
+  string        subject       = 1;  // Formal subject to subscribe to, e.g. foo.bar
+  string        queue         = 2;  // Optional queue group
+  string        inbox         = 3;  // Inbox subject to delibver messages on.
+  int32         maxInFlight   = 4;  // Maximum inflight messages without an ack allowed.
+  int32         ackWaitInSecs = 5;  // Timeout for receiving an ack from the client.
+  string        durableName   = 6;  // Optional durable name which survives client restarts.
+  StartPosition startPosition = 10; // Start position.
+  uint64        startSequence = 11; // Optional start sequence number.
+  int64         startTime     = 12; // Optional start time.
 }
 
 // Used to Respond to SubscriptionRequest

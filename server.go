@@ -5,7 +5,9 @@ package stan
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/nats"
@@ -37,10 +39,11 @@ type stanServer struct {
 	msgStoreLimit int
 
 	// Subscription Storage
-	subLock  sync.RWMutex
+	subLock sync.RWMutex
+	// Used to lookup subscriptions by subject.
 	subStore map[string][]*serverSubscription
 	// Used to lookup subscriptions by the INBOX they came in on.
-	ackStore map[string]*serverSubscription
+	subAckInboxStore map[string]*serverSubscription
 }
 
 // Per channel/subject store
@@ -66,13 +69,14 @@ type serverSubscription struct {
 	lastAck       uint64
 	maxInFlight   uint64
 	ackWaitInSecs int32
-	startAt       StartPosition
 	ackSub        *nats.Subscription
 }
 
 var (
 	ErrBadPubMsg       = errors.New("stan: malformed message")
 	ErrBadSubscription = errors.New("stan: malformed subscription request")
+	ErrInvalidSequence = errors.New("stan: invalid start sequence")
+	ErrInvalidTime     = errors.New("stan: invalid start time")
 )
 
 // ServerOptions
@@ -96,7 +100,7 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 
 	// Setup Subscription Stores
 	s.subStore = make(map[string][]*serverSubscription)
-	s.ackStore = make(map[string]*serverSubscription)
+	s.subAckInboxStore = make(map[string]*serverSubscription)
 
 	// Generate pubPrefix
 	// FIXME(dlc) guid needs to be shared in cluster mode
@@ -226,7 +230,7 @@ func (s *stanServer) assignAndStore(pm *PubMsg) (*Msg, error) {
 		s.msgStores[pm.Subject] = store
 		s.msgStoreLock.Unlock()
 	}
-	m := &Msg{Seq: store.cur, Subject: pm.Subject, Reply: pm.Reply, Data: pm.Data}
+	m := &Msg{Seq: store.cur, Subject: pm.Subject, Reply: pm.Reply, Data: pm.Data, Timestamp: time.Now().UnixNano()}
 	store.Lock()
 	store.msgs[store.cur] = m
 	store.last = store.cur
@@ -259,7 +263,7 @@ func (s *stanServer) storeSubscription(sub *serverSubscription) {
 		sl = make([]*serverSubscription, 0, 8)
 	}
 	s.subStore[sub.subject] = append(sl, sub)
-	s.ackStore[sub.ackInbox] = sub
+	s.subAckInboxStore[sub.ackInbox] = sub
 	s.subLock.Unlock()
 }
 
@@ -274,10 +278,29 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		return
 	}
 
-	// FIXME(dlc) check for errors, mis-configurations, etc.
+	// FIXME(dlc) check for multiple errors, mis-configurations, etc.
+
+	// Check SequenceStart out of range
+	if sr.StartPosition == StartPosition_SequenceStart {
+		if !s.startSeqValid(sr.Subject, sr.StartSequence) {
+			resp := &SubscriptionResponse{Error: ErrInvalidSequence.Error()}
+			b, _ := resp.Marshal()
+			s.nc.Publish(m.Reply, b)
+			return
+		}
+	}
+	// Check for SequenceTime out of range
+	if sr.StartPosition == StartPosition_TimeStart {
+		if !s.startTimeValid(sr.Subject, sr.StartTime) {
+			resp := &SubscriptionResponse{Error: ErrInvalidTime.Error()}
+			b, _ := resp.Marshal()
+			s.nc.Publish(m.Reply, b)
+			return
+		}
+	}
 
 	// Create a serverSubscription
-	ss := &serverSubscription{
+	sub := &serverSubscription{
 		subject:       sr.Subject,
 		queue:         sr.Queue,
 		inbox:         sr.Inbox,
@@ -285,51 +308,70 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		name:          sr.DurableName,
 		maxInFlight:   uint64(sr.MaxInFlight),
 		ackWaitInSecs: sr.AckWaitInSecs,
-		startAt:       sr.StartPosition,
 	}
+
 	// Store this subscription
-	s.storeSubscription(ss)
+	s.storeSubscription(sub)
 
 	// Subscribe to acks
-	ss.ackSub, err = s.nc.Subscribe(ss.ackInbox, s.processAck)
+	sub.ackSub, err = s.nc.Subscribe(sub.ackInbox, s.processAckMsg)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
 	}
 
 	// Create a response
-	r := &SubscriptionResponse{AckInbox: ss.ackInbox}
-	b, _ := r.Marshal()
+	resp := &SubscriptionResponse{AckInbox: sub.ackInbox}
+	b, _ := resp.Marshal()
 	s.nc.Publish(m.Reply, b)
 
-	// Now see if StartPosition dictates we have messages to send.
-	switch ss.startAt {
+	// Initialize the subscription and see if StartPosition dictates we have messages to send.
+	switch sr.StartPosition {
 	case StartPosition_NewOnly:
 		// No-Op
 	case StartPosition_LastReceived:
 		// Send the last message received.
-		s.sendLastMessageToSub(ss)
+		s.sendLastMessageToSub(sub)
 	case StartPosition_TimeStart:
-		// FIXME(dlc) - impl
+		s.sendMessagesToSubFromTime(sub, sr.StartTime)
 	case StartPosition_SequenceStart:
-		// FIXME(dlc) - impl
+		s.sendMessagesToSubFromSequence(sub, sr.StartSequence)
 	}
 }
 
-// processAck processes inbound acks from clients for delivered messages.
-func (s *stanServer) processAck(m *nats.Msg) {
+// processAckMsg processes inbound acks from clients for delivered messages.
+func (s *stanServer) processAckMsg(m *nats.Msg) {
 	ack := &Ack{}
 	ack.Unmarshal(m.Data)
-	sub := s.ackStore[m.Subject]
+	s.processAck(s.subAckInboxStore[m.Subject], ack)
+}
+
+// processAck processes an ack and if needed sends more messages.
+func (s *stanServer) processAck(sub *serverSubscription, ack *Ack) {
+	if sub == nil {
+		return
+	}
+
 	sub.Lock()
+	// Update our notion of lastAck.
 	if ack.Seq > sub.lastAck {
 		sub.lastAck = ack.Seq
 	}
+	sub.Unlock()
+
+	// Check to see if we should send more messages. Acks unblock the queue.
+	s.sendQueuedMessages(sub)
+}
+
+// Send any messages that are ready to be sent that have been queued.
+// Lock for sub should be held.
+func (s *stanServer) sendQueuedMessages(sub *serverSubscription) {
+	sub.Lock()
+	defer sub.Unlock()
 
 	s.msgStoreLock.RLock()
 	store := s.msgStores[sub.subject]
 	s.msgStoreLock.RUnlock()
 
-	// Check to see if we should send more messages
 	for d := sub.lastQueued - sub.lastSent; d > 0; d = sub.lastQueued - sub.lastSent {
 		nextSeq := sub.lastSent + 1
 		store.RLock()
@@ -340,7 +382,68 @@ func (s *stanServer) processAck(m *nats.Msg) {
 			s.sendMsgToSub(sub.inbox, nextMsg)
 		}
 	}
-	sub.Unlock()
+}
+
+// Check if a startTime is valid.
+func (s *stanServer) startTimeValid(subject string, start int64) bool {
+	s.msgStoreLock.RLock()
+	store := s.msgStores[subject]
+	s.msgStoreLock.RUnlock()
+	store.RLock()
+	defer store.RUnlock()
+	firstMsg := store.msgs[store.first]
+	lastMsg := store.msgs[store.last]
+	if start > lastMsg.Timestamp || start < firstMsg.Timestamp {
+		return false
+	}
+	return true
+}
+
+// Check if a startSequence is valid.
+func (s *stanServer) startSeqValid(subject string, seq uint64) bool {
+	s.msgStoreLock.RLock()
+	store := s.msgStores[subject]
+	s.msgStoreLock.RUnlock()
+	store.RLock()
+	defer store.RUnlock()
+	if seq > store.last || seq < store.first {
+		return false
+	}
+	return true
+}
+
+// Send messages to the subscriber starting at startSeq.
+func (s *stanServer) sendMessagesToSubFromSequence(sub *serverSubscription, startSeq uint64) {
+	s.msgStoreLock.RLock()
+	store := s.msgStores[sub.subject]
+	s.msgStoreLock.RUnlock()
+
+	store.RLock()
+	sub.lastSent = startSeq - 1 // FIXME(dlc) - wrap?
+	sub.lastQueued = store.last
+	store.RUnlock()
+
+	s.sendQueuedMessages(sub)
+}
+
+// Send messages to the subscriber starting at startTime. Assumes startTime is valid.
+func (s *stanServer) sendMessagesToSubFromTime(sub *serverSubscription, startTime int64) {
+	s.msgStoreLock.RLock()
+	store := s.msgStores[sub.subject]
+	s.msgStoreLock.RUnlock()
+
+	// Do binary search to find starting sequence.
+	store.RLock()
+	index := sort.Search(len(store.msgs), func(i int) bool {
+		m := store.msgs[uint64(i)+store.first]
+		if m.Timestamp >= startTime {
+			return true
+		}
+		return false
+	})
+	store.RUnlock()
+	startSeq := uint64(index) + store.first
+	s.sendMessagesToSubFromSequence(sub, startSeq)
 }
 
 // Send the last message we have to the subscriber
@@ -350,11 +453,10 @@ func (s *stanServer) sendLastMessageToSub(sub *serverSubscription) {
 	s.msgStoreLock.RUnlock()
 
 	store.RLock()
-	msg := store.msgs[store.last]
+	last := store.last
 	store.RUnlock()
-	if msg != nil {
-		s.sendMsgToSub(sub.inbox, msg)
-	}
+
+	s.sendMessagesToSubFromSequence(sub, last)
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.

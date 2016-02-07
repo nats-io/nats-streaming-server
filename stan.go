@@ -67,6 +67,10 @@ type SubscriptionOptions struct {
 	AckWait time.Duration
 	// StartPosition enum from proto.
 	StartAt StartPosition
+	// Optional start sequence number.
+	StartSequence uint64
+	// Optional start time.
+	StartTime time.Time
 }
 
 var DefaultSubscriptionOptions = SubscriptionOptions{
@@ -96,6 +100,24 @@ func AckWait(t time.Duration) SubscriptionOption {
 func StartAt(sp StartPosition) SubscriptionOption {
 	return func(o *SubscriptionOptions) error {
 		o.StartAt = sp
+		return nil
+	}
+}
+
+// StartSequence sets the desired start sequence position.
+func StartAtSequence(seq uint64) SubscriptionOption {
+	return func(o *SubscriptionOptions) error {
+		o.StartAt = StartPosition_SequenceStart
+		o.StartSequence = seq
+		return nil
+	}
+}
+
+// StartTime sets the desired start time position.
+func StartAtTime(start time.Time) SubscriptionOption {
+	return func(o *SubscriptionOptions) error {
+		o.StartAt = StartPosition_TimeStart
+		o.StartTime = start
 		return nil
 	}
 }
@@ -305,6 +327,7 @@ func (sc *conn) removeAck(guid string) {
 
 // A subscription represents a subscription to a stan cluster.
 type subscription struct {
+	sync.RWMutex
 	subject  string
 	inbox    string
 	ackInbox string
@@ -317,6 +340,11 @@ type subscription struct {
 // FIXME(dlc) remove once ported back to nats client.
 func newInbox() string {
 	return fmt.Sprintf("_INBOX.%s", newGUID())
+}
+
+// Helper function to produce time.Time from timestamp ns.
+func (m *Msg) Time() time.Time {
+	return time.Unix(0, m.Timestamp)
 }
 
 // Process an msg from the STAN cluster
@@ -333,11 +361,20 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 	if sub == nil {
 		return
 	}
-	sub.cb(msg)
+	sub.RLock()
+	cb := sub.cb
+	ackSubject := sub.ackInbox
+	sub.RUnlock()
+
+	// Perform the callback
+	if cb != nil {
+		cb(msg)
+	}
+
 	// Now auto-ack
 	ack := &Ack{Seq: msg.Seq}
 	b, _ := ack.Marshal()
-	sc.nc.Publish(sub.ackInbox, b)
+	sc.nc.Publish(ackSubject, b)
 }
 
 // Subscribe will perform a subscription with the given options to the STAN cluster.
@@ -369,6 +406,15 @@ func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...Subscription
 		AckWaitInSecs: int32(sub.opts.AckWait / time.Second),
 		StartPosition: sub.opts.StartAt,
 	}
+
+	// Conditionals
+	switch sr.StartPosition {
+	case StartPosition_TimeStart:
+		sr.StartTime = sub.opts.StartTime.UnixNano()
+	case StartPosition_SequenceStart:
+		sr.StartSequence = sub.opts.StartSequence
+	}
+
 	b, _ := sr.Marshal()
 	reply, err := sc.nc.Request(sc.subRequests, b, 2*time.Second)
 	if err != nil {
@@ -380,7 +426,13 @@ func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...Subscription
 		// FIXME(dlc) unwind subscription from above.
 		return nil, err
 	}
+	if r.Error != "" {
+		// FIXME(dlc) unwind subscription from above.
+		return nil, errors.New(r.Error)
+	}
+	sub.Lock()
 	sub.ackInbox = r.AckInbox
+	sub.Unlock()
 
 	return sub, nil
 }

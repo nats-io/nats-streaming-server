@@ -125,7 +125,9 @@ type SubscriptionRequest struct {
 	MaxInFlight   int32         `protobuf:"varint,4,opt,name=maxInFlight,proto3" json:"maxInFlight,omitempty"`
 	AckWaitInSecs int32         `protobuf:"varint,5,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
 	DurableName   string        `protobuf:"bytes,6,opt,name=durableName,proto3" json:"durableName,omitempty"`
-	StartPosition StartPosition `protobuf:"varint,7,opt,name=startPosition,proto3,enum=stan.StartPosition" json:"startPosition,omitempty"`
+	StartPosition StartPosition `protobuf:"varint,10,opt,name=startPosition,proto3,enum=stan.StartPosition" json:"startPosition,omitempty"`
+	StartSequence uint64        `protobuf:"varint,11,opt,name=startSequence,proto3" json:"startSequence,omitempty"`
+	StartTime     int64         `protobuf:"varint,12,opt,name=startTime,proto3" json:"startTime,omitempty"`
 }
 
 func (m *SubscriptionRequest) Reset()         { *m = SubscriptionRequest{} }
@@ -398,9 +400,19 @@ func (m *SubscriptionRequest) MarshalTo(data []byte) (int, error) {
 		i += copy(data[i:], m.DurableName)
 	}
 	if m.StartPosition != 0 {
-		data[i] = 0x38
+		data[i] = 0x50
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.StartPosition))
+	}
+	if m.StartSequence != 0 {
+		data[i] = 0x58
+		i++
+		i = encodeVarintProtocol(data, i, uint64(m.StartSequence))
+	}
+	if m.StartTime != 0 {
+		data[i] = 0x60
+		i++
+		i = encodeVarintProtocol(data, i, uint64(m.StartTime))
 	}
 	return i, nil
 }
@@ -589,6 +601,12 @@ func (m *SubscriptionRequest) Size() (n int) {
 	}
 	if m.StartPosition != 0 {
 		n += 1 + sovProtocol(uint64(m.StartPosition))
+	}
+	if m.StartSequence != 0 {
+		n += 1 + sovProtocol(uint64(m.StartSequence))
+	}
+	if m.StartTime != 0 {
+		n += 1 + sovProtocol(uint64(m.StartTime))
 	}
 	return n
 }
@@ -1512,7 +1530,7 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 			}
 			m.DurableName = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
-		case 7:
+		case 10:
 			if wireType != 0 {
 				return fmt.Errorf("proto: wrong wireType = %d for field StartPosition", wireType)
 			}
@@ -1527,6 +1545,44 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 				b := data[iNdEx]
 				iNdEx++
 				m.StartPosition |= (StartPosition(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 11:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field StartSequence", wireType)
+			}
+			m.StartSequence = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				m.StartSequence |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 12:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field StartTime", wireType)
+			}
+			m.StartTime = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				m.StartTime |= (int64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
