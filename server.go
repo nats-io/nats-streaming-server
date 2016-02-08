@@ -823,5 +823,6 @@ func (s *stanServer) Shutdown() {
 	}
 	if s.natsServer != nil {
 		s.natsServer.Shutdown()
+		s.natsServer = nil
 	}
 }

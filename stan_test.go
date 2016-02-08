@@ -62,8 +62,10 @@ func TestBasicConnect(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
-	if _, err := Connect(clusterName, clientName); err != nil {
+	if sc, err := Connect(clusterName, clientName); err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	} else {
+		sc.Close()
 	}
 }
 
@@ -72,6 +74,7 @@ func TestBasicPublish(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 	sc, err := Connect(clusterName, clientName)
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -85,6 +88,7 @@ func TestBasicPublishAsync(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 	sc, err := Connect(clusterName, clientName)
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -152,6 +156,7 @@ func TestBasicSubscription(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -168,6 +173,7 @@ func TestBasicPubSub(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -214,6 +220,7 @@ func TestBasicPubSubWithReply(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -253,6 +260,7 @@ func TestAsyncPubSubWithReply(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -292,6 +300,7 @@ func TestSubscriptionStartPositionLast(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -329,6 +338,7 @@ func TestSubscriptionStartAtSequence(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -397,6 +407,7 @@ func TestSubscriptionStartAtTime(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -479,6 +490,7 @@ func TestSubscriptionStartAtFirst(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -541,6 +553,7 @@ func TestUnsubscribe(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -589,6 +602,7 @@ func TestSubscribeShrink(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -617,7 +631,8 @@ func TestDupClientID(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	_, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -668,6 +683,7 @@ func TestManualAck(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -685,7 +701,6 @@ func TestManualAck(t *testing.T) {
 	// Test that we can't Ack if not in manual mode.
 	sub, err := sc.Subscribe("foo", func(m *Msg) {
 		if err := m.Ack(); err != ErrManualAck {
-			fmt.Printf("err is %v\n", err)
 			t.Fatalf("Expected an error trying to ack an auto-ack subscription")
 		}
 		fch <- true
@@ -753,6 +768,7 @@ func TestRedelivery(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -807,6 +823,7 @@ func TestDurableSubscriber(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -896,7 +913,6 @@ func TestDurableSubscriber(t *testing.T) {
 			t.Fatalf("Got wrong seq, expected %d, got %d\n", seqExpected, m.Seq)
 		}
 	}
-
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -910,6 +926,7 @@ func BenchmarkPublish(b *testing.B) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 	sc, err := Connect(clusterName, clientName)
+	defer sc.Close()
 	if err != nil {
 		b.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -932,6 +949,7 @@ func BenchmarkPublishAsync(b *testing.B) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 	sc, err := Connect(clusterName, clientName)
+	defer sc.Close()
 	if err != nil {
 		b.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
@@ -952,7 +970,12 @@ func BenchmarkPublishAsync(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		sc.PublishAsync("foo", hw, ah)
+		if _, err := sc.PublishAsync("foo", hw, ah); err != nil {
+			fmt.Printf("Client status %v, Server status %v\n", s.nc.Status(), (sc.(*conn)).nc.Status())
+			fmt.Printf("len(ackmap) = %d\n", len(sc.(*conn).pubAckMap))
+
+			b.Fatalf("Error from PublishAsync: %v\n", err)
+		}
 	}
 
 	err = WaitTime(ch, 10*time.Second)
@@ -973,6 +996,7 @@ func BenchmarkPublishSubscribe(b *testing.B) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 	sc, err := Connect(clusterName, clientName)
+	defer sc.Close()
 	if err != nil {
 		b.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
