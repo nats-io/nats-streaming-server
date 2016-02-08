@@ -340,7 +340,13 @@ func (s *stanServer) assignAndStore(pm *PubMsg) (*MsgProto, error) {
 		s.msgStores[pm.Subject] = store
 		s.msgStoreLock.Unlock()
 	}
-	m := &MsgProto{Seq: store.cur, Subject: pm.Subject, Reply: pm.Reply, Data: pm.Data, Timestamp: time.Now().UnixNano()}
+	m := &MsgProto{
+		Seq:       store.cur,
+		Subject:   pm.Subject,
+		Reply:     pm.Reply,
+		Data:      pm.Data,
+		Timestamp: time.Now().UnixNano(),
+	}
 	store.Lock()
 	store.msgs[store.cur] = m
 	store.last = store.cur
