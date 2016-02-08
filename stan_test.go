@@ -801,6 +801,104 @@ func TestRedelivery(t *testing.T) {
 	}
 }
 
+func TestDurableSubscriber(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	toSend := int32(100)
+	hw := []byte("Hello World")
+
+	// Capture the messages that are delivered.
+	savedMsgs := make([]*Msg, 0, toSend)
+
+	for i := int32(0); i < toSend; i++ {
+		sc.Publish("foo", hw)
+	}
+
+	ch := make(chan bool)
+	received := int32(0)
+
+	_, err = sc.Subscribe("foo", func(m *Msg) {
+		if nr := atomic.AddInt32(&received, 1); nr == 10 {
+			sc.Close()
+			ch <- true
+		} else {
+			savedMsgs = append(savedMsgs, m)
+		}
+	}, DeliverAllAvailable(), DurableName("durable-foo"))
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not receive first delivery of all messages")
+	}
+	// Reset in case we get more messages in the above callback
+	ch = make(chan bool)
+
+	if nr := atomic.LoadInt32(&received); nr != 10 {
+		t.Fatalf("Expected to get only 10 messages, got %d\n", nr)
+	}
+	// This is autoack, so undo received for check.
+	// Close will prevent ack from going out, so #10 will be redelivered
+	atomic.AddInt32(&received, -1)
+
+	// Recreate the connection
+	sc, err = Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+	defer sc.Close()
+
+	// Create the same durable subscription.
+	_, err = sc.Subscribe("foo", func(m *Msg) {
+		savedMsgs = append(savedMsgs, m)
+		if nr := atomic.AddInt32(&received, 1); nr == toSend {
+			ch <- true
+		}
+	}, DeliverAllAvailable(), DurableName("durable-foo"))
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+
+	// Check that durables can not be subscribed to again by same client.
+	_, err = sc.Subscribe("foo", nil, DurableName("durable-foo"))
+	if err == nil || err.Error() != ErrDupDurable.Error() {
+		t.Fatalf("Expected ErrDupSubscription error, got %v\n", err)
+	}
+
+	// Check that durables with same name, but subscribed to differen subject are ok.
+	_, err = sc.Subscribe("bar", nil, DurableName("durable-foo"))
+	if err != nil {
+		t.Fatalf("Expected no error, got %v\n", err)
+	}
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not receive delivery of all messages")
+	}
+
+	if nr := atomic.LoadInt32(&received); nr != toSend {
+		t.Fatalf("Expected to get %d messages, got %d\n", toSend, nr)
+	}
+	if len(savedMsgs) != int(toSend) {
+		t.Fatalf("Expected len(savedMsgs) to be %d, got %d\n", toSend, len(savedMsgs))
+	}
+	// Check we received them in order
+	for i, m := range savedMsgs {
+		seqExpected := uint64(i + 1)
+		if m.Seq != seqExpected {
+			t.Fatalf("Got wrong seq, expected %d, got %d\n", seqExpected, m.Seq)
+		}
+	}
+
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Benchmarks
 ////////////////////////////////////////////////////////////////////////////////

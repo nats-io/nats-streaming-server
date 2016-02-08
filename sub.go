@@ -140,6 +140,14 @@ func SetManualAckMode() SubscriptionOption {
 	}
 }
 
+// DurableName sets the DurableName for the subcriber.
+func DurableName(name string) SubscriptionOption {
+	return func(o *SubscriptionOptions) error {
+		o.DurableName = name
+		return nil
+	}
+}
+
 // Subscribe will perform a subscription with the given options to the STAN cluster.
 func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...SubscriptionOption) (Subscription, error) {
 	sub := &subscription{subject: subject, inbox: newInbox(), cb: cb, sc: sc, opts: DefaultSubscriptionOptions}
@@ -179,6 +187,7 @@ func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...Subscription
 		MaxInFlight:   int32(sub.opts.MaxInflight),
 		AckWaitInSecs: int32(sub.opts.AckWait / time.Second),
 		StartPosition: sub.opts.StartAt,
+		DurableName:   sub.opts.DurableName,
 	}
 
 	// Conditionals

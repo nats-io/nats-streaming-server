@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +31,7 @@ const (
 var (
 	ErrBadPubMsg       = errors.New("stan: malformed message")
 	ErrBadSubRequest   = errors.New("stan: malformed subscription request")
+	ErrInvalidSubject  = errors.New("stan: invalid subject")
 	ErrInvalidSequence = errors.New("stan: invalid start sequence")
 	ErrInvalidTime     = errors.New("stan: invalid start time")
 	ErrInvalidSub      = errors.New("stan: invalid subscription")
@@ -37,6 +39,7 @@ var (
 	ErrInvalidClient   = errors.New("stan: clientID already registered")
 	ErrInvalidCloseReq = errors.New("stan: invalid close request")
 	ErrInvalidAckWait  = errors.New("stan: invalid ack wait time, should be >= 1s")
+	ErrDupDurable      = errors.New("stan: duplicate durable registration")
 )
 
 type stanServer struct {
@@ -54,7 +57,7 @@ type stanServer struct {
 	clientStoreLock sync.RWMutex
 	clientStore     map[string]*client
 
-	// Msg Storage
+	// Message Storage
 	msgStoreLock  sync.RWMutex
 	msgStores     map[string]*msgStore
 	msgStoreLimit int
@@ -65,6 +68,8 @@ type stanServer struct {
 	subStore map[string][]*serverSubscription
 	// Used to lookup subscriptions by the INBOX they came in on.
 	subAckInboxStore map[string]*serverSubscription
+	// Used for Durables, note key is tuple, ClientId+Subject+Durable
+	durableStore map[string]*serverSubscription
 }
 
 type client struct {
@@ -124,6 +129,7 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 	// Setup Subscription Stores
 	s.subStore = make(map[string][]*serverSubscription)
 	s.subAckInboxStore = make(map[string]*serverSubscription)
+	s.durableStore = make(map[string]*serverSubscription)
 
 	// Generate Subjects
 	// FIXME(dlc) guid needs to be shared in cluster mode
@@ -359,8 +365,15 @@ func (s *stanServer) ackPublisher(pm *PubMsg, reply string) {
 	s.nc.Publish(reply, b[:n])
 }
 
+// Check for the existence of a durable.
+func (s *stanServer) checkForDurable(key string) *serverSubscription {
+	s.subLock.RLock()
+	defer s.subLock.RUnlock()
+	return s.durableStore[key]
+}
+
 // storeSubscription will store the subscription.
-func (s *stanServer) storeSubscription(sub *serverSubscription) {
+func (s *stanServer) storeSubscription(sub *serverSubscription, optDurable string) {
 	if sub == nil {
 		return
 	}
@@ -378,6 +391,9 @@ func (s *stanServer) storeSubscription(sub *serverSubscription) {
 	}
 	s.subStore[subject] = append(sl, sub)
 	s.subAckInboxStore[ackInbox] = sub
+	if optDurable != "" {
+		s.durableStore[optDurable] = sub
+	}
 }
 
 // removeSubscription will remove references to the subscription.
@@ -433,8 +449,19 @@ func (s *stanServer) removeAllNonDurableSubscribers(clientID string) {
 
 	s.subLock.RLock()
 	for _, sub := range s.subAckInboxStore {
-		if sub.clientID == clientID && sub.durableName == "" {
-			dlist = append(dlist, sub)
+		sub.Lock()
+		if sub.ackTimer != nil {
+			sub.ackTimer.Stop()
+			sub.ackTimer = nil
+		}
+		sub.Unlock()
+		if sub.clientID == clientID {
+			if sub.durableName == "" {
+				dlist = append(dlist, sub)
+			} else {
+				// Clear the subscriptions clientID
+				sub.clientID = ""
+			}
 		}
 	}
 	s.subLock.RUnlock()
@@ -478,6 +505,20 @@ func (s *stanServer) sendSubscriptionResponseErr(reply string, err error) {
 	s.nc.Publish(reply, b)
 }
 
+// Check for valid subjects
+func isValidSubject(subject string) bool {
+	tokens := strings.Split(subject, ".")
+	if len(tokens) == 0 {
+		return false
+	}
+	for _, token := range tokens {
+		if strings.ContainsAny(token, ">*") {
+			return false
+		}
+	}
+	return true
+}
+
 // processSubscriptionRequest will process a subscription request.
 func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	sr := &SubscriptionRequest{}
@@ -495,45 +536,78 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		return
 	}
 
+	// Make sure subject is valid
+	if !isValidSubject(sr.Subject) {
+		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubject)
+		return
+	}
+
 	// ClientID must not be empty.
 	if sr.ClientID == "" {
-		s.sendSubscriptionResponseErr(m.Reply, errors.New("stan: malformed subscription request, clientID missing"))
+		s.sendSubscriptionResponseErr(m.Reply,
+			errors.New("stan: malformed subscription request, clientID missing"))
 		return
+	}
+
+	var sub *serverSubscription
+	var durableKey string
+
+	// Check for DurableSubscriber status
+	if sr.DurableName != "" {
+		durableKey = fmt.Sprintf("%s-%s-%s", sr.ClientID, sr.Subject, sr.DurableName)
+		if sub = s.checkForDurable(durableKey); sub != nil {
+			sub.RLock()
+			clientID := sub.clientID
+			sub.RUnlock()
+			if clientID != "" {
+				s.sendSubscriptionResponseErr(m.Reply, ErrDupDurable)
+				return
+			}
+			// ok we have a remembered subscription
+			// FIXME(dlc) - Do we error on options? They should be ignored
+			sub.Lock()
+			// Set new clientID and reset lastSent to lastAck
+			sub.clientID = sr.ClientID
+			sub.lastSent = sub.lastAck
+			sub.Unlock()
+		}
 	}
 
 	// Check SequenceStart out of range
 	if sr.StartPosition == StartPosition_SequenceStart {
 		if !s.startSeqValid(sr.Subject, sr.StartSequence) {
-			resp := &SubscriptionResponse{Error: ErrInvalidSequence.Error()}
-			b, _ := resp.Marshal()
-			s.nc.Publish(m.Reply, b)
+			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSequence)
 			return
 		}
 	}
 	// Check for SequenceTime out of range
 	if sr.StartPosition == StartPosition_TimeStart {
 		if !s.startTimeValid(sr.Subject, sr.StartTime) {
-			resp := &SubscriptionResponse{Error: ErrInvalidTime.Error()}
-			b, _ := resp.Marshal()
-			s.nc.Publish(m.Reply, b)
+			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidTime)
 			return
 		}
 	}
 
 	// Create a serverSubscription
-	sub := &serverSubscription{
-		clientID:      sr.ClientID,
-		subject:       sr.Subject,
-		queue:         sr.Queue,
-		inbox:         sr.Inbox,
-		ackInbox:      newInbox(),
-		durableName:   sr.DurableName,
-		maxInFlight:   uint64(sr.MaxInFlight),
-		ackWaitInSecs: time.Duration(sr.AckWaitInSecs),
+	if sub == nil {
+		sub = &serverSubscription{
+			clientID:      sr.ClientID,
+			subject:       sr.Subject,
+			queue:         sr.Queue,
+			inbox:         sr.Inbox,
+			ackInbox:      newInbox(),
+			durableName:   sr.DurableName,
+			maxInFlight:   uint64(sr.MaxInFlight),
+			ackWaitInSecs: time.Duration(sr.AckWaitInSecs),
+		}
+		// Store this subscription
+		s.storeSubscription(sub, durableKey)
+	} else {
+		sub.Lock()
+		sub.ackInbox = newInbox()
+		sub.inbox = sr.Inbox
+		sub.Unlock()
 	}
-
-	// Store this subscription
-	s.storeSubscription(sub)
 
 	// Subscribe to acks
 	sub.ackSub, err = s.nc.Subscribe(sub.ackInbox, s.processAckMsg)
@@ -545,6 +619,17 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	resp := &SubscriptionResponse{AckInbox: sub.ackInbox}
 	b, _ := resp.Marshal()
 	s.nc.Publish(m.Reply, b)
+
+	// If we are a durable and have state
+	if sr.DurableName != "" {
+		sub.RLock()
+		lastSent := sub.lastSent
+		sub.RUnlock()
+		if lastSent > 0 {
+			s.sendQueuedMessages(sub)
+			return
+		}
+	}
 
 	// Initialize the subscription and see if StartPosition dictates we have messages to send.
 	switch sr.StartPosition {

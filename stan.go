@@ -6,6 +6,7 @@ package stan
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -170,6 +171,9 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	// Create Subscription map
 	c.subMap = make(map[string]*subscription)
 
+	// Attach a finalizer
+	runtime.SetFinalizer(&c, func(sc *conn) { sc.Close() })
+
 	return &c, nil
 }
 
@@ -321,9 +325,12 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 	}
 	// Lookup the subscription
 	sc.Lock()
+	isClosed := sc.nc == nil
 	sub := sc.subMap[raw.Subject]
 	sc.Unlock()
-	if sub == nil {
+
+	// Check if sub is no longer valid or connection has been closed.
+	if sub == nil || isClosed {
 		return
 	}
 
