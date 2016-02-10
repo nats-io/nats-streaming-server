@@ -294,8 +294,18 @@ func (s *stanServer) processClientPublish(m *nats.Msg) {
 // or use insertion sort, etc.
 func findBestQueueSub(sl []*subState) (rsub *subState) {
 	for _, sub := range sl {
+
+		if rsub == nil {
+			rsub = sub
+			continue
+		}
+
+		rsub.RLock()
+		rdiff := rsub.lastSent - rsub.lastAck
+		rsub.RUnlock()
+
 		sub.Lock()
-		if rsub == nil || sub.lastSent-sub.lastAck < rsub.lastSent-rsub.lastAck {
+		if sub.lastSent-sub.lastAck < rdiff {
 			rsub = sub
 		}
 		sub.Unlock()

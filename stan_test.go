@@ -1218,7 +1218,13 @@ func TestPubMultiQueueSubWithRedelivery(t *testing.T) {
 	s1r := atomic.LoadInt32(&s1Received)
 	s2r := atomic.LoadInt32(&s2Received)
 
-	fmt.Printf("s1r = %d s2r = %d\n", s1r, s2r)
+	// Since we never ack'd sub2, we should receive all messages on sub1
+	if s1r != toSend {
+		t.Fatalf("Expected %d msgs for sub1, got %d\n", toSend, s1r)
+	}
+	if s2r != 0 {
+		t.Fatalf("Expected %d msgs for sub2, got %d\n", 0, s2r)
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////
