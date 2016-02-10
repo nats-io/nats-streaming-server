@@ -167,7 +167,80 @@ func TestBasicSubscription(t *testing.T) {
 	defer sub.Unsubscribe()
 }
 
+func TestBasicQueueSubscription(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+	sub, err := sc.QueueSubscribe("foo", "bar", func(m *Msg) {})
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer sub.Unsubscribe()
+}
+
 func TestBasicPubSub(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	ch := make(chan bool)
+	received := int32(0)
+	toSend := int32(500)
+	hw := []byte("Hello World")
+	msgMap := make(map[uint64]struct{})
+
+	sub, err := sc.Subscribe("foo", func(m *Msg) {
+		if m.Subject != "foo" {
+			t.Fatalf("Expected subject of 'foo', got '%s'\n", m.Subject)
+		}
+		if !bytes.Equal(m.Data, hw) {
+			t.Fatalf("Wrong payload, got %q\n", m.Data)
+		}
+		// Make sure Seq and Timestamp are set
+		if m.Seq == 0 {
+			t.Fatalf("Expected Sequence to be set\n")
+		}
+		if m.Timestamp == 0 {
+			t.Fatalf("Expected timestamp to be set\n")
+		}
+
+		if _, ok := msgMap[m.Seq]; ok {
+			t.Fatalf("Detected duplicate for sequence: %d\n", m.Seq)
+		}
+		msgMap[m.Seq] = struct{}{}
+
+		if nr := atomic.AddInt32(&received, 1); nr >= int32(toSend) {
+			ch <- true
+		}
+	})
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer sub.Unsubscribe()
+
+	for i := int32(0); i < toSend; i++ {
+		if err := sc.Publish("foo", hw); err != nil {
+			t.Fatalf("Received error on publish: %v\n", err)
+		}
+	}
+	if err := WaitTime(ch, 1*time.Second); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
+}
+
+func TestBasicPubQueueSub(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
@@ -183,7 +256,7 @@ func TestBasicPubSub(t *testing.T) {
 	toSend := int32(100)
 	hw := []byte("Hello World")
 
-	sub, err := sc.Subscribe("foo", func(m *Msg) {
+	sub, err := sc.QueueSubscribe("foo", "bar", func(m *Msg) {
 		if m.Subject != "foo" {
 			t.Fatalf("Expected subject of 'foo', got '%s'\n", m.Subject)
 		}
@@ -912,6 +985,77 @@ func TestDurableSubscriber(t *testing.T) {
 		if m.Seq != seqExpected {
 			t.Fatalf("Got wrong seq, expected %d, got %d\n", seqExpected, m.Seq)
 		}
+	}
+}
+
+func TestPubMultiQueueSub(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	ch := make(chan bool)
+	received := int32(0)
+	s1Received := int32(0)
+	s2Received := int32(0)
+	toSend := int32(500)
+
+	var s1, s2 Subscription
+
+	msgMapLock := &sync.Mutex{}
+	msgMap := make(map[uint64]struct{})
+
+	mcb := func(m *Msg) {
+		// Remember the message sequence.
+		msgMapLock.Lock()
+		if _, ok := msgMap[m.Seq]; ok {
+			t.Fatalf("Detected duplicate for sequence: %d\n", m.Seq)
+		}
+		msgMap[m.Seq] = struct{}{}
+		msgMapLock.Unlock()
+		// Track received for each receiver.
+		if m.Sub == s1 {
+			atomic.AddInt32(&s1Received, 1)
+		} else if m.Sub == s2 {
+			atomic.AddInt32(&s2Received, 1)
+		} else {
+			t.Fatalf("Received message on unknown subscription")
+		}
+		// Track total
+		if nr := atomic.AddInt32(&received, 1); nr == int32(toSend) {
+			ch <- true
+		}
+	}
+
+	s1, err = sc.QueueSubscribe("foo", "bar", mcb)
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer s1.Unsubscribe()
+
+	s2, err = sc.QueueSubscribe("foo", "bar", mcb)
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer s2.Unsubscribe()
+
+	// Publish out the messages.
+	for i := int32(0); i < toSend; i++ {
+		data := []byte(fmt.Sprintf("%d", i))
+		sc.Publish("foo", data)
+	}
+	if err := WaitTime(ch, 1*time.Second); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
+
+	if nr := atomic.LoadInt32(&received); nr != toSend {
+		fmt.Printf("s1:%d, s2:%d\n", s1Received, s2Received)
+		t.Fatalf("Did not receive correct number of messages: %d vs %d\n", nr, toSend)
 	}
 }
 

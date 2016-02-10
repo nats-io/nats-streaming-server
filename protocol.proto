@@ -36,7 +36,7 @@ message MsgProto {
   string reply     = 3;  // optional reply
   bytes  data      = 4;  // payload
   int64  timestamp = 5;  // received timestamp
-  uint32 crc       = 10; // optional IEEE CRC32
+  uint32 CRC32     = 10; // optional IEEE CRC32
 }
 
 // Ack will deliver an ack for a delivered msg.
@@ -74,7 +74,7 @@ enum StartPosition {
 message SubscriptionRequest {
   string        clientID      = 1;  // ClientID
   string        subject       = 2;  // Formal subject to subscribe to, e.g. foo.bar
-  string        queue         = 3;  // Optional queue group
+  string        qGroup        = 3;  // Optional queue group
   string        inbox         = 4;  // Inbox subject to deliver messages on.
   int32         maxInFlight   = 5;  // Maximum inflight messages without an ack allowed.
   int32         ackWaitInSecs = 6;  // Timeout for receiving an ack from the client.

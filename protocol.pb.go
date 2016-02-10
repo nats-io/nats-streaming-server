@@ -96,7 +96,7 @@ type MsgProto struct {
 	Reply     string `protobuf:"bytes,3,opt,name=reply,proto3" json:"reply,omitempty"`
 	Data      []byte `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`
 	Timestamp int64  `protobuf:"varint,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Crc       uint32 `protobuf:"varint,10,opt,name=crc,proto3" json:"crc,omitempty"`
+	CRC32     uint32 `protobuf:"varint,10,opt,name=CRC32,proto3" json:"CRC32,omitempty"`
 }
 
 func (m *MsgProto) Reset()         { *m = MsgProto{} }
@@ -139,7 +139,7 @@ func (*ConnectResponse) ProtoMessage()    {}
 type SubscriptionRequest struct {
 	ClientID      string        `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
 	Subject       string        `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
-	Queue         string        `protobuf:"bytes,3,opt,name=queue,proto3" json:"queue,omitempty"`
+	QGroup        string        `protobuf:"bytes,3,opt,name=qGroup,proto3" json:"qGroup,omitempty"`
 	Inbox         string        `protobuf:"bytes,4,opt,name=inbox,proto3" json:"inbox,omitempty"`
 	MaxInFlight   int32         `protobuf:"varint,5,opt,name=maxInFlight,proto3" json:"maxInFlight,omitempty"`
 	AckWaitInSecs int32         `protobuf:"varint,6,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
@@ -333,10 +333,10 @@ func (m *MsgProto) MarshalTo(data []byte) (int, error) {
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.Timestamp))
 	}
-	if m.Crc != 0 {
+	if m.CRC32 != 0 {
 		data[i] = 0x50
 		i++
-		i = encodeVarintProtocol(data, i, uint64(m.Crc))
+		i = encodeVarintProtocol(data, i, uint64(m.CRC32))
 	}
 	return i, nil
 }
@@ -471,11 +471,11 @@ func (m *SubscriptionRequest) MarshalTo(data []byte) (int, error) {
 		i = encodeVarintProtocol(data, i, uint64(len(m.Subject)))
 		i += copy(data[i:], m.Subject)
 	}
-	if len(m.Queue) > 0 {
+	if len(m.QGroup) > 0 {
 		data[i] = 0x1a
 		i++
-		i = encodeVarintProtocol(data, i, uint64(len(m.Queue)))
-		i += copy(data[i:], m.Queue)
+		i = encodeVarintProtocol(data, i, uint64(len(m.QGroup)))
+		i += copy(data[i:], m.QGroup)
 	}
 	if len(m.Inbox) > 0 {
 		data[i] = 0x22
@@ -725,8 +725,8 @@ func (m *MsgProto) Size() (n int) {
 	if m.Timestamp != 0 {
 		n += 1 + sovProtocol(uint64(m.Timestamp))
 	}
-	if m.Crc != 0 {
-		n += 1 + sovProtocol(uint64(m.Crc))
+	if m.CRC32 != 0 {
+		n += 1 + sovProtocol(uint64(m.CRC32))
 	}
 	return n
 }
@@ -791,7 +791,7 @@ func (m *SubscriptionRequest) Size() (n int) {
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
-	l = len(m.Queue)
+	l = len(m.QGroup)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
@@ -1351,9 +1351,9 @@ func (m *MsgProto) Unmarshal(data []byte) error {
 			}
 		case 10:
 			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Crc", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field CRC32", wireType)
 			}
-			m.Crc = 0
+			m.CRC32 = 0
 			for shift := uint(0); ; shift += 7 {
 				if shift >= 64 {
 					return ErrIntOverflowProtocol
@@ -1363,7 +1363,7 @@ func (m *MsgProto) Unmarshal(data []byte) error {
 				}
 				b := data[iNdEx]
 				iNdEx++
-				m.Crc |= (uint32(b) & 0x7F) << shift
+				m.CRC32 |= (uint32(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1850,7 +1850,7 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 			iNdEx = postIndex
 		case 3:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Queue", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field QGroup", wireType)
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
@@ -1875,7 +1875,7 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Queue = string(data[iNdEx:postIndex])
+			m.QGroup = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
 		case 4:
 			if wireType != 2 {

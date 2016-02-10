@@ -22,19 +22,6 @@ const (
 	DefaultMaxPubAcksInflight = 16384
 )
 
-// Errors
-var (
-	ErrConnectReqTimeout = errors.New("stan: connect request timeout")
-	ErrCloseReqTimeout   = errors.New("stan: close request timeout")
-	ErrConnectionClosed  = errors.New("stan: connection closed")
-	ErrTimeout           = errors.New("stan: publish ack timeout")
-	ErrBadAck            = errors.New("stan: malformed ack")
-	ErrBadSubscription   = errors.New("stan: invalid subscription")
-	ErrBadConnection     = errors.New("stan: invalid connection")
-	ErrManualAck         = errors.New("stan: can not manually ack in auto-ack mode")
-	ErrNilMsg            = errors.New("stan: nil message")
-)
-
 // Conn represents a connection to the STAN subsystem. It can Publish and
 // Subscribe to messages withing the STAN cluster.
 type Conn interface {
@@ -48,9 +35,25 @@ type Conn interface {
 	// Subscribe
 	Subscribe(subject string, cb MsgHandler, opts ...SubscriptionOption) (Subscription, error)
 
+	// QueueSubscribe
+	QueueSubscribe(subject, qgroup string, cb MsgHandler, opts ...SubscriptionOption) (Subscription, error)
+
 	// Close
 	Close() error
 }
+
+// Errors
+var (
+	ErrConnectReqTimeout = errors.New("stan: connect request timeout")
+	ErrCloseReqTimeout   = errors.New("stan: close request timeout")
+	ErrConnectionClosed  = errors.New("stan: connection closed")
+	ErrTimeout           = errors.New("stan: publish ack timeout")
+	ErrBadAck            = errors.New("stan: malformed ack")
+	ErrBadSubscription   = errors.New("stan: invalid subscription")
+	ErrBadConnection     = errors.New("stan: invalid connection")
+	ErrManualAck         = errors.New("stan: can not manually ack in auto-ack mode")
+	ErrNilMsg            = errors.New("stan: nil message")
+)
 
 // AckHandler is used for Async Publishing to provide status of the ack.
 // The func will be passed teh GUID and any error state. No error means the
@@ -365,7 +368,7 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 	}
 
 	// Store in msg for backlink
-	msg.sub = sub
+	msg.Sub = sub
 
 	sub.RLock()
 	cb := sub.cb

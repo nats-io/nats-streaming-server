@@ -18,8 +18,8 @@ const (
 
 // Client defined Msg, which includes proto, then back link to subscription.
 type Msg struct {
-	MsgProto
-	sub *subscription
+	MsgProto // MsgProto: Seq, Subject, Reply[opt], Data, Timestamp, CRC32[opt]
+	Sub      Subscription
 }
 
 // Subscriptions and Options
@@ -35,6 +35,7 @@ type subscription struct {
 	sync.RWMutex
 	sc       *conn
 	subject  string
+	qgroup   string
 	inbox    string
 	ackInbox string
 	inboxSub *nats.Subscription
@@ -150,7 +151,17 @@ func DurableName(name string) SubscriptionOption {
 
 // Subscribe will perform a subscription with the given options to the STAN cluster.
 func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...SubscriptionOption) (Subscription, error) {
-	sub := &subscription{subject: subject, inbox: newInbox(), cb: cb, sc: sc, opts: DefaultSubscriptionOptions}
+	return sc.subscribe(subject, "", cb, options...)
+}
+
+// QueueSubscribe will perform a queue subscription with the given options to the STAN cluster.
+func (sc *conn) QueueSubscribe(subject, qgroup string, cb MsgHandler, options ...SubscriptionOption) (Subscription, error) {
+	return sc.subscribe(subject, qgroup, cb, options...)
+}
+
+// subscribe will perform a subscription with the given options to the STAN cluster.
+func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...SubscriptionOption) (Subscription, error) {
+	sub := &subscription{subject: subject, qgroup: qgroup, inbox: newInbox(), cb: cb, sc: sc, opts: DefaultSubscriptionOptions}
 	for _, opt := range options {
 		if err := opt(&sub.opts); err != nil {
 			return nil, err
@@ -183,6 +194,7 @@ func (sc *conn) Subscribe(subject string, cb MsgHandler, options ...Subscription
 	sr := &SubscriptionRequest{
 		ClientID:      sc.clientID,
 		Subject:       subject,
+		QGroup:        qgroup,
 		Inbox:         sub.inbox,
 		MaxInFlight:   int32(sub.opts.MaxInflight),
 		AckWaitInSecs: int32(sub.opts.AckWait / time.Second),
@@ -278,7 +290,7 @@ func (msg *Msg) Ack() error {
 		return ErrNilMsg
 	}
 	// Look up subscription
-	sub := msg.sub
+	sub := msg.Sub.(*subscription)
 	if sub == nil {
 		return ErrBadSubscription
 	}
