@@ -1,7 +1,8 @@
 
-- [ ] Queue Subscribers
+- [ ] Check for need of ackMap (out of order re-delivery to queue subscribers)
 - [ ] Server ping, release dead clients.
 - [ ] Server Store Limits (time, msgs, byte)
+- [X] Queue Subscribers
 - [X] Durable Subscribers (survive reconnect, etc)
 - [X] Start Positions on Subscribers
 - [X] Ack for delivered just Reply? No need on ConnectedResponse?
