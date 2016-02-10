@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1054,8 +1055,101 @@ func TestPubMultiQueueSub(t *testing.T) {
 	}
 
 	if nr := atomic.LoadInt32(&received); nr != toSend {
-		fmt.Printf("s1:%d, s2:%d\n", s1Received, s2Received)
 		t.Fatalf("Did not receive correct number of messages: %d vs %d\n", nr, toSend)
+	}
+
+	s1r := atomic.LoadInt32(&s1Received)
+	s2r := atomic.LoadInt32(&s2Received)
+
+	v := uint(float32(toSend) * 0.15) // 15 percent
+	expected := toSend / 2
+	d1 := uint(math.Abs(float64(expected - s1r)))
+	d2 := uint(math.Abs(float64(expected - s2r)))
+	if d1 > v || d2 > v {
+		t.Fatalf("Too much variance in totals: %d, %d > %d", d1, d2, v)
+	}
+}
+
+func TestPubMultiQueueSubWithSlowSubscriber(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	ch := make(chan bool)
+	received := int32(0)
+	s1Received := int32(0)
+	s2Received := int32(0)
+	toSend := int32(500)
+
+	var s1, s2 Subscription
+
+	msgMapLock := &sync.Mutex{}
+	msgMap := make(map[uint64]struct{})
+
+	mcb := func(m *Msg) {
+		// Remember the message sequence.
+		msgMapLock.Lock()
+		if _, ok := msgMap[m.Seq]; ok {
+			t.Fatalf("Detected duplicate for sequence: %d\n", m.Seq)
+		}
+		msgMap[m.Seq] = struct{}{}
+		msgMapLock.Unlock()
+		// Track received for each receiver.
+		if m.Sub == s1 {
+			atomic.AddInt32(&s1Received, 1)
+		} else if m.Sub == s2 {
+			// Slow down this subscriber
+			time.Sleep(250 * time.Millisecond)
+			atomic.AddInt32(&s2Received, 1)
+		} else {
+			t.Fatalf("Received message on unknown subscription")
+		}
+		// Track total
+		if nr := atomic.AddInt32(&received, 1); nr == int32(toSend) {
+			ch <- true
+		}
+	}
+
+	s1, err = sc.QueueSubscribe("foo", "bar", mcb)
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer s1.Unsubscribe()
+
+	s2, err = sc.QueueSubscribe("foo", "bar", mcb)
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer s2.Unsubscribe()
+
+	// Publish out the messages.
+	for i := int32(0); i < toSend; i++ {
+		data := []byte(fmt.Sprintf("%d", i))
+		sc.Publish("foo", data)
+	}
+	if err := WaitTime(ch, 1*time.Second); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
+
+	if nr := atomic.LoadInt32(&received); nr != toSend {
+		t.Fatalf("Did not receive correct number of messages: %d vs %d\n", nr, toSend)
+	}
+
+	s1r := atomic.LoadInt32(&s1Received)
+	s2r := atomic.LoadInt32(&s2Received)
+
+	// Since we slowed down  sub2, we should receive all but 1 message on sub1
+	if s1r != toSend-1 {
+		t.Fatalf("Expected %d msgs for sub1, got %d\n", toSend-1, s1r)
+	}
+	if s2r != 1 {
+		t.Fatalf("Expected %d msgs for sub2, got %d\n", 1, s2r)
 	}
 }
 
