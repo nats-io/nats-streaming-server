@@ -352,13 +352,31 @@ func (s *stanServer) sendMsgToSub(sub *subState, m *MsgProto) bool {
 			sub.Lock()
 			sub.ackTimer = nil
 			needsRetransmit := sub.lastSent > sub.lastAck
-			sub.Unlock()
 			if needsRetransmit {
-				// Reaqcuire lock and reset lastSent to lastAck
-				sub.Lock()
+				// Reset lastSent to lastAck
 				sub.lastSent = sub.lastAck
-				sub.Unlock()
-				s.sendQueuedMessages(sub)
+			}
+			qgroup := sub.qgroup
+			subject := sub.subject
+			sub.Unlock()
+
+			if needsRetransmit {
+				if qgroup != "" {
+					// For Queue Subscriber, we pick the best sub, don't redeliver
+					// necessarily to the same one.
+					s.subLock.RLock()
+					chs := s.subStore[subject]
+					sl := chs.qsubs[qgroup]
+					sub = findBestQueueSub(sl)
+					s.subLock.RUnlock()
+					if sub != nil {
+						sub.Lock()
+						s.sendMsgToSub(sub, m)
+						sub.Unlock()
+					}
+				} else {
+					s.sendQueuedMessages(sub)
+				}
 			}
 		})
 	}
@@ -603,18 +621,12 @@ func isValidSubject(subject string) bool {
 
 // Test if a subscription is a queue subscriber.
 func (sub *subState) isQueueSubscriber() bool {
-	if sub == nil {
-		return false
-	}
-	return sub.qgroup != ""
+	return sub != nil && sub.qgroup != ""
 }
 
 // Test if a subscription is durable.
 func (sub *subState) isDurable() bool {
-	if sub == nil {
-		return false
-	}
-	return sub.durableName != ""
+	return sub != nil && sub.durableName != ""
 }
 
 // Used to generate durable key. This should not be called on non-durables.

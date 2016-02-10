@@ -1153,6 +1153,74 @@ func TestPubMultiQueueSubWithSlowSubscriber(t *testing.T) {
 	}
 }
 
+func TestPubMultiQueueSubWithRedelivery(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	defer sc.Close()
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	ch := make(chan bool)
+	received := int32(0)
+	s1Received := int32(0)
+	s2Received := int32(0)
+	toSend := int32(500)
+
+	var s1, s2 Subscription
+
+	mcb := func(m *Msg) {
+		// Track received for each receiver.
+		if m.Sub == s1 {
+			m.Ack()
+			atomic.AddInt32(&s1Received, 1)
+
+			// Track total only for sub1
+			if nr := atomic.AddInt32(&received, 1); nr == int32(toSend) {
+				ch <- true
+			}
+
+		} else if m.Sub == s2 {
+			// We will not ack this subscriber
+		} else {
+			t.Fatalf("Received message on unknown subscription")
+		}
+	}
+
+	s1, err = sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer s1.Unsubscribe()
+
+	s2, err = sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode(), AckWait(1*time.Second))
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer s2.Unsubscribe()
+
+	// Publish out the messages.
+	for i := int32(0); i < toSend; i++ {
+		data := []byte(fmt.Sprintf("%d", i))
+		sc.Publish("foo", data)
+	}
+	if err := WaitTime(ch, 2*time.Second); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
+
+	if nr := atomic.LoadInt32(&received); nr != toSend {
+		t.Fatalf("Did not receive correct number of messages: %d vs %d\n", nr, toSend)
+	}
+
+	s1r := atomic.LoadInt32(&s1Received)
+	s2r := atomic.LoadInt32(&s2Received)
+
+	fmt.Printf("s1r = %d s2r = %d\n", s1r, s2r)
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Benchmarks
 ////////////////////////////////////////////////////////////////////////////////
