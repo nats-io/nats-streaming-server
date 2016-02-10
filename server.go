@@ -776,6 +776,8 @@ func (s *stanServer) processAck(sub *subState, ack *Ack) {
 
 	sub.Lock()
 
+	wasBlocked := sub.lastSent-sub.lastAck >= sub.maxInFlight
+
 	// Update our notion of lastAck.
 	if ack.Seq > sub.lastAck {
 		sub.lastAck = ack.Seq
@@ -793,7 +795,9 @@ func (s *stanServer) processAck(sub *subState, ack *Ack) {
 	sub.Unlock()
 
 	// Check to see if we should send more messages. Acks unblock the queue.
-	s.sendQueuedMessages(sub)
+	if wasBlocked {
+		s.sendQueuedMessages(sub)
+	}
 }
 
 // Send any messages that are ready to be sent that have been queued.
