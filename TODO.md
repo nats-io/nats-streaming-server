@@ -1,5 +1,6 @@
 
-- [ ] Check for need of ackMap (out of order re-delivery to queue subscribers)
+- [ ] Check for need of ackMap (out of order re-delivery to queue subscribers).
+- [ ] Resent Flag for Stan Msg.
 - [ ] Server ping, release dead clients.
 - [ ] Server Store Limits (time, msgs, byte)
 - [X] Queue Subscribers
