@@ -239,6 +239,7 @@ func (sub *subscription) Unsubscribe() error {
 	sc := sub.sc
 	if sc == nil {
 		// Already closed.
+		sub.Unlock()
 		return ErrBadSubscription
 	}
 	sub.sc = nil
@@ -253,6 +254,7 @@ func (sub *subscription) Unsubscribe() error {
 
 	sc.Lock()
 	if sc.nc == nil {
+		sc.Unlock()
 		return ErrConnectionClosed
 	}
 

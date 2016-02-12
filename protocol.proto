@@ -19,6 +19,7 @@ message PubMsg {
   string subject = 2;  // subject
   string reply   = 3;  // optional reply
   bytes  data    = 4;  // payload
+
   bytes  sha256  = 10; // optional sha256 of data
 }
 
@@ -37,6 +38,7 @@ message MsgProto {
   bytes  data        = 4;  // payload
   int64  timestamp   = 5;  // received timestamp
   bool   redelivered = 6;  // Flag specifying if the message is being redelivered
+
   uint32 CRC32       = 10; // optional IEEE CRC32
 }
 
@@ -60,7 +62,6 @@ message ConnectResponse {
 
   string publicKey     = 100; // Possibly used to sign acks, etc.
 }
-
 
 // Enum for start position type.
 enum StartPosition {
