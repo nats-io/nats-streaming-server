@@ -24,7 +24,7 @@ const (
 	DefaultUnSubPrefix = "_STAN.unsub"
 	DefaultClosePrefix = "_STAN.close"
 
-	DefaultMsgStoreLimit = 1024 * 1024
+	DefaultMsgStoreLimit = 1000000
 )
 
 // Errors.
@@ -162,6 +162,9 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 		panic(fmt.Sprintf("Can't connect to embedded NATS server: %v\n", err))
 	}
 	s.initSubscriptions()
+
+	Noticef("Message store is MEMORY")
+	Noticef("Maximum of %d will be stored", DefaultMsgStoreLimit)
 
 	return &s
 }
@@ -484,7 +487,7 @@ func (s *stanServer) assignAndStore(pm *PubMsg) (*MsgProto, error) {
 
 	// FIXME(dlc) - Check if we need to remove any.
 	if len(store.msgs) >= s.msgStoreLimit {
-		fmt.Printf("WARNING: Removing message[%d] from the store for [`%s`]\n", store.first, pm.Subject)
+		Errorf("WARNING: Removing message[%d] from the store for [`%s`]\n", store.first, pm.Subject)
 		delete(store.msgs, store.first)
 		store.first++
 	}
