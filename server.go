@@ -40,6 +40,7 @@ var (
 	ErrInvalidCloseReq = errors.New("stan: invalid close request")
 	ErrInvalidAckWait  = errors.New("stan: invalid ack wait time, should be >= 1s")
 	ErrDupDurable      = errors.New("stan: duplicate durable registration")
+	ErrDurableQueue    = errors.New("stan: queue subscribers can't be durable")
 )
 
 type stanServer struct {
@@ -748,6 +749,12 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	// Check for DurableSubscriber status
 	if sr.DurableName != "" {
+		// Can't be durable and a queue subscriber
+		if sr.QGroup != "" {
+			s.sendSubscriptionResponseErr(m.Reply, ErrDurableQueue)
+			return
+		}
+
 		durableKey := sr.durableKey()
 		if sub = s.checkForDurable(durableKey); sub != nil {
 			sub.RLock()

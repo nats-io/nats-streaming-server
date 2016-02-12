@@ -180,9 +180,15 @@ func TestBasicQueueSubscription(t *testing.T) {
 	}
 	sub, err := sc.QueueSubscribe("foo", "bar", func(m *Msg) {})
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
 	}
 	defer sub.Unsubscribe()
+
+	// Test that we can not set durable status on queue subscribers.
+	_, err = sc.QueueSubscribe("foo", "bar", func(m *Msg) {}, DurableName("durable-queue-sub"))
+	if err == nil {
+		t.Fatalf("Expected non-nil error on QueueSubscribe with DurableName\n")
+	}
 }
 
 func TestBasicPubSub(t *testing.T) {
