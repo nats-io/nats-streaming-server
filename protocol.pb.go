@@ -88,15 +88,16 @@ func (m *PubAck) Reset()         { *m = PubAck{} }
 func (m *PubAck) String() string { return proto.CompactTextString(m) }
 func (*PubAck) ProtoMessage()    {}
 
-// Msg struct. Seq is assigned for global ordering by
+// Msg struct. Sequence is assigned for global ordering by
 // the cluster after the publisher has been acknowledged.
 type MsgProto struct {
-	Seq       uint64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	Subject   string `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
-	Reply     string `protobuf:"bytes,3,opt,name=reply,proto3" json:"reply,omitempty"`
-	Data      []byte `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`
-	Timestamp int64  `protobuf:"varint,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	CRC32     uint32 `protobuf:"varint,10,opt,name=CRC32,proto3" json:"CRC32,omitempty"`
+	Sequence    uint64 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Subject     string `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
+	Reply       string `protobuf:"bytes,3,opt,name=reply,proto3" json:"reply,omitempty"`
+	Data        []byte `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`
+	Timestamp   int64  `protobuf:"varint,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Redelivered bool   `protobuf:"varint,6,opt,name=redelivered,proto3" json:"redelivered,omitempty"`
+	CRC32       uint32 `protobuf:"varint,10,opt,name=CRC32,proto3" json:"CRC32,omitempty"`
 }
 
 func (m *MsgProto) Reset()         { *m = MsgProto{} }
@@ -105,7 +106,7 @@ func (*MsgProto) ProtoMessage()    {}
 
 // Ack will deliver an ack for a delivered msg.
 type Ack struct {
-	Seq uint64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	Sequence uint64 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
 }
 
 func (m *Ack) Reset()         { *m = Ack{} }
@@ -303,10 +304,10 @@ func (m *MsgProto) MarshalTo(data []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
-	if m.Seq != 0 {
+	if m.Sequence != 0 {
 		data[i] = 0x8
 		i++
-		i = encodeVarintProtocol(data, i, uint64(m.Seq))
+		i = encodeVarintProtocol(data, i, uint64(m.Sequence))
 	}
 	if len(m.Subject) > 0 {
 		data[i] = 0x12
@@ -333,6 +334,16 @@ func (m *MsgProto) MarshalTo(data []byte) (int, error) {
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.Timestamp))
 	}
+	if m.Redelivered {
+		data[i] = 0x30
+		i++
+		if m.Redelivered {
+			data[i] = 1
+		} else {
+			data[i] = 0
+		}
+		i++
+	}
 	if m.CRC32 != 0 {
 		data[i] = 0x50
 		i++
@@ -356,10 +367,10 @@ func (m *Ack) MarshalTo(data []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
-	if m.Seq != 0 {
+	if m.Sequence != 0 {
 		data[i] = 0x8
 		i++
-		i = encodeVarintProtocol(data, i, uint64(m.Seq))
+		i = encodeVarintProtocol(data, i, uint64(m.Sequence))
 	}
 	return i, nil
 }
@@ -705,8 +716,8 @@ func (m *PubAck) Size() (n int) {
 func (m *MsgProto) Size() (n int) {
 	var l int
 	_ = l
-	if m.Seq != 0 {
-		n += 1 + sovProtocol(uint64(m.Seq))
+	if m.Sequence != 0 {
+		n += 1 + sovProtocol(uint64(m.Sequence))
 	}
 	l = len(m.Subject)
 	if l > 0 {
@@ -725,6 +736,9 @@ func (m *MsgProto) Size() (n int) {
 	if m.Timestamp != 0 {
 		n += 1 + sovProtocol(uint64(m.Timestamp))
 	}
+	if m.Redelivered {
+		n += 2
+	}
 	if m.CRC32 != 0 {
 		n += 1 + sovProtocol(uint64(m.CRC32))
 	}
@@ -734,8 +748,8 @@ func (m *MsgProto) Size() (n int) {
 func (m *Ack) Size() (n int) {
 	var l int
 	_ = l
-	if m.Seq != 0 {
-		n += 1 + sovProtocol(uint64(m.Seq))
+	if m.Sequence != 0 {
+		n += 1 + sovProtocol(uint64(m.Sequence))
 	}
 	return n
 }
@@ -1224,9 +1238,9 @@ func (m *MsgProto) Unmarshal(data []byte) error {
 		switch fieldNum {
 		case 1:
 			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Seq", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field Sequence", wireType)
 			}
-			m.Seq = 0
+			m.Sequence = 0
 			for shift := uint(0); ; shift += 7 {
 				if shift >= 64 {
 					return ErrIntOverflowProtocol
@@ -1236,7 +1250,7 @@ func (m *MsgProto) Unmarshal(data []byte) error {
 				}
 				b := data[iNdEx]
 				iNdEx++
-				m.Seq |= (uint64(b) & 0x7F) << shift
+				m.Sequence |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
@@ -1349,6 +1363,26 @@ func (m *MsgProto) Unmarshal(data []byte) error {
 					break
 				}
 			}
+		case 6:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Redelivered", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.Redelivered = bool(v != 0)
 		case 10:
 			if wireType != 0 {
 				return fmt.Errorf("proto: wrong wireType = %d for field CRC32", wireType)
@@ -1420,9 +1454,9 @@ func (m *Ack) Unmarshal(data []byte) error {
 		switch fieldNum {
 		case 1:
 			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Seq", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field Sequence", wireType)
 			}
-			m.Seq = 0
+			m.Sequence = 0
 			for shift := uint(0); ; shift += 7 {
 				if shift >= 64 {
 					return ErrIntOverflowProtocol
@@ -1432,7 +1466,7 @@ func (m *Ack) Unmarshal(data []byte) error {
 				}
 				b := data[iNdEx]
 				iNdEx++
-				m.Seq |= (uint64(b) & 0x7F) << shift
+				m.Sequence |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}

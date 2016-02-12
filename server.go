@@ -89,7 +89,7 @@ type msgStore struct {
 	msgs    map[uint64]*MsgProto
 }
 
-// channelSubscriptions holds our known state of the plain and queue subscribers
+// channelState holds our known state of all subscribers for a given channel/subject.
 type channelState struct {
 	subs  []*subState            // plain subscribers
 	qsubs map[string][]*subState // queue subscribers
@@ -106,11 +106,11 @@ type subState struct {
 	ackInbox      string
 	durableName   string
 	lastSent      uint64
-	lastAck       uint64
-	maxInFlight   uint64
 	ackWaitInSecs time.Duration
 	ackTimer      *time.Timer
 	ackSub        *nats.Subscription
+	maxInFlight   int
+	acksPending   map[uint64]*MsgProto
 }
 
 // ServerOptions
@@ -301,21 +301,23 @@ func findBestQueueSub(sl []*subState) (rsub *subState) {
 		}
 
 		rsub.RLock()
-		rdiff := rsub.lastSent - rsub.lastAck
+		rOut := len(rsub.acksPending)
 		rsub.RUnlock()
 
 		sub.Lock()
-		if sub.lastSent-sub.lastAck < rdiff {
+		sOut := len(sub.acksPending)
+		sub.Unlock()
+
+		if sOut < rOut {
 			rsub = sub
 		}
-		sub.Unlock()
 	}
 	return
 }
 
 // processMsg will proces a message, and possibly send to clients, etc.
 func (s *stanServer) processMsg(m *MsgProto) {
-	// Grab active subscriptions
+	// Grab channel state
 	s.subLock.RLock()
 	chs := s.subStore[m.Subject]
 	if chs == nil {
@@ -342,52 +344,109 @@ func (s *stanServer) processMsg(m *MsgProto) {
 	s.subLock.RUnlock()
 }
 
-// Sends the message to the subscriber, assumes sub lock is held.
+// Used for sorting by sequence
+type bySeq []*MsgProto
+
+func (a bySeq) Len() int           { return (len(a)) }
+func (a bySeq) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a bySeq) Less(i, j int) bool { return a[i].Sequence < a[j].Sequence }
+
+func makeSortedMsgs(msgs map[uint64]*MsgProto) []*MsgProto {
+	results := make([]*MsgProto, 0, len(msgs))
+	for _, m := range msgs {
+		mCopy := *m // copy since we need to set redelivered flag.
+		results = append(results, &mCopy)
+	}
+	sort.Sort(bySeq(results))
+	return results
+}
+
+// Redeliver all outstanding messages to a durable subscriber, used on resubscribe.
+func (s *stanServer) performDurableRedelivery(sub *subState) {
+	s.performRedelivery(sub, false)
+}
+
+// Redeliver all outstanding messages that have expired.
+func (s *stanServer) performAckExpirationRedelivery(sub *subState) {
+	s.performRedelivery(sub, true)
+}
+
+// Performs redlivery, takes a flag on whether to honor expiration.
+func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
+	// Sort our messages outstanding from acksPending, grab some state and unlock.
+	sub.Lock()
+	expTime := int64(sub.ackWaitInSecs * time.Second)
+	sortedMsgs := makeSortedMsgs(sub.acksPending)
+	sub.ackTimer = nil
+	inbox := sub.inbox
+	subject := sub.subject
+	qgroup := sub.qgroup
+	isQueueSubsriber := qgroup != ""
+	sub.Unlock()
+
+	now := time.Now().UnixNano()
+
+	// We will move through acksPending(sorted) and see what needs redelivery.
+	for _, m := range sortedMsgs {
+		if m.Timestamp+expTime > now && checkExpiration {
+			continue
+		}
+
+		// Flag as redelivered.
+		m.Redelivered = true
+
+		// Handle QueueSubscribers differently, since we will choose best subscriber
+		// to redeliver to, not necessarily the same one.
+		if isQueueSubsriber {
+			// Remove from current subs acksPending.
+			sub.Lock()
+			delete(sub.acksPending, m.Sequence)
+			sub.Unlock()
+
+			s.subLock.RLock()
+			chs := s.subStore[subject]
+			sl := chs.qsubs[qgroup]
+			qsub := findBestQueueSub(sl)
+			s.subLock.RUnlock()
+			if qsub == nil {
+				break
+			}
+			qsub.Lock()
+			s.sendMsgToSub(qsub, m)
+			qsub.Unlock()
+		} else {
+			b, _ := m.Marshal()
+			if err := s.nc.Publish(inbox, b); err != nil {
+				// Break on error. FIXME(dlc) reset timer?
+				break
+			}
+		}
+	}
+}
+
+// Sends the message to the subscriber
+// Sub lock should be held before calling.
 func (s *stanServer) sendMsgToSub(sub *subState, m *MsgProto) bool {
 	if sub == nil || m == nil {
 		return false
 	}
 	// Don't send if we have too many outstanding already.
-	if sub.lastSent-sub.lastAck > sub.maxInFlight {
+	if len(sub.acksPending) > sub.maxInFlight {
 		return false
 	}
 
-	sub.lastSent = m.Seq
+	sub.lastSent = m.Sequence
 	b, _ := m.Marshal()
-	s.nc.Publish(sub.inbox, b)
+	if err := s.nc.Publish(sub.inbox, b); err != nil {
+		return false
+	}
+	// Store in ackPending.
+	sub.acksPending[m.Sequence] = m
 
 	// Setup the ackTimer as needed.
 	if sub.ackTimer == nil {
 		sub.ackTimer = time.AfterFunc(sub.ackWaitInSecs*time.Second, func() {
-			sub.Lock()
-			sub.ackTimer = nil
-			needsRetransmit := sub.lastSent > sub.lastAck
-			if needsRetransmit {
-				// Reset lastSent to lastAck
-				sub.lastSent = sub.lastAck
-			}
-			qgroup := sub.qgroup
-			subject := sub.subject
-			sub.Unlock()
-
-			if needsRetransmit {
-				if qgroup != "" {
-					// For Queue Subscriber, we pick the best sub, don't redeliver
-					// necessarily to the same one.
-					s.subLock.RLock()
-					chs := s.subStore[subject]
-					sl := chs.qsubs[qgroup]
-					sub = findBestQueueSub(sl)
-					s.subLock.RUnlock()
-					if sub != nil {
-						sub.Lock()
-						s.sendMsgToSub(sub, m)
-						sub.Unlock()
-					}
-				} else {
-					s.sendQueuedMessages(sub)
-				}
-			}
+			s.performAckExpirationRedelivery(sub)
 		})
 	}
 
@@ -412,7 +471,7 @@ func (s *stanServer) assignAndStore(pm *PubMsg) (*MsgProto, error) {
 	store.Lock()
 
 	m := &MsgProto{
-		Seq:       store.cur,
+		Sequence:  store.cur,
 		Subject:   pm.Subject,
 		Reply:     pm.Reply,
 		Data:      pm.Data,
@@ -701,9 +760,8 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 			// ok we have a remembered subscription
 			// FIXME(dlc) - Do we error on options? They should be ignored if the new conflicts with old.
 			sub.Lock()
-			// Set new clientID and reset lastSent to lastAck
+			// Set new clientID and reset lastSent
 			sub.clientID = sr.ClientID
-			sub.lastSent = sub.lastAck
 			// Also grab a new ackInbox and the sr's inbox.
 			sub.ackInbox = newInbox()
 			sub.inbox = sr.Inbox
@@ -735,8 +793,9 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 			inbox:         sr.Inbox,
 			ackInbox:      newInbox(),
 			durableName:   sr.DurableName,
-			maxInFlight:   uint64(sr.MaxInFlight),
+			maxInFlight:   int(sr.MaxInFlight),
 			ackWaitInSecs: time.Duration(sr.AckWaitInSecs),
+			acksPending:   make(map[uint64]*MsgProto),
 		}
 		// Store this subscription
 		s.storeSubscription(sub)
@@ -755,6 +814,8 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	// If we are a durable and have state
 	if sr.DurableName != "" {
+		// Redeliver any oustanding.
+		s.performDurableRedelivery(sub)
 		sub.RLock()
 		lastSent := sub.lastSent
 		sub.RUnlock()
@@ -798,18 +859,18 @@ func (s *stanServer) processAck(sub *subState, ack *Ack) {
 
 	sub.Lock()
 
-	wasBlocked := sub.lastSent-sub.lastAck >= sub.maxInFlight
+	wasBlocked := len(sub.acksPending) >= sub.maxInFlight
 
-	// Update our notion of lastAck.
-	if ack.Seq > sub.lastAck {
-		sub.lastAck = ack.Seq
-	}
+	// Clear the ack
+	delete(sub.acksPending, ack.Sequence)
+
 	// If we have the ackTimer running, either reset or cancel it.
 	if sub.ackTimer != nil {
-		if sub.lastAck == sub.lastSent {
+		if len(sub.acksPending) == 0 {
 			sub.ackTimer.Stop()
 			sub.ackTimer = nil
 		} else {
+			// FIXME(dlc) - This should be to next expiration, not simply +delta
 			sub.ackTimer.Reset(sub.ackWaitInSecs * time.Second)
 		}
 	}
@@ -837,7 +898,7 @@ func (s *stanServer) sendQueuedMessages(sub *subState) {
 
 	for d := last - sub.lastSent; d > 0; d = last - sub.lastSent {
 		// Throttle based on maxInflight
-		if sub.lastSent-sub.lastAck >= sub.maxInFlight {
+		if len(sub.acksPending) >= sub.maxInFlight {
 			break
 		}
 		nextSeq := sub.lastSent + 1
@@ -882,7 +943,6 @@ func (s *stanServer) startSeqValid(subject string, seq uint64) bool {
 func (s *stanServer) sendMessagesToSubFromSequence(sub *subState, startSeq uint64) {
 	sub.Lock()
 	sub.lastSent = startSeq - 1 // FIXME(dlc) - wrap?
-	sub.lastAck = sub.lastSent
 	sub.Unlock()
 
 	s.sendQueuedMessages(sub)

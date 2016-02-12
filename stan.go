@@ -390,7 +390,7 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 
 	// Proces auto-ack
 	if !isManualAck && nc != nil {
-		ack := &Ack{Seq: msg.Seq}
+		ack := &Ack{Sequence: msg.Sequence}
 		b, _ := ack.Marshal()
 		nc.Publish(ackSubject, b)
 	}

@@ -310,7 +310,7 @@ func (msg *Msg) Ack() error {
 	}
 
 	// Ack here.
-	ack := &Ack{Seq: msg.Seq}
+	ack := &Ack{Sequence: msg.Sequence}
 	b, _ := ack.Marshal()
 	return sc.nc.Publish(ackSubject, b)
 }

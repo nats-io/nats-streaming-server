@@ -28,20 +28,21 @@ message PubAck {
   string error = 2; // err string, empty/omitted if no error
 }
 
-// Msg struct. Seq is assigned for global ordering by
+// Msg struct. Sequence is assigned for global ordering by
 // the cluster after the publisher has been acknowledged.
 message MsgProto {
-  uint64 seq       = 1;  // globally ordered sequence number for the subject's channel.
-  string subject   = 2;  // subject
-  string reply     = 3;  // optional reply
-  bytes  data      = 4;  // payload
-  int64  timestamp = 5;  // received timestamp
-  uint32 CRC32     = 10; // optional IEEE CRC32
+  uint64 sequence    = 1;  // globally ordered sequence number for the subject's channel
+  string subject     = 2;  // subject
+  string reply       = 3;  // optional reply
+  bytes  data        = 4;  // payload
+  int64  timestamp   = 5;  // received timestamp
+  bool   redelivered = 6;  // Flag specifying if the message is being redelivered
+  uint32 CRC32       = 10; // optional IEEE CRC32
 }
 
 // Ack will deliver an ack for a delivered msg.
 message Ack {
-  uint64 seq   = 1;
+  uint64 sequence = 1; // Sequence to acknowledge
 }
 
 // Connection Request
@@ -51,7 +52,7 @@ message ConnectRequest {
 
 // Response to a client connect
 message ConnectResponse {
-  string pubPrefix     = 1;   // Prefix to use when publishing to this STAN cluster.
+  string pubPrefix     = 1;   // Prefix to use when publishing to this STAN cluster
   string subRequests   = 2;   // Subject to use for subscription requests.
   string unsubRequests = 3;   // Subject to use for unsubscribe requests.
   string closeRequests = 4;   // Subject for closing the stan connection.
