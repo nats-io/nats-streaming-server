@@ -1,4 +1,5 @@
 // Copyright 2016 Apcera Inc. All rights reserved.
+// +build ignore
 
 package main
 
