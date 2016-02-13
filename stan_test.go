@@ -1178,7 +1178,7 @@ func TestPubMultiQueueSubWithSlowSubscriber(t *testing.T) {
 		data := []byte(fmt.Sprintf("%d", i))
 		sc.Publish("foo", data)
 	}
-	if err := WaitTime(ch, 5*time.Second); err != nil {
+	if err := WaitTime(ch, 10*time.Second); err != nil {
 		t.Fatal("Did not receive our messages")
 	}
 
@@ -1251,7 +1251,7 @@ func TestPubMultiQueueSubWithRedelivery(t *testing.T) {
 		data := []byte(fmt.Sprintf("%d", i))
 		sc.Publish("foo", data)
 	}
-	if err := WaitTime(ch, 5*time.Second); err != nil {
+	if err := WaitTime(ch, 10*time.Second); err != nil {
 		t.Fatal("Did not receive our messages")
 	}
 
