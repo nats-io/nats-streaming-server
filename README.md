@@ -2,6 +2,8 @@
 
 STAN is an extremely performant, lightweight reliable streaming platform built on [NATS](https://nats.io).
 
+[![License MIT](https://img.shields.io/npm/l/express.svg)](http://opensource.org/licenses/MIT)[![Build Status](https://travis-ci.com/nats-io/stan.svg?branch=master)](http://travis-ci.comnats-io/stan)
+
 [Project Design Document](https://docs.google.com/document/d/1keDwK35YQnOXXKKy2HVV2oOnvEUPFyypT-Tplh8F89c/edit)
 
 STAN provides the following high-level feature set.
