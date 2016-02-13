@@ -3,14 +3,22 @@
 package stan
 
 import (
+	"fmt"
+
 	"github.com/nats-io/gnatsd/server"
 )
+
+var noLog bool
 
 func Noticef(format string, v ...interface{}) {
 	server.Noticef(format, v...)
 }
 func Errorf(format string, v ...interface{}) {
-	server.Errorf(format, v...)
+	if noLog {
+		fmt.Printf(format, v...)
+	} else {
+		server.Errorf(format, v...)
+	}
 }
 
 func Fatalf(format string, v ...interface{}) {

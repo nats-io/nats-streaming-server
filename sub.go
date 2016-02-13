@@ -264,10 +264,11 @@ func (sub *subscription) Unsubscribe() error {
 
 	// Send Unsubscribe to server.
 
-	// FIXME(dlc) - Add in durable
+	// FIXME(dlc) - Add in durable?
 	usr := &UnsubscribeRequest{
-		Subject: sub.subject,
-		Inbox:   sub.ackInbox,
+		ClientID: sc.clientID,
+		Subject:  sub.subject,
+		Inbox:    sub.ackInbox,
 	}
 	b, _ := usr.Marshal()
 	// FIXME(dlc) - make timeout configurable.
@@ -312,7 +313,7 @@ func (msg *Msg) Ack() error {
 	}
 
 	// Ack here.
-	ack := &Ack{Sequence: msg.Sequence}
+	ack := &Ack{Subject: msg.Subject, Sequence: msg.Sequence}
 	b, _ := ack.Marshal()
 	return sc.nc.Publish(ackSubject, b)
 }

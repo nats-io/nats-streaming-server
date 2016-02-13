@@ -390,8 +390,10 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 
 	// Proces auto-ack
 	if !isManualAck && nc != nil {
-		ack := &Ack{Sequence: msg.Sequence}
+		ack := &Ack{Subject: msg.Subject, Sequence: msg.Sequence}
 		b, _ := ack.Marshal()
-		nc.Publish(ackSubject, b)
+		if err := nc.Publish(ackSubject, b); err != nil {
+			// FIXME(dlc) - Async error handler? Retry?
+		}
 	}
 }

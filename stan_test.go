@@ -267,7 +267,7 @@ func TestBasicPubSubFlowControl(t *testing.T) {
 		if nr := atomic.AddInt32(&received, 1); nr >= int32(toSend) {
 			ch <- true
 		}
-	}, MaxInflight(50))
+	}, MaxInflight(25))
 	if err != nil {
 		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
 	}
@@ -979,9 +979,11 @@ func TestDurableSubscriber(t *testing.T) {
 	if nr := atomic.LoadInt32(&received); nr != 10 {
 		t.Fatalf("Expected to get only 10 messages, got %d\n", nr)
 	}
-	// This is autoack, so undo received for check.
+	// This is auto-ack, so undo received for check.
 	// Close will prevent ack from going out, so #10 will be redelivered
 	atomic.AddInt32(&received, -1)
+
+	// sc is closed here from above..
 
 	// Recreate the connection
 	sc, err = Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
@@ -1408,6 +1410,62 @@ func BenchmarkPublishAsync(b *testing.B) {
 	//	fmt.Printf("max pending msgs:%d bytes:%d\n", msgs, bytes)
 }
 
+func BenchmarkSubscribe(b *testing.B) {
+	b.StopTimer()
+
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+	sc, err := Connect(clusterName, clientName)
+	defer sc.Close()
+	if err != nil {
+		b.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	hw := []byte("Hello World")
+	pch := make(chan bool)
+
+	// Queue up all the messages. Keep this outside of the timing.
+	for i := 0; i < b.N; i++ {
+		if i == b.N-1 {
+			// last one
+			sc.PublishAsync("foo", hw, func(lguid string, err error) {
+				if err != nil {
+					b.Fatalf("Got an error from ack handler, %v", err)
+				}
+				pch <- true
+			})
+		} else {
+			sc.PublishAsync("foo", hw, nil)
+		}
+	}
+
+	// Wait for published to finish
+	if err := WaitTime(pch, 10*time.Second); err != nil {
+		b.Fatalf("Error waiting for publish to finish\n")
+	}
+
+	ch := make(chan bool)
+	received := int32(0)
+
+	b.StartTimer()
+	b.ReportAllocs()
+
+	sc.Subscribe("foo", func(m *Msg) {
+		if nr := atomic.AddInt32(&received, 1); nr >= int32(b.N) {
+			ch <- true
+		}
+	}, DeliverAllAvailable())
+
+	err = WaitTime(ch, 10*time.Second)
+	nr := atomic.LoadInt32(&received)
+	if err != nil {
+		b.Fatalf("Timed out waiting for messages, received only %d of %d\n", nr, b.N)
+	} else if nr != int32(b.N) {
+		b.Fatalf("Only Received: %d of %d", received, b.N)
+	}
+}
+
 func BenchmarkPublishSubscribe(b *testing.B) {
 	b.StopTimer()
 
@@ -1425,24 +1483,31 @@ func BenchmarkPublishSubscribe(b *testing.B) {
 	received := int32(0)
 
 	// Subscribe callback, counts msgs received.
-	sc.Subscribe("foo", func(m *Msg) {
+	_, err = sc.Subscribe("foo", func(m *Msg) {
 		if nr := atomic.AddInt32(&received, 1); nr >= int32(b.N) {
 			ch <- true
 		}
-	})
+	}, DeliverAllAvailable())
+
+	if err != nil {
+		b.Fatalf("Error subscribing, %v", err)
+	}
 
 	b.StartTimer()
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		sc.PublishAsync("foo", hw, func(guid string, err error) {
+		_, err := sc.PublishAsync("foo", hw, func(guid string, err error) {
 			if err != nil {
 				b.Fatalf("Received an error in publish ack callback: %v\n", err)
 			}
 		})
+		if err != nil {
+			b.Fatalf("Error publishing %v\n", err)
+		}
 	}
 
-	err = WaitTime(ch, 10*time.Second)
+	err = WaitTime(ch, 30*time.Second)
 	nr := atomic.LoadInt32(&received)
 	if err != nil {
 		b.Fatalf("Timed out waiting for messages, received only %d of %d\n", nr, b.N)

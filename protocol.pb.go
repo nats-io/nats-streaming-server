@@ -106,7 +106,8 @@ func (*MsgProto) ProtoMessage()    {}
 
 // Ack will deliver an ack for a delivered msg.
 type Ack struct {
-	Sequence uint64 `protobuf:"varint,1,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Subject  string `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
+	Sequence uint64 `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
 }
 
 func (m *Ack) Reset()         { *m = Ack{} }
@@ -166,9 +167,10 @@ func (*SubscriptionResponse) ProtoMessage()    {}
 
 // Protocol for a clients to unsubscribe. Will return a SubscriptionResponse
 type UnsubscribeRequest struct {
-	Subject     string `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
-	Inbox       string `protobuf:"bytes,2,opt,name=inbox,proto3" json:"inbox,omitempty"`
-	DurableName string `protobuf:"bytes,3,opt,name=durableName,proto3" json:"durableName,omitempty"`
+	ClientID    string `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
+	Subject     string `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
+	Inbox       string `protobuf:"bytes,3,opt,name=inbox,proto3" json:"inbox,omitempty"`
+	DurableName string `protobuf:"bytes,4,opt,name=durableName,proto3" json:"durableName,omitempty"`
 }
 
 func (m *UnsubscribeRequest) Reset()         { *m = UnsubscribeRequest{} }
@@ -367,8 +369,14 @@ func (m *Ack) MarshalTo(data []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
+	if len(m.Subject) > 0 {
+		data[i] = 0xa
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Subject)))
+		i += copy(data[i:], m.Subject)
+	}
 	if m.Sequence != 0 {
-		data[i] = 0x8
+		data[i] = 0x10
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.Sequence))
 	}
@@ -573,20 +581,26 @@ func (m *UnsubscribeRequest) MarshalTo(data []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
-	if len(m.Subject) > 0 {
+	if len(m.ClientID) > 0 {
 		data[i] = 0xa
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.ClientID)))
+		i += copy(data[i:], m.ClientID)
+	}
+	if len(m.Subject) > 0 {
+		data[i] = 0x12
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.Subject)))
 		i += copy(data[i:], m.Subject)
 	}
 	if len(m.Inbox) > 0 {
-		data[i] = 0x12
+		data[i] = 0x1a
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.Inbox)))
 		i += copy(data[i:], m.Inbox)
 	}
 	if len(m.DurableName) > 0 {
-		data[i] = 0x1a
+		data[i] = 0x22
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.DurableName)))
 		i += copy(data[i:], m.DurableName)
@@ -748,6 +762,10 @@ func (m *MsgProto) Size() (n int) {
 func (m *Ack) Size() (n int) {
 	var l int
 	_ = l
+	l = len(m.Subject)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
 	if m.Sequence != 0 {
 		n += 1 + sovProtocol(uint64(m.Sequence))
 	}
@@ -852,6 +870,10 @@ func (m *SubscriptionResponse) Size() (n int) {
 func (m *UnsubscribeRequest) Size() (n int) {
 	var l int
 	_ = l
+	l = len(m.ClientID)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
 	l = len(m.Subject)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
@@ -1453,6 +1475,35 @@ func (m *Ack) Unmarshal(data []byte) error {
 		}
 		switch fieldNum {
 		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Subject", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Subject = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
 			if wireType != 0 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Sequence", wireType)
 			}
@@ -2224,6 +2275,35 @@ func (m *UnsubscribeRequest) Unmarshal(data []byte) error {
 		switch fieldNum {
 		case 1:
 			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ClientID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ClientID = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Subject", wireType)
 			}
 			var stringLen uint64
@@ -2251,7 +2331,7 @@ func (m *UnsubscribeRequest) Unmarshal(data []byte) error {
 			}
 			m.Subject = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
-		case 2:
+		case 3:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Inbox", wireType)
 			}
@@ -2280,7 +2360,7 @@ func (m *UnsubscribeRequest) Unmarshal(data []byte) error {
 			}
 			m.Inbox = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
-		case 3:
+		case 4:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field DurableName", wireType)
 			}
