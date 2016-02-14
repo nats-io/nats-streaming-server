@@ -1123,9 +1123,14 @@ func (s *stanServer) startSequenceValid(subject string, seq uint64) bool {
 func (s *stanServer) sendMessagesFromSequence(cs *channelStore, sub *subState, startSeq uint64) {
 	sub.Lock()
 	sub.lastSent = startSeq - 1 // FIXME(dlc) - wrap?
+	qgroup := sub.qgroup
 	sub.Unlock()
 
-	s.sendAvailableMessages(cs, sub)
+	if qgroup != "" {
+		s.sendAvailableMessagesToQueue(cs, cs.subs.LookupQueueState(qgroup))
+	} else {
+		s.sendAvailableMessages(cs, sub)
+	}
 }
 
 // Send messages to the subscriber starting at startTime. Assumes startTime is valid.

@@ -1095,7 +1095,7 @@ func TestPubMultiQueueSub(t *testing.T) {
 		data := []byte(fmt.Sprintf("%d", i))
 		sc.Publish("foo", data)
 	}
-	if err := WaitTime(ch, 1*time.Second); err != nil {
+	if err := WaitTime(ch, 5*time.Second); err != nil {
 		t.Fatal("Did not receive our messages")
 	}
 
@@ -1458,6 +1458,67 @@ func BenchmarkSubscribe(b *testing.B) {
 	}, DeliverAllAvailable())
 
 	err = WaitTime(ch, 10*time.Second)
+	nr := atomic.LoadInt32(&received)
+	if err != nil {
+		b.Fatalf("Timed out waiting for messages, received only %d of %d\n", nr, b.N)
+	} else if nr != int32(b.N) {
+		b.Fatalf("Only Received: %d of %d", received, b.N)
+	}
+}
+
+func BenchmarkQueueSubscribe(b *testing.B) {
+	b.StopTimer()
+
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+	sc, err := Connect(clusterName, clientName)
+	defer sc.Close()
+	if err != nil {
+		b.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	hw := []byte("Hello World")
+	pch := make(chan bool)
+
+	// Queue up all the messages. Keep this outside of the timing.
+	for i := 0; i < b.N; i++ {
+		if i == b.N-1 {
+			// last one
+			sc.PublishAsync("foo", hw, func(lguid string, err error) {
+				if err != nil {
+					b.Fatalf("Got an error from ack handler, %v", err)
+				}
+				pch <- true
+			})
+		} else {
+			sc.PublishAsync("foo", hw, nil)
+		}
+	}
+
+	// Wait for published to finish
+	if err := WaitTime(pch, 10*time.Second); err != nil {
+		b.Fatalf("Error waiting for publish to finish\n")
+	}
+
+	ch := make(chan bool)
+	received := int32(0)
+
+	b.StartTimer()
+	b.ReportAllocs()
+
+	mcb := func(m *Msg) {
+		if nr := atomic.AddInt32(&received, 1); nr >= int32(b.N) {
+			ch <- true
+		}
+	}
+
+	sc.QueueSubscribe("foo", "bar", mcb, DeliverAllAvailable())
+	sc.QueueSubscribe("foo", "bar", mcb, DeliverAllAvailable())
+	sc.QueueSubscribe("foo", "bar", mcb, DeliverAllAvailable())
+	sc.QueueSubscribe("foo", "bar", mcb, DeliverAllAvailable())
+
+	err = WaitTime(ch, 20*time.Second)
 	nr := atomic.LoadInt32(&received)
 	if err != nil {
 		b.Fatalf("Timed out waiting for messages, received only %d of %d\n", nr, b.N)
