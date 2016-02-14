@@ -24,7 +24,10 @@ const (
 	DefaultUnSubPrefix = "_STAN.unsub"
 	DefaultClosePrefix = "_STAN.close"
 
+	// How many messages per channel will we store?
 	DefaultMsgStoreLimit = 1000000
+	// How many channels (literal subjects) do we allow?
+	DefaultChannelLimit = 100
 )
 
 // Errors.
@@ -538,13 +541,13 @@ func (s *stanServer) processClientPublish(m *nats.Msg) {
 	// assume we are the master and assign the sequence ID here.
 	////////////////////////////////////////////////////////////////////////////
 
-	cs, msg := s.assignAndStore(pe)
+	cs := s.assignAndStore(pe)
 
 	////////////////////////////////////////////////////////////////////////////
 	// Now trigger sends to any active subscribers
 	////////////////////////////////////////////////////////////////////////////
 
-	s.processMsg(cs, msg)
+	s.processMsg(cs)
 }
 
 // FIXME(dlc) - place holder to pick sub that has least outstanding, should just sort,
@@ -597,7 +600,7 @@ func (s *stanServer) sendMsgToQueueGroup(qs *queueState, m *MsgProto) bool {
 }
 
 // processMsg will proces a message, and possibly send to clients, etc.
-func (s *stanServer) processMsg(cs *channelStore, m *MsgProto) {
+func (s *stanServer) processMsg(cs *channelStore) {
 	ss := cs.subs
 
 	// Since we iterate through them all.
@@ -732,11 +735,11 @@ func (s *stanServer) sendMsgToSub(sub *subState, m *MsgProto) bool {
 }
 
 // assignAndStore will assign a sequence ID and then store the message.
-func (s *stanServer) assignAndStore(pm *PubMsg) (*channelStore, *MsgProto) {
+func (s *stanServer) assignAndStore(pm *PubMsg) *channelStore {
 	cs := s.channels.LookupOrCreate(pm.Subject)
 	// FIXME(dlc) - check for errors.
-	m, _ := cs.msgs.Store(pm.Subject, pm.Reply, pm.Data)
-	return cs, m
+	cs.msgs.Store(pm.Subject, pm.Reply, pm.Data)
+	return cs
 }
 
 // ackPublisher sends the ack for a message.
