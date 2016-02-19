@@ -399,6 +399,14 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 		opts = &natsd.DefaultTestOptions
 	}
 	noLog = opts.NoLog
+
+	if opts.Host == "" {
+		opts.Host = "localhost"
+	}
+	if opts.Port == 0 {
+		opts.Port = server.DEFAULT_PORT
+	}
+
 	s.natsServer = natsd.RunServer(opts)
 	natsURL := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
 	var err error
