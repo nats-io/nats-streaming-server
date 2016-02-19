@@ -1,5 +1,5 @@
 
-- [ ] Server ping, release dead clients.
+- [ ] Server heartbeat, release dead clients.
 - [ ] Server Store Limits (time, msgs, byte)
 - [X] Check for need of ackMap (out of order re-delivery to queue subscribers).
 - [X] Redelivered Flag for Msg.

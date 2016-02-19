@@ -143,6 +143,27 @@ type queueState struct {
 	sync.RWMutex
 	lastSent uint64
 	subs     []*subState
+	stalled  bool
+}
+
+// Holds Subscription state
+// FIXME(dlc) - Use embedded proto
+type subState struct {
+	sync.RWMutex
+	clientID      string
+	subject       string
+	qgroup        string
+	inbox         string
+	ackInbox      string
+	durableName   string
+	qstate        *queueState
+	lastSent      uint64
+	ackWaitInSecs time.Duration
+	ackTimer      *time.Timer
+	ackSub        *nats.Subscription
+	acksPending   map[uint64]*MsgProto
+	maxInFlight   int
+	stalled       bool
 }
 
 // Lookup or create a channel by subject
@@ -210,6 +231,7 @@ func (ss *subStore) Store(sub *subState) {
 			ss.qsubs[qgroup] = qs
 		}
 		qs.subs = append(qs.subs, sub)
+		sub.qstate = qs
 	} else {
 		// Plain subscriber.
 		ss.psubs = append(ss.psubs, sub)
@@ -232,7 +254,7 @@ func (ss *subStore) Remove(sub *subState) {
 	sub.clientID = ""
 	sub.ackSub.Unsubscribe()
 	ackInbox := sub.ackInbox
-	qgroup := sub.qgroup
+	qs := sub.qstate
 	durable := sub.durableName
 	sub.Unlock()
 
@@ -248,10 +270,8 @@ func (ss *subStore) Remove(sub *subState) {
 	}
 
 	// Delete ourselves from the list
-	if qgroup != "" {
-		if qs := ss.qsubs[qgroup]; qs != nil {
-			qs.subs = sub.deleteFromList(qs.subs)
-		}
+	if qs != nil {
+		qs.subs = sub.deleteFromList(qs.subs)
 	} else {
 		ss.psubs = sub.deleteFromList(ss.psubs)
 	}
@@ -269,13 +289,6 @@ func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 	ss.RLock()
 	defer ss.RUnlock()
 	return ss.acks[ackInbox]
-}
-
-// Get queueState for qgroup name.
-func (ss *subStore) LookupQueueState(qgroup string) *queueState {
-	ss.RLock()
-	defer ss.RUnlock()
-	return ss.qsubs[qgroup]
 }
 
 // Per channel/subject message store
@@ -343,24 +356,6 @@ func (ms *msgStore) LastMsg() *MsgProto {
 	ms.RLock()
 	defer ms.RUnlock()
 	return ms.msgs[ms.last]
-}
-
-// Holds Subscription state
-// FIXME(dlc) - Use embedded proto
-type subState struct {
-	sync.RWMutex
-	clientID      string
-	subject       string
-	qgroup        string
-	inbox         string
-	ackInbox      string
-	durableName   string
-	lastSent      uint64
-	ackWaitInSecs time.Duration
-	ackTimer      *time.Timer
-	ackSub        *nats.Subscription
-	maxInFlight   int
-	acksPending   map[uint64]*MsgProto
 }
 
 // ServerOptions
@@ -591,6 +586,7 @@ func (s *stanServer) sendMsgToQueueGroup(qs *queueState, m *MsgProto) bool {
 	lastSent := sub.lastSent
 	sub.Unlock()
 	if !didSend {
+		qs.stalled = true
 		return false
 	}
 	if lastSent > qs.lastSent {
@@ -654,8 +650,7 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	sub.ackTimer = nil
 	inbox := sub.inbox
 	subject := sub.subject
-	qgroup := sub.qgroup
-	isQueueSubsriber := qgroup != ""
+	qs := sub.qstate
 	sub.Unlock()
 
 	now := time.Now().UnixNano()
@@ -671,7 +666,7 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 
 		// Handle QueueSubscribers differently, since we will choose best subscriber
 		// to redeliver to, not necessarily the same one.
-		if isQueueSubsriber {
+		if qs != nil {
 			// Remove from current subs acksPending.
 			sub.Lock()
 			delete(sub.acksPending, m.Sequence)
@@ -682,9 +677,7 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 
 			var qsub *subState
 			ss.RLock()
-			if qs := ss.qsubs[qgroup]; qs != nil {
-				qsub = findBestQueueSub(qs.subs)
-			}
+			qsub = findBestQueueSub(qs.subs)
 			ss.RUnlock()
 
 			if qsub == nil {
@@ -711,6 +704,7 @@ func (s *stanServer) sendMsgToSub(sub *subState, m *MsgProto) bool {
 	}
 	// Don't send if we have too many outstanding already.
 	if len(sub.acksPending) >= sub.maxInFlight {
+		sub.stalled = true
 		return false
 	}
 
@@ -974,7 +968,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 	}
 
-	// Create a subState if non-durable
+	// Create a subState if not retrieved from durable lookup above.
 	if sub == nil {
 		sub = &subState{
 			clientID:      sr.ClientID,
@@ -1050,6 +1044,14 @@ func (s *stanServer) processAck(cs *channelStore, sub *subState, ack *Ack) {
 	sub.Lock()
 	// Clear the ack
 	delete(sub.acksPending, ack.Sequence)
+	stalled := sub.stalled
+	if len(sub.acksPending) < sub.maxInFlight {
+		sub.stalled = false
+	}
+	if sub.qstate != nil {
+		stalled = sub.qstate.stalled
+		sub.qstate.stalled = false
+	}
 
 	// If we have the ackTimer running, either reset or cancel it.
 	if sub.ackTimer != nil {
@@ -1060,11 +1062,16 @@ func (s *stanServer) processAck(cs *channelStore, sub *subState, ack *Ack) {
 			sub.ackTimer.Reset(sub.ackWaitInSecs * time.Second)
 		}
 	}
-	qgroup := sub.qgroup
+
+	qs := sub.qstate
 	sub.Unlock()
 
-	if qgroup != "" {
-		s.sendAvailableMessagesToQueue(cs, cs.subs.LookupQueueState(qgroup))
+	if !stalled {
+		return
+	}
+
+	if qs != nil {
+		s.sendAvailableMessagesToQueue(cs, qs)
 	} else {
 		s.sendAvailableMessages(cs, sub)
 	}
@@ -1126,11 +1133,11 @@ func (s *stanServer) startSequenceValid(subject string, seq uint64) bool {
 func (s *stanServer) sendMessagesFromSequence(cs *channelStore, sub *subState, startSeq uint64) {
 	sub.Lock()
 	sub.lastSent = startSeq - 1 // FIXME(dlc) - wrap?
-	qgroup := sub.qgroup
+	qs := sub.qstate
 	sub.Unlock()
 
-	if qgroup != "" {
-		s.sendAvailableMessagesToQueue(cs, cs.subs.LookupQueueState(qgroup))
+	if qs != nil {
+		s.sendAvailableMessagesToQueue(cs, qs)
 	} else {
 		s.sendAvailableMessages(cs, sub)
 	}
