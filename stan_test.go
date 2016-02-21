@@ -416,10 +416,11 @@ func TestSubscriptionStartPositionLast(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName)
-	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
+	defer sc.Close()
+
 	// Publish ten messages
 	for i := 0; i < 10; i++ {
 		data := []byte(fmt.Sprintf("%d", i))
