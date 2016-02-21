@@ -21,13 +21,13 @@ func TestGUIDInit(t *testing.T) {
 }
 
 func TestGUIDRollover(t *testing.T) {
-	globalGUID.mu.Lock()
+	globalGUID.Lock()
 	globalGUID.seq = maxSeq
 	oldPre := globalGUID.pre
-	globalGUID.mu.Unlock()
+	globalGUID.Unlock()
 	newGUID()
-	globalGUID.mu.Lock()
-	defer globalGUID.mu.Unlock()
+	globalGUID.Lock()
+	defer globalGUID.Unlock()
 	if globalGUID.pre == oldPre {
 		t.Fatalf("Expected new pre, got the old one\n")
 	}

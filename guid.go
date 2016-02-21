@@ -30,7 +30,7 @@ const (
 var globalGUID *guid
 
 type guid struct {
-	mu  sync.Mutex
+	sync.Mutex
 	pre [preLen]byte
 	seq int64
 }
@@ -45,9 +45,9 @@ func init() {
 func newGUID() string {
 	// Check first to see if we are at the maximum for the sequential data.
 	// Could use atomic, but with 3xatomic (check limit, increment, load pre) doubt its worth it.
-	globalGUID.mu.Lock()
+	globalGUID.Lock()
 	if globalGUID.seq >= maxSeq {
-		globalGUID.seq = 0
+		globalGUID.seq = mrand.Int63() % maxSeq
 		globalGUID.genNewPre()
 	}
 	// copy of prefix under lock.
@@ -59,7 +59,7 @@ func newGUID() string {
 	globalGUID.seq++
 	seq := globalGUID.seq
 	// We can unlock here
-	globalGUID.mu.Unlock()
+	globalGUID.Unlock()
 
 	i := len(b)
 	for l := seq; i > preLen; l /= base {
