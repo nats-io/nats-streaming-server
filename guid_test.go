@@ -1,7 +1,6 @@
 package stan
 
 import (
-	"math/rand"
 	"testing"
 
 	"github.com/nats-io/nats"
@@ -31,10 +30,6 @@ func TestGUIDRollover(t *testing.T) {
 	if globalGUID.pre == oldPre {
 		t.Fatalf("Expected new pre, got the old one\n")
 	}
-	if globalGUID.seq != 1 {
-		t.Fatalf("Expected seq to rollover to 1, got %d\n", globalGUID.seq)
-	}
-	globalGUID.seq = rand.Int63() % maxSeq
 }
 
 func TestGUIDLen(t *testing.T) {
