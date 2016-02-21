@@ -39,26 +39,26 @@ var _ = math.Inf
 type StartPosition int32
 
 const (
-	StartPosition_NewOnly       StartPosition = 0
-	StartPosition_LastReceived  StartPosition = 1
-	StartPosition_TimeStart     StartPosition = 2
-	StartPosition_SequenceStart StartPosition = 3
-	StartPosition_First         StartPosition = 4
+	StartPosition_NewOnly        StartPosition = 0
+	StartPosition_LastReceived   StartPosition = 1
+	StartPosition_TimeDeltaStart StartPosition = 2
+	StartPosition_SequenceStart  StartPosition = 3
+	StartPosition_First          StartPosition = 4
 )
 
 var StartPosition_name = map[int32]string{
 	0: "NewOnly",
 	1: "LastReceived",
-	2: "TimeStart",
+	2: "TimeDeltaStart",
 	3: "SequenceStart",
 	4: "First",
 }
 var StartPosition_value = map[string]int32{
-	"NewOnly":       0,
-	"LastReceived":  1,
-	"TimeStart":     2,
-	"SequenceStart": 3,
-	"First":         4,
+	"NewOnly":        0,
+	"LastReceived":   1,
+	"TimeDeltaStart": 2,
+	"SequenceStart":  3,
+	"First":          4,
 }
 
 func (x StartPosition) String() string {
@@ -141,16 +141,16 @@ func (*ConnectResponse) ProtoMessage()    {}
 
 // Protocol for a client to subscribe
 type SubscriptionRequest struct {
-	ClientID      string        `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
-	Subject       string        `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
-	QGroup        string        `protobuf:"bytes,3,opt,name=qGroup,proto3" json:"qGroup,omitempty"`
-	Inbox         string        `protobuf:"bytes,4,opt,name=inbox,proto3" json:"inbox,omitempty"`
-	MaxInFlight   int32         `protobuf:"varint,5,opt,name=maxInFlight,proto3" json:"maxInFlight,omitempty"`
-	AckWaitInSecs int32         `protobuf:"varint,6,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
-	DurableName   string        `protobuf:"bytes,7,opt,name=durableName,proto3" json:"durableName,omitempty"`
-	StartPosition StartPosition `protobuf:"varint,10,opt,name=startPosition,proto3,enum=stan.StartPosition" json:"startPosition,omitempty"`
-	StartSequence uint64        `protobuf:"varint,11,opt,name=startSequence,proto3" json:"startSequence,omitempty"`
-	StartTime     int64         `protobuf:"varint,12,opt,name=startTime,proto3" json:"startTime,omitempty"`
+	ClientID       string        `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
+	Subject        string        `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
+	QGroup         string        `protobuf:"bytes,3,opt,name=qGroup,proto3" json:"qGroup,omitempty"`
+	Inbox          string        `protobuf:"bytes,4,opt,name=inbox,proto3" json:"inbox,omitempty"`
+	MaxInFlight    int32         `protobuf:"varint,5,opt,name=maxInFlight,proto3" json:"maxInFlight,omitempty"`
+	AckWaitInSecs  int32         `protobuf:"varint,6,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
+	DurableName    string        `protobuf:"bytes,7,opt,name=durableName,proto3" json:"durableName,omitempty"`
+	StartPosition  StartPosition `protobuf:"varint,10,opt,name=startPosition,proto3,enum=stan.StartPosition" json:"startPosition,omitempty"`
+	StartSequence  uint64        `protobuf:"varint,11,opt,name=startSequence,proto3" json:"startSequence,omitempty"`
+	StartTimeDelta int64         `protobuf:"varint,12,opt,name=startTimeDelta,proto3" json:"startTimeDelta,omitempty"`
 }
 
 func (m *SubscriptionRequest) Reset()         { *m = SubscriptionRequest{} }
@@ -542,10 +542,10 @@ func (m *SubscriptionRequest) MarshalTo(data []byte) (int, error) {
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.StartSequence))
 	}
-	if m.StartTime != 0 {
+	if m.StartTimeDelta != 0 {
 		data[i] = 0x60
 		i++
-		i = encodeVarintProtocol(data, i, uint64(m.StartTime))
+		i = encodeVarintProtocol(data, i, uint64(m.StartTimeDelta))
 	}
 	return i, nil
 }
@@ -869,8 +869,8 @@ func (m *SubscriptionRequest) Size() (n int) {
 	if m.StartSequence != 0 {
 		n += 1 + sovProtocol(uint64(m.StartSequence))
 	}
-	if m.StartTime != 0 {
-		n += 1 + sovProtocol(uint64(m.StartTime))
+	if m.StartTimeDelta != 0 {
+		n += 1 + sovProtocol(uint64(m.StartTimeDelta))
 	}
 	return n
 }
@@ -2178,9 +2178,9 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 			}
 		case 12:
 			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field StartTime", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field StartTimeDelta", wireType)
 			}
-			m.StartTime = 0
+			m.StartTimeDelta = 0
 			for shift := uint(0); ; shift += 7 {
 				if shift >= 64 {
 					return ErrIntOverflowProtocol
@@ -2190,7 +2190,7 @@ func (m *SubscriptionRequest) Unmarshal(data []byte) error {
 				}
 				b := data[iNdEx]
 				iNdEx++
-				m.StartTime |= (int64(b) & 0x7F) << shift
+				m.StartTimeDelta |= (int64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}

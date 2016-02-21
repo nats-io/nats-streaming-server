@@ -1,7 +1,7 @@
 
 - [ ] Retry limits?
 - [ ] Server Store Limits (time, msgs, byte)
-- [ ] Change time to deltas
+- [X] Change time to deltas
 - [X] Server heartbeat, release dead clients.
 - [X] Require clientID for published messages, error if not registered.
 - [X] Check for need of ackMap (out of order re-delivery to queue subscribers).

@@ -108,11 +108,20 @@ func StartAtSequence(seq uint64) SubscriptionOption {
 	}
 }
 
-// StartTime sets the desired start time position and state.
+// StartAtTime sets the desired start time position and state.
 func StartAtTime(start time.Time) SubscriptionOption {
 	return func(o *SubscriptionOptions) error {
-		o.StartAt = StartPosition_TimeStart
+		o.StartAt = StartPosition_TimeDeltaStart
 		o.StartTime = start
+		return nil
+	}
+}
+
+// StartAtTimeDelta sets the desired start time position and state using the delta.
+func StartAtTimeDelta(ago time.Duration) SubscriptionOption {
+	return func(o *SubscriptionOptions) error {
+		o.StartAt = StartPosition_TimeDeltaStart
+		o.StartTime = time.Now().Add(-ago)
 		return nil
 	}
 }
@@ -204,8 +213,8 @@ func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...Subs
 
 	// Conditionals
 	switch sr.StartPosition {
-	case StartPosition_TimeStart:
-		sr.StartTime = sub.opts.StartTime.UnixNano()
+	case StartPosition_TimeDeltaStart:
+		sr.StartTimeDelta = time.Now().UnixNano() - sub.opts.StartTime.UnixNano()
 	case StartPosition_SequenceStart:
 		sr.StartSequence = sub.opts.StartSequence
 	}

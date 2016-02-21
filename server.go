@@ -1010,8 +1010,9 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 	}
 	// Check for SequenceTime out of range
-	if sr.StartPosition == StartPosition_TimeStart {
-		if !s.startTimeValid(sr.Subject, sr.StartTime) {
+	if sr.StartPosition == StartPosition_TimeDeltaStart {
+		startTime := time.Now().UnixNano() - sr.StartTimeDelta
+		if !s.startTimeValid(sr.Subject, startTime) {
 			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidTime)
 			return
 		}
@@ -1063,8 +1064,8 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		s.sendNewOnly(cs, sub)
 	case StartPosition_LastReceived:
 		s.sendLastMessage(cs, sub)
-	case StartPosition_TimeStart:
-		s.sendMessagesToSubFromTime(cs, sub, sr.StartTime)
+	case StartPosition_TimeDeltaStart:
+		s.sendMessagesToSubFromTime(cs, sub, time.Now().UnixNano()-sr.StartTimeDelta)
 	case StartPosition_SequenceStart:
 		s.sendMessagesFromSequence(cs, sub, sr.StartSequence)
 	case StartPosition_First:

@@ -527,15 +527,17 @@ func TestSubscriptionStartAtTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
-	// Publish ten messages all together
 
 	// Publish first 5
 	for i := 1; i <= 5; i++ {
 		data := []byte(fmt.Sprintf("%d", i))
 		sc.Publish("foo", data)
 	}
-	time.Sleep(200 * time.Millisecond)
+
+	// Buffer each side so slow tests still work.
+	time.Sleep(250 * time.Millisecond)
 	startTime := time.Now()
+	time.Sleep(250 * time.Millisecond)
 
 	// Publish last 5
 	for i := 6; i <= 10; i++ {
@@ -572,7 +574,7 @@ func TestSubscriptionStartAtTime(t *testing.T) {
 
 	// Check for sub setup
 	rsub := sub.(*subscription)
-	if rsub.opts.StartAt != StartPosition_TimeStart {
+	if rsub.opts.StartAt != StartPosition_TimeDeltaStart {
 		t.Fatalf("Incorrect StartAt state: %s\n", rsub.opts.StartAt)
 	}
 
@@ -597,6 +599,19 @@ func TestSubscriptionStartAtTime(t *testing.T) {
 			t.Fatalf("Expected payload: %d, got %d\n", seq, dseq)
 		}
 		seq++
+	}
+
+	// Now test Ago helper
+	delta := time.Now().Sub(startTime)
+
+	sub, err = sc.Subscribe("foo", mcb, StartAtTimeDelta(delta))
+	if err != nil {
+		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
+	}
+	defer sub.Unsubscribe()
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not receive our messages")
 	}
 }
 
