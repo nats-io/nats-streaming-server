@@ -67,11 +67,12 @@ func (x StartPosition) String() string {
 
 // How messages are delivered to the STAN cluster
 type PubMsg struct {
-	Id      string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Subject string `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
-	Reply   string `protobuf:"bytes,3,opt,name=reply,proto3" json:"reply,omitempty"`
-	Data    []byte `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`
-	Sha256  []byte `protobuf:"bytes,10,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	ClientID string `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
+	Guid     string `protobuf:"bytes,2,opt,name=guid,proto3" json:"guid,omitempty"`
+	Subject  string `protobuf:"bytes,3,opt,name=subject,proto3" json:"subject,omitempty"`
+	Reply    string `protobuf:"bytes,4,opt,name=reply,proto3" json:"reply,omitempty"`
+	Data     []byte `protobuf:"bytes,5,opt,name=data,proto3" json:"data,omitempty"`
+	Sha256   []byte `protobuf:"bytes,10,opt,name=sha256,proto3" json:"sha256,omitempty"`
 }
 
 func (m *PubMsg) Reset()         { *m = PubMsg{} }
@@ -80,7 +81,7 @@ func (*PubMsg) ProtoMessage()    {}
 
 // Used to ACK to publishers
 type PubAck struct {
-	Id    string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Guid  string `protobuf:"bytes,1,opt,name=guid,proto3" json:"guid,omitempty"`
 	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 }
 
@@ -116,7 +117,8 @@ func (*Ack) ProtoMessage()    {}
 
 // Connection Request
 type ConnectRequest struct {
-	ClientID string `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
+	ClientID       string `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
+	HeartbeatInbox string `protobuf:"bytes,2,opt,name=heartbeatInbox,proto3" json:"heartbeatInbox,omitempty"`
 }
 
 func (m *ConnectRequest) Reset()         { *m = ConnectRequest{} }
@@ -224,27 +226,33 @@ func (m *PubMsg) MarshalTo(data []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
-	if len(m.Id) > 0 {
+	if len(m.ClientID) > 0 {
 		data[i] = 0xa
 		i++
-		i = encodeVarintProtocol(data, i, uint64(len(m.Id)))
-		i += copy(data[i:], m.Id)
+		i = encodeVarintProtocol(data, i, uint64(len(m.ClientID)))
+		i += copy(data[i:], m.ClientID)
+	}
+	if len(m.Guid) > 0 {
+		data[i] = 0x12
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Guid)))
+		i += copy(data[i:], m.Guid)
 	}
 	if len(m.Subject) > 0 {
-		data[i] = 0x12
+		data[i] = 0x1a
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.Subject)))
 		i += copy(data[i:], m.Subject)
 	}
 	if len(m.Reply) > 0 {
-		data[i] = 0x1a
+		data[i] = 0x22
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.Reply)))
 		i += copy(data[i:], m.Reply)
 	}
 	if m.Data != nil {
 		if len(m.Data) > 0 {
-			data[i] = 0x22
+			data[i] = 0x2a
 			i++
 			i = encodeVarintProtocol(data, i, uint64(len(m.Data)))
 			i += copy(data[i:], m.Data)
@@ -276,11 +284,11 @@ func (m *PubAck) MarshalTo(data []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
-	if len(m.Id) > 0 {
+	if len(m.Guid) > 0 {
 		data[i] = 0xa
 		i++
-		i = encodeVarintProtocol(data, i, uint64(len(m.Id)))
-		i += copy(data[i:], m.Id)
+		i = encodeVarintProtocol(data, i, uint64(len(m.Guid)))
+		i += copy(data[i:], m.Guid)
 	}
 	if len(m.Error) > 0 {
 		data[i] = 0x12
@@ -403,6 +411,12 @@ func (m *ConnectRequest) MarshalTo(data []byte) (int, error) {
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.ClientID)))
 		i += copy(data[i:], m.ClientID)
+	}
+	if len(m.HeartbeatInbox) > 0 {
+		data[i] = 0x12
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.HeartbeatInbox)))
+		i += copy(data[i:], m.HeartbeatInbox)
 	}
 	return i, nil
 }
@@ -686,7 +700,11 @@ func encodeVarintProtocol(data []byte, offset int, v uint64) int {
 func (m *PubMsg) Size() (n int) {
 	var l int
 	_ = l
-	l = len(m.Id)
+	l = len(m.ClientID)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.Guid)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
@@ -716,7 +734,7 @@ func (m *PubMsg) Size() (n int) {
 func (m *PubAck) Size() (n int) {
 	var l int
 	_ = l
-	l = len(m.Id)
+	l = len(m.Guid)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
@@ -776,6 +794,10 @@ func (m *ConnectRequest) Size() (n int) {
 	var l int
 	_ = l
 	l = len(m.ClientID)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.HeartbeatInbox)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
@@ -953,7 +975,7 @@ func (m *PubMsg) Unmarshal(data []byte) error {
 		switch fieldNum {
 		case 1:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Id", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field ClientID", wireType)
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
@@ -978,9 +1000,38 @@ func (m *PubMsg) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Id = string(data[iNdEx:postIndex])
+			m.ClientID = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
 		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Guid", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Guid = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Subject", wireType)
 			}
@@ -1009,7 +1060,7 @@ func (m *PubMsg) Unmarshal(data []byte) error {
 			}
 			m.Subject = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
-		case 3:
+		case 4:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Reply", wireType)
 			}
@@ -1038,7 +1089,7 @@ func (m *PubMsg) Unmarshal(data []byte) error {
 			}
 			m.Reply = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
-		case 4:
+		case 5:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Data", wireType)
 			}
@@ -1152,7 +1203,7 @@ func (m *PubAck) Unmarshal(data []byte) error {
 		switch fieldNum {
 		case 1:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Id", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field Guid", wireType)
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
@@ -1177,7 +1228,7 @@ func (m *PubAck) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Id = string(data[iNdEx:postIndex])
+			m.Guid = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
 		case 2:
 			if wireType != 2 {
@@ -1600,6 +1651,35 @@ func (m *ConnectRequest) Unmarshal(data []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.ClientID = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field HeartbeatInbox", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.HeartbeatInbox = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex

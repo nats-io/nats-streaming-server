@@ -28,11 +28,16 @@ const (
 	DefaultMsgStoreLimit = 1000000
 	// How many channels (literal subjects) do we allow?
 	DefaultChannelLimit = 100
+
+	// Heartbeat intervals.
+	DefaultHeartBeatInterval   = 30 * time.Second
+	DefaultClientHBTimeout     = 10 * time.Second
+	DefaultMaxFailedHeartBeats = int((5 * time.Minute) / DefaultHeartBeatInterval)
 )
 
 // Errors.
 var (
-	ErrBadPubMsg       = errors.New("stan: malformed message")
+	ErrBadPubMsg       = errors.New("stan: malformed publish message envelope")
 	ErrBadSubRequest   = errors.New("stan: malformed subscription request")
 	ErrInvalidSubject  = errors.New("stan: invalid subject")
 	ErrInvalidSequence = errors.New("stan: invalid start sequence")
@@ -74,6 +79,9 @@ type clientStore struct {
 type client struct {
 	sync.RWMutex
 	clientID string
+	hbInbox  string
+	hbt      *time.Timer
+	fhb      int
 	subs     []*subState
 }
 
@@ -107,6 +115,11 @@ func (cs *clientStore) Unregister(ID string) {
 		client.subs = nil
 	}
 	delete(cs.clients, ID)
+}
+
+// Check validity of a client.
+func (s *stanServer) isValidClient(ID string) bool {
+	return s.clients.Lookup(ID) != nil
 }
 
 // Lookup a client
@@ -401,18 +414,6 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 		panic(fmt.Sprintf("Can't connect to NATS server: %v\n", err))
 	}
 
-	/*
-		s.nc.SetDisconnectHandler(func(_ *nats.Conn) {
-			fmt.Printf("NATS DISCONNECTED THE CONNECTION!\n")
-		})
-		s.nc.SetClosedHandler(func(_ *nats.Conn) {
-			fmt.Printf("NATS CLOSED THE CONNECTION!\n")
-		})
-		s.nc.SetErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
-			fmt.Printf("NATS GOT ERR: %v\n", err)
-		})
-	*/
-
 	s.initSubscriptions()
 
 	Noticef("Message store is MEMORY")
@@ -456,7 +457,7 @@ func (s *stanServer) initSubscriptions() {
 func (s *stanServer) connectCB(m *nats.Msg) {
 	req := &ConnectRequest{}
 	err := req.Unmarshal(m.Data)
-	if err != nil || req.ClientID == "" {
+	if err != nil || req.ClientID == "" || req.HeartbeatInbox == "" {
 		cr := &ConnectResponse{Error: ErrInvalidConnReq.Error()}
 		b, _ := cr.Marshal()
 		s.nc.Publish(m.Reply, b)
@@ -474,6 +475,7 @@ func (s *stanServer) connectCB(m *nats.Msg) {
 	// Register the new connection.
 	client := &client{
 		clientID: req.ClientID,
+		hbInbox:  req.HeartbeatInbox,
 		subs:     make([]*subState, 0, 4),
 	}
 	s.clients.Register(client)
@@ -487,6 +489,41 @@ func (s *stanServer) connectCB(m *nats.Msg) {
 	}
 	b, _ := cr.Marshal()
 	s.nc.Publish(m.Reply, b)
+
+	// Heartbeat timer.
+	client.Lock()
+	client.hbt = time.AfterFunc(DefaultHeartBeatInterval, func() { s.checkClientHealth(client.clientID) })
+	client.Unlock()
+}
+
+// Send a heartbeat call to the client.
+func (s *stanServer) checkClientHealth(clientID string) {
+	client := s.clients.Lookup(clientID)
+	if client == nil {
+		return
+	}
+	client.Lock()
+	defer client.Unlock()
+
+	_, err := s.nc.Request(client.hbInbox, nil, DefaultClientHBTimeout)
+	if err != nil {
+		client.fhb++
+		if client.fhb > DefaultMaxFailedHeartBeats { // 5 minutes
+			defer s.closeClient(client.clientID)
+		}
+	} else {
+		client.fhb = 0
+	}
+	client.hbt.Reset(DefaultHeartBeatInterval)
+}
+
+// Close a client
+func (s *stanServer) closeClient(clientID string) {
+	// Remove all non-durable subscribers.
+	s.removeAllNonDurableSubscribers(clientID)
+
+	// Remove from our clientStore
+	s.clients.Unregister(clientID)
 }
 
 // processCloseRequest process inbound messages from clients.
@@ -500,11 +537,7 @@ func (s *stanServer) processCloseRequest(m *nats.Msg) {
 		}
 	}
 
-	// Remove all non-durable subscribers.
-	s.removeAllNonDurableSubscribers(req.ClientID)
-
-	// Remove from our clientStore
-	s.clients.Unregister(req.ClientID)
+	s.closeClient(req.ClientID)
 
 	resp := &CloseResponse{}
 	b, _ := resp.Marshal()
@@ -513,13 +546,16 @@ func (s *stanServer) processCloseRequest(m *nats.Msg) {
 
 // processClientPublish process inbound messages from clients.
 func (s *stanServer) processClientPublish(m *nats.Msg) {
-	pe := &PubMsg{}
-	err := pe.Unmarshal(m.Data)
-	if err != nil {
-		badMsgAck := &PubAck{Error: ErrBadPubMsg.Error()}
-		if b, err := badMsgAck.Marshal(); err != nil {
+	pm := &PubMsg{}
+	pm.Unmarshal(m.Data)
+
+	// Make sure we have a clientID, guid, etc.
+	if pm.Guid == "" || !s.isValidClient(pm.ClientID) || !isValidSubject(pm.Subject) {
+		badMsgAck := &PubAck{Guid: pm.Guid, Error: ErrBadPubMsg.Error()}
+		if b, err := badMsgAck.Marshal(); err == nil {
 			s.nc.Publish(m.Reply, b)
 		}
+		return
 	}
 
 	////////////////////////////////////////////////////////////////////////////
@@ -528,7 +564,7 @@ func (s *stanServer) processClientPublish(m *nats.Msg) {
 	// ack the publisher. We simply do so here for now.
 	////////////////////////////////////////////////////////////////////////////
 
-	s.ackPublisher(pe, m.Reply)
+	s.ackPublisher(pm, m.Reply)
 
 	////////////////////////////////////////////////////////////////////////////
 	// Once we have ack'd the publisher, we need to assign this a sequence ID.
@@ -536,7 +572,7 @@ func (s *stanServer) processClientPublish(m *nats.Msg) {
 	// assume we are the master and assign the sequence ID here.
 	////////////////////////////////////////////////////////////////////////////
 
-	cs := s.assignAndStore(pe)
+	cs := s.assignAndStore(pm)
 
 	////////////////////////////////////////////////////////////////////////////
 	// Now trigger sends to any active subscribers
@@ -644,14 +680,27 @@ func (s *stanServer) performAckExpirationRedelivery(sub *subState) {
 // Performs redlivery, takes a flag on whether to honor expiration.
 func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
-	sub.Lock()
+	sub.RLock()
 	expTime := int64(sub.ackWaitInSecs * time.Second)
 	sortedMsgs := makeSortedMsgs(sub.acksPending)
 	sub.ackTimer = nil
 	inbox := sub.inbox
 	subject := sub.subject
 	qs := sub.qstate
-	sub.Unlock()
+	clientID := sub.clientID
+	sub.RUnlock()
+
+	// If the client has some failed heartbeats, ignore this request.
+	client := s.clients.Lookup(clientID)
+	if client == nil {
+		return
+	}
+	client.RLock()
+	fhbs := client.fhb
+	client.RUnlock()
+	if fhbs != 0 {
+		return
+	}
 
 	now := time.Now().UnixNano()
 
@@ -738,7 +787,7 @@ func (s *stanServer) assignAndStore(pm *PubMsg) *channelStore {
 
 // ackPublisher sends the ack for a message.
 func (s *stanServer) ackPublisher(pm *PubMsg, reply string) {
-	msgAck := &PubAck{Id: pm.Id}
+	msgAck := &PubAck{Guid: pm.Guid}
 	var buf [32]byte
 	b := buf[:]
 	n, _ := msgAck.MarshalTo(b)
@@ -1048,10 +1097,6 @@ func (s *stanServer) processAck(cs *channelStore, sub *subState, ack *Ack) {
 	if len(sub.acksPending) < sub.maxInFlight {
 		sub.stalled = false
 	}
-	if sub.qstate != nil {
-		stalled = sub.qstate.stalled
-		sub.qstate.stalled = false
-	}
 
 	// If we have the ackTimer running, either reset or cancel it.
 	if sub.ackTimer != nil {
@@ -1065,6 +1110,13 @@ func (s *stanServer) processAck(cs *channelStore, sub *subState, ack *Ack) {
 
 	qs := sub.qstate
 	sub.Unlock()
+
+	if qs != nil {
+		qs.Lock()
+		stalled = qs.stalled
+		qs.stalled = false
+		qs.Unlock()
+	}
 
 	if !stalled {
 		return

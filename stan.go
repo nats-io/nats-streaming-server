@@ -109,6 +109,7 @@ type conn struct {
 	closeRequests   string // Subject to send close requests.
 	ackSubject      string // publish acks
 	ackSubscription *nats.Subscription
+	hbSubscription  *nats.Subscription
 	subMap          map[string]*subscription
 	pubAckMap       map[string]*ack
 	pubAckChan      chan (struct{})
@@ -131,7 +132,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 			return nil, err
 		}
 	}
-	// Create a connection if it doesn't exist.
+	// Create a NATS connection if it doesn't exist.
 	if c.nc == nil {
 		if nc, err := nats.Connect(c.opts.NatsURL); err != nil {
 			return nil, err
@@ -139,9 +140,16 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 			c.nc = nc
 		}
 	}
+	// Create a heartbeat inbox
+	hbInbox := newInbox()
+	var err error
+	if c.hbSubscription, err = c.nc.Subscribe(hbInbox, c.processHeartBeat); err != nil {
+		return nil, err
+	}
+
 	// Send Request to discover the cluster
 	discoverSubject := fmt.Sprintf("%s.%s", c.opts.DiscoverPrefix, stanClusterID)
-	req := &ConnectRequest{ClientID: clientID}
+	req := &ConnectRequest{ClientID: clientID, HeartbeatInbox: hbInbox}
 	b, _ := req.Marshal()
 	reply, err := c.nc.Request(discoverSubject, b, c.opts.ConnectTimeout)
 	if err != nil {
@@ -232,6 +240,12 @@ func (sc *conn) Close() error {
 	return nil
 }
 
+// Process a heartbeat from the STAN cluster
+func (sc *conn) processHeartBeat(m *nats.Msg) {
+	// No payload assumed, just reply.
+	sc.nc.Publish(m.Reply, nil)
+}
+
 // Process an ack from the STAN cluster
 func (sc *conn) processAck(m *nats.Msg) {
 	pa := &PubAck{}
@@ -242,11 +256,15 @@ func (sc *conn) processAck(m *nats.Msg) {
 	}
 
 	// Remove
-	a := sc.removeAck(pa.Id)
+	a := sc.removeAck(pa.Guid)
 
+	// Capture error if it exists.
+	if pa.Error != "" {
+		err = errors.New(pa.Error)
+	}
 	// Perform the ackHandler callback
 	if a != nil && a.ah != nil {
-		a.ah(pa.Id, nil)
+		a.ah(pa.Guid, err)
 	}
 }
 
@@ -278,18 +296,20 @@ func (sc *conn) PublishWithReply(subject, reply string, data []byte) error {
 // PublishAsyncWithReply will publish to the cluster and asynchronously
 // process the ACK or error state. It will return the GUID for the message being sent.
 func (sc *conn) PublishAsyncWithReply(subject, reply string, data []byte, ah AckHandler) (string, error) {
-	subj := fmt.Sprintf("%s.%s", sc.pubPrefix, subject)
-	pe := &PubMsg{Id: newGUID(), Subject: subject, Reply: reply, Data: data}
-	b, _ := pe.Marshal()
-	a := &ack{ah: ah}
 
 	sc.Lock()
 	if sc.nc == nil {
 		sc.Unlock()
 		return "", ErrConnectionClosed
 	}
+
+	subj := fmt.Sprintf("%s.%s", sc.pubPrefix, subject)
+	pe := &PubMsg{ClientID: sc.clientID, Guid: newGUID(), Subject: subject, Reply: reply, Data: data}
+	b, _ := pe.Marshal()
+	a := &ack{ah: ah}
+
 	// Map ack to guid.
-	sc.pubAckMap[pe.Id] = a
+	sc.pubAckMap[pe.Guid] = a
 	// snapshot
 	ackSubject := sc.ackSubject
 	ackTimeout := sc.opts.AckTimeout
@@ -301,21 +321,21 @@ func (sc *conn) PublishAsyncWithReply(subject, reply string, data []byte, ah Ack
 
 	err := sc.nc.PublishRequest(subj, ackSubject, b)
 	if err != nil {
-		sc.removeAck(pe.Id)
+		sc.removeAck(pe.Guid)
 		return "", err
 	}
 
 	// Setup the timer for expiration.
 	sc.Lock()
 	a.t = time.AfterFunc(ackTimeout, func() {
-		sc.removeAck(pe.Id)
+		sc.removeAck(pe.Guid)
 		if a.ah != nil {
-			ah(pe.Id, ErrTimeout)
+			ah(pe.Guid, ErrTimeout)
 		}
 	})
 	sc.Unlock()
 
-	return pe.Id, nil
+	return pe.Guid, nil
 }
 
 // removeAck removes the ack from the pubAckMap and cancels any state, e.g. timers

@@ -72,6 +72,7 @@ func BenchmarkPublishAsync(b *testing.B) {
 
 	err = WaitTime(ch, 10*time.Second)
 	if err != nil {
+		fmt.Printf("sc error is %v\n", sc.(*conn).nc.LastError())
 		b.Fatal("Timed out waiting for ack messages")
 	} else if atomic.LoadInt32(&received) != int32(b.N) {
 		b.Fatalf("Received: %d", received)

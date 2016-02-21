@@ -15,17 +15,18 @@ option (gogoproto.goproto_getters_all) = false;
 
 // How messages are delivered to the STAN cluster
 message PubMsg {
-  string id      = 1;  // guid
-  string subject = 2;  // subject
-  string reply   = 3;  // optional reply
-  bytes  data    = 4;  // payload
+  string clientID = 1;  // ClientID
+  string guid     = 2;  // guid
+  string subject  = 3;  // subject
+  string reply    = 4;  // optional reply
+  bytes  data     = 5;  // payload
 
   bytes  sha256  = 10; // optional sha256 of data
 }
 
 // Used to ACK to publishers
 message PubAck {
-  string id    = 1; // guid
+  string guid  = 1; // guid
   string error = 2; // err string, empty/omitted if no error
 }
 
@@ -50,7 +51,8 @@ message Ack {
 
 // Connection Request
 message ConnectRequest {
-  string clientID = 1;  // Client name/identifier.
+  string clientID       = 1;  // Client name/identifier.
+  string heartbeatInbox = 2;  // Inbox for server initiated heartbeats.
 }
 
 // Response to a client connect

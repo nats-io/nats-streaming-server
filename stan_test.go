@@ -75,10 +75,10 @@ func TestBasicPublish(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 	sc, err := Connect(clusterName, clientName)
-	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
+	defer sc.Close()
 	if err := sc.Publish("foo", []byte("Hello World!")); err != nil {
 		t.Fatalf("Expected no errors on publish, got %v\n", err)
 	}
