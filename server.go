@@ -12,6 +12,7 @@ import (
 
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/nats"
+	"github.com/nats-io/nuid"
 
 	natsd "github.com/nats-io/gnatsd/test"
 )
@@ -384,7 +385,7 @@ var DefaultServerOptions = ServerOptions{
 // RunServer will startup and embedded STAN server and a nats-server to support it.
 func RunServer(ID string, optsA ...*server.Options) *stanServer {
 	// Run a nats server by default
-	s := stanServer{clusterID: ID, serverID: newGUID(), opts: &DefaultServerOptions}
+	s := stanServer{clusterID: ID, serverID: nuid.Next(), opts: &DefaultServerOptions}
 
 	// Create clientStore
 	s.clients = &clientStore{clients: make(map[string]*client)}
@@ -394,10 +395,10 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 
 	// Generate Subjects
 	// FIXME(dlc) guid needs to be shared in cluster mode
-	s.pubPrefix = fmt.Sprintf("%s.%s", DefaultPubPrefix, newGUID())
-	s.subRequests = fmt.Sprintf("%s.%s", DefaultSubPrefix, newGUID())
-	s.unsubRequests = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, newGUID())
-	s.closeRequests = fmt.Sprintf("%s.%s", DefaultClosePrefix, newGUID())
+	s.pubPrefix = fmt.Sprintf("%s.%s", DefaultPubPrefix, nuid.Next())
+	s.subRequests = fmt.Sprintf("%s.%s", DefaultSubPrefix, nuid.Next())
+	s.unsubRequests = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
+	s.closeRequests = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
 
 	// hack
 	var opts *server.Options
@@ -996,7 +997,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 			// Set new clientID and reset lastSent
 			sub.clientID = sr.ClientID
 			// Also grab a new ackInbox and the sr's inbox.
-			sub.ackInbox = newInbox()
+			sub.ackInbox = nats.NewInbox()
 			sub.inbox = sr.Inbox
 			sub.Unlock()
 		}
@@ -1025,7 +1026,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 			subject:       sr.Subject,
 			qgroup:        sr.QGroup,
 			inbox:         sr.Inbox,
-			ackInbox:      newInbox(),
+			ackInbox:      nats.NewInbox(),
 			durableName:   sr.DurableName,
 			maxInFlight:   int(sr.MaxInFlight),
 			ackWaitInSecs: time.Duration(sr.AckWaitInSecs),

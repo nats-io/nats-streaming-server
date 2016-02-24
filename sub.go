@@ -170,7 +170,7 @@ func (sc *conn) QueueSubscribe(subject, qgroup string, cb MsgHandler, options ..
 
 // subscribe will perform a subscription with the given options to the STAN cluster.
 func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...SubscriptionOption) (Subscription, error) {
-	sub := &subscription{subject: subject, qgroup: qgroup, inbox: newInbox(), cb: cb, sc: sc, opts: DefaultSubscriptionOptions}
+	sub := &subscription{subject: subject, qgroup: qgroup, inbox: nats.NewInbox(), cb: cb, sc: sc, opts: DefaultSubscriptionOptions}
 	for _, opt := range options {
 		if err := opt(&sub.opts); err != nil {
 			return nil, err

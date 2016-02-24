@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats"
+	"github.com/nats-io/nuid"
 )
 
 const (
@@ -141,7 +142,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 		}
 	}
 	// Create a heartbeat inbox
-	hbInbox := newInbox()
+	hbInbox := nats.NewInbox()
 	var err error
 	if c.hbSubscription, err = c.nc.Subscribe(hbInbox, c.processHeartBeat); err != nil {
 		return nil, err
@@ -176,7 +177,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	c.closeRequests = cr.CloseRequests
 
 	// Setup the ACK subscription
-	c.ackSubject = fmt.Sprintf("%s.%s", DefaultACKPrefix, newGUID())
+	c.ackSubject = fmt.Sprintf("%s.%s", DefaultACKPrefix, nuid.Next())
 	if c.ackSubscription, err = c.nc.Subscribe(c.ackSubject, c.processAck); err != nil {
 		return nil, err
 	}
@@ -304,7 +305,7 @@ func (sc *conn) PublishAsyncWithReply(subject, reply string, data []byte, ah Ack
 	}
 
 	subj := fmt.Sprintf("%s.%s", sc.pubPrefix, subject)
-	pe := &PubMsg{ClientID: sc.clientID, Guid: newGUID(), Subject: subject, Reply: reply, Data: data}
+	pe := &PubMsg{ClientID: sc.clientID, Guid: nuid.Next(), Subject: subject, Reply: reply, Data: data}
 	b, _ := pe.Marshal()
 	a := &ack{ah: ah}
 
@@ -356,12 +357,6 @@ func (sc *conn) removeAck(guid string) *ack {
 		<-pac
 	}
 	return a
-}
-
-// New style Inbox
-// FIXME(dlc) remove once ported back to nats client.
-func newInbox() string {
-	return fmt.Sprintf("_INBOX.%s", newGUID())
 }
 
 // Helper function to produce time.Time from timestamp ns.

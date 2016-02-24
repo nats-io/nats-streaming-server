@@ -344,7 +344,7 @@ func TestBasicPubSubWithReply(t *testing.T) {
 	ch := make(chan bool)
 	hw := []byte("Hello World")
 
-	inbox := newInbox()
+	inbox := nats.NewInbox()
 
 	sub, err := sc.Subscribe("foo", func(m *Msg) {
 		if m.Subject != "foo" {
@@ -384,7 +384,7 @@ func TestAsyncPubSubWithReply(t *testing.T) {
 	ch := make(chan bool)
 	hw := []byte("Hello World")
 
-	inbox := newInbox()
+	inbox := nats.NewInbox()
 
 	sub, err := sc.Subscribe("foo", func(m *Msg) {
 		if m.Subject != "foo" {
