@@ -1146,7 +1146,7 @@ func TestPubMultiQueueSubWithSlowSubscriber(t *testing.T) {
 	received := int32(0)
 	s1Received := int32(0)
 	s2Received := int32(0)
-	toSend := int32(500)
+	toSend := int32(100)
 
 	var s1, s2 Subscription
 
