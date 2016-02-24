@@ -1065,7 +1065,7 @@ func TestPubMultiQueueSub(t *testing.T) {
 	received := int32(0)
 	s1Received := int32(0)
 	s2Received := int32(0)
-	toSend := int32(500)
+	toSend := int32(1000)
 
 	var s1, s2 Subscription
 
@@ -1111,7 +1111,7 @@ func TestPubMultiQueueSub(t *testing.T) {
 		data := []byte(fmt.Sprintf("%d", i))
 		sc.Publish("foo", data)
 	}
-	if err := WaitTime(ch, 5*time.Second); err != nil {
+	if err := WaitTime(ch, 10*time.Second); err != nil {
 		t.Fatal("Did not receive our messages")
 	}
 
@@ -1229,8 +1229,7 @@ func TestPubMultiQueueSubWithRedelivery(t *testing.T) {
 	ch := make(chan bool)
 	received := int32(0)
 	s1Received := int32(0)
-	s2Received := int32(0)
-	toSend := int32(500)
+	toSend := int32(50)
 
 	var s1, s2 Subscription
 
@@ -1274,17 +1273,6 @@ func TestPubMultiQueueSubWithRedelivery(t *testing.T) {
 
 	if nr := atomic.LoadInt32(&received); nr != toSend {
 		t.Fatalf("Did not receive correct number of messages: %d vs %d\n", nr, toSend)
-	}
-
-	s1r := atomic.LoadInt32(&s1Received)
-	s2r := atomic.LoadInt32(&s2Received)
-
-	// Since we never ack'd sub2, we should receive all messages on sub1
-	if s1r != toSend {
-		t.Fatalf("Expected %d msgs for sub1, got %d\n", toSend, s1r)
-	}
-	if s2r != 0 {
-		t.Fatalf("Expected %d msgs for sub2, got %d\n", 0, s2r)
 	}
 }
 
