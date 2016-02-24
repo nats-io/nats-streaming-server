@@ -1205,12 +1205,13 @@ func TestPubMultiQueueSubWithSlowSubscriber(t *testing.T) {
 	s1r := atomic.LoadInt32(&s1Received)
 	s2r := atomic.LoadInt32(&s2Received)
 
-	// Since we slowed down  sub2, we should receive all but 1 message on sub1
-	if s1r != toSend-1 {
-		t.Fatalf("Expected %d msgs for sub1, got %d\n", toSend-1, s1r)
+	// Since we slowed down sub2, we should receive all but 1 or 2 messages on sub1
+	if s2r != 1 && s2r != 2 {
+		t.Fatalf("Expected 1 or 2 msgs for sub2, got %d\n", s2r)
 	}
-	if s2r != 1 {
-		t.Fatalf("Expected %d msgs for sub2, got %d\n", 1, s2r)
+
+	if s1r != toSend-s2r {
+		t.Fatalf("Expected %d msgs for sub1, got %d\n", toSend-s2r, s1r)
 	}
 }
 
