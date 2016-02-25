@@ -90,7 +90,7 @@ func NewMemoryStore(limits ChannelLimits) *MemoryStore {
 	ms := &MemoryStore{}
 	ms.SetChannelLimits(limits)
 	ms.limits = limits
-	ms.channels = &ChannelMap{channels: make(map[string]*channelStore)}
+	ms.channels = &channelMap{channels: make(map[string]*channelStore)}
 	return ms
 }
 
