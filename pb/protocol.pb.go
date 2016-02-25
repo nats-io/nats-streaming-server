@@ -3,7 +3,7 @@
 // DO NOT EDIT!
 
 /*
-	Package stan is a generated protocol buffer package.
+	Package pb is a generated protocol buffer package.
 
 	It is generated from these files:
 		protocol.proto
@@ -21,7 +21,7 @@
 		CloseRequest
 		CloseResponse
 */
-package stan
+package pb
 
 import proto "github.com/gogo/protobuf/proto"
 import fmt "fmt"
@@ -148,7 +148,7 @@ type SubscriptionRequest struct {
 	MaxInFlight    int32         `protobuf:"varint,5,opt,name=maxInFlight,proto3" json:"maxInFlight,omitempty"`
 	AckWaitInSecs  int32         `protobuf:"varint,6,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
 	DurableName    string        `protobuf:"bytes,7,opt,name=durableName,proto3" json:"durableName,omitempty"`
-	StartPosition  StartPosition `protobuf:"varint,10,opt,name=startPosition,proto3,enum=stan.StartPosition" json:"startPosition,omitempty"`
+	StartPosition  StartPosition `protobuf:"varint,10,opt,name=startPosition,proto3,enum=pb.StartPosition" json:"startPosition,omitempty"`
 	StartSequence  uint64        `protobuf:"varint,11,opt,name=startSequence,proto3" json:"startSequence,omitempty"`
 	StartTimeDelta int64         `protobuf:"varint,12,opt,name=startTimeDelta,proto3" json:"startTimeDelta,omitempty"`
 }
@@ -198,18 +198,18 @@ func (m *CloseResponse) String() string { return proto.CompactTextString(m) }
 func (*CloseResponse) ProtoMessage()    {}
 
 func init() {
-	proto.RegisterType((*PubMsg)(nil), "stan.PubMsg")
-	proto.RegisterType((*PubAck)(nil), "stan.PubAck")
-	proto.RegisterType((*MsgProto)(nil), "stan.MsgProto")
-	proto.RegisterType((*Ack)(nil), "stan.Ack")
-	proto.RegisterType((*ConnectRequest)(nil), "stan.ConnectRequest")
-	proto.RegisterType((*ConnectResponse)(nil), "stan.ConnectResponse")
-	proto.RegisterType((*SubscriptionRequest)(nil), "stan.SubscriptionRequest")
-	proto.RegisterType((*SubscriptionResponse)(nil), "stan.SubscriptionResponse")
-	proto.RegisterType((*UnsubscribeRequest)(nil), "stan.UnsubscribeRequest")
-	proto.RegisterType((*CloseRequest)(nil), "stan.CloseRequest")
-	proto.RegisterType((*CloseResponse)(nil), "stan.CloseResponse")
-	proto.RegisterEnum("stan.StartPosition", StartPosition_name, StartPosition_value)
+	proto.RegisterType((*PubMsg)(nil), "pb.PubMsg")
+	proto.RegisterType((*PubAck)(nil), "pb.PubAck")
+	proto.RegisterType((*MsgProto)(nil), "pb.MsgProto")
+	proto.RegisterType((*Ack)(nil), "pb.Ack")
+	proto.RegisterType((*ConnectRequest)(nil), "pb.ConnectRequest")
+	proto.RegisterType((*ConnectResponse)(nil), "pb.ConnectResponse")
+	proto.RegisterType((*SubscriptionRequest)(nil), "pb.SubscriptionRequest")
+	proto.RegisterType((*SubscriptionResponse)(nil), "pb.SubscriptionResponse")
+	proto.RegisterType((*UnsubscribeRequest)(nil), "pb.UnsubscribeRequest")
+	proto.RegisterType((*CloseRequest)(nil), "pb.CloseRequest")
+	proto.RegisterType((*CloseResponse)(nil), "pb.CloseResponse")
+	proto.RegisterEnum("pb.StartPosition", StartPosition_name, StartPosition_value)
 }
 func (m *PubMsg) Marshal() (data []byte, err error) {
 	size := m.Size()

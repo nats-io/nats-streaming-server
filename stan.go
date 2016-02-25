@@ -12,6 +12,7 @@ import (
 
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nuid"
+	"github.com/nats-io/stan/pb"
 )
 
 const (
@@ -150,7 +151,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 
 	// Send Request to discover the cluster
 	discoverSubject := fmt.Sprintf("%s.%s", c.opts.DiscoverPrefix, stanClusterID)
-	req := &ConnectRequest{ClientID: clientID, HeartbeatInbox: hbInbox}
+	req := &pb.ConnectRequest{ClientID: clientID, HeartbeatInbox: hbInbox}
 	b, _ := req.Marshal()
 	reply, err := c.nc.Request(discoverSubject, b, c.opts.ConnectTimeout)
 	if err != nil {
@@ -161,7 +162,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 		}
 	}
 	// Process the response, grab server pubPrefix
-	cr := &ConnectResponse{}
+	cr := &pb.ConnectResponse{}
 	err = cr.Unmarshal(reply.Data)
 	if err != nil {
 		return nil, err
@@ -220,7 +221,7 @@ func (sc *conn) Close() error {
 		sc.ackSubscription.Unsubscribe()
 	}
 
-	req := &CloseRequest{ClientID: sc.clientID}
+	req := &pb.CloseRequest{ClientID: sc.clientID}
 	b, _ := req.Marshal()
 	reply, err := nc.Request(sc.closeRequests, b, sc.opts.ConnectTimeout)
 	if err != nil {
@@ -230,7 +231,7 @@ func (sc *conn) Close() error {
 			return err
 		}
 	}
-	cr := &CloseResponse{}
+	cr := &pb.CloseResponse{}
 	err = cr.Unmarshal(reply.Data)
 	if err != nil {
 		return err
@@ -249,7 +250,7 @@ func (sc *conn) processHeartBeat(m *nats.Msg) {
 
 // Process an ack from the STAN cluster
 func (sc *conn) processAck(m *nats.Msg) {
-	pa := &PubAck{}
+	pa := &pb.PubAck{}
 	err := pa.Unmarshal(m.Data)
 	if err != nil {
 		// FIXME, make closure to have context?
@@ -305,7 +306,7 @@ func (sc *conn) PublishAsyncWithReply(subject, reply string, data []byte, ah Ack
 	}
 
 	subj := fmt.Sprintf("%s.%s", sc.pubPrefix, subject)
-	pe := &PubMsg{ClientID: sc.clientID, Guid: nuid.Next(), Subject: subject, Reply: reply, Data: data}
+	pe := &pb.PubMsg{ClientID: sc.clientID, Guid: nuid.Next(), Subject: subject, Reply: reply, Data: data}
 	b, _ := pe.Marshal()
 	a := &ack{ah: ah}
 
@@ -405,7 +406,7 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 
 	// Proces auto-ack
 	if !isManualAck && nc != nil {
-		ack := &Ack{Subject: msg.Subject, Sequence: msg.Sequence}
+		ack := &pb.Ack{Subject: msg.Subject, Sequence: msg.Sequence}
 		b, _ := ack.Marshal()
 		if err := nc.Publish(ackSubject, b); err != nil {
 			// FIXME(dlc) - Async error handler? Retry?

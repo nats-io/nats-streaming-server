@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nuid"
+	"github.com/nats-io/stan/pb"
 
 	natsd "github.com/nats-io/gnatsd/test"
 )
@@ -70,66 +71,6 @@ type stanServer struct {
 	channels *channelMap
 }
 
-// Hold current clients.
-type clientStore struct {
-	sync.RWMutex
-	clients map[string]*client
-}
-
-// Hold for client
-type client struct {
-	sync.RWMutex
-	clientID string
-	hbInbox  string
-	hbt      *time.Timer
-	fhb      int
-	subs     []*subState
-}
-
-// Track subscriptions
-func (c *client) AddSub(sub *subState) {
-	c.Lock()
-	defer c.Unlock()
-	c.subs = append(c.subs, sub)
-}
-
-// Remove a subscription
-func (c *client) RemoveSub(sub *subState) {
-	c.Lock()
-	defer c.Unlock()
-	c.subs = sub.deleteFromList(c.subs)
-}
-
-// Register a client
-func (cs *clientStore) Register(c *client) {
-	cs.Lock()
-	defer cs.Unlock()
-	cs.clients[c.clientID] = c
-}
-
-// Unregister a client
-func (cs *clientStore) Unregister(ID string) {
-	cs.Lock()
-	defer cs.Unlock()
-	client := cs.clients[ID]
-	if client != nil {
-		client.subs = nil
-	}
-	delete(cs.clients, ID)
-}
-
-// Check validity of a client.
-func (s *stanServer) isValidClient(ID string) bool {
-	return s.clients.Lookup(ID) != nil
-}
-
-// Lookup a client
-func (cs *clientStore) Lookup(ID string) *client {
-	cs.RLock()
-	defer cs.RUnlock()
-	return cs.clients[ID]
-}
-
 // Map from subject to channelStore
 type channelMap struct {
 	sync.RWMutex
@@ -175,7 +116,7 @@ type subState struct {
 	ackWaitInSecs time.Duration
 	ackTimer      *time.Timer
 	ackSub        *nats.Subscription
-	acksPending   map[uint64]*MsgProto
+	acksPending   map[uint64]*pb.MsgProto
 	maxInFlight   int
 	stalled       bool
 }
@@ -205,7 +146,7 @@ func (cm *channelMap) New(subject string) *channelStore {
 			subject: subject,
 			first:   1,
 			last:    0,
-			msgs:    make(map[uint64]*MsgProto, DefaultMsgStoreLimit),
+			msgs:    make(map[uint64]*pb.MsgProto, DefaultMsgStoreLimit),
 		},
 		subs: &subStore{
 			psubs:    make([]*subState, 0, 4),
@@ -311,16 +252,16 @@ type msgStore struct {
 	subject string // Can't be wildcard
 	first   uint64
 	last    uint64
-	msgs    map[uint64]*MsgProto
+	msgs    map[uint64]*pb.MsgProto
 }
 
 // Store a given message
-func (ms *msgStore) Store(subject, reply string, data []byte) (*MsgProto, error) {
+func (ms *msgStore) Store(subject, reply string, data []byte) (*pb.MsgProto, error) {
 	ms.Lock()
 	defer ms.Unlock()
 
 	ms.last++
-	m := &MsgProto{
+	m := &pb.MsgProto{
 		Sequence:  ms.last,
 		Subject:   subject,
 		Reply:     reply,
@@ -354,19 +295,19 @@ func (ms *msgStore) LastSequence() uint64 {
 }
 
 // Lookup by sequence number.
-func (ms *msgStore) Lookup(seq uint64) *MsgProto {
+func (ms *msgStore) Lookup(seq uint64) *pb.MsgProto {
 	ms.RLock()
 	defer ms.RUnlock()
 	return ms.msgs[seq]
 }
 
-func (ms *msgStore) FirstMsg() *MsgProto {
+func (ms *msgStore) FirstMsg() *pb.MsgProto {
 	ms.RLock()
 	defer ms.RUnlock()
 	return ms.msgs[ms.first]
 }
 
-func (ms *msgStore) LastMsg() *MsgProto {
+func (ms *msgStore) LastMsg() *pb.MsgProto {
 	ms.RLock()
 	defer ms.RUnlock()
 	return ms.msgs[ms.last]
@@ -456,10 +397,10 @@ func (s *stanServer) initSubscriptions() {
 
 // Process a client connect request
 func (s *stanServer) connectCB(m *nats.Msg) {
-	req := &ConnectRequest{}
+	req := &pb.ConnectRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil || req.ClientID == "" || req.HeartbeatInbox == "" {
-		cr := &ConnectResponse{Error: ErrInvalidConnReq.Error()}
+		cr := &pb.ConnectResponse{Error: ErrInvalidConnReq.Error()}
 		b, _ := cr.Marshal()
 		s.nc.Publish(m.Reply, b)
 		return
@@ -467,7 +408,7 @@ func (s *stanServer) connectCB(m *nats.Msg) {
 
 	// Check if already connected.
 	if c := s.clients.Lookup(req.ClientID); c != nil {
-		cr := &ConnectResponse{Error: ErrInvalidClient.Error()}
+		cr := &pb.ConnectResponse{Error: ErrInvalidClient.Error()}
 		b, _ := cr.Marshal()
 		s.nc.Publish(m.Reply, b)
 		return
@@ -482,7 +423,7 @@ func (s *stanServer) connectCB(m *nats.Msg) {
 	s.clients.Register(client)
 
 	// Respond with our ConnectResponse
-	cr := &ConnectResponse{
+	cr := &pb.ConnectResponse{
 		PubPrefix:     s.pubPrefix,
 		SubRequests:   s.subRequests,
 		UnsubRequests: s.unsubRequests,
@@ -529,10 +470,10 @@ func (s *stanServer) closeClient(clientID string) {
 
 // processCloseRequest process inbound messages from clients.
 func (s *stanServer) processCloseRequest(m *nats.Msg) {
-	req := &CloseRequest{}
+	req := &pb.CloseRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
-		resp := &CloseResponse{Error: ErrInvalidCloseReq.Error()}
+		resp := &pb.CloseResponse{Error: ErrInvalidCloseReq.Error()}
 		if b, err := resp.Marshal(); err != nil {
 			s.nc.Publish(m.Reply, b)
 		}
@@ -540,19 +481,19 @@ func (s *stanServer) processCloseRequest(m *nats.Msg) {
 
 	s.closeClient(req.ClientID)
 
-	resp := &CloseResponse{}
+	resp := &pb.CloseResponse{}
 	b, _ := resp.Marshal()
 	s.nc.Publish(m.Reply, b)
 }
 
 // processClientPublish process inbound messages from clients.
 func (s *stanServer) processClientPublish(m *nats.Msg) {
-	pm := &PubMsg{}
+	pm := &pb.PubMsg{}
 	pm.Unmarshal(m.Data)
 
 	// Make sure we have a clientID, guid, etc.
 	if pm.Guid == "" || !s.isValidClient(pm.ClientID) || !isValidSubject(pm.Subject) {
-		badMsgAck := &PubAck{Guid: pm.Guid, Error: ErrBadPubMsg.Error()}
+		badMsgAck := &pb.PubAck{Guid: pm.Guid, Error: ErrBadPubMsg.Error()}
 		if b, err := badMsgAck.Marshal(); err == nil {
 			s.nc.Publish(m.Reply, b)
 		}
@@ -610,7 +551,7 @@ func findBestQueueSub(sl []*subState) (rsub *subState) {
 // Send a message to the queue group
 // Assumes subStore lock is held
 // Assumes qs lock held for write
-func (s *stanServer) sendMsgToQueueGroup(qs *queueState, m *MsgProto) bool {
+func (s *stanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto) bool {
 	if qs == nil {
 		return false
 	}
@@ -652,14 +593,14 @@ func (s *stanServer) processMsg(cs *channelStore) {
 }
 
 // Used for sorting by sequence
-type bySeq []*MsgProto
+type bySeq []*pb.MsgProto
 
 func (a bySeq) Len() int           { return (len(a)) }
 func (a bySeq) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a bySeq) Less(i, j int) bool { return a[i].Sequence < a[j].Sequence }
 
-func makeSortedMsgs(msgs map[uint64]*MsgProto) []*MsgProto {
-	results := make([]*MsgProto, 0, len(msgs))
+func makeSortedMsgs(msgs map[uint64]*pb.MsgProto) []*pb.MsgProto {
+	results := make([]*pb.MsgProto, 0, len(msgs))
 	for _, m := range msgs {
 		mCopy := *m // copy since we need to set redelivered flag.
 		results = append(results, &mCopy)
@@ -748,7 +689,7 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 
 // Sends the message to the subscriber
 // Sub lock should be held before calling.
-func (s *stanServer) sendMsgToSub(sub *subState, m *MsgProto) bool {
+func (s *stanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 	if sub == nil || m == nil {
 		return false
 	}
@@ -779,7 +720,7 @@ func (s *stanServer) sendMsgToSub(sub *subState, m *MsgProto) bool {
 }
 
 // assignAndStore will assign a sequence ID and then store the message.
-func (s *stanServer) assignAndStore(pm *PubMsg) *channelStore {
+func (s *stanServer) assignAndStore(pm *pb.PubMsg) *channelStore {
 	cs := s.channels.LookupOrCreate(pm.Subject)
 	// FIXME(dlc) - check for errors.
 	cs.msgs.Store(pm.Subject, pm.Reply, pm.Data)
@@ -787,8 +728,8 @@ func (s *stanServer) assignAndStore(pm *PubMsg) *channelStore {
 }
 
 // ackPublisher sends the ack for a message.
-func (s *stanServer) ackPublisher(pm *PubMsg, reply string) {
-	msgAck := &PubAck{Guid: pm.Guid}
+func (s *stanServer) ackPublisher(pm *pb.PubMsg, reply string) {
+	msgAck := &pb.PubAck{Guid: pm.Guid}
 	var buf [32]byte
 	b := buf[:]
 	n, _ := msgAck.MarshalTo(b)
@@ -855,7 +796,7 @@ func (s *stanServer) removeAllNonDurableSubscribers(clientID string) {
 
 // processUnSubscribeRequest will process a unsubscribe request.
 func (s *stanServer) processUnSubscribeRequest(m *nats.Msg) {
-	req := &UnsubscribeRequest{}
+	req := &pb.UnsubscribeRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
 		s.sendSubscriptionResponseErr(m.Reply, err)
@@ -881,13 +822,13 @@ func (s *stanServer) processUnSubscribeRequest(m *nats.Msg) {
 	}
 
 	// Create a non-error response
-	resp := &SubscriptionResponse{AckInbox: req.Inbox}
+	resp := &pb.SubscriptionResponse{AckInbox: req.Inbox}
 	b, _ := resp.Marshal()
 	s.nc.Publish(m.Reply, b)
 }
 
 func (s *stanServer) sendSubscriptionResponseErr(reply string, err error) {
-	resp := &SubscriptionResponse{Error: err.Error()}
+	resp := &pb.SubscriptionResponse{Error: err.Error()}
 	b, _ := resp.Marshal()
 	s.nc.Publish(reply, b)
 }
@@ -933,7 +874,7 @@ func (sub *subState) durableKey() string {
 }
 
 // Used to generate durable key. This should not be called on non-durables.
-func (sr *SubscriptionRequest) durableKey() string {
+func durableKey(sr *pb.SubscriptionRequest) string {
 	if sr.DurableName == "" {
 		return ""
 	}
@@ -942,7 +883,7 @@ func (sr *SubscriptionRequest) durableKey() string {
 
 // processSubscriptionRequest will process a subscription request.
 func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
-	sr := &SubscriptionRequest{}
+	sr := &pb.SubscriptionRequest{}
 	err := sr.Unmarshal(m.Data)
 	if err != nil {
 		s.sendSubscriptionResponseErr(m.Reply, err)
@@ -983,7 +924,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 			return
 		}
 
-		if sub = cs.subs.LookupByDurable(sr.durableKey()); sub != nil {
+		if sub = cs.subs.LookupByDurable(durableKey(sr)); sub != nil {
 			sub.RLock()
 			clientID := sub.clientID
 			sub.RUnlock()
@@ -1004,14 +945,14 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 
 	// Check SequenceStart out of range
-	if sr.StartPosition == StartPosition_SequenceStart {
+	if sr.StartPosition == pb.StartPosition_SequenceStart {
 		if !s.startSequenceValid(sr.Subject, sr.StartSequence) {
 			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSequence)
 			return
 		}
 	}
 	// Check for SequenceTime out of range
-	if sr.StartPosition == StartPosition_TimeDeltaStart {
+	if sr.StartPosition == pb.StartPosition_TimeDeltaStart {
 		startTime := time.Now().UnixNano() - sr.StartTimeDelta
 		if !s.startTimeValid(sr.Subject, startTime) {
 			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidTime)
@@ -1030,7 +971,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 			durableName:   sr.DurableName,
 			maxInFlight:   int(sr.MaxInFlight),
 			ackWaitInSecs: time.Duration(sr.AckWaitInSecs),
-			acksPending:   make(map[uint64]*MsgProto),
+			acksPending:   make(map[uint64]*pb.MsgProto),
 		}
 		// Store this subscription
 		cs.subs.Store(sub)
@@ -1047,7 +988,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 
 	// Create a non-error response
-	resp := &SubscriptionResponse{AckInbox: sub.ackInbox}
+	resp := &pb.SubscriptionResponse{AckInbox: sub.ackInbox}
 	b, _ := resp.Marshal()
 	s.nc.Publish(m.Reply, b)
 
@@ -1061,22 +1002,22 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	// Initialize the subscription and see if StartPosition dictates we have messages to send.
 	switch sr.StartPosition {
-	case StartPosition_NewOnly:
+	case pb.StartPosition_NewOnly:
 		s.sendNewOnly(cs, sub)
-	case StartPosition_LastReceived:
+	case pb.StartPosition_LastReceived:
 		s.sendLastMessage(cs, sub)
-	case StartPosition_TimeDeltaStart:
+	case pb.StartPosition_TimeDeltaStart:
 		s.sendMessagesToSubFromTime(cs, sub, time.Now().UnixNano()-sr.StartTimeDelta)
-	case StartPosition_SequenceStart:
+	case pb.StartPosition_SequenceStart:
 		s.sendMessagesFromSequence(cs, sub, sr.StartSequence)
-	case StartPosition_First:
+	case pb.StartPosition_First:
 		s.sendMessagesFromBeginning(cs, sub)
 	}
 }
 
 // processAckMsg processes inbound acks from clients for delivered messages.
 func (s *stanServer) processAckMsg(m *nats.Msg) {
-	ack := &Ack{}
+	ack := &pb.Ack{}
 	ack.Unmarshal(m.Data)
 	cs := s.channels.Lookup(ack.Subject)
 	if cs == nil {
@@ -1087,7 +1028,7 @@ func (s *stanServer) processAckMsg(m *nats.Msg) {
 }
 
 // processAck processes an ack and if needed sends more messages.
-func (s *stanServer) processAck(cs *channelStore, sub *subState, ack *Ack) {
+func (s *stanServer) processAck(cs *channelStore, sub *subState, ack *pb.Ack) {
 	if sub == nil || ack == nil {
 		return
 	}

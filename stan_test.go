@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats"
+	"github.com/nats-io/stan/pb"
+
 	natsd "github.com/nats-io/gnatsd/test"
-	nats "github.com/nats-io/nats"
 )
 
 // Dumb wait program to sync on callbacks, etc... Will timeout
@@ -440,7 +442,7 @@ func TestSubscriptionStartPositionLast(t *testing.T) {
 
 	// Check for sub setup
 	rsub := sub.(*subscription)
-	if rsub.opts.StartAt != StartPosition_LastReceived {
+	if rsub.opts.StartAt != pb.StartPosition_LastReceived {
 		t.Fatalf("Incorrect StartAt state: %s\n", rsub.opts.StartAt)
 	}
 
@@ -494,7 +496,7 @@ func TestSubscriptionStartAtSequence(t *testing.T) {
 
 	// Check for sub setup
 	rsub := sub.(*subscription)
-	if rsub.opts.StartAt != StartPosition_SequenceStart {
+	if rsub.opts.StartAt != pb.StartPosition_SequenceStart {
 		t.Fatalf("Incorrect StartAt state: %s\n", rsub.opts.StartAt)
 	}
 
@@ -575,7 +577,7 @@ func TestSubscriptionStartAtTime(t *testing.T) {
 
 	// Check for sub setup
 	rsub := sub.(*subscription)
-	if rsub.opts.StartAt != StartPosition_TimeDeltaStart {
+	if rsub.opts.StartAt != pb.StartPosition_TimeDeltaStart {
 		t.Fatalf("Incorrect StartAt state: %s\n", rsub.opts.StartAt)
 	}
 
@@ -655,7 +657,7 @@ func TestSubscriptionStartAtFirst(t *testing.T) {
 
 	// Check for sub setup
 	rsub := sub.(*subscription)
-	if rsub.opts.StartAt != StartPosition_First {
+	if rsub.opts.StartAt != pb.StartPosition_First {
 		t.Fatalf("Incorrect StartAt state: %s\n", rsub.opts.StartAt)
 	}
 

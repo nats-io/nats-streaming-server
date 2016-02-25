@@ -3,25 +3,18 @@
 package stan
 
 import (
-	"time"
+	"github.com/nats-io/stan/pb"
 )
 
-type MsgStore interface {
-	// Limits
-	SetLimits(maxMessages, maxSize int, maxAge time.Duration) error
+// Interface to storage for STAN servers.
+type Store interface {
+	// Limits per channel
+	//	SetChannelLimits(limits stores.ChannelLimits) error
 
-	// Current State
-	State() (numMessages, byteSize int, oldest time.Duration, err error)
+	// Current State, "*" returns all channels combined.
+	State(channel string) (numMessages, byteSize int, err error)
 
-	// Basic Storage and Retrieval
-	Store(m *MsgProto, optSerial []byte) error
-	Retrieve(seq uint64) (*MsgProto, error)
-	RetrieveN(seq []uint64) ([]*MsgProto, error)
-}
-
-type SubscriptionStore interface {
-	Store(sub *subState) error
-	Load() (subs []*subState, err error)
-	Size() int
-	Compact() error
+	// Basic Message Storage and Lookup
+	Store(channel, reply string, data []byte) (*pb.MsgProto, error)
+	Lookup(channel string, seq uint64) (*pb.MsgProto, error)
 }
