@@ -5,11 +5,13 @@ package stan
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/nats-io/gnatsd/logger"
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nuid"
@@ -272,7 +274,7 @@ func (ms *msgStore) Store(subject, reply string, data []byte) (*pb.MsgProto, err
 
 	// Check if we need to remove any.
 	if len(ms.msgs) > DefaultMsgStoreLimit {
-		Errorf("WARNING: Removing message[%d] from the store for [`%s`]\n", ms.first, subject)
+		Errorf("WARNING: Removing message[%d] from the store for [`%s`]", ms.first, subject)
 		delete(ms.msgs, ms.first)
 		ms.first++
 	}
@@ -323,6 +325,34 @@ var DefaultServerOptions = ServerOptions{
 	DiscoverPrefix: DefaultDiscoverPrefix,
 }
 
+func stanDisconnectedHandler(nc *nats.Conn) {
+	Errorf("STAN: connection has been disconnected: %s.", nc.LastError())
+}
+
+func stanClosedHandler(nc *nats.Conn) {
+	Debugf("STAN: connection has been closed.")
+}
+
+func stanErrorHandler(nc *nats.Conn, sub *nats.Subscription, err error) {
+	Errorf("STAN: Asynchronous Error: %s.", err)
+}
+
+// Convenience API to set the default logger.
+func EnableDefaultLogger(opts *server.Options) {
+	//	var log natsd.Logger
+	colors := true
+	// Check to see if stderr is being redirected and if so turn off color
+	// Also turn off colors if we're running on Windows where os.Stderr.Stat() returns an invalid handle-error
+	stat, err := os.Stderr.Stat()
+	if err != nil || (stat.Mode()&os.ModeCharDevice) == 0 {
+		colors = false
+	}
+	log := logger.NewStdLogger(opts.Logtime, opts.Debug, opts.Trace, colors, true)
+
+	var s *server.Server
+	s.SetLogger(log, opts.Debug, opts.Trace)
+}
+
 // RunServer will startup and embedded STAN server and a nats-server to support it.
 func RunServer(ID string, optsA ...*server.Options) *stanServer {
 	// Run a nats server by default
@@ -350,16 +380,21 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 	}
 	noLog = opts.NoLog
 	s.natsServer = natsd.RunServer(opts)
+
 	natsURL := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
 	var err error
 	if s.nc, err = nats.Connect(natsURL); err != nil {
 		panic(fmt.Sprintf("Can't connect to NATS server: %v\n", err))
 	}
 
+	nats.DisconnectHandler(stanDisconnectedHandler)
+	nats.ErrorHandler(stanErrorHandler)
+	nats.ClosedHandler(stanClosedHandler)
+
 	s.initSubscriptions()
 
-	Noticef("Message store is MEMORY")
-	Noticef("Maximum of %d will be stored", DefaultMsgStoreLimit)
+	Noticef("STAN: Message store is MEMORY")
+	Noticef("STAN: Maximum of %d will be stored", DefaultMsgStoreLimit)
 
 	return &s
 }
@@ -393,6 +428,13 @@ func (s *stanServer) initSubscriptions() {
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to close request subject, %v\n", err))
 	}
+
+	Debugf("STAN: discover subject: %s", discoverSubject)
+	Debugf("STAN: publish subject:  %s", pubSubject)
+	Debugf("STAN: subcribe subject: %s", s.subRequests)
+	Debugf("STAN: unsub subject:    %s", s.unsubRequests)
+	Debugf("STAN: close subject:    %s", s.closeRequests)
+
 }
 
 // Process a client connect request
@@ -411,6 +453,7 @@ func (s *stanServer) connectCB(m *nats.Msg) {
 		cr := &pb.ConnectResponse{Error: ErrInvalidClient.Error()}
 		b, _ := cr.Marshal()
 		s.nc.Publish(m.Reply, b)
+		Debugf("STAN: [Client:%s] Connect failed; already connected.", c.clientID)
 		return
 	}
 
@@ -436,6 +479,8 @@ func (s *stanServer) connectCB(m *nats.Msg) {
 	client.Lock()
 	client.hbt = time.AfterFunc(DefaultHeartBeatInterval, func() { s.checkClientHealth(client.clientID) })
 	client.Unlock()
+
+	Debugf("STAN: [Client:%s] connected.", client.clientID)
 }
 
 // Send a heartbeat call to the client.
@@ -451,6 +496,7 @@ func (s *stanServer) checkClientHealth(clientID string) {
 	if err != nil {
 		client.fhb++
 		if client.fhb > DefaultMaxFailedHeartBeats { // 5 minutes
+			Debugf("STAN: [Client:%s]  Timed out on hearbeats.", client.clientID)
 			defer s.closeClient(client.clientID)
 		}
 	} else {
@@ -466,6 +512,8 @@ func (s *stanServer) closeClient(clientID string) {
 
 	// Remove from our clientStore
 	s.clients.Unregister(clientID)
+
+	Debugf("STAN: [Client:%s] Closed.", clientID)
 }
 
 // processCloseRequest process inbound messages from clients.
@@ -473,6 +521,7 @@ func (s *stanServer) processCloseRequest(m *nats.Msg) {
 	req := &pb.CloseRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
+		Errorf("STAN: Received invalid close request, subject=%s.", m.Subject)
 		resp := &pb.CloseResponse{Error: ErrInvalidCloseReq.Error()}
 		if b, err := resp.Marshal(); err != nil {
 			s.nc.Publish(m.Reply, b)
@@ -491,8 +540,11 @@ func (s *stanServer) processClientPublish(m *nats.Msg) {
 	pm := &pb.PubMsg{}
 	pm.Unmarshal(m.Data)
 
+	// TODO (cls) error check.
+
 	// Make sure we have a clientID, guid, etc.
 	if pm.Guid == "" || !s.isValidClient(pm.ClientID) || !isValidSubject(pm.Subject) {
+		Errorf("STAN: Received invalid client publish message %v.", pm)
 		badMsgAck := &pb.PubAck{Guid: pm.Guid, Error: ErrBadPubMsg.Error()}
 		if b, err := badMsgAck.Marshal(); err == nil {
 			s.nc.Publish(m.Reply, b)
@@ -611,11 +663,14 @@ func makeSortedMsgs(msgs map[uint64]*pb.MsgProto) []*pb.MsgProto {
 
 // Redeliver all outstanding messages to a durable subscriber, used on resubscribe.
 func (s *stanServer) performDurableRedelivery(sub *subState) {
+	Debugf("STAN:[Client:%s] Redelivering to durable %s.", sub.clientID, sub.durableName)
 	s.performRedelivery(sub, false)
 }
 
 // Redeliver all outstanding messages that have expired.
 func (s *stanServer) performAckExpirationRedelivery(sub *subState) {
+	Debugf("STAN: [Client:%s] Redelivering on ack expiration. subject=%s, inbox=%s.",
+		sub.clientID, sub.subject, sub.inbox)
 	s.performRedelivery(sub, true)
 }
 
@@ -649,8 +704,11 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	// We will move through acksPending(sorted) and see what needs redelivery.
 	for _, m := range sortedMsgs {
 		if m.Timestamp+expTime > now && checkExpiration {
+			Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
 			continue
 		}
+
+		Tracef("STAN: [Client:%s] redelivery, sending seqno=%d.", clientID, m.Sequence)
 
 		// Flag as redelivered.
 		m.Redelivered = true
@@ -672,6 +730,7 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 			ss.RUnlock()
 
 			if qsub == nil {
+				Errorf("STAN: [Client:%s] Unable to find queue subscriber.", clientID)
 				break
 			}
 			qsub.Lock()
@@ -693,9 +752,15 @@ func (s *stanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 	if sub == nil || m == nil {
 		return false
 	}
+
+	Tracef("STAN: [Client:%s] Sending msg subject=%s inbox=%s seqno=%d.",
+		sub.clientID, m.Subject, sub.inbox, m.Sequence)
+
 	// Don't send if we have too many outstanding already.
 	if len(sub.acksPending) >= sub.maxInFlight {
 		sub.stalled = true
+		Debugf("STAN: [Client:%s] Stalled msgseq %s:%d to %s.",
+			sub.clientID, m.Subject, m.Sequence, sub.inbox)
 		return false
 	}
 
@@ -704,6 +769,8 @@ func (s *stanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 	b, _ := m.Marshal()
 	if err := s.nc.Publish(sub.inbox, b); err != nil {
 		sub.lastSent = oldLast
+		Errorf("STAN: [Client:%s] Failed Sending msgseq %s:%d to %s (%s).",
+			sub.clientID, m.Subject, m.Sequence, sub.inbox, err)
 		return false
 	}
 	// Store in ackPending.
@@ -733,6 +800,7 @@ func (s *stanServer) ackPublisher(pm *pb.PubMsg, reply string) {
 	var buf [32]byte
 	b := buf[:]
 	n, _ := msgAck.MarshalTo(b)
+	Tracef("STAN: [Client:%s] Acking Publisher subj=%s guid=%s", pm.ClientID, pm.Subject, pm.Guid)
 	s.nc.Publish(reply, b[:n])
 }
 
@@ -799,17 +867,22 @@ func (s *stanServer) processUnSubscribeRequest(m *nats.Msg) {
 	req := &pb.UnsubscribeRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
+		Errorf("STAN: Invalid unsub request from %s.", m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
 	}
 
 	cs := s.channels.Lookup(req.Subject)
 	if cs == nil {
+		Errorf("STAN: [Client:%s] unsub request missing subject %s.",
+			req.ClientID, req.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
 	}
 	sub := cs.subs.LookupByAckInbox(req.Inbox)
 	if sub == nil {
+		Errorf("STAN: [Client:%s] unsub request for missing inbox %s.",
+			req.ClientID, req.Inbox)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
 	}
@@ -818,6 +891,8 @@ func (s *stanServer) processUnSubscribeRequest(m *nats.Msg) {
 
 	// Remove from Client
 	if client := s.clients.Lookup(req.ClientID); client != nil {
+		Debugf("STAN: [Client:%s] Unsubscribing subject=%s.",
+			req.ClientID, sub.subject)
 		client.RemoveSub(sub)
 	}
 
@@ -886,6 +961,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	sr := &pb.SubscriptionRequest{}
 	err := sr.Unmarshal(m.Data)
 	if err != nil {
+		Errorf("STAN:  Invalid Subscription request from %s.", m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
 	}
@@ -894,20 +970,25 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	// AckWait must be >= 1s
 	if sr.AckWaitInSecs <= 0 {
+		Debugf("STAN: [Client:%s] Invalid AckWait in subscription request from %s.",
+			sr.ClientID, m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidAckWait)
 		return
 	}
 
 	// Make sure subject is valid
 	if !isValidSubject(sr.Subject) {
+		Debugf("STAN: [Client:%s] Invalid subject <%s> in subscription request from %s.",
+			sr.ClientID, sr.Subject, m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubject)
 		return
 	}
 
 	// ClientID must not be empty.
 	if sr.ClientID == "" {
+		Debugf("STAN: missing clientID in subscription request from %s", m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply,
-			errors.New("stan: malformed subscription request, clientID missing"))
+			errors.New("stan: malformed subscription request, clientID missing."))
 		return
 	}
 
@@ -920,6 +1001,8 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	if sr.DurableName != "" {
 		// Can't be durable and a queue subscriber
 		if sr.QGroup != "" {
+			Debugf("STAN: [Client:%s] Invalid subscription request; cannot be both durable and a queue subscriber.",
+				sr.ClientID)
 			s.sendSubscriptionResponseErr(m.Reply, ErrDurableQueue)
 			return
 		}
@@ -929,6 +1012,8 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 			clientID := sub.clientID
 			sub.RUnlock()
 			if clientID != "" {
+				Debugf("STAN: [Client:%s] Invalid client id in subscription request from %s.",
+					sr.ClientID, m.Subject)
 				s.sendSubscriptionResponseErr(m.Reply, ErrDupDurable)
 				return
 			}
@@ -947,6 +1032,8 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	// Check SequenceStart out of range
 	if sr.StartPosition == pb.StartPosition_SequenceStart {
 		if !s.startSequenceValid(sr.Subject, sr.StartSequence) {
+			Debugf("STAN: [Client:%s] Invalid start sequence in subscription request from %s.",
+				sr.ClientID, m.Subject)
 			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSequence)
 			return
 		}
@@ -955,6 +1042,8 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	if sr.StartPosition == pb.StartPosition_TimeDeltaStart {
 		startTime := time.Now().UnixNano() - sr.StartTimeDelta
 		if !s.startTimeValid(sr.Subject, startTime) {
+			Debugf("STAN: [Client:%s] Invalid start time in subscription request from %s.",
+				sr.ClientID, m.Subject)
 			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidTime)
 			return
 		}
@@ -979,6 +1068,9 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 		if client := s.clients.Lookup(sr.ClientID); client != nil {
 			client.AddSub(sub)
 		}
+
+		Debugf("STAN: [Client:%s] Subscribed. subject=%s, inbox=%s.",
+			sr.ClientID, sub.subject, sub.inbox)
 	}
 
 	// Subscribe to acks
@@ -1021,7 +1113,7 @@ func (s *stanServer) processAckMsg(m *nats.Msg) {
 	ack.Unmarshal(m.Data)
 	cs := s.channels.Lookup(ack.Subject)
 	if cs == nil {
-		// FIXME(dlc) - log
+		Errorf("STAN: [Client:?] Ack received, invalid channel (%s)", ack.Subject)
 		return
 	}
 	s.processAck(cs, cs.subs.LookupByAckInbox(m.Subject), ack)
@@ -1034,7 +1126,11 @@ func (s *stanServer) processAck(cs *channelStore, sub *subState, ack *pb.Ack) {
 	}
 
 	sub.Lock()
+
 	// Clear the ack
+	Tracef("STAN: [Client:%s] removing pending ack, subj=%s, seq=%d.",
+		sub.clientID, sub.subject, ack.Sequence)
+
 	delete(sub.acksPending, ack.Sequence)
 	stalled := sub.stalled
 	if len(sub.acksPending) < sub.maxInFlight {
@@ -1044,9 +1140,14 @@ func (s *stanServer) processAck(cs *channelStore, sub *subState, ack *pb.Ack) {
 	// If we have the ackTimer running, either reset or cancel it.
 	if sub.ackTimer != nil {
 		if len(sub.acksPending) == 0 {
+			Tracef("STAN: [Client:%s] clearing timer, subj=%s.",
+				sub.clientID, sub.subject)
 			sub.clearAckTimer()
 		} else {
 			// FIXME(dlc) - This should be to next expiration, not simply +delta
+			Tracef("STAN: [Client:%s] subj=%s, reset timer.",
+				sub.clientID, sub.subject)
+
 			sub.ackTimer.Reset(sub.ackWaitInSecs * time.Second)
 		}
 	}
@@ -1131,6 +1232,9 @@ func (s *stanServer) sendMessagesFromSequence(cs *channelStore, sub *subState, s
 	qs := sub.qstate
 	sub.Unlock()
 
+	Debugf("STAN: [Client:%s] Sending to subject=%s startseq=%d",
+		sub.clientID, sub.subject, startSeq)
+
 	if qs != nil {
 		s.sendAvailableMessagesToQueue(cs, qs)
 	} else {
@@ -1151,17 +1255,19 @@ func (s *stanServer) sendMessagesToSubFromTime(cs *channelStore, sub *subState, 
 	})
 	startSeq := uint64(index) + cs.msgs.first
 	cs.msgs.RUnlock()
-
+	Debugf("STAN: [Client:%s] Sending from time, subject=%s time=%d", sub.clientID, sub.subject, startTime)
 	s.sendMessagesFromSequence(cs, sub, startSeq)
 }
 
 // Send all messages to the subscriber.
 func (s *stanServer) sendMessagesFromBeginning(cs *channelStore, sub *subState) {
+	Debugf("STAN: [Client:%s] Sending from beginning, subject=%s.", sub.clientID, sub.subject)
 	s.sendMessagesFromSequence(cs, sub, cs.msgs.FirstSequence())
 }
 
 // Send the last message we have to the subscriber
 func (s *stanServer) sendLastMessage(cs *channelStore, sub *subState) {
+	Debugf("STAN: [Client:%s] Sending last message, subject=%s.", sub.clientID, sub.subject)
 	s.sendMessagesFromSequence(cs, sub, cs.msgs.LastSequence())
 }
 
@@ -1171,10 +1277,14 @@ func (s *stanServer) sendNewOnly(cs *channelStore, sub *subState) {
 	sub.Lock()
 	sub.lastSent = lastSeq
 	sub.Unlock()
+
+	Debugf("STAN: [Client:%s] Sending new-only subject=%s, seq=%d.",
+		sub.clientID, sub.subject, lastSeq)
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.
 func (s *stanServer) Shutdown() {
+	Debugf("STAN: Shutting down.")
 	if s.nc != nil {
 		s.nc.Close()
 	}
