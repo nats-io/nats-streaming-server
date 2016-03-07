@@ -53,7 +53,7 @@ var (
 	ErrBadAck            = errors.New("stan: malformed ack")
 	ErrBadSubscription   = errors.New("stan: invalid subscription")
 	ErrBadConnection     = errors.New("stan: invalid connection")
-	ErrManualAck         = errors.New("stan: can not manually ack in auto-ack mode")
+	ErrManualAck         = errors.New("stan: cannot manually ack in auto-ack mode")
 	ErrNilMsg            = errors.New("stan: nil message")
 )
 
