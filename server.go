@@ -674,13 +674,13 @@ func (s *stanServer) performAckExpirationRedelivery(sub *subState) {
 	s.performRedelivery(sub, true)
 }
 
-// Performs redlivery, takes a flag on whether to honor expiration.
+// Performs redelivery, takes a flag on whether to honor expiration.
 func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.RLock()
 	expTime := int64(sub.ackWaitInSecs * time.Second)
 	sortedMsgs := makeSortedMsgs(sub.acksPending)
-	sub.ackTimer = nil
+	ackTimer := sub.ackTimer
 	inbox := sub.inbox
 	subject := sub.subject
 	qs := sub.qstate
@@ -703,9 +703,18 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 
 	// We will move through acksPending(sorted) and see what needs redelivery.
 	for _, m := range sortedMsgs {
-		if m.Timestamp+expTime > now && checkExpiration {
+
+		remaining := m.Timestamp + expTime - now
+
+		if remaining > 0 && checkExpiration {
+
+			// the messages are ordered by seq so the expiration
+			// times are ascending.  Once we've get here, we've hit an
+			// unexpired message, and we're done. Reset the sub's ack
+			// timer to fire on the next message expiration.
 			Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
-			continue
+			ackTimer.Reset(time.Duration(remaining) / time.Nanosecond)
+			return
 		}
 
 		Tracef("STAN: [Client:%s] redelivery, sending seqno=%d.", clientID, m.Sequence)
@@ -718,7 +727,15 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 		if qs != nil {
 			// Remove from current subs acksPending.
 			sub.Lock()
+
 			delete(sub.acksPending, m.Sequence)
+
+			// if there are no outstanding acks on this subscriber after
+			// removing our ack, clear the timer.
+			if len(sub.acksPending) == 0 {
+				sub.clearAckTimer()
+			}
+
 			sub.Unlock()
 
 			cs := s.channels.Lookup(subject)
@@ -733,10 +750,13 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 				Errorf("STAN: [Client:%s] Unable to find queue subscriber.", clientID)
 				break
 			}
+
 			qsub.Lock()
+			qsub.ackTimer = nil
 			s.sendMsgToSub(qsub, m)
 			qsub.Unlock()
 		} else {
+			sub.ackTimer = nil
 			b, _ := m.Marshal()
 			if err := s.nc.Publish(inbox, b); err != nil {
 				// Break on error. FIXME(dlc) reset timer?

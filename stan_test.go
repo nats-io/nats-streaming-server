@@ -429,11 +429,17 @@ func TestSubscriptionStartPositionLast(t *testing.T) {
 		sc.Publish("foo", data)
 	}
 
-	// Now subscribe and set start position to last received.
 	ch := make(chan bool)
+	received := int32(0)
+
 	mcb := func(m *Msg) {
+		atomic.AddInt32(&received, 1)
+		if m.Sequence != 10 {
+			t.Fatalf("Wrong sequence received: got %d vs. %d\n", m.Sequence, 10)
+		}
 		ch <- true
 	}
+	// Now subscribe and set start position to last received.
 	sub, err := sc.Subscribe("foo", mcb, StartWithLastReceived())
 	if err != nil {
 		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
@@ -448,6 +454,10 @@ func TestSubscriptionStartPositionLast(t *testing.T) {
 
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not receive our message")
+	}
+
+	if received > int32(1) {
+		t.Fatalf("Should have received only 1 message, but got %d\n", received)
 	}
 }
 
@@ -663,6 +673,10 @@ func TestSubscriptionStartAtFirst(t *testing.T) {
 
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not receive our messages")
+	}
+
+	if received != shouldReceive {
+		t.Fatalf("Expected %d msgs but received %d\n", shouldReceive, received)
 	}
 
 	// Check we received them in order.
@@ -1237,6 +1251,7 @@ func TestPubMultiQueueSubWithRedelivery(t *testing.T) {
 
 	mcb := func(m *Msg) {
 		// Track received for each receiver.
+
 		if m.Sub == s1 {
 			m.Ack()
 			atomic.AddInt32(&s1Received, 1)
@@ -1275,6 +1290,80 @@ func TestPubMultiQueueSubWithRedelivery(t *testing.T) {
 
 	if nr := atomic.LoadInt32(&received); nr != toSend {
 		t.Fatalf("Did not receive correct number of messages: %d vs %d\n", nr, toSend)
+	}
+}
+
+func TestPubMultiQueueSubWithDelayRedelivery(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName)
+	defer sc.Close()
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	ch := make(chan bool)
+	toSend := int32(500)
+	ackCount := int32(0)
+
+	var s1, s2 Subscription
+
+	mcb := func(m *Msg) {
+		// Track received for each receiver.
+		if m.Sub == s1 {
+
+			m.Ack()
+
+			// if we've acked everything, signal
+			nr := atomic.AddInt32(&ackCount, 1)
+
+			if nr == int32(toSend) {
+				ch <- true
+			}
+
+			if nr > 0 && nr%(toSend/2) == 0 {
+
+				// This depends on the internal algorithm where the
+				// best resend subscriber is the one with the least number
+				// of outstanding acks.
+				//
+				// Sleep to allow the acks to back up, so s2 will look
+				// like a better subscriber to send messages to.
+				time.Sleep(time.Millisecond * 200)
+			}
+		} else if m.Sub == s2 {
+			// We will not ack this subscriber
+		} else {
+			t.Fatalf("Received message on unknown subscription")
+		}
+	}
+
+	s1, err = sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer s1.Unsubscribe()
+
+	s2, err = sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode(), AckWait(1*time.Second))
+	if err != nil {
+		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+	}
+	defer s2.Unsubscribe()
+
+	// Publish out the messages.
+	for i := int32(0); i < toSend; i++ {
+		data := []byte(fmt.Sprintf("%d", i))
+		sc.Publish("foo", data)
+	}
+
+	if err := WaitTime(ch, 30*time.Second); err != nil {
+		t.Fatalf("Did not ack expected count of messages: %v", toSend)
+	}
+
+	if nr := atomic.LoadInt32(&ackCount); nr != toSend {
+		t.Fatalf("Did not ack the correct number of messages: %d vs %d\n", nr, toSend)
 	}
 }
 
