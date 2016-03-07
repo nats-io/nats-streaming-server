@@ -334,7 +334,7 @@ func stanClosedHandler(nc *nats.Conn) {
 }
 
 func stanErrorHandler(nc *nats.Conn, sub *nats.Subscription, err error) {
-	Errorf("STAN: Asynchronous Error: %s.", err)
+	Errorf("STAN: Asynchronous error on subject %s: %s.", sub.Subject, err)
 }
 
 // Convenience API to set the default logger.
