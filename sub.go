@@ -270,6 +270,9 @@ func (sub *subscription) Unsubscribe() error {
 
 	delete(sc.subMap, inbox)
 	reqSubject := sc.unsubRequests
+	// Snapshot connection to avoid data race, since the connection may be
+	// closing while we try to send the request
+	nc := sc.nc
 	sc.Unlock()
 
 	// Send Unsubscribe to server.
@@ -282,7 +285,7 @@ func (sub *subscription) Unsubscribe() error {
 	}
 	b, _ := usr.Marshal()
 	// FIXME(dlc) - make timeout configurable.
-	reply, err := sc.nc.Request(reqSubject, b, 2*time.Second)
+	reply, err := nc.Request(reqSubject, b, 2*time.Second)
 	if err != nil {
 		return err
 	}

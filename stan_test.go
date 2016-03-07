@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -742,6 +743,37 @@ func TestUnsubscribe(t *testing.T) {
 		data := []byte(fmt.Sprintf("%d", i))
 		sc.Publish("foo", data)
 	}
+}
+
+func TestUnsubscribeWhileConnClosing(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+	defer sc.Close()
+
+	sub, err := sc.Subscribe("foo", nil)
+	if err != nil {
+		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
+		sc.Close()
+		wg.Done()
+	}()
+
+	// Unsubscribe
+	sub.Unsubscribe()
+
+	wg.Wait()
 }
 
 func TestSubscribeShrink(t *testing.T) {
