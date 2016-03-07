@@ -657,7 +657,7 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 			// times are ascending.  Once we've get here, we've hit an
 			// unexpired message, and we're done. Reset the sub's ack
 			// timer to fire on the next message expiration.
-			ackTimer.Reset(time.Duration(remaining) / time.Nanosecond);
+			ackTimer.Reset(time.Duration(remaining) / time.Nanosecond)
 			return
 		}
 
@@ -674,7 +674,7 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 
 			// if there are no outstanding acks on this subscriber after
 			// removing our ack, clear the timer.
-			if (len(sub.acksPending) == 0) {
+			if len(sub.acksPending) == 0 {
 				sub.clearAckTimer()
 			}
 
