@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -68,10 +70,28 @@ type tLogger interface {
 	Errorf(format string, args ...interface{})
 }
 
+func stackFatalf(t tLogger, f string, args ...interface{}) {
+	lines := make([]string, 0, 32)
+	msg := fmt.Sprintf(f, args...)
+	lines = append(lines, msg)
+
+	// Generate the Stack of callers:
+	for i := 2; true; i++ {
+		_, file, line, ok := runtime.Caller(i)
+		if ok == false {
+			break
+		}
+		msg := fmt.Sprintf("%d - %s:%d", i, file, line)
+		lines = append(lines, msg)
+	}
+
+	t.Fatalf("%s", strings.Join(lines, "\n"))
+}
+
 func NewDefaultConnection(t tLogger) Conn {
 	sc, err := Connect(clusterName, clientName)
 	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+		stackFatalf(t, "Expected to connect correctly, got err %v", err)
 	}
 	return sc
 }
