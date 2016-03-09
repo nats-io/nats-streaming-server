@@ -845,6 +845,20 @@ func TestClose(t *testing.T) {
 	}
 }
 
+func TestDoubleClose(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	if err := sc.Close(); err != nil {
+		t.Fatalf("Did not expect an error on first Close, got %v\n", err)
+	}
+
+	if err := sc.Close(); err != nil {
+		t.Fatalf("Did not expect an error on second Close, got %v\n", err)
+	}
+}
+
 func TestManualAck(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)
