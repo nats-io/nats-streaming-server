@@ -1096,6 +1096,12 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 			ackWaitInSecs: time.Duration(sr.AckWaitInSecs),
 			acksPending:   make(map[uint64]*pb.MsgProto),
 		}
+
+		// set the start sequence of the subscriber.
+		s.setSubStartSequence(sub, sr, cs)
+
+		// add the subscription to stan
+		s.addSubscription(cs, sub)
 	}
 
 	// Subscribe to acks
@@ -1103,12 +1109,6 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
 	}
-
-	// set the start sequence of the subscriber.
-	s.setSubStartSequence(sub, sr, cs)
-
-	// add the subscription to stan
-	s.addSubscription(cs, sub)
 
 	// Create a non-error response
 	resp := &pb.SubscriptionResponse{AckInbox: sub.ackInbox}
@@ -1122,9 +1122,9 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 
 	// publish messages to this subscriber
-	sub.Lock()
+	sub.RLock()
 	qs := sub.qstate
-	sub.Unlock()
+	sub.RUnlock()
 
 	if qs != nil {
 		s.sendAvailableMessagesToQueue(cs, qs)
@@ -1283,7 +1283,7 @@ func (s *stanServer) setSubStartSequence(sub *subState, sr *pb.SubscriptionReque
 		Debugf("STAN: [Client:%s] Sending last message, subject=%s.",
 			sub.clientID, sub.subject)
 	case pb.StartPosition_TimeDeltaStart:
-		startTime := time.Now().UnixNano()-sr.StartTimeDelta
+		startTime := time.Now().UnixNano() - sr.StartTimeDelta
 		sub.lastSent = s.getSequenceFromStartTime(cs, sub, startTime) - 1
 		Debugf("STAN: [Client:%s] Sending from time, subject=%s time=%d seq=%d",
 			sub.clientID, sub.subject, startTime, sub.lastSent)

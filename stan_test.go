@@ -1434,10 +1434,11 @@ func TestSubscriptionStartWithMsgFlow(t *testing.T) {
 	defer s.Shutdown()
 
 	sc, err := Connect(clusterName, clientName)
-	defer sc.Close()
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
+
+	defer sc.Close()
 
 	batch := int(100)
 	ch := make(chan bool)
@@ -1455,8 +1456,6 @@ func TestSubscriptionStartWithMsgFlow(t *testing.T) {
 		if nr := atomic.AddInt32(&received, 1); nr == sent {
 			ch <- true
 		}
-
-		//fmt.Printf("Received msg %v\n", m)
 	}
 
 	publish := func() {
@@ -1466,7 +1465,7 @@ func TestSubscriptionStartWithMsgFlow(t *testing.T) {
 				ns := atomic.AddInt32(&sent, 1)
 				data := []byte(fmt.Sprintf("%d", ns))
 				sc.PublishAsync("foo", data, func(guid string, err error) {
-					time.Sleep(10)
+					time.Sleep(10 * time.Millisecond)
 				})
 			}
 		}
@@ -1487,7 +1486,9 @@ func TestSubscriptionStartWithMsgFlow(t *testing.T) {
 		t.Fatal("Did not receive our messages")
 	}
 
-	if received != sent {
+	time.Sleep(250 * time.Millisecond)
+
+	if atomic.LoadInt32(&received) != atomic.LoadInt32(&sent) {
 		t.Fatalf("Expected %d msgs but received %d\n", sent, received)
 	}
 
