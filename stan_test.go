@@ -1428,6 +1428,86 @@ func TestRedeliveredFlag(t *testing.T) {
 	}
 }
 
+func TestSubscriptionStartWithMsgFlow(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName)
+	defer sc.Close()
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	batch := int(100)
+	ch := make(chan bool)
+	received := int32(0)
+	sent := int32(0)
+
+	// Capture the messages that are delivered.
+	savedMsgs := make([]*Msg, 0, batch)
+
+	mcb := func(m *Msg) {
+
+		savedMsgs = append(savedMsgs, m)
+
+		// Track total
+		if nr := atomic.AddInt32(&received, 1); nr == sent {
+			ch <- true
+		}
+
+		//fmt.Printf("Received msg %v\n", m)
+	}
+
+	publish := func() {
+		// send at least two batches.
+		for atomic.LoadInt32(&received) == 0 {
+			for i := 0; i < batch; i++ {
+				ns := atomic.AddInt32(&sent, 1)
+				data := []byte(fmt.Sprintf("%d", ns))
+				sc.PublishAsync("foo", data, func(guid string, err error) {
+					time.Sleep(10)
+				})
+			}
+		}
+	}
+
+	go publish()
+
+	time.Sleep(50 * time.Millisecond)
+
+	sub, err := sc.Subscribe("foo", mcb, DeliverAllAvailable())
+	if err != nil {
+		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
+	}
+
+	defer sub.Unsubscribe()
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
+
+	if received != sent {
+		t.Fatalf("Expected %d msgs but received %d\n", sent, received)
+	}
+
+	// Check we received them in order.
+	seq := uint64(1)
+	for i := int32(0); i < sent; i++ {
+		m := savedMsgs[i]
+		// Check Sequence
+		if m.Sequence != seq {
+			t.Fatalf("Expected seq: %d, got %d\n", seq, m.Sequence)
+		}
+		// Check payload
+		dseq, _ := strconv.Atoi(string(m.Data))
+		if dseq != int(seq) {
+			t.Fatalf("Expected payload: %d, got %d\n", seq, dseq)
+		}
+		seq++
+	}
+}
+
 func TestMaxChannels(t *testing.T) {
 	t.Skip("Skipping test for now around channel limits")
 
