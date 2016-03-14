@@ -96,6 +96,32 @@ func NewDefaultConnection(t tLogger) Conn {
 	return sc
 }
 
+func TestNatsConnNotClosedOnClose(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	// Create a NATS connection
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on Connect: %v", err)
+	}
+	defer nc.Close()
+
+	// Pass this NATS connection to STAN
+	sc, err := Connect(clusterName, clientName, NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	// Now close the STAN connection
+	sc.Close()
+
+	// Verify that NATS connection is not closed
+	if nc.IsClosed() {
+		t.Fatal("NATS connection should NOT have been closed in Connect")
+	}
+}
+
 func TestBasicConnect(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)
