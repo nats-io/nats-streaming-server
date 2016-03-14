@@ -980,6 +980,122 @@ func TestRedelivery(t *testing.T) {
 	}
 }
 
+func checkTime(t *testing.T, label string, time1, time2 time.Time, expected time.Duration, tolerance time.Duration) {
+	duration := time2.Sub(time1)
+
+	if duration < (expected-tolerance) || duration > (expected+tolerance) {
+		t.Fatalf("%s not in range: %v (expected %v +/- %v)", label, duration, expected, tolerance)
+	}
+}
+
+func testRedelivery(t *testing.T, count int, queueSub bool) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	toSend := int32(count)
+	hw := []byte("Hello World")
+
+	ch := make(chan bool)
+	acked := int32(0)
+	secondRedelivery := false
+	firstDeliveryCount := int32(0)
+	firstRedeliveryCount := int32(0)
+	var startDelivery time.Time
+	var startFirstRedelivery time.Time
+	var startSecondRedelivery time.Time
+
+	ackRedeliverTime := 1 * time.Second
+
+	recvCb := func(m *Msg) {
+		if m.Redelivered {
+			if secondRedelivery {
+				if startSecondRedelivery.IsZero() {
+					startSecondRedelivery = time.Now()
+				}
+				m.Ack()
+				if atomic.AddInt32(&acked, 1) == toSend {
+					ch <- true
+				}
+			} else {
+				if startFirstRedelivery.IsZero() {
+					startFirstRedelivery = time.Now()
+				}
+				if atomic.AddInt32(&firstRedeliveryCount, 1) == toSend {
+					secondRedelivery = true
+				}
+			}
+		} else {
+			if startDelivery.IsZero() {
+				startDelivery = time.Now()
+			}
+			atomic.AddInt32(&firstDeliveryCount, 1)
+		}
+	}
+
+	var sub Subscription
+	var err error
+	if queueSub {
+		sub, err = sc.QueueSubscribe("foo", "bar", recvCb, AckWait(ackRedeliverTime), SetManualAckMode())
+	} else {
+		sub, err = sc.Subscribe("foo", recvCb, AckWait(ackRedeliverTime), SetManualAckMode())
+	}
+	if err != nil {
+		t.Fatalf("Unexpected error on Subscribe, got %v\n", err)
+	}
+	defer sub.Unsubscribe()
+
+	for i := int32(0); i < toSend; i++ {
+		sc.Publish("foo", hw)
+	}
+
+	// If this succeeds, it means that we got all messages first delivered,
+	// and then at least 2 * toSend messages received as redelivered.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not ack all expected messages")
+	}
+
+	// Verify first redelivery happens when expected
+	checkTime(t, "First redelivery", startDelivery, startFirstRedelivery, ackRedeliverTime, 100*time.Millisecond)
+
+	// Verify second redelivery happens when expected
+	checkTime(t, "Second redelivery", startFirstRedelivery, startSecondRedelivery, ackRedeliverTime, 100*time.Millisecond)
+
+	// Check counts
+	if delivered := atomic.LoadInt32(&firstDeliveryCount); delivered != toSend {
+		t.Fatalf("Did not receive all messages during delivery: %v vs %v", delivered, toSend)
+	}
+	if firstRedelivered := atomic.LoadInt32(&firstRedeliveryCount); firstRedelivered != toSend {
+		t.Fatalf("Did not receive all messages during first redelivery: %v vs %v", firstRedelivered, toSend)
+	}
+	if acks := atomic.LoadInt32(&acked); acks != toSend {
+		t.Fatalf("Did not get expected acks: %v vs %v", acks, toSend)
+	}
+}
+
+func TestLowRedeliveryToSubMoreThanOnce(t *testing.T) {
+	t.Skip("Skipping until redelivery is fixed")
+	testRedelivery(t, 10, false)
+}
+
+func TestHighRedeliveryToSubMoreThanOnce(t *testing.T) {
+	t.Skip("Skipping until redelivery is fixed")
+	testRedelivery(t, 100, false)
+}
+
+func TestLowRedeliveryToQueueSubMoreThanOnce(t *testing.T) {
+	t.Skip("Skipping until redelivery is fixed")
+	testRedelivery(t, 10, true)
+}
+
+func TestHighRedeliveryToQueueSubMoreThanOnce(t *testing.T) {
+	t.Skip("Skipping until redelivery is fixed")
+	testRedelivery(t, 100, true)
+}
+
 func TestDurableSubscriber(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)
