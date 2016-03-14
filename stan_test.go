@@ -96,6 +96,32 @@ func NewDefaultConnection(t tLogger) Conn {
 	return sc
 }
 
+func TestConnClosedOnConnectFailure(t *testing.T) {
+	s := natsd.RunDefaultServer()
+	defer s.Shutdown()
+
+	// Non-Existant or Unreachable
+	connectTime := 25 * time.Millisecond
+	if _, err := Connect("someNonExistantServerID", "myTestClient", ConnectWait(connectTime)); err != ErrConnectReqTimeout {
+		t.Fatalf("Expected Unreachable err, got %v\n", err)
+	}
+
+	// Check that the underlying NATS connection has been closed.
+	// We will first stop the server. If we have left the NATS connection
+	// opened, it should be trying to reconnect.
+	s.Shutdown()
+
+	// Wait a bit
+	time.Sleep(500 * time.Millisecond)
+
+	// Inspecting go routines in search for a doReconnect
+	buf := make([]byte, 10000)
+	n := runtime.Stack(buf, true)
+	if strings.Contains(string(buf[:n]), "doReconnect") {
+		t.Fatal("NATS Connection suspected to not have been closed")
+	}
+}
+
 func TestBasicConnect(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)

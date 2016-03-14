@@ -146,6 +146,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	hbInbox := nats.NewInbox()
 	var err error
 	if c.hbSubscription, err = c.nc.Subscribe(hbInbox, c.processHeartBeat); err != nil {
+		c.Close()
 		return nil, err
 	}
 
@@ -156,8 +157,10 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	reply, err := c.nc.Request(discoverSubject, b, c.opts.ConnectTimeout)
 	if err != nil {
 		if err == nats.ErrTimeout {
+			c.Close()
 			return nil, ErrConnectReqTimeout
 		} else {
+			c.Close()
 			return nil, err
 		}
 	}
@@ -165,9 +168,11 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	cr := &pb.ConnectResponse{}
 	err = cr.Unmarshal(reply.Data)
 	if err != nil {
+		c.Close()
 		return nil, err
 	}
 	if cr.Error != "" {
+		c.Close()
 		return nil, errors.New(cr.Error)
 	}
 
@@ -180,6 +185,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	// Setup the ACK subscription
 	c.ackSubject = fmt.Sprintf("%s.%s", DefaultACKPrefix, nuid.Next())
 	if c.ackSubscription, err = c.nc.Subscribe(c.ackSubject, c.processAck); err != nil {
+		c.Close()
 		return nil, err
 	}
 	c.ackSubscription.SetPendingLimits(1024*1024, 32*1024*1024)
