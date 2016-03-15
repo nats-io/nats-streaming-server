@@ -126,7 +126,7 @@ type conn struct {
 	pubAckChan      chan (struct{})
 	opts            Options
 	nc              *nats.Conn
-	ncOwned         bool
+	ncOwned         bool // STAN created the connection, so needs to close it.
 }
 
 // Closure for ack contexts.
