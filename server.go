@@ -428,6 +428,12 @@ func (s *stanServer) initSubscriptions() {
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to close request subject, %v\n", err))
 	}
+	// Flush to make sure those subscriptions are processed before the upper layer
+	// returns to the user.
+	err = s.nc.Flush()
+	if err != nil {
+		panic(fmt.Sprintf("Could not flush the request subscriptions, %v\n", err))
+	}
 
 	Debugf("STAN: discover subject: %s", discoverSubject)
 	Debugf("STAN: publish subject:  %s", pubSubject)
