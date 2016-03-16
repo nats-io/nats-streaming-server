@@ -225,7 +225,8 @@ func (sc *conn) Close() error {
 	defer sc.Unlock()
 
 	if sc.nc == nil {
-		return ErrBadConnection
+		// We are already closed.
+		return nil
 	}
 
 	// Capture for NATS calls below.
