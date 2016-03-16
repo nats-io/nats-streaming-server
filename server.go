@@ -690,7 +690,7 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	subject := sub.subject
 	qs := sub.qstate
 	clientID := sub.clientID
-	floorTimesamp := sub.ackTimeFloor
+	floorTimestamp := sub.ackTimeFloor
 	sub.RUnlock()
 
 	// If the client has some failed heartbeats, ignore this request.
@@ -713,7 +713,7 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	for _, m := range sortedMsgs {
 		if checkExpiration {
 			// Ignore messages with a timestamp below our floor
-			if floorTimesamp > 0 && floorTimesamp > m.Timestamp {
+			if floorTimestamp > 0 && floorTimestamp > m.Timestamp {
 				continue
 			}
 
@@ -991,11 +991,14 @@ func (sub *subState) adjustAckTimer(firstUnackedTimestamp int64) {
 		// Capture time
 		now := time.Now().UnixNano()
 
-		// If it is in the past (or 0), use the default ackWait
+		// If it is in the past (which will happen when a message is
+		// redelivered more than once), or 0, use the default ackWait
 		if firstUnackedTimestamp <= now {
 			sub.ackTimer.Reset(sub.ackWaitInSecs * time.Second)
 		} else {
-			// Compute the time the ackTimer should fire
+			// Compute the time the ackTimer should fire, which is the
+			// ack timeout less the duration the message has been in
+			// the server.
 			fireIn := (firstUnackedTimestamp - now) + int64(sub.ackWaitInSecs*time.Second)
 
 			sub.ackTimer.Reset(time.Duration(fireIn))
