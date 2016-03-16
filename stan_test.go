@@ -243,7 +243,7 @@ func TestBasicSubscription(t *testing.T) {
 
 	sub, err := sc.Subscribe("foo", func(m *Msg) {})
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 }
@@ -265,7 +265,7 @@ func TestBasicQueueSubscription(t *testing.T) {
 	// Test that we can not set durable status on queue subscribers.
 	_, err = sc.QueueSubscribe("foo", "bar", func(m *Msg) {}, DurableName("durable-queue-sub"))
 	if err == nil {
-		t.Fatalf("Expected non-nil error on QueueSubscribe with DurableName\n")
+		t.Fatalf("Expected non-nil error on QueueSubscribe with DurableName")
 	}
 }
 
@@ -308,7 +308,7 @@ func TestBasicPubSub(t *testing.T) {
 		}
 	})
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -341,7 +341,7 @@ func TestBasicPubSubFlowControl(t *testing.T) {
 		}
 	}, MaxInflight(25))
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -387,7 +387,7 @@ func TestBasicPubQueueSub(t *testing.T) {
 		}
 	})
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -425,7 +425,7 @@ func TestBasicPubSubWithReply(t *testing.T) {
 		ch <- true
 	})
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -462,7 +462,7 @@ func TestAsyncPubSubWithReply(t *testing.T) {
 		ch <- true
 	})
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -500,7 +500,7 @@ func TestSubscriptionStartPositionLast(t *testing.T) {
 	// Now subscribe and set start position to last received.
 	sub, err := sc.Subscribe("foo", mcb, StartWithLastReceived())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -536,7 +536,7 @@ func TestSubscriptionStartAtSequence(t *testing.T) {
 	// Check for illegal sequences
 	_, err := sc.Subscribe("foo", nil, StartAtSequence(500))
 	if err == nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Expected non-nil error on Subscribe")
 	}
 
 	ch := make(chan bool)
@@ -614,7 +614,7 @@ func TestSubscriptionStartAtTime(t *testing.T) {
 	// Check for illegal configuration
 	_, err := sc.Subscribe("foo", nil, StartAtTime(time.Time{}))
 	if err == nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Expected non-nil error on Subscribe")
 	}
 
 	ch := make(chan bool)
@@ -923,7 +923,7 @@ func TestManualAck(t *testing.T) {
 		fch <- true
 	}, DeliverAllAvailable())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 
 	if err := Wait(fch); err != nil {
@@ -950,7 +950,7 @@ func TestManualAck(t *testing.T) {
 		}
 	}, DeliverAllAvailable(), MaxInflight(10), SetManualAckMode())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -1014,7 +1014,7 @@ func TestRedelivery(t *testing.T) {
 
 	}, DeliverAllAvailable(), MaxInflight(100), AckWait(ackRedeliverTime), SetManualAckMode())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -1062,7 +1062,7 @@ func TestDurableSubscriber(t *testing.T) {
 		}
 	}, DeliverAllAvailable(), DurableName("durable-foo"))
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 
 	if err := Wait(ch); err != nil {
@@ -1095,7 +1095,7 @@ func TestDurableSubscriber(t *testing.T) {
 		}
 	}, DeliverAllAvailable(), DurableName("durable-foo"))
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 
 	// Check that durables can not be subscribed to again by same client.
@@ -1172,13 +1172,13 @@ func TestPubMultiQueueSub(t *testing.T) {
 
 	s1, err := sc.QueueSubscribe("foo", "bar", mcb)
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s1.Unsubscribe()
 
 	s2, err = sc.QueueSubscribe("foo", "bar", mcb)
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s2.Unsubscribe()
 
@@ -1252,13 +1252,13 @@ func TestPubMultiQueueSubWithSlowSubscriber(t *testing.T) {
 
 	s1, err := sc.QueueSubscribe("foo", "bar", mcb)
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s1.Unsubscribe()
 
 	s2, err = sc.QueueSubscribe("foo", "bar", mcb)
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s2.Unsubscribe()
 
@@ -1323,13 +1323,13 @@ func TestPubMultiQueueSubWithRedelivery(t *testing.T) {
 
 	s1, err := sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s1.Unsubscribe()
 
 	s2, err = sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode(), AckWait(1*time.Second))
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s2.Unsubscribe()
 
@@ -1393,13 +1393,13 @@ func TestPubMultiQueueSubWithDelayRedelivery(t *testing.T) {
 
 	s1, err := sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s1.Unsubscribe()
 
 	s2, err = sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode(), AckWait(1*time.Second))
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s2.Unsubscribe()
 
@@ -1460,7 +1460,7 @@ func TestRedeliveredFlag(t *testing.T) {
 		}
 	}, DeliverAllAvailable(), AckWait(1*time.Second), SetManualAckMode())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
