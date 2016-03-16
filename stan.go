@@ -100,6 +100,15 @@ func PubAckWait(t time.Duration) Option {
 	}
 }
 
+// NatsConn is an Option to set the underlying NATS connection to be used
+// by a STAN Conn object.
+func NatsConn(nc *nats.Conn) Option {
+	return func(o *Options) error {
+		o.NatsConn = nc
+		return nil
+	}
+}
+
 // A conn represents a bare connection to a stan cluster.
 type conn struct {
 	sync.Mutex
@@ -117,6 +126,7 @@ type conn struct {
 	pubAckChan      chan (struct{})
 	opts            Options
 	nc              *nats.Conn
+	ncOwned         bool // STAN created the connection, so needs to close it.
 }
 
 // Closure for ack contexts.
@@ -134,18 +144,22 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 			return nil, err
 		}
 	}
+	// Check if the user has provided a connection as an option
+	c.nc = c.opts.NatsConn
 	// Create a NATS connection if it doesn't exist.
 	if c.nc == nil {
 		if nc, err := nats.Connect(c.opts.NatsURL); err != nil {
 			return nil, err
 		} else {
 			c.nc = nc
+			c.ncOwned = true
 		}
 	}
 	// Create a heartbeat inbox
 	hbInbox := nats.NewInbox()
 	var err error
 	if c.hbSubscription, err = c.nc.Subscribe(hbInbox, c.processHeartBeat); err != nil {
+		c.Close()
 		return nil, err
 	}
 
@@ -156,8 +170,10 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	reply, err := c.nc.Request(discoverSubject, b, c.opts.ConnectTimeout)
 	if err != nil {
 		if err == nats.ErrTimeout {
+			c.Close()
 			return nil, ErrConnectReqTimeout
 		} else {
+			c.Close()
 			return nil, err
 		}
 	}
@@ -165,9 +181,11 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	cr := &pb.ConnectResponse{}
 	err = cr.Unmarshal(reply.Data)
 	if err != nil {
+		c.Close()
 		return nil, err
 	}
 	if cr.Error != "" {
+		c.Close()
 		return nil, errors.New(cr.Error)
 	}
 
@@ -180,6 +198,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	// Setup the ACK subscription
 	c.ackSubject = fmt.Sprintf("%s.%s", DefaultACKPrefix, nuid.Next())
 	if c.ackSubscription, err = c.nc.Subscribe(c.ackSubject, c.processAck); err != nil {
+		c.Close()
 		return nil, err
 	}
 	c.ackSubscription.SetPendingLimits(1024*1024, 32*1024*1024)
@@ -211,7 +230,9 @@ func (sc *conn) Close() error {
 
 	// Capture for NATS calls below.
 	nc := sc.nc
-	defer nc.Close()
+	if sc.ncOwned {
+		defer nc.Close()
+	}
 
 	// Signals we are closed.
 	sc.nc = nil
