@@ -1480,6 +1480,75 @@ func TestRedeliveredFlag(t *testing.T) {
 	}
 }
 
+// TestNoDuplicatesOnSubscriberStart tests that a subscriber does not
+// receive duplicate when requesting a replay while messages are being
+// published on it's subject.
+func TestNoDuplicatesOnSubscriberStart(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	defer sc.Close()
+
+	batch := int32(100)
+	ch := make(chan bool)
+	pch := make(chan bool)
+	received := int32(0)
+	sent := int32(0)
+
+	mcb := func(m *Msg) {
+		// signal when we've reached the expected messages count
+		if nr := atomic.AddInt32(&received, 1); nr == sent {
+			ch <- true
+		}
+	}
+
+	publish := func() {
+		// publish until the receiver starts, then one additional batch.
+		// This primes STAN with messages, and gives us a point to stop
+		// when the subscriber has started processing messages.
+		for atomic.LoadInt32(&received) == 0 {
+			for i := int32(0); i < batch; i++ {
+				atomic.AddInt32(&sent, 1)
+				sc.PublishAsync("foo", []byte("hello"), nil)
+			}
+			// signal that we've published a batch.
+			pch <- true
+		}
+	}
+
+	go publish()
+
+	// wait until the publisher has published at least one batch
+	Wait(pch)
+
+	// start the subscriber
+	sub, err := sc.Subscribe("foo", mcb, DeliverAllAvailable())
+	if err != nil {
+		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
+	}
+
+	defer sub.Unsubscribe()
+
+	// Wait for our expected count.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
+
+	// Wait to see if the subscriber receives any duplicate messages.
+	time.Sleep(250 * time.Millisecond)
+
+	// Make sure we've receive the exact count of sent messages.
+	if atomic.LoadInt32(&received) != atomic.LoadInt32(&sent) {
+		t.Fatalf("Expected %d msgs but received %d\n", sent, received)
+	}
+}
+
 func TestMaxChannels(t *testing.T) {
 	t.Skip("Skipping test for now around channel limits")
 

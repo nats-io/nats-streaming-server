@@ -982,6 +982,20 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 	return fmt.Sprintf("%s-%s-%s", sr.ClientID, sr.Subject, sr.DurableName)
 }
 
+func (s *stanServer) addSubscription(cs *channelStore, sub *subState) {
+
+	// Store this subscription
+	cs.subs.Store(sub)
+
+	// Also store in client
+	if client := s.clients.Lookup(sub.clientID); client != nil {
+		client.AddSub(sub)
+	}
+
+	Debugf("STAN: [Client:%s] Subscribed. subject=%s, inbox=%s.",
+		sub.clientID, sub.subject, sub.inbox)
+}
+
 // processSubscriptionRequest will process a subscription request.
 func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	sr := &pb.SubscriptionRequest{}
@@ -1088,15 +1102,12 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 			ackWaitInSecs: time.Duration(sr.AckWaitInSecs),
 			acksPending:   make(map[uint64]*pb.MsgProto),
 		}
-		// Store this subscription
-		cs.subs.Store(sub)
-		// Also store in client
-		if client := s.clients.Lookup(sr.ClientID); client != nil {
-			client.AddSub(sub)
-		}
 
-		Debugf("STAN: [Client:%s] Subscribed. subject=%s, inbox=%s.",
-			sr.ClientID, sub.subject, sub.inbox)
+		// set the start sequence of the subscriber.
+		s.setSubStartSequence(sub, sr, cs)
+
+		// add the subscription to stan
+		s.addSubscription(cs, sub)
 	}
 
 	// Subscribe to acks
@@ -1114,23 +1125,19 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 	if sr.DurableName != "" {
 		// Redeliver any oustanding.
 		s.performDurableRedelivery(sub)
-		s.sendAvailableMessages(cs, sub)
-		return
 	}
 
-	// Initialize the subscription and see if StartPosition dictates we have messages to send.
-	switch sr.StartPosition {
-	case pb.StartPosition_NewOnly:
-		s.sendNewOnly(cs, sub)
-	case pb.StartPosition_LastReceived:
-		s.sendLastMessage(cs, sub)
-	case pb.StartPosition_TimeDeltaStart:
-		s.sendMessagesToSubFromTime(cs, sub, time.Now().UnixNano()-sr.StartTimeDelta)
-	case pb.StartPosition_SequenceStart:
-		s.sendMessagesFromSequence(cs, sub, sr.StartSequence)
-	case pb.StartPosition_First:
-		s.sendMessagesFromBeginning(cs, sub)
+	// publish messages to this subscriber
+	sub.RLock()
+	qs := sub.qstate
+	sub.RUnlock()
+
+	if qs != nil {
+		s.sendAvailableMessagesToQueue(cs, qs)
+	} else {
+		s.sendAvailableMessages(cs, sub)
 	}
+
 }
 
 // processAckMsg processes inbound acks from clients for delivered messages.
@@ -1251,27 +1258,11 @@ func (s *stanServer) startSequenceValid(subject string, seq uint64) bool {
 	return true
 }
 
-// Send messages to the subscriber starting at startSeq.
-func (s *stanServer) sendMessagesFromSequence(cs *channelStore, sub *subState, startSeq uint64) {
-	sub.Lock()
-	sub.lastSent = startSeq - 1 // FIXME(dlc) - wrap?
-	qs := sub.qstate
-	sub.Unlock()
+func (s *stanServer) getSequenceFromStartTime(cs *channelStore, sub *subState, startTime int64) uint64 {
 
-	Debugf("STAN: [Client:%s] Sending to subject=%s startseq=%d",
-		sub.clientID, sub.subject, startSeq)
-
-	if qs != nil {
-		s.sendAvailableMessagesToQueue(cs, qs)
-	} else {
-		s.sendAvailableMessages(cs, sub)
-	}
-}
-
-// Send messages to the subscriber starting at startTime. Assumes startTime is valid.
-func (s *stanServer) sendMessagesToSubFromTime(cs *channelStore, sub *subState, startTime int64) {
-	// Do binary search to find starting sequence.
 	cs.msgs.RLock()
+	defer cs.msgs.RUnlock()
+
 	index := sort.Search(len(cs.msgs.msgs), func(i int) bool {
 		m := cs.msgs.msgs[uint64(i)+cs.msgs.first]
 		if m.Timestamp >= startTime {
@@ -1279,33 +1270,38 @@ func (s *stanServer) sendMessagesToSubFromTime(cs *channelStore, sub *subState, 
 		}
 		return false
 	})
-	startSeq := uint64(index) + cs.msgs.first
-	cs.msgs.RUnlock()
-	Debugf("STAN: [Client:%s] Sending from time, subject=%s time=%d", sub.clientID, sub.subject, startTime)
-	s.sendMessagesFromSequence(cs, sub, startSeq)
+
+	return uint64(index) + cs.msgs.first
 }
 
-// Send all messages to the subscriber.
-func (s *stanServer) sendMessagesFromBeginning(cs *channelStore, sub *subState) {
-	Debugf("STAN: [Client:%s] Sending from beginning, subject=%s.", sub.clientID, sub.subject)
-	s.sendMessagesFromSequence(cs, sub, cs.msgs.FirstSequence())
-}
-
-// Send the last message we have to the subscriber
-func (s *stanServer) sendLastMessage(cs *channelStore, sub *subState) {
-	Debugf("STAN: [Client:%s] Sending last message, subject=%s.", sub.clientID, sub.subject)
-	s.sendMessagesFromSequence(cs, sub, cs.msgs.LastSequence())
-}
-
-// Setup to send only new messages.
-func (s *stanServer) sendNewOnly(cs *channelStore, sub *subState) {
-	lastSeq := cs.msgs.LastSequence()
+// Setup the start position for the subscriber.
+func (s *stanServer) setSubStartSequence(sub *subState, sr *pb.SubscriptionRequest, cs *channelStore) {
 	sub.Lock()
-	sub.lastSent = lastSeq
-	sub.Unlock()
+	defer sub.Unlock()
 
-	Debugf("STAN: [Client:%s] Sending new-only subject=%s, seq=%d.",
-		sub.clientID, sub.subject, lastSeq)
+	switch sr.StartPosition {
+	case pb.StartPosition_NewOnly:
+		sub.lastSent = cs.msgs.LastSequence()
+		Debugf("STAN: [Client:%s] Sending new-only subject=%s, seq=%d.",
+			sub.clientID, sub.subject, sub.lastSent)
+	case pb.StartPosition_LastReceived:
+		sub.lastSent = cs.msgs.LastSequence() - 1
+		Debugf("STAN: [Client:%s] Sending last message, subject=%s.",
+			sub.clientID, sub.subject)
+	case pb.StartPosition_TimeDeltaStart:
+		startTime := time.Now().UnixNano() - sr.StartTimeDelta
+		sub.lastSent = s.getSequenceFromStartTime(cs, sub, startTime) - 1
+		Debugf("STAN: [Client:%s] Sending from time, subject=%s time=%d seq=%d",
+			sub.clientID, sub.subject, startTime, sub.lastSent)
+	case pb.StartPosition_SequenceStart:
+		sub.lastSent = sr.StartSequence - 1
+		Debugf("STAN: [Client:%s] Sending from sequence, subject=%s seq=%d",
+			sub.clientID, sub.subject, sub.lastSent)
+	case pb.StartPosition_First:
+		sub.lastSent = cs.msgs.FirstSequence() - 1
+		Debugf("STAN: [Client:%s] Sending from beginngin, subject=%s seq=%d",
+			sub.clientID, sub.subject, sub.lastSent)
+	}
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.
