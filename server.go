@@ -117,6 +117,7 @@ type subState struct {
 	lastSent      uint64
 	ackWaitInSecs time.Duration
 	ackTimer      *time.Timer
+	ackTimeFloor  int64
 	ackSub        *nats.Subscription
 	acksPending   map[uint64]*pb.MsgProto
 	maxInFlight   int
@@ -612,7 +613,7 @@ func (s *stanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto) bool {
 		return false
 	}
 	sub.Lock()
-	didSend := s.sendMsgToSub(sub, m)
+	didSend := s.sendMsgToSubAndUpdateLastSent(sub, m)
 	lastSent := sub.lastSent
 	sub.Unlock()
 	if !didSend {
@@ -680,11 +681,10 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	sub.RLock()
 	expTime := int64(sub.ackWaitInSecs * time.Second)
 	sortedMsgs := makeSortedMsgs(sub.acksPending)
-	ackTimer := sub.ackTimer
-	inbox := sub.inbox
 	subject := sub.subject
 	qs := sub.qstate
 	clientID := sub.clientID
+	floorTimesamp := sub.ackTimeFloor
 	sub.RUnlock()
 
 	// If the client has some failed heartbeats, ignore this request.
@@ -699,22 +699,27 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 		return
 	}
 
+	var pick *subState
+
 	now := time.Now().UnixNano()
 
 	// We will move through acksPending(sorted) and see what needs redelivery.
 	for _, m := range sortedMsgs {
+		if checkExpiration {
+			// Ignore messages with a timestamp below our floor
+			if floorTimesamp > 0 && floorTimesamp > m.Timestamp {
+				continue
+			}
 
-		remaining := m.Timestamp + expTime - now
-
-		if remaining > 0 && checkExpiration {
-
-			// the messages are ordered by seq so the expiration
-			// times are ascending.  Once we've get here, we've hit an
-			// unexpired message, and we're done. Reset the sub's ack
-			// timer to fire on the next message expiration.
-			Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
-			ackTimer.Reset(time.Duration(remaining) / time.Nanosecond)
-			return
+			if m.Timestamp+expTime > now {
+				// the messages are ordered by seq so the expiration
+				// times are ascending.  Once we've get here, we've hit an
+				// unexpired message, and we're done. Reset the sub's ack
+				// timer to fire on the next message expiration.
+				Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
+				sub.adjustAckTimer(m.Timestamp)
+				return
+			}
 		}
 
 		Tracef("STAN: [Client:%s] redelivery, sending seqno=%d.", clientID, m.Sequence)
@@ -727,42 +732,45 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 		if qs != nil {
 			// Remove from current subs acksPending.
 			sub.Lock()
-
 			delete(sub.acksPending, m.Sequence)
-
-			// if there are no outstanding acks on this subscriber after
-			// removing our ack, clear the timer.
-			if len(sub.acksPending) == 0 {
-				sub.clearAckTimer()
-			}
-
 			sub.Unlock()
 
 			cs := s.channels.Lookup(subject)
 			ss := cs.subs
 
-			var qsub *subState
 			ss.RLock()
-			qsub = findBestQueueSub(qs.subs)
+			pick = findBestQueueSub(qs.subs)
 			ss.RUnlock()
 
-			if qsub == nil {
+			if pick == nil {
 				Errorf("STAN: [Client:%s] Unable to find queue subscriber.", clientID)
 				break
 			}
-
-			qsub.Lock()
-			qsub.ackTimer = nil
-			s.sendMsgToSub(qsub, m)
-			qsub.Unlock()
 		} else {
-			sub.ackTimer = nil
-			b, _ := m.Marshal()
-			if err := s.nc.Publish(inbox, b); err != nil {
-				// Break on error. FIXME(dlc) reset timer?
-				break
-			}
+			pick = sub
 		}
+
+		pick.Lock()
+		s.sendMsgToSub(pick, m)
+		pick.Unlock()
+	}
+
+	if checkExpiration {
+		// The messages from sortedMsgs above may have all been acknowledged
+		// by now, but we are going to set the timer based on the oldest on
+		// that list, which is the sooner the timer should fire anyway.
+		// The timer will correctly be adjusted.
+
+		firstUnacked := int64(0)
+
+		// Because of locking and timing, it's possible that the sortedMsgs
+		// map was empty even on entry.
+		if len(sortedMsgs) > 0 {
+			firstUnacked = sortedMsgs[0].Timestamp
+		}
+
+		// Adjust the timer
+		sub.adjustAckTimer(firstUnacked)
 	}
 }
 
@@ -784,11 +792,8 @@ func (s *stanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 		return false
 	}
 
-	oldLast := sub.lastSent
-	sub.lastSent = m.Sequence
 	b, _ := m.Marshal()
 	if err := s.nc.Publish(sub.inbox, b); err != nil {
-		sub.lastSent = oldLast
 		Errorf("STAN: [Client:%s] Failed Sending msgseq %s:%d to %s (%s).",
 			sub.clientID, m.Subject, m.Sequence, sub.inbox, err)
 		return false
@@ -801,9 +806,20 @@ func (s *stanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 		sub.ackTimer = time.AfterFunc(sub.ackWaitInSecs*time.Second, func() {
 			s.performAckExpirationRedelivery(sub)
 		})
+		sub.ackTimeFloor = m.Timestamp
 	}
 
 	return true
+}
+
+// Sends the message to the subscriber and updates the subscriber's lastSent field
+// Sub lock should be held before calling.
+func (s *stanServer) sendMsgToSubAndUpdateLastSent(sub *subState, m *pb.MsgProto) bool {
+	if s.sendMsgToSub(sub, m) {
+		sub.lastSent = m.Sequence
+		return true
+	}
+	return false
 }
 
 // assignAndStore will assign a sequence ID and then store the message.
@@ -947,6 +963,43 @@ func (sub *subState) clearAckTimer() {
 	if sub.ackTimer != nil {
 		sub.ackTimer.Stop()
 		sub.ackTimer = nil
+	}
+}
+
+// adjustAckTimer adjusts the timer based on a given timestamp
+// The timer will be stopped if there is no more pending ack.
+// If there are pending acks, the timer will be reset to the
+// default sub.ackWaitInSecs value if the given timestamp is
+// 0 or in the past. Otherwise, it is set to the remaining time
+// between the given timestamp and now.
+func (sub *subState) adjustAckTimer(firstUnackedTimestamp int64) {
+	sub.Lock()
+	defer sub.Unlock()
+
+	// Reset the floor (it will be set if needed)
+	sub.ackTimeFloor = 0
+
+	// Check if there are still pending acks
+	if len(sub.acksPending) > 0 {
+
+		// Capture time
+		now := time.Now().UnixNano()
+
+		// If it is in the past (or 0), use the default ackWait
+		if firstUnackedTimestamp <= now {
+			sub.ackTimer.Reset(sub.ackWaitInSecs * time.Second)
+		} else {
+			// Compute the time the ackTimer should fire
+			fireIn := (firstUnackedTimestamp - now) + int64(sub.ackWaitInSecs*time.Second)
+
+			sub.ackTimer.Reset(time.Duration(fireIn))
+
+			// Skip redelivery of messages before this one.
+			sub.ackTimeFloor = firstUnackedTimestamp
+		}
+	} else {
+		// No more pending acks, clear the timer.
+		sub.clearAckTimer()
 	}
 }
 
@@ -1157,20 +1210,7 @@ func (s *stanServer) processAck(cs *channelStore, sub *subState, ack *pb.Ack) {
 		sub.stalled = false
 	}
 
-	// If we have the ackTimer running, either reset or cancel it.
-	if sub.ackTimer != nil {
-		if len(sub.acksPending) == 0 {
-			Tracef("STAN: [Client:%s] clearing timer, subj=%s.",
-				sub.clientID, sub.subject)
-			sub.clearAckTimer()
-		} else {
-			// FIXME(dlc) - This should be to next expiration, not simply +delta
-			Tracef("STAN: [Client:%s] subj=%s, reset timer.",
-				sub.clientID, sub.subject)
-
-			sub.ackTimer.Reset(sub.ackWaitInSecs * time.Second)
-		}
-	}
+	// Leave the reset/cancel of the ackTimer to the redelivery cb.
 
 	qs := sub.qstate
 	sub.Unlock()
@@ -1217,7 +1257,7 @@ func (s *stanServer) sendAvailableMessages(cs *channelStore, sub *subState) {
 
 	for nextSeq := sub.lastSent + 1; ; nextSeq++ {
 		nextMsg := cs.msgs.Lookup(nextSeq)
-		if nextMsg == nil || s.sendMsgToSub(sub, nextMsg) == false {
+		if nextMsg == nil || s.sendMsgToSubAndUpdateLastSent(sub, nextMsg) == false {
 			break
 		}
 	}
