@@ -1450,7 +1450,7 @@ func TestNoDuplicatesOnSubscriberStart(t *testing.T) {
 	sent := int32(0)
 
 	mcb := func(m *Msg) {
-	    // signal when we've reached the expected messages count
+		// signal when we've reached the expected messages count
 		if nr := atomic.AddInt32(&received, 1); nr == sent {
 			ch <- true
 		}
@@ -1472,10 +1472,10 @@ func TestNoDuplicatesOnSubscriberStart(t *testing.T) {
 
 	go publish()
 
-    // wait until the publisher has published at least one batch
-    Wait(pch)
+	// wait until the publisher has published at least one batch
+	Wait(pch)
 
-    // start the subscriber
+	// start the subscriber
 	sub, err := sc.Subscribe("foo", mcb, DeliverAllAvailable())
 	if err != nil {
 		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
@@ -1488,8 +1488,8 @@ func TestNoDuplicatesOnSubscriberStart(t *testing.T) {
 		t.Fatal("Did not receive our messages")
 	}
 
-    // Wait to see if the subscriber receives any duplicate messages.
-    time.Sleep(250 * time.Millisecond)
+	// Wait to see if the subscriber receives any duplicate messages.
+	time.Sleep(250 * time.Millisecond)
 
 	// Make sure we've receive the exact count of sent messages.
 	if atomic.LoadInt32(&received) != atomic.LoadInt32(&sent) {
