@@ -383,9 +383,6 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 	if opts.Host == "" {
 		opts.Host = "localhost"
 	}
-	if opts.Port == 0 {
-		opts.Port = server.DEFAULT_PORT
-	}
 
 	s.natsServer = natsd.RunServer(opts)
 
