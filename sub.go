@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats"
+	"github.com/nats-io/stan/pb"
 )
 
 const (
@@ -18,8 +19,8 @@ const (
 
 // Client defined Msg, which includes proto, then back link to subscription.
 type Msg struct {
-	MsgProto // MsgProto: Seq, Subject, Reply[opt], Data, Timestamp, CRC32[opt]
-	Sub      Subscription
+	pb.MsgProto // MsgProto: Seq, Subject, Reply[opt], Data, Timestamp, CRC32[opt]
+	Sub         Subscription
 }
 
 // Subscriptions and Options
@@ -59,7 +60,7 @@ type SubscriptionOptions struct {
 	// Controls the time the cluster will wait for an ACK for a given message.
 	AckWait time.Duration
 	// StartPosition enum from proto.
-	StartAt StartPosition
+	StartAt pb.StartPosition
 	// Optional start sequence number.
 	StartSequence uint64
 	// Optional start time.
@@ -92,7 +93,7 @@ func AckWait(t time.Duration) SubscriptionOption {
 }
 
 // StartPosition sets the desired start position for the message stream.
-func StartAt(sp StartPosition) SubscriptionOption {
+func StartAt(sp pb.StartPosition) SubscriptionOption {
 	return func(o *SubscriptionOptions) error {
 		o.StartAt = sp
 		return nil
@@ -102,17 +103,26 @@ func StartAt(sp StartPosition) SubscriptionOption {
 // StartSequence sets the desired start sequence position and state.
 func StartAtSequence(seq uint64) SubscriptionOption {
 	return func(o *SubscriptionOptions) error {
-		o.StartAt = StartPosition_SequenceStart
+		o.StartAt = pb.StartPosition_SequenceStart
 		o.StartSequence = seq
 		return nil
 	}
 }
 
-// StartTime sets the desired start time position and state.
+// StartAtTime sets the desired start time position and state.
 func StartAtTime(start time.Time) SubscriptionOption {
 	return func(o *SubscriptionOptions) error {
-		o.StartAt = StartPosition_TimeStart
+		o.StartAt = pb.StartPosition_TimeDeltaStart
 		o.StartTime = start
+		return nil
+	}
+}
+
+// StartAtTimeDelta sets the desired start time position and state using the delta.
+func StartAtTimeDelta(ago time.Duration) SubscriptionOption {
+	return func(o *SubscriptionOptions) error {
+		o.StartAt = pb.StartPosition_TimeDeltaStart
+		o.StartTime = time.Now().Add(-ago)
 		return nil
 	}
 }
@@ -120,7 +130,7 @@ func StartAtTime(start time.Time) SubscriptionOption {
 // StartWithLastReceived is a helper function to set start position to last received.
 func StartWithLastReceived() SubscriptionOption {
 	return func(o *SubscriptionOptions) error {
-		o.StartAt = StartPosition_LastReceived
+		o.StartAt = pb.StartPosition_LastReceived
 		return nil
 	}
 }
@@ -128,7 +138,7 @@ func StartWithLastReceived() SubscriptionOption {
 // DeliverAllAvailable will deliver all messages available.
 func DeliverAllAvailable() SubscriptionOption {
 	return func(o *SubscriptionOptions) error {
-		o.StartAt = StartPosition_First
+		o.StartAt = pb.StartPosition_First
 		return nil
 	}
 }
@@ -161,7 +171,7 @@ func (sc *conn) QueueSubscribe(subject, qgroup string, cb MsgHandler, options ..
 
 // subscribe will perform a subscription with the given options to the STAN cluster.
 func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...SubscriptionOption) (Subscription, error) {
-	sub := &subscription{subject: subject, qgroup: qgroup, inbox: newInbox(), cb: cb, sc: sc, opts: DefaultSubscriptionOptions}
+	sub := &subscription{subject: subject, qgroup: qgroup, inbox: nats.NewInbox(), cb: cb, sc: sc, opts: DefaultSubscriptionOptions}
 	for _, opt := range options {
 		if err := opt(&sub.opts); err != nil {
 			return nil, err
@@ -191,7 +201,7 @@ func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...Subs
 
 	// Create a subscription request
 	// FIXME(dlc) add others.
-	sr := &SubscriptionRequest{
+	sr := &pb.SubscriptionRequest{
 		ClientID:      sc.clientID,
 		Subject:       subject,
 		QGroup:        qgroup,
@@ -204,9 +214,9 @@ func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...Subs
 
 	// Conditionals
 	switch sr.StartPosition {
-	case StartPosition_TimeStart:
-		sr.StartTime = sub.opts.StartTime.UnixNano()
-	case StartPosition_SequenceStart:
+	case pb.StartPosition_TimeDeltaStart:
+		sr.StartTimeDelta = time.Now().UnixNano() - sub.opts.StartTime.UnixNano()
+	case pb.StartPosition_SequenceStart:
 		sr.StartSequence = sub.opts.StartSequence
 	}
 
@@ -216,7 +226,7 @@ func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...Subs
 		// FIXME(dlc) unwind subscription from above.
 		return nil, err
 	}
-	r := &SubscriptionResponse{}
+	r := &pb.SubscriptionResponse{}
 	if err := r.Unmarshal(reply.Data); err != nil {
 		// FIXME(dlc) unwind subscription from above.
 		return nil, err
@@ -260,23 +270,26 @@ func (sub *subscription) Unsubscribe() error {
 
 	delete(sc.subMap, inbox)
 	reqSubject := sc.unsubRequests
+	// Snapshot connection to avoid data race, since the connection may be
+	// closing while we try to send the request
+	nc := sc.nc
 	sc.Unlock()
 
 	// Send Unsubscribe to server.
 
 	// FIXME(dlc) - Add in durable?
-	usr := &UnsubscribeRequest{
+	usr := &pb.UnsubscribeRequest{
 		ClientID: sc.clientID,
 		Subject:  sub.subject,
 		Inbox:    sub.ackInbox,
 	}
 	b, _ := usr.Marshal()
 	// FIXME(dlc) - make timeout configurable.
-	reply, err := sc.nc.Request(reqSubject, b, 2*time.Second)
+	reply, err := nc.Request(reqSubject, b, 2*time.Second)
 	if err != nil {
 		return err
 	}
-	r := &SubscriptionResponse{}
+	r := &pb.SubscriptionResponse{}
 	if err := r.Unmarshal(reply.Data); err != nil {
 		return err
 	}
@@ -313,7 +326,7 @@ func (msg *Msg) Ack() error {
 	}
 
 	// Ack here.
-	ack := &Ack{Subject: msg.Subject, Sequence: msg.Sequence}
+	ack := &pb.Ack{Subject: msg.Subject, Sequence: msg.Sequence}
 	b, _ := ack.Marshal()
 	return sc.nc.Publish(ackSubject, b)
 }

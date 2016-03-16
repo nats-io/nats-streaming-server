@@ -1,6 +1,9 @@
 
-- [ ] Server ping, release dead clients.
+- [ ] Retry limits?
 - [ ] Server Store Limits (time, msgs, byte)
+- [X] Change time to deltas
+- [X] Server heartbeat, release dead clients.
+- [X] Require clientID for published messages, error if not registered.
 - [X] Check for need of ackMap (out of order re-delivery to queue subscribers).
 - [X] Redelivered Flag for Msg.
 - [X] Queue Subscribers

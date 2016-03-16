@@ -17,11 +17,9 @@ func BenchmarkPublish(b *testing.B) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(b)
 	defer sc.Close()
-	if err != nil {
-		b.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
+
 	hw := []byte("Hello World")
 
 	b.StartTimer()
@@ -40,11 +38,9 @@ func BenchmarkPublishAsync(b *testing.B) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(b)
 	defer sc.Close()
-	if err != nil {
-		b.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
+
 	hw := []byte("Hello World")
 
 	ch := make(chan bool)
@@ -70,8 +66,9 @@ func BenchmarkPublishAsync(b *testing.B) {
 		}
 	}
 
-	err = WaitTime(ch, 10*time.Second)
+	err := WaitTime(ch, 10*time.Second)
 	if err != nil {
+		fmt.Printf("sc error is %v\n", sc.(*conn).nc.LastError())
 		b.Fatal("Timed out waiting for ack messages")
 	} else if atomic.LoadInt32(&received) != int32(b.N) {
 		b.Fatalf("Received: %d", received)
@@ -87,11 +84,8 @@ func BenchmarkSubscribe(b *testing.B) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(b)
 	defer sc.Close()
-	if err != nil {
-		b.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	hw := []byte("Hello World")
 	pch := make(chan bool)
@@ -128,7 +122,7 @@ func BenchmarkSubscribe(b *testing.B) {
 		}
 	}, DeliverAllAvailable())
 
-	err = WaitTime(ch, 10*time.Second)
+	err := WaitTime(ch, 10*time.Second)
 	nr := atomic.LoadInt32(&received)
 	if err != nil {
 		b.Fatalf("Timed out waiting for messages, received only %d of %d\n", nr, b.N)
@@ -143,11 +137,8 @@ func BenchmarkQueueSubscribe(b *testing.B) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(b)
 	defer sc.Close()
-	if err != nil {
-		b.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	hw := []byte("Hello World")
 	pch := make(chan bool)
@@ -189,7 +180,7 @@ func BenchmarkQueueSubscribe(b *testing.B) {
 	sc.QueueSubscribe("foo", "bar", mcb, DeliverAllAvailable())
 	sc.QueueSubscribe("foo", "bar", mcb, DeliverAllAvailable())
 
-	err = WaitTime(ch, 20*time.Second)
+	err := WaitTime(ch, 20*time.Second)
 	nr := atomic.LoadInt32(&received)
 	if err != nil {
 		b.Fatalf("Timed out waiting for messages, received only %d of %d\n", nr, b.N)
@@ -204,18 +195,16 @@ func BenchmarkPublishSubscribe(b *testing.B) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(b)
 	defer sc.Close()
-	if err != nil {
-		b.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
+
 	hw := []byte("Hello World")
 
 	ch := make(chan bool)
 	received := int32(0)
 
 	// Subscribe callback, counts msgs received.
-	_, err = sc.Subscribe("foo", func(m *Msg) {
+	_, err := sc.Subscribe("foo", func(m *Msg) {
 		if nr := atomic.AddInt32(&received, 1); nr >= int32(b.N) {
 			ch <- true
 		}

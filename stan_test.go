@@ -9,14 +9,19 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats"
+	"github.com/nats-io/stan/pb"
+
 	natsd "github.com/nats-io/gnatsd/test"
-	nats "github.com/nats-io/nats"
 )
 
 // Dumb wait program to sync on callbacks, etc... Will timeout
@@ -59,26 +64,104 @@ const (
 	clientName  = "me"
 )
 
+// So that we can pass tests and benchmarks...
+type tLogger interface {
+	Fatalf(format string, args ...interface{})
+	Errorf(format string, args ...interface{})
+}
+
+func stackFatalf(t tLogger, f string, args ...interface{}) {
+	lines := make([]string, 0, 32)
+	msg := fmt.Sprintf(f, args...)
+	lines = append(lines, msg)
+
+	// Generate the Stack of callers:
+	for i := 2; true; i++ {
+		_, file, line, ok := runtime.Caller(i)
+		if ok == false {
+			break
+		}
+		msg := fmt.Sprintf("%d - %s:%d", i, file, line)
+		lines = append(lines, msg)
+	}
+
+	t.Fatalf("%s", strings.Join(lines, "\n"))
+}
+
+func NewDefaultConnection(t tLogger) Conn {
+	sc, err := Connect(clusterName, clientName)
+	if err != nil {
+		stackFatalf(t, "Expected to connect correctly, got err %v", err)
+	}
+	return sc
+}
+
+func TestConnClosedOnConnectFailure(t *testing.T) {
+	s := natsd.RunDefaultServer()
+	defer s.Shutdown()
+
+	// Non-Existant or Unreachable
+	connectTime := 25 * time.Millisecond
+	if _, err := Connect("someNonExistantServerID", "myTestClient", ConnectWait(connectTime)); err != ErrConnectReqTimeout {
+		t.Fatalf("Expected Unreachable err, got %v\n", err)
+	}
+
+	// Check that the underlying NATS connection has been closed.
+	// We will first stop the server. If we have left the NATS connection
+	// opened, it should be trying to reconnect.
+	s.Shutdown()
+
+	// Wait a bit
+	time.Sleep(500 * time.Millisecond)
+
+	// Inspecting go routines in search for a doReconnect
+	buf := make([]byte, 10000)
+	n := runtime.Stack(buf, true)
+	if strings.Contains(string(buf[:n]), "doReconnect") {
+		t.Fatal("NATS Connection suspected to not have been closed")
+	}
+}
+
+func TestNatsConnNotClosedOnClose(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	// Create a NATS connection
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on Connect: %v", err)
+	}
+	defer nc.Close()
+
+	// Pass this NATS connection to STAN
+	sc, err := Connect(clusterName, clientName, NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	// Now close the STAN connection
+	sc.Close()
+
+	// Verify that NATS connection is not closed
+	if nc.IsClosed() {
+		t.Fatal("NATS connection should NOT have been closed in Connect")
+	}
+}
+
 func TestBasicConnect(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
-	if sc, err := Connect(clusterName, clientName); err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	} else {
-		sc.Close()
-	}
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
 }
 
 func TestBasicPublish(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 	if err := sc.Publish("foo", []byte("Hello World!")); err != nil {
 		t.Fatalf("Expected no errors on publish, got %v\n", err)
 	}
@@ -88,11 +171,8 @@ func TestBasicPublishAsync(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 	ch := make(chan bool)
 	var glock sync.Mutex
 	var guid string
@@ -124,6 +204,8 @@ func TestTimeoutPublishAsync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v\n", err)
 	}
+	defer sc.Close()
+
 	ch := make(chan bool)
 	var glock sync.Mutex
 	var guid string
@@ -156,14 +238,12 @@ func TestBasicSubscription(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
+
 	sub, err := sc.Subscribe("foo", func(m *Msg) {})
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 }
@@ -173,11 +253,9 @@ func TestBasicQueueSubscription(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
+
 	sub, err := sc.QueueSubscribe("foo", "bar", func(m *Msg) {})
 	if err != nil {
 		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
@@ -187,7 +265,7 @@ func TestBasicQueueSubscription(t *testing.T) {
 	// Test that we can not set durable status on queue subscribers.
 	_, err = sc.QueueSubscribe("foo", "bar", func(m *Msg) {}, DurableName("durable-queue-sub"))
 	if err == nil {
-		t.Fatalf("Expected non-nil error on QueueSubscribe with DurableName\n")
+		t.Fatalf("Expected non-nil error on QueueSubscribe with DurableName")
 	}
 }
 
@@ -196,11 +274,8 @@ func TestBasicPubSub(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	ch := make(chan bool)
 	received := int32(0)
@@ -233,7 +308,7 @@ func TestBasicPubSub(t *testing.T) {
 		}
 	})
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -252,11 +327,8 @@ func TestBasicPubSubFlowControl(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	ch := make(chan bool)
 	received := int32(0)
@@ -269,7 +341,7 @@ func TestBasicPubSubFlowControl(t *testing.T) {
 		}
 	}, MaxInflight(25))
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -288,11 +360,8 @@ func TestBasicPubQueueSub(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	ch := make(chan bool)
 	received := int32(0)
@@ -318,7 +387,7 @@ func TestBasicPubQueueSub(t *testing.T) {
 		}
 	})
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -335,16 +404,13 @@ func TestBasicPubSubWithReply(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	ch := make(chan bool)
 	hw := []byte("Hello World")
 
-	inbox := newInbox()
+	inbox := nats.NewInbox()
 
 	sub, err := sc.Subscribe("foo", func(m *Msg) {
 		if m.Subject != "foo" {
@@ -359,7 +425,7 @@ func TestBasicPubSubWithReply(t *testing.T) {
 		ch <- true
 	})
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -375,16 +441,13 @@ func TestAsyncPubSubWithReply(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	ch := make(chan bool)
 	hw := []byte("Hello World")
 
-	inbox := newInbox()
+	inbox := nats.NewInbox()
 
 	sub, err := sc.Subscribe("foo", func(m *Msg) {
 		if m.Subject != "foo" {
@@ -399,7 +462,7 @@ func TestAsyncPubSubWithReply(t *testing.T) {
 		ch <- true
 	})
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -415,36 +478,44 @@ func TestSubscriptionStartPositionLast(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
+
 	// Publish ten messages
 	for i := 0; i < 10; i++ {
 		data := []byte(fmt.Sprintf("%d", i))
 		sc.Publish("foo", data)
 	}
 
-	// Now subscribe and set start position to last received.
 	ch := make(chan bool)
+	received := int32(0)
+
 	mcb := func(m *Msg) {
+		atomic.AddInt32(&received, 1)
+		if m.Sequence != 10 {
+			t.Fatalf("Wrong sequence received: got %d vs. %d\n", m.Sequence, 10)
+		}
 		ch <- true
 	}
+	// Now subscribe and set start position to last received.
 	sub, err := sc.Subscribe("foo", mcb, StartWithLastReceived())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
 	// Check for sub setup
 	rsub := sub.(*subscription)
-	if rsub.opts.StartAt != StartPosition_LastReceived {
+	if rsub.opts.StartAt != pb.StartPosition_LastReceived {
 		t.Fatalf("Incorrect StartAt state: %s\n", rsub.opts.StartAt)
 	}
 
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not receive our message")
+	}
+
+	if received > int32(1) {
+		t.Fatalf("Should have received only 1 message, but got %d\n", received)
 	}
 }
 
@@ -453,11 +524,9 @@ func TestSubscriptionStartAtSequence(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
+
 	// Publish ten messages
 	for i := 1; i <= 10; i++ {
 		data := []byte(fmt.Sprintf("%d", i))
@@ -465,9 +534,9 @@ func TestSubscriptionStartAtSequence(t *testing.T) {
 	}
 
 	// Check for illegal sequences
-	_, err = sc.Subscribe("foo", nil, StartAtSequence(500))
+	_, err := sc.Subscribe("foo", nil, StartAtSequence(500))
 	if err == nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Expected non-nil error on Subscribe")
 	}
 
 	ch := make(chan bool)
@@ -493,7 +562,7 @@ func TestSubscriptionStartAtSequence(t *testing.T) {
 
 	// Check for sub setup
 	rsub := sub.(*subscription)
-	if rsub.opts.StartAt != StartPosition_SequenceStart {
+	if rsub.opts.StartAt != pb.StartPosition_SequenceStart {
 		t.Fatalf("Incorrect StartAt state: %s\n", rsub.opts.StartAt)
 	}
 
@@ -522,20 +591,19 @@ func TestSubscriptionStartAtTime(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
-	// Publish ten messages all together
 
 	// Publish first 5
 	for i := 1; i <= 5; i++ {
 		data := []byte(fmt.Sprintf("%d", i))
 		sc.Publish("foo", data)
 	}
-	time.Sleep(200 * time.Millisecond)
+
+	// Buffer each side so slow tests still work.
+	time.Sleep(250 * time.Millisecond)
 	startTime := time.Now()
+	time.Sleep(250 * time.Millisecond)
 
 	// Publish last 5
 	for i := 6; i <= 10; i++ {
@@ -544,9 +612,9 @@ func TestSubscriptionStartAtTime(t *testing.T) {
 	}
 
 	// Check for illegal configuration
-	_, err = sc.Subscribe("foo", nil, StartAtTime(time.Time{}))
+	_, err := sc.Subscribe("foo", nil, StartAtTime(time.Time{}))
 	if err == nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Expected non-nil error on Subscribe")
 	}
 
 	ch := make(chan bool)
@@ -572,7 +640,7 @@ func TestSubscriptionStartAtTime(t *testing.T) {
 
 	// Check for sub setup
 	rsub := sub.(*subscription)
-	if rsub.opts.StartAt != StartPosition_TimeStart {
+	if rsub.opts.StartAt != pb.StartPosition_TimeDeltaStart {
 		t.Fatalf("Incorrect StartAt state: %s\n", rsub.opts.StartAt)
 	}
 
@@ -598,6 +666,19 @@ func TestSubscriptionStartAtTime(t *testing.T) {
 		}
 		seq++
 	}
+
+	// Now test Ago helper
+	delta := time.Now().Sub(startTime)
+
+	sub, err = sc.Subscribe("foo", mcb, StartAtTimeDelta(delta))
+	if err != nil {
+		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
+	}
+	defer sub.Unsubscribe()
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
 }
 
 func TestSubscriptionStartAtFirst(t *testing.T) {
@@ -605,11 +686,9 @@ func TestSubscriptionStartAtFirst(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
+
 	// Publish ten messages
 	for i := 1; i <= 10; i++ {
 		data := []byte(fmt.Sprintf("%d", i))
@@ -639,12 +718,16 @@ func TestSubscriptionStartAtFirst(t *testing.T) {
 
 	// Check for sub setup
 	rsub := sub.(*subscription)
-	if rsub.opts.StartAt != StartPosition_First {
+	if rsub.opts.StartAt != pb.StartPosition_First {
 		t.Fatalf("Incorrect StartAt state: %s\n", rsub.opts.StartAt)
 	}
 
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not receive our messages")
+	}
+
+	if received != shouldReceive {
+		t.Fatalf("Expected %d msgs but received %d\n", shouldReceive, received)
 	}
 
 	// Check we received them in order.
@@ -668,15 +751,12 @@ func TestUnsubscribe(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	// test nil
 	var nsub *subscription
-	err = nsub.Unsubscribe()
+	err := nsub.Unsubscribe()
 	if err == nil || err != ErrBadSubscription {
 		t.Fatalf("Expected a bad subscription err, got %v\n", err)
 	}
@@ -712,16 +792,44 @@ func TestUnsubscribe(t *testing.T) {
 	}
 }
 
+func TestUnsubscribeWhileConnClosing(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+	defer sc.Close()
+
+	sub, err := sc.Subscribe("foo", nil)
+	if err != nil {
+		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
+		sc.Close()
+		wg.Done()
+	}()
+
+	// Unsubscribe
+	sub.Unsubscribe()
+
+	wg.Wait()
+}
+
 func TestSubscribeShrink(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	nsubs := 1000
 	subs := make([]Subscription, 0, nsubs)
@@ -747,12 +855,10 @@ func TestDupClientID(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
-	_, err = Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
+
+	_, err := Connect(clusterName, clientName, PubAckWait(50*time.Millisecond))
 	if err == nil {
 		t.Fatalf("Expected to get an error for duplicate clientID\n")
 	}
@@ -763,10 +869,8 @@ func TestClose(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
 
 	sub, err := sc.Subscribe("foo", func(m *Msg) {
 		t.Fatalf("Did not expect to receive any messages\n")
@@ -793,16 +897,27 @@ func TestClose(t *testing.T) {
 	}
 }
 
+func TestDoubleClose(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	if err := sc.Close(); err != nil {
+		t.Fatalf("Did not expect an error on first Close, got %v\n", err)
+	}
+
+	if err := sc.Close(); err != nil {
+		t.Fatalf("Did not expect an error on second Close, got %v\n", err)
+	}
+}
+
 func TestManualAck(t *testing.T) {
 	// Run a STAN server
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	toSend := int32(100)
 	hw := []byte("Hello World")
@@ -822,7 +937,7 @@ func TestManualAck(t *testing.T) {
 		fch <- true
 	}, DeliverAllAvailable())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 
 	if err := Wait(fch); err != nil {
@@ -849,7 +964,7 @@ func TestManualAck(t *testing.T) {
 		}
 	}, DeliverAllAvailable(), MaxInflight(10), SetManualAckMode())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -883,11 +998,8 @@ func TestRedelivery(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	toSend := int32(100)
 	hw := []byte("Hello World")
@@ -916,7 +1028,7 @@ func TestRedelivery(t *testing.T) {
 
 	}, DeliverAllAvailable(), MaxInflight(100), AckWait(ackRedeliverTime), SetManualAckMode())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -939,11 +1051,8 @@ func TestDurableSubscriber(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	toSend := int32(100)
 	hw := []byte("Hello World")
@@ -958,7 +1067,7 @@ func TestDurableSubscriber(t *testing.T) {
 	ch := make(chan bool)
 	received := int32(0)
 
-	_, err = sc.Subscribe("foo", func(m *Msg) {
+	_, err := sc.Subscribe("foo", func(m *Msg) {
 		if nr := atomic.AddInt32(&received, 1); nr == 10 {
 			sc.Close()
 			ch <- true
@@ -967,7 +1076,7 @@ func TestDurableSubscriber(t *testing.T) {
 		}
 	}, DeliverAllAvailable(), DurableName("durable-foo"))
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 
 	if err := Wait(ch); err != nil {
@@ -1000,7 +1109,7 @@ func TestDurableSubscriber(t *testing.T) {
 		}
 	}, DeliverAllAvailable(), DurableName("durable-foo"))
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 
 	// Check that durables can not be subscribed to again by same client.
@@ -1039,17 +1148,14 @@ func TestPubMultiQueueSub(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	ch := make(chan bool)
 	received := int32(0)
 	s1Received := int32(0)
 	s2Received := int32(0)
-	toSend := int32(500)
+	toSend := int32(1000)
 
 	var s1, s2 Subscription
 
@@ -1078,15 +1184,15 @@ func TestPubMultiQueueSub(t *testing.T) {
 		}
 	}
 
-	s1, err = sc.QueueSubscribe("foo", "bar", mcb)
+	s1, err := sc.QueueSubscribe("foo", "bar", mcb)
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s1.Unsubscribe()
 
 	s2, err = sc.QueueSubscribe("foo", "bar", mcb)
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s2.Unsubscribe()
 
@@ -1095,7 +1201,7 @@ func TestPubMultiQueueSub(t *testing.T) {
 		data := []byte(fmt.Sprintf("%d", i))
 		sc.Publish("foo", data)
 	}
-	if err := WaitTime(ch, 5*time.Second); err != nil {
+	if err := WaitTime(ch, 10*time.Second); err != nil {
 		t.Fatal("Did not receive our messages")
 	}
 
@@ -1120,17 +1226,14 @@ func TestPubMultiQueueSubWithSlowSubscriber(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	ch := make(chan bool)
 	received := int32(0)
 	s1Received := int32(0)
 	s2Received := int32(0)
-	toSend := int32(500)
+	toSend := int32(100)
 
 	var s1, s2 Subscription
 
@@ -1161,15 +1264,15 @@ func TestPubMultiQueueSubWithSlowSubscriber(t *testing.T) {
 		}
 	}
 
-	s1, err = sc.QueueSubscribe("foo", "bar", mcb)
+	s1, err := sc.QueueSubscribe("foo", "bar", mcb)
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s1.Unsubscribe()
 
 	s2, err = sc.QueueSubscribe("foo", "bar", mcb)
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s2.Unsubscribe()
 
@@ -1189,12 +1292,13 @@ func TestPubMultiQueueSubWithSlowSubscriber(t *testing.T) {
 	s1r := atomic.LoadInt32(&s1Received)
 	s2r := atomic.LoadInt32(&s2Received)
 
-	// Since we slowed down  sub2, we should receive all but 1 message on sub1
-	if s1r != toSend-1 {
-		t.Fatalf("Expected %d msgs for sub1, got %d\n", toSend-1, s1r)
+	// Since we slowed down sub2, we should receive all but 1 or 2 messages on sub1
+	if s2r != 1 && s2r != 2 {
+		t.Fatalf("Expected 1 or 2 msgs for sub2, got %d\n", s2r)
 	}
-	if s2r != 1 {
-		t.Fatalf("Expected %d msgs for sub2, got %d\n", 1, s2r)
+
+	if s1r != toSend-s2r {
+		t.Fatalf("Expected %d msgs for sub1, got %d\n", toSend-s2r, s1r)
 	}
 }
 
@@ -1203,22 +1307,19 @@ func TestPubMultiQueueSubWithRedelivery(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	ch := make(chan bool)
 	received := int32(0)
 	s1Received := int32(0)
-	s2Received := int32(0)
-	toSend := int32(500)
+	toSend := int32(50)
 
 	var s1, s2 Subscription
 
 	mcb := func(m *Msg) {
 		// Track received for each receiver.
+
 		if m.Sub == s1 {
 			m.Ack()
 			atomic.AddInt32(&s1Received, 1)
@@ -1234,15 +1335,15 @@ func TestPubMultiQueueSubWithRedelivery(t *testing.T) {
 		}
 	}
 
-	s1, err = sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode())
+	s1, err := sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s1.Unsubscribe()
 
 	s2, err = sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode(), AckWait(1*time.Second))
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer s2.Unsubscribe()
 
@@ -1258,16 +1359,76 @@ func TestPubMultiQueueSubWithRedelivery(t *testing.T) {
 	if nr := atomic.LoadInt32(&received); nr != toSend {
 		t.Fatalf("Did not receive correct number of messages: %d vs %d\n", nr, toSend)
 	}
+}
 
-	s1r := atomic.LoadInt32(&s1Received)
-	s2r := atomic.LoadInt32(&s2Received)
+func TestPubMultiQueueSubWithDelayRedelivery(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
 
-	// Since we never ack'd sub2, we should receive all messages on sub1
-	if s1r != toSend {
-		t.Fatalf("Expected %d msgs for sub1, got %d\n", toSend, s1r)
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	ch := make(chan bool)
+	toSend := int32(500)
+	ackCount := int32(0)
+
+	var s1, s2 Subscription
+
+	mcb := func(m *Msg) {
+		// Track received for each receiver.
+		if m.Sub == s1 {
+
+			m.Ack()
+
+			// if we've acked everything, signal
+			nr := atomic.AddInt32(&ackCount, 1)
+
+			if nr == int32(toSend) {
+				ch <- true
+			}
+
+			if nr > 0 && nr%(toSend/2) == 0 {
+
+				// This depends on the internal algorithm where the
+				// best resend subscriber is the one with the least number
+				// of outstanding acks.
+				//
+				// Sleep to allow the acks to back up, so s2 will look
+				// like a better subscriber to send messages to.
+				time.Sleep(time.Millisecond * 200)
+			}
+		} else if m.Sub == s2 {
+			// We will not ack this subscriber
+		} else {
+			t.Fatalf("Received message on unknown subscription")
+		}
 	}
-	if s2r != 0 {
-		t.Fatalf("Expected %d msgs for sub2, got %d\n", 0, s2r)
+
+	s1, err := sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
+	}
+	defer s1.Unsubscribe()
+
+	s2, err = sc.QueueSubscribe("foo", "bar", mcb, SetManualAckMode(), AckWait(1*time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
+	}
+	defer s2.Unsubscribe()
+
+	// Publish out the messages.
+	for i := int32(0); i < toSend; i++ {
+		data := []byte(fmt.Sprintf("%d", i))
+		sc.Publish("foo", data)
+	}
+
+	if err := WaitTime(ch, 30*time.Second); err != nil {
+		t.Fatalf("Did not ack expected count of messages: %v", toSend)
+	}
+
+	if nr := atomic.LoadInt32(&ackCount); nr != toSend {
+		t.Fatalf("Did not ack the correct number of messages: %d vs %d\n", nr, toSend)
 	}
 }
 
@@ -1276,11 +1437,8 @@ func TestRedeliveredFlag(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	toSend := int32(100)
 	hw := []byte("Hello World")
@@ -1316,7 +1474,7 @@ func TestRedeliveredFlag(t *testing.T) {
 		}
 	}, DeliverAllAvailable(), AckWait(1*time.Second), SetManualAckMode())
 	if err != nil {
-		t.Fatalf("Expected non-nil error on Subscribe, got %v\n", err)
+		t.Fatalf("Unexpected error on Subscribe, got %v", err)
 	}
 	defer sub.Unsubscribe()
 
@@ -1336,6 +1494,75 @@ func TestRedeliveredFlag(t *testing.T) {
 	}
 }
 
+// TestNoDuplicatesOnSubscriberStart tests that a subscriber does not
+// receive duplicate when requesting a replay while messages are being
+// published on it's subject.
+func TestNoDuplicatesOnSubscriberStart(t *testing.T) {
+	// Run a STAN server
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc, err := Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v\n", err)
+	}
+
+	defer sc.Close()
+
+	batch := int32(100)
+	ch := make(chan bool)
+	pch := make(chan bool)
+	received := int32(0)
+	sent := int32(0)
+
+	mcb := func(m *Msg) {
+		// signal when we've reached the expected messages count
+		if nr := atomic.AddInt32(&received, 1); nr == sent {
+			ch <- true
+		}
+	}
+
+	publish := func() {
+		// publish until the receiver starts, then one additional batch.
+		// This primes STAN with messages, and gives us a point to stop
+		// when the subscriber has started processing messages.
+		for atomic.LoadInt32(&received) == 0 {
+			for i := int32(0); i < batch; i++ {
+				atomic.AddInt32(&sent, 1)
+				sc.PublishAsync("foo", []byte("hello"), nil)
+			}
+			// signal that we've published a batch.
+			pch <- true
+		}
+	}
+
+	go publish()
+
+	// wait until the publisher has published at least one batch
+	Wait(pch)
+
+	// start the subscriber
+	sub, err := sc.Subscribe("foo", mcb, DeliverAllAvailable())
+	if err != nil {
+		t.Fatalf("Expected no error on Subscribe, got %v\n", err)
+	}
+
+	defer sub.Unsubscribe()
+
+	// Wait for our expected count.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
+
+	// Wait to see if the subscriber receives any duplicate messages.
+	time.Sleep(250 * time.Millisecond)
+
+	// Make sure we've receive the exact count of sent messages.
+	if atomic.LoadInt32(&received) != atomic.LoadInt32(&sent) {
+		t.Fatalf("Expected %d msgs but received %d\n", sent, received)
+	}
+}
+
 func TestMaxChannels(t *testing.T) {
 	t.Skip("Skipping test for now around channel limits")
 
@@ -1343,11 +1570,8 @@ func TestMaxChannels(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
-	sc, err := Connect(clusterName, clientName)
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v\n", err)
-	}
 
 	hw := []byte("Hello World")
 	var subject string
