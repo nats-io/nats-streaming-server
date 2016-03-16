@@ -100,7 +100,7 @@ func parseFlags(opts *server.Options, ID *string) {
 	}
 
 	if showTLSHelp {
-		server.PrintTlsHelpAndDie()
+		server.PrintTLSHelpAndDie()
 	}
 
 	// One flag can set multiple options.
