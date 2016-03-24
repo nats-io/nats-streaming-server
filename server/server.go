@@ -23,11 +23,11 @@ import (
 // A single STAN server
 
 const (
-	DefaultDiscoverPrefix   = "_STAN.discover"
-	DefaultPubPrefix		= "_STAN.pub"
-	DefaultSubPrefix		= "_STAN.sub"
-	DefaultUnSubPrefix		= "_STAN.unsub"
-	DefaultClosePrefix		= "_STAN.close"
+	DefaultDiscoverPrefix = "_STAN.discover"
+	DefaultPubPrefix      = "_STAN.pub"
+	DefaultSubPrefix      = "_STAN.sub"
+	DefaultUnSubPrefix    = "_STAN.unsub"
+	DefaultClosePrefix    = "_STAN.close"
 
 	// How many messages per channel will we store?
 	DefaultMsgStoreLimit = 1000000
