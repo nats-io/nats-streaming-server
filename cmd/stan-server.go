@@ -7,7 +7,7 @@ import (
 	"flag"
 	"runtime"
 
-	"github.com/nats-io/gnatsd/server"
+	natsd "github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/stan"
 	"github.com/nats-io/stanserver/server"
 	"fmt"
@@ -17,7 +17,7 @@ func main() {
 
 	var ID string
 
-	opts := &server.Options{}
+	opts := &natsd.Options{}
 
 	// Parse flags
 	parseFlags(opts, &ID)
@@ -31,7 +31,7 @@ func main() {
 	runtime.Goexit()
 }
 
-func parseFlags(opts *server.Options, ID *string) {
+func parseFlags(opts *natsd.Options, ID *string) {
 
 	var showVersion bool
 	var debugAndTrace bool
@@ -90,18 +90,18 @@ func parseFlags(opts *server.Options, ID *string) {
 	// lots of connections present.
 	flag.IntVar(&opts.BufSize, "bs", 0, "Read/Write buffer size per client connection.")
 
-	flag.Usage = server.Usage
+	flag.Usage = natsd.Usage
 
 	flag.Parse()
 
 	// Show version and exit
 	if showVersion {
 		fmt.Printf("stan-server version %s, ", stan.Version)
-		server.PrintServerAndExit()
+		natsd.PrintServerAndExit()
 	}
 
 	if showTLSHelp {
-		server.PrintTLSHelpAndDie()
+		natsd.PrintTLSHelpAndDie()
 	}
 
 	// One flag can set multiple options.
