@@ -2,6 +2,8 @@ language: go
 sudo: false
 go:
 - 1.5
+before_install:
+echo -e "machine github.com\n login 122a18a6ddc85bb9001c03a377c8b273e8dc4db6" >> ~/.netrc
 install:
 - go get -t ./...
 - go get github.com/nats-io/gnatsd
