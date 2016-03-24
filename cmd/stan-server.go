@@ -9,6 +9,7 @@ import (
 
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/stan"
+	"github.com/nats-io/stanserver/server"
 	"fmt"
 )
 
@@ -21,11 +22,11 @@ func main() {
 	// Parse flags
 	parseFlags(opts, &ID)
 
-	stan.EnableDefaultLogger(opts)
+	server.EnableDefaultLogger(opts)
 
 	server.Noticef("Starting stan-server[%s] version %s", ID, stan.Version)
 
-	stan.RunServer(ID, opts)
+	server.RunServer(ID, opts)
 
 	runtime.Goexit()
 }

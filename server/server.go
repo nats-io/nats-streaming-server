@@ -1,6 +1,6 @@
 // Copyright 2016 Apcera Inc. All rights reserved.
 
-package stan
+package server
 
 import (
 	"errors"
@@ -23,10 +23,11 @@ import (
 // A single STAN server
 
 const (
-	DefaultPubPrefix   = "_STAN.pub"
-	DefaultSubPrefix   = "_STAN.sub"
-	DefaultUnSubPrefix = "_STAN.unsub"
-	DefaultClosePrefix = "_STAN.close"
+	DefaultDiscoverPrefix   = "_STAN.discover"
+	DefaultPubPrefix		= "_STAN.pub"
+	DefaultSubPrefix		= "_STAN.sub"
+	DefaultUnSubPrefix		= "_STAN.unsub"
+	DefaultClosePrefix		= "_STAN.close"
 
 	// How many messages per channel will we store?
 	DefaultMsgStoreLimit = 1000000
@@ -55,7 +56,7 @@ var (
 	ErrDurableQueue    = errors.New("stan: queue subscribers can't be durable")
 )
 
-type stanServer struct {
+type StanServer struct {
 	clusterID     string
 	serverID      string
 	pubPrefix     string // Subject prefix we received published messages on.
@@ -355,9 +356,9 @@ func EnableDefaultLogger(opts *server.Options) {
 }
 
 // RunServer will startup and embedded STAN server and a nats-server to support it.
-func RunServer(ID string, optsA ...*server.Options) *stanServer {
+func RunServer(ID string, optsA ...*server.Options) *StanServer {
 	// Run a nats server by default
-	s := stanServer{clusterID: ID, serverID: nuid.Next(), opts: &DefaultServerOptions}
+	s := StanServer{clusterID: ID, serverID: nuid.Next(), opts: &DefaultServerOptions}
 
 	// Create clientStore
 	s.clients = &clientStore{clients: make(map[string]*client)}
@@ -406,7 +407,7 @@ func RunServer(ID string, optsA ...*server.Options) *stanServer {
 }
 
 // initSubscriptions will setup initial subscriptions for discovery etc.
-func (s *stanServer) initSubscriptions() {
+func (s *StanServer) initSubscriptions() {
 	// Listen for connection requests.
 	discoverSubject := fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.clusterID)
 	_, err := s.nc.Subscribe(discoverSubject, s.connectCB)
@@ -450,7 +451,7 @@ func (s *stanServer) initSubscriptions() {
 }
 
 // Process a client connect request
-func (s *stanServer) connectCB(m *nats.Msg) {
+func (s *StanServer) connectCB(m *nats.Msg) {
 	req := &pb.ConnectRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil || req.ClientID == "" || req.HeartbeatInbox == "" {
@@ -496,7 +497,7 @@ func (s *stanServer) connectCB(m *nats.Msg) {
 }
 
 // Send a heartbeat call to the client.
-func (s *stanServer) checkClientHealth(clientID string) {
+func (s *StanServer) checkClientHealth(clientID string) {
 	client := s.clients.Lookup(clientID)
 	if client == nil {
 		return
@@ -518,7 +519,7 @@ func (s *stanServer) checkClientHealth(clientID string) {
 }
 
 // Close a client
-func (s *stanServer) closeClient(clientID string) {
+func (s *StanServer) closeClient(clientID string) {
 	// Remove all non-durable subscribers.
 	s.removeAllNonDurableSubscribers(clientID)
 
@@ -529,7 +530,7 @@ func (s *stanServer) closeClient(clientID string) {
 }
 
 // processCloseRequest process inbound messages from clients.
-func (s *stanServer) processCloseRequest(m *nats.Msg) {
+func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	req := &pb.CloseRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
@@ -548,7 +549,7 @@ func (s *stanServer) processCloseRequest(m *nats.Msg) {
 }
 
 // processClientPublish process inbound messages from clients.
-func (s *stanServer) processClientPublish(m *nats.Msg) {
+func (s *StanServer) processClientPublish(m *nats.Msg) {
 	pm := &pb.PubMsg{}
 	pm.Unmarshal(m.Data)
 
@@ -615,7 +616,7 @@ func findBestQueueSub(sl []*subState) (rsub *subState) {
 // Send a message to the queue group
 // Assumes subStore lock is held
 // Assumes qs lock held for write
-func (s *stanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto) bool {
+func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto) bool {
 	if qs == nil {
 		return false
 	}
@@ -638,7 +639,7 @@ func (s *stanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto) bool {
 }
 
 // processMsg will proces a message, and possibly send to clients, etc.
-func (s *stanServer) processMsg(cs *channelStore) {
+func (s *StanServer) processMsg(cs *channelStore) {
 	ss := cs.subs
 
 	// Since we iterate through them all.
@@ -674,20 +675,20 @@ func makeSortedMsgs(msgs map[uint64]*pb.MsgProto) []*pb.MsgProto {
 }
 
 // Redeliver all outstanding messages to a durable subscriber, used on resubscribe.
-func (s *stanServer) performDurableRedelivery(sub *subState) {
+func (s *StanServer) performDurableRedelivery(sub *subState) {
 	Debugf("STAN:[Client:%s] Redelivering to durable %s.", sub.clientID, sub.durableName)
 	s.performRedelivery(sub, false)
 }
 
 // Redeliver all outstanding messages that have expired.
-func (s *stanServer) performAckExpirationRedelivery(sub *subState) {
+func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	Debugf("STAN: [Client:%s] Redelivering on ack expiration. subject=%s, inbox=%s.",
 		sub.clientID, sub.subject, sub.inbox)
 	s.performRedelivery(sub, true)
 }
 
 // Performs redelivery, takes a flag on whether to honor expiration.
-func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
+func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.RLock()
 	expTime := int64(sub.ackWaitInSecs * time.Second)
@@ -787,7 +788,7 @@ func (s *stanServer) performRedelivery(sub *subState, checkExpiration bool) {
 
 // Sends the message to the subscriber
 // Sub lock should be held before calling.
-func (s *stanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
+func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 	if sub == nil || m == nil {
 		return false
 	}
@@ -825,7 +826,7 @@ func (s *stanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 
 // Sends the message to the subscriber and updates the subscriber's lastSent field
 // Sub lock should be held before calling.
-func (s *stanServer) sendMsgToSubAndUpdateLastSent(sub *subState, m *pb.MsgProto) bool {
+func (s *StanServer) sendMsgToSubAndUpdateLastSent(sub *subState, m *pb.MsgProto) bool {
 	if s.sendMsgToSub(sub, m) {
 		sub.lastSent = m.Sequence
 		return true
@@ -834,7 +835,7 @@ func (s *stanServer) sendMsgToSubAndUpdateLastSent(sub *subState, m *pb.MsgProto
 }
 
 // assignAndStore will assign a sequence ID and then store the message.
-func (s *stanServer) assignAndStore(pm *pb.PubMsg) *channelStore {
+func (s *StanServer) assignAndStore(pm *pb.PubMsg) *channelStore {
 	cs := s.channels.LookupOrCreate(pm.Subject)
 	// FIXME(dlc) - check for errors.
 	cs.msgs.Store(pm.Subject, pm.Reply, pm.Data)
@@ -842,7 +843,7 @@ func (s *stanServer) assignAndStore(pm *pb.PubMsg) *channelStore {
 }
 
 // ackPublisher sends the ack for a message.
-func (s *stanServer) ackPublisher(pm *pb.PubMsg, reply string) {
+func (s *StanServer) ackPublisher(pm *pb.PubMsg, reply string) {
 	msgAck := &pb.PubAck{Guid: pm.Guid}
 	var buf [32]byte
 	b := buf[:]
@@ -881,7 +882,7 @@ func shrinkSubListIfNeeded(sl []*subState) []*subState {
 }
 
 // removeAllNonDurableSubscribers will remove all non-durable subscribers for the client.
-func (s *stanServer) removeAllNonDurableSubscribers(clientID string) {
+func (s *StanServer) removeAllNonDurableSubscribers(clientID string) {
 	client := s.clients.Lookup(clientID)
 	if client == nil {
 		return
@@ -910,7 +911,7 @@ func (s *stanServer) removeAllNonDurableSubscribers(clientID string) {
 }
 
 // processUnSubscribeRequest will process a unsubscribe request.
-func (s *stanServer) processUnSubscribeRequest(m *nats.Msg) {
+func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 	req := &pb.UnsubscribeRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
@@ -949,7 +950,7 @@ func (s *stanServer) processUnSubscribeRequest(m *nats.Msg) {
 	s.nc.Publish(m.Reply, b)
 }
 
-func (s *stanServer) sendSubscriptionResponseErr(reply string, err error) {
+func (s *StanServer) sendSubscriptionResponseErr(reply string, err error) {
 	resp := &pb.SubscriptionResponse{Error: err.Error()}
 	b, _ := resp.Marshal()
 	s.nc.Publish(reply, b)
@@ -1043,7 +1044,7 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 	return fmt.Sprintf("%s-%s-%s", sr.ClientID, sr.Subject, sr.DurableName)
 }
 
-func (s *stanServer) addSubscription(cs *channelStore, sub *subState) {
+func (s *StanServer) addSubscription(cs *channelStore, sub *subState) {
 
 	// Store this subscription
 	cs.subs.Store(sub)
@@ -1058,7 +1059,7 @@ func (s *stanServer) addSubscription(cs *channelStore, sub *subState) {
 }
 
 // processSubscriptionRequest will process a subscription request.
-func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
+func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	sr := &pb.SubscriptionRequest{}
 	err := sr.Unmarshal(m.Data)
 	if err != nil {
@@ -1202,7 +1203,7 @@ func (s *stanServer) processSubscriptionRequest(m *nats.Msg) {
 }
 
 // processAckMsg processes inbound acks from clients for delivered messages.
-func (s *stanServer) processAckMsg(m *nats.Msg) {
+func (s *StanServer) processAckMsg(m *nats.Msg) {
 	ack := &pb.Ack{}
 	ack.Unmarshal(m.Data)
 	cs := s.channels.Lookup(ack.Subject)
@@ -1214,7 +1215,7 @@ func (s *stanServer) processAckMsg(m *nats.Msg) {
 }
 
 // processAck processes an ack and if needed sends more messages.
-func (s *stanServer) processAck(cs *channelStore, sub *subState, ack *pb.Ack) {
+func (s *StanServer) processAck(cs *channelStore, sub *subState, ack *pb.Ack) {
 	if sub == nil || ack == nil {
 		return
 	}
@@ -1255,7 +1256,7 @@ func (s *stanServer) processAck(cs *channelStore, sub *subState, ack *pb.Ack) {
 }
 
 // Send any messages that are ready to be sent that have been queued to the group.
-func (s *stanServer) sendAvailableMessagesToQueue(cs *channelStore, qs *queueState) {
+func (s *StanServer) sendAvailableMessagesToQueue(cs *channelStore, qs *queueState) {
 	if cs == nil || qs == nil {
 		return
 	}
@@ -1272,7 +1273,7 @@ func (s *stanServer) sendAvailableMessagesToQueue(cs *channelStore, qs *queueSta
 }
 
 // Send any messages that are ready to be sent that have been queued.
-func (s *stanServer) sendAvailableMessages(cs *channelStore, sub *subState) {
+func (s *StanServer) sendAvailableMessages(cs *channelStore, sub *subState) {
 	sub.Lock()
 	defer sub.Unlock()
 
@@ -1285,7 +1286,7 @@ func (s *stanServer) sendAvailableMessages(cs *channelStore, sub *subState) {
 }
 
 // Check if a startTime is valid.
-func (s *stanServer) startTimeValid(subject string, start int64) bool {
+func (s *StanServer) startTimeValid(subject string, start int64) bool {
 	cs := s.channels.Lookup(subject)
 	firstMsg := cs.msgs.FirstMsg()
 	lastMsg := cs.msgs.LastMsg()
@@ -1296,7 +1297,7 @@ func (s *stanServer) startTimeValid(subject string, start int64) bool {
 }
 
 // Check if a startSequence is valid.
-func (s *stanServer) startSequenceValid(subject string, seq uint64) bool {
+func (s *StanServer) startSequenceValid(subject string, seq uint64) bool {
 	cs := s.channels.Lookup(subject)
 	cs.msgs.RLock()
 	defer cs.msgs.RUnlock()
@@ -1306,7 +1307,7 @@ func (s *stanServer) startSequenceValid(subject string, seq uint64) bool {
 	return true
 }
 
-func (s *stanServer) getSequenceFromStartTime(cs *channelStore, sub *subState, startTime int64) uint64 {
+func (s *StanServer) getSequenceFromStartTime(cs *channelStore, sub *subState, startTime int64) uint64 {
 
 	cs.msgs.RLock()
 	defer cs.msgs.RUnlock()
@@ -1323,7 +1324,7 @@ func (s *stanServer) getSequenceFromStartTime(cs *channelStore, sub *subState, s
 }
 
 // Setup the start position for the subscriber.
-func (s *stanServer) setSubStartSequence(sub *subState, sr *pb.SubscriptionRequest, cs *channelStore) {
+func (s *StanServer) setSubStartSequence(sub *subState, sr *pb.SubscriptionRequest, cs *channelStore) {
 	sub.Lock()
 	defer sub.Unlock()
 
@@ -1353,7 +1354,7 @@ func (s *stanServer) setSubStartSequence(sub *subState, sr *pb.SubscriptionReque
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.
-func (s *stanServer) Shutdown() {
+func (s *StanServer) Shutdown() {
 	Debugf("STAN: Shutting down.")
 	if s.nc != nil {
 		s.nc.Close()
