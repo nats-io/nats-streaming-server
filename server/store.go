@@ -1,6 +1,6 @@
 // Copyright 2016 Apcera Inc. All rights reserved.
 
-package stan
+package server
 
 import (
 	"github.com/nats-io/stan/pb"

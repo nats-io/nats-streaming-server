@@ -1,6 +1,6 @@
 // Copyright 2016 Apcera Inc. All rights reserved.
 
-package stan
+package server
 
 import (
 	"sync"
@@ -56,7 +56,7 @@ func (cs *clientStore) Unregister(ID string) {
 }
 
 // Check validity of a client.
-func (s *stanServer) isValidClient(ID string) bool {
+func (s *StanServer) isValidClient(ID string) bool {
 	return s.clients.Lookup(ID) != nil
 }
 
