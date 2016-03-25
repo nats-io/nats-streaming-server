@@ -3,7 +3,7 @@
 package test
 
 import (
-	"github.com/nats-io/stanserver/server"
+	"github.com/nats-io/stan-server/server"
 )
 
 func RunServer(ID string) *server.StanServer {

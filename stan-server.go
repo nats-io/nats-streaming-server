@@ -1,5 +1,4 @@
 // Copyright 2016 Apcera Inc. All rights reserved.
-// +build ignore
 
 package main
 
@@ -7,10 +6,10 @@ import (
 	"flag"
 	"runtime"
 
+	"fmt"
 	natsd "github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/stan"
-	"github.com/nats-io/stanserver/server"
-	"fmt"
+	"github.com/nats-io/stan-server/server"
 )
 
 func main() {
@@ -39,7 +38,7 @@ func parseFlags(opts *natsd.Options, ID *string) {
 	var configFile string
 
 	// STAN options
-	flag.StringVar(ID, "id", "test-cluster", "Cluster ID.");
+	flag.StringVar(ID, "id", "test-cluster", "Cluster ID.")
 
 	// TODO: Expose gnatsd parsing into server options
 	// (cls) This is a development placeholder until gnatsd
