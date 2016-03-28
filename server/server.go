@@ -1295,7 +1295,14 @@ func (s *StanServer) sendAvailableMessages(cs *channelStore, sub *subState) {
 // Check if a startTime is valid.
 func (s *StanServer) startTimeValid(subject string, start int64) bool {
 	cs := s.channels.Lookup(subject)
+
 	firstMsg := cs.msgs.FirstMsg()
+
+	// simply no messages to return
+	if firstMsg == nil {
+		return false
+	}
+
 	lastMsg := cs.msgs.LastMsg()
 	if start > lastMsg.Timestamp || start < firstMsg.Timestamp {
 		return false
@@ -1306,6 +1313,7 @@ func (s *StanServer) startTimeValid(subject string, start int64) bool {
 // Check if a startSequence is valid.
 func (s *StanServer) startSequenceValid(subject string, seq uint64) bool {
 	cs := s.channels.Lookup(subject)
+
 	cs.msgs.RLock()
 	defer cs.msgs.RUnlock()
 	if seq > cs.msgs.last || seq < cs.msgs.first {
