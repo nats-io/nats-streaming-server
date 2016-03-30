@@ -15,7 +15,7 @@ option (gogoproto.goproto_getters_all) = false;
 
 // A Subscription State
 message SubState {
-  string	clientID       = 1;  // ClientID
+  string    clientID       = 1;  // ClientID
   string    qGroup         = 2;  // Optional queue group
   string    inbox          = 3;  // Inbox subject to deliver messages on
   string    ackInbox       = 4;  // Inbox for acks

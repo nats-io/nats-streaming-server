@@ -84,7 +84,6 @@ type subStore struct {
 	qsubs    map[string]*queueState // queue subscribers
 	durables map[string]*subState   // durables lookup
 	acks     map[string]*subState   // ack inbox lookup
-	store    stores.SubStore        // storage interface
 }
 
 // Holds all queue subsribers for a subject/group and
@@ -103,8 +102,9 @@ type subState struct {
 	subject      string
 	qstate       *queueState
 	lastSent     uint64
-	ackWait      time.Duration // expressed as a duration so that we don't need
+	// ackWait expressed as a duration so that we don't need
 	// to multiply by time.Second anytime we use this.
+	ackWait      time.Duration
 	ackTimer     *time.Timer
 	ackTimeFloor int64
 	ackSub       *nats.Subscription
