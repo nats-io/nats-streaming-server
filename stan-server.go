@@ -4,6 +4,7 @@ package main
 
 import (
 	"flag"
+	"os"
 	"runtime"
 
 	"fmt"
@@ -15,22 +16,26 @@ import (
 func main() {
 
 	var ID string
+	var filestore string
 
 	opts := &natsd.Options{}
 
 	// Parse flags
-	parseFlags(opts, &ID)
+	parseFlags(opts, &ID, &filestore)
 
 	server.EnableDefaultLogger(opts)
 
 	server.Noticef("Starting stan-server[%s] version %s", ID, stan.Version)
 
-	server.RunServer(ID, opts)
+	_, err := server.RunServer(ID, filestore, opts)
+	if err != nil {
+		os.Exit(1)
+	}
 
 	runtime.Goexit()
 }
 
-func parseFlags(opts *natsd.Options, ID *string) {
+func parseFlags(opts *natsd.Options, ID, filestore *string) {
 
 	var showVersion bool
 	var debugAndTrace bool
@@ -39,6 +44,7 @@ func parseFlags(opts *natsd.Options, ID *string) {
 
 	// STAN options
 	flag.StringVar(ID, "id", "test-cluster", "Cluster ID.")
+	flag.StringVar(filestore, "filestore", "", "Root directory for file-based storage.")
 
 	// TODO: Expose gnatsd parsing into server options
 	// (cls) This is a development placeholder until gnatsd

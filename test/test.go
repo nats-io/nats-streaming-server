@@ -7,5 +7,6 @@ import (
 )
 
 func RunServer(ID string) *server.StanServer {
-	return server.RunServer(ID)
+	s, _ := server.RunServer(ID, "")
+	return s
 }

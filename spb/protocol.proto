@@ -1,0 +1,25 @@
+// Copyright 2016 Apcera Inc. All rights reserved.
+//
+// Uses https://github.com/gogo/protobuf
+// compiled via `protoc -I=. -I=$GOPATH/src  --gogofaster_out=. protocol.proto`
+
+syntax = "proto3";
+package spb;
+
+import "github.com/gogo/protobuf/gogoproto/gogo.proto";
+
+option (gogoproto.marshaler_all) = true;
+option (gogoproto.sizer_all) = true;
+option (gogoproto.unmarshaler_all) = true;
+option (gogoproto.goproto_getters_all) = false;
+
+// A Subscription State
+message SubState {
+  string	clientID       = 1;  // ClientID
+  string    qGroup         = 2;  // Optional queue group
+  string    inbox          = 3;  // Inbox subject to deliver messages on
+  string    ackInbox       = 4;  // Inbox for acks
+  int32     maxInFlight    = 5;  // Maximum inflight messages without an ack allowed
+  int32     ackWaitInSecs  = 6;  // Timeout for receiving an ack from the client
+  string    durableName    = 7;  // Optional durable name which survives client restarts
+}
