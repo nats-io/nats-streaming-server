@@ -10,23 +10,27 @@ import (
 
 // MemoryStore is a factory for message and subscription stores.
 type MemoryStore struct {
-	GenericStore
+	genericStore
 }
 
 // MemorySubStore is a subscription store in memory
 type MemorySubStore struct {
-	GenericSubStore
+	genericSubStore
 }
 
 // MemoryMsgStore is a per channel message store in memory
 type MemoryMsgStore struct {
-	GenericMsgStore
+	genericMsgStore
 }
+
+////////////////////////////////////////////////////////////////////////////
+// MemoryStore methods
+////////////////////////////////////////////////////////////////////////////
 
 // NewMemoryStore returns a factory for stores held in memory.
 func NewMemoryStore(limits ChannelLimits) (*MemoryStore, error) {
 	ms := &MemoryStore{}
-	ms.Init("MEMORY", limits)
+	ms.init("MEMORY", limits)
 	return ms, nil
 }
 
@@ -49,7 +53,7 @@ func (ms *MemoryStore) LookupOrCreateChannel(channel string) (*ChannelStore, boo
 	}
 
 	msgStore := &MemoryMsgStore{}
-	msgStore.Init(channel, ms.limits)
+	msgStore.init(channel, ms.limits)
 
 	subStore := &MemorySubStore{}
 
@@ -62,6 +66,10 @@ func (ms *MemoryStore) LookupOrCreateChannel(channel string) (*ChannelStore, boo
 
 	return channelStore, true, nil
 }
+
+////////////////////////////////////////////////////////////////////////////
+// MemoryMsgStore methods
+////////////////////////////////////////////////////////////////////////////
 
 // Store a given message.
 func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
@@ -91,9 +99,4 @@ func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error)
 	}
 
 	return m, nil
-}
-
-// Close closes this store.
-func (ss *MemoryMsgStore) Close() error {
-	return nil
 }

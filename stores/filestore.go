@@ -18,13 +18,13 @@ const (
 
 // FileStore is a factory for message and subscription stores.
 type FileStore struct {
-	GenericStore
+	genericStore
 	rootDir string
 }
 
 // FileSubStore is a subscription store in files.
 type FileSubStore struct {
-	GenericSubStore
+	genericSubStore
 }
 
 // fileSlice represents one of the message store file (there are a number
@@ -40,17 +40,21 @@ type fileSlice struct {
 
 // FileMsgStore is a per channel message file store.
 type FileMsgStore struct {
-	GenericMsgStore
+	genericMsgStore
 	files        [numFiles]*fileSlice
 	currSliceIdx int
 }
+
+////////////////////////////////////////////////////////////////////////////
+// FileStore methods
+////////////////////////////////////////////////////////////////////////////
 
 // NewFileStore returns a factory for stores backed by files.
 func NewFileStore(rootDir string, limits ChannelLimits) (*FileStore, error) {
 	fs := &FileStore{
 		rootDir: rootDir,
 	}
-	fs.Init("FILESTORE", limits)
+	fs.init("FILESTORE", limits)
 
 	if err := os.MkdirAll(rootDir, os.ModeDir+os.ModePerm); err != nil && !os.IsExist(err) {
 		Errorf("Unable to create the root directory [%s]: %v", rootDir, err)
@@ -260,10 +264,14 @@ func (fs *FileStore) createFileMsgStore(channel string) (*FileMsgStore, error) {
 	return msgStore, nil
 }
 
+////////////////////////////////////////////////////////////////////////////
+// FileMsgStore methods
+////////////////////////////////////////////////////////////////////////////
+
 // NewFileMsgStore returns a new instace of a file MsgStore
 func NewFileMsgStore(channel string, limits ChannelLimits) *FileMsgStore {
 	fs := &FileMsgStore{}
-	fs.Init(channel, limits)
+	fs.init(channel, limits)
 
 	return fs
 }
@@ -415,3 +423,7 @@ func (ms *FileMsgStore) Close() error {
 	}
 	return err
 }
+
+////////////////////////////////////////////////////////////////////////////
+// FileSubStore methods
+////////////////////////////////////////////////////////////////////////////

@@ -8,45 +8,56 @@ import (
 	"github.com/nats-io/stan/pb"
 )
 
-type GenericStore struct {
-	sync.RWMutex
-	name     string
-	closed   bool
-	channels map[string]*ChannelStore
-	limits   ChannelLimits
-}
-
-type GenericSubStore struct {
+// commonStore contains everything that is common to any type of store
+type commonStore struct {
 	sync.RWMutex
 	limits ChannelLimits
+	closed bool
 }
 
-type GenericMsgStore struct {
-	sync.RWMutex
+// genericStore is the generic store implementation with a map of channels.
+type genericStore struct {
+	commonStore
+	name     string
+	channels map[string]*ChannelStore
+}
+
+// genericSubStore is the generic store implementation that manages subscriptions
+// for a given channel.
+type genericSubStore struct {
+	commonStore
+}
+
+// genericMsgStore is the generic store implementation that manages messages
+// for a given channel.
+type genericMsgStore struct {
+	commonStore
 	subject    string // Can't be wildcard
 	first      uint64
 	last       uint64
 	msgs       map[uint64]*pb.MsgProto
-	limits     ChannelLimits
 	totalCount int
 	totalBytes uint64
-	closed     bool
 }
 
+////////////////////////////////////////////////////////////////////////////
+// genericStore methods
+////////////////////////////////////////////////////////////////////////////
+
 // Init initializes the structure of a generic store
-func (gs *GenericStore) Init(name string, limits ChannelLimits) {
+func (gs *genericStore) init(name string, limits ChannelLimits) {
 	gs.name = name
 	gs.limits = limits
 	gs.channels = make(map[string]*ChannelStore, 1)
 }
 
 // Name returns the type name of this store
-func (gs *GenericStore) Name() string {
+func (gs *genericStore) Name() string {
 	return gs.name
 }
 
 // SetChannelLimits sets the limit for the messages and subscriptions stores.
-func (gs *GenericStore) SetChannelLimits(limits ChannelLimits) error {
+func (gs *genericStore) SetChannelLimits(limits ChannelLimits) error {
 	gs.Lock()
 	defer gs.Unlock()
 	gs.limits = limits
@@ -54,7 +65,7 @@ func (gs *GenericStore) SetChannelLimits(limits ChannelLimits) error {
 }
 
 // LookupChannel returns a ChannelStore for the given channel.
-func (gs *GenericStore) LookupChannel(channel string) *ChannelStore {
+func (gs *genericStore) LookupChannel(channel string) *ChannelStore {
 	gs.RLock()
 	defer gs.RUnlock()
 
@@ -62,7 +73,7 @@ func (gs *GenericStore) LookupChannel(channel string) *ChannelStore {
 }
 
 // HasChannel returns true if this store has any channel
-func (gs *GenericStore) HasChannel() bool {
+func (gs *genericStore) HasChannel() bool {
 	gs.RLock()
 	defer gs.RUnlock()
 
@@ -70,7 +81,7 @@ func (gs *GenericStore) HasChannel() bool {
 }
 
 // State returns message store statistics for a given channel ('*' for all)
-func (gs *GenericStore) MsgsState(channel string) (numMessages int, byteSize uint64, err error) {
+func (gs *genericStore) MsgsState(channel string) (numMessages int, byteSize uint64, err error) {
 	numMessages = 0
 	byteSize = 0
 	err = nil
@@ -99,7 +110,7 @@ func (gs *GenericStore) MsgsState(channel string) (numMessages int, byteSize uin
 }
 
 // Close closes all stores
-func (gs *GenericStore) Close() error {
+func (gs *genericStore) Close() error {
 	gs.Lock()
 	defer gs.Unlock()
 
@@ -126,8 +137,12 @@ func (gs *GenericStore) Close() error {
 	return err
 }
 
+////////////////////////////////////////////////////////////////////////////
+// genericMsgStore methods
+////////////////////////////////////////////////////////////////////////////
+
 // Init initializes this generic message store
-func (gms *GenericMsgStore) Init(subject string, limits ChannelLimits) {
+func (gms *genericMsgStore) init(subject string, limits ChannelLimits) {
 	gms.subject = subject
 	gms.limits = limits
 	gms.first = 1
@@ -137,7 +152,7 @@ func (gms *GenericMsgStore) Init(subject string, limits ChannelLimits) {
 }
 
 // State returns some statistics related to this store
-func (gms *GenericMsgStore) State() (numMessages int, byteSize uint64, err error) {
+func (gms *genericMsgStore) State() (numMessages int, byteSize uint64, err error) {
 	gms.RLock()
 	defer gms.RUnlock()
 
@@ -145,42 +160,42 @@ func (gms *GenericMsgStore) State() (numMessages int, byteSize uint64, err error
 }
 
 // FirstSequence returns sequence for first message stored.
-func (gms *GenericMsgStore) FirstSequence() uint64 {
+func (gms *genericMsgStore) FirstSequence() uint64 {
 	gms.RLock()
 	defer gms.RUnlock()
 	return gms.first
 }
 
 // LastSequence returns sequence for last message stored.
-func (gms *GenericMsgStore) LastSequence() uint64 {
+func (gms *genericMsgStore) LastSequence() uint64 {
 	gms.RLock()
 	defer gms.RUnlock()
 	return gms.last
 }
 
 // FirstAndLastSequence returns sequences for the first and last messages stored.
-func (gms *GenericMsgStore) FirstAndLastSequence() (uint64, uint64) {
+func (gms *genericMsgStore) FirstAndLastSequence() (uint64, uint64) {
 	gms.RLock()
 	defer gms.RUnlock()
 	return gms.first, gms.last
 }
 
 // Lookup returns the stored message with given sequence number.
-func (gms *GenericMsgStore) Lookup(seq uint64) *pb.MsgProto {
+func (gms *genericMsgStore) Lookup(seq uint64) *pb.MsgProto {
 	gms.RLock()
 	defer gms.RUnlock()
 	return gms.msgs[seq]
 }
 
 // FirstMsg returns the first message stored.
-func (gms *GenericMsgStore) FirstMsg() *pb.MsgProto {
+func (gms *genericMsgStore) FirstMsg() *pb.MsgProto {
 	gms.RLock()
 	defer gms.RUnlock()
 	return gms.msgs[gms.first]
 }
 
 // LastMsg returns the last message stored.
-func (gms *GenericMsgStore) LastMsg() *pb.MsgProto {
+func (gms *genericMsgStore) LastMsg() *pb.MsgProto {
 	gms.RLock()
 	defer gms.RUnlock()
 	return gms.msgs[gms.last]
@@ -188,7 +203,7 @@ func (gms *GenericMsgStore) LastMsg() *pb.MsgProto {
 
 // GetSequenceFromStartTime returns the sequence of the first message whose
 // timestamp is greater or equal to given startTime.
-func (gms *GenericMsgStore) GetSequenceFromStartTime(startTime int64) uint64 {
+func (gms *genericMsgStore) GetSequenceFromStartTime(startTime int64) uint64 {
 	gms.RLock()
 	defer gms.RUnlock()
 
@@ -203,28 +218,37 @@ func (gms *GenericMsgStore) GetSequenceFromStartTime(startTime int64) uint64 {
 	return uint64(index) + gms.first
 }
 
+// Close closes this store.
+func (gms *genericMsgStore) Close() error {
+	return nil
+}
+
+////////////////////////////////////////////////////////////////////////////
+// genericSubStore methods
+////////////////////////////////////////////////////////////////////////////
+
 // CreateSub records a new subscription represented by SubState. On success,
 // it returns an id that is used by the other methods.
-func (gss *GenericSubStore) CreateSub(sub *spb.SubState) (uint64, error) {
+func (gss *genericSubStore) CreateSub(sub *spb.SubState) (uint64, error) {
 	return 0, nil
 }
 
 // DeleteSub invalidates this subscription.
-func (gss *GenericSubStore) DeleteSub(subid uint64) {
+func (gss *genericSubStore) DeleteSub(subid uint64) {
 }
 
 // AddSeqPending adds the given message seqno to the given subscription.
-func (gss *GenericSubStore) AddSeqPending(subid, seqno uint64) error {
+func (gss *genericSubStore) AddSeqPending(subid, seqno uint64) error {
 	return nil
 }
 
 // AckSeqPending records that the given message seqno has been acknowledged
 // by the given subscription.
-func (gss *GenericSubStore) AckSeqPending(subid, seqno uint64) error {
+func (gss *genericSubStore) AckSeqPending(subid, seqno uint64) error {
 	return nil
 }
 
 // Close closes this store
-func (gss *GenericSubStore) Close() error {
+func (gss *genericSubStore) Close() error {
 	return nil
 }
