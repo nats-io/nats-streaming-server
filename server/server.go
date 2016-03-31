@@ -112,7 +112,6 @@ type subState struct {
 	ackSub       *nats.Subscription
 	acksPending  map[uint64]*pb.MsgProto
 	stalled      bool
-	id           uint64
 	store        stores.SubStore // for easy access to the store interface
 }
 
@@ -150,17 +149,11 @@ func (ss *subStore) Store(sub *subState) error {
 	sub.RUnlock()
 
 	// Adds to storage.
-	subid, err := store.CreateSub(subStateProto)
+	err := store.CreateSub(subStateProto)
 	if err != nil {
 		Errorf("Unable to store subscription [%v:%v] on [%s]: %v", clientID, inbox, subject, err)
 		return err
 	}
-
-	// Save the given subid, we will use that for further updates with
-	// the store interface.
-	sub.Lock()
-	sub.id = subid
-	sub.Unlock()
 
 	ss.Lock()
 	defer ss.Unlock()
@@ -206,7 +199,7 @@ func (ss *subStore) Remove(sub *subState) {
 	ackInbox := sub.AckInbox
 	qs := sub.qstate
 	durable := sub.DurableName
-	subid := sub.id
+	subid := sub.ID
 	store := sub.store
 	sub.Unlock()
 
@@ -753,7 +746,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 		sub.ClientID, m.Subject, sub.Inbox, m.Sequence)
 
 	// Store in storage
-	if err := sub.store.AddSeqPending(sub.id, m.Sequence); err != nil {
+	if err := sub.store.AddSeqPending(sub.ID, m.Sequence); err != nil {
 		Errorf("STAN: [Client:%s] Unable to update subscription for %s:%v (%v)",
 			sub.ClientID, m.Subject, m.Sequence, err)
 		return false
@@ -1133,13 +1126,16 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	if sub == nil {
 		sub = &subState{
 			SubState: spb.SubState{
-				ClientID:      sr.ClientID,
-				QGroup:        sr.QGroup,
-				Inbox:         sr.Inbox,
-				AckInbox:      nats.NewInbox(),
-				MaxInFlight:   sr.MaxInFlight,
-				AckWaitInSecs: sr.AckWaitInSecs,
-				DurableName:   sr.DurableName,
+				ClientID:       sr.ClientID,
+				QGroup:         sr.QGroup,
+				Inbox:          sr.Inbox,
+				AckInbox:       nats.NewInbox(),
+				MaxInFlight:    sr.MaxInFlight,
+				AckWaitInSecs:  sr.AckWaitInSecs,
+				DurableName:    sr.DurableName,
+				StartPosition:  spb.StartPosition(sr.StartPosition),
+				StartSequence:  sr.StartSequence,
+				StartTimeDelta: sr.StartTimeDelta,
 			},
 			subject:     sr.Subject,
 			ackWait:     time.Duration(sr.AckWaitInSecs) * time.Second,
@@ -1212,7 +1208,7 @@ func (s *StanServer) processAck(cs *stores.ChannelStore, sub *subState, ack *pb.
 	Tracef("STAN: [Client:%s] removing pending ack, subj=%s, seq=%d.",
 		sub.ClientID, sub.subject, ack.Sequence)
 
-	if err := sub.store.AckSeqPending(sub.id, ack.Sequence); err != nil {
+	if err := sub.store.AckSeqPending(sub.ID, ack.Sequence); err != nil {
 		Errorf("STAN: [Client:%s] Unable to persist ack for %s:%v (%v)",
 			sub.ClientID, sub.subject, ack.Sequence, err)
 		return

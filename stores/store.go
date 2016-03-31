@@ -73,8 +73,9 @@ type Store interface {
 // SubStore stores a subscription state.
 type SubStore interface {
 	// CreateSub records a new subscription represented by SubState. On success,
-	// it returns an id that is used by the other methods.
-	CreateSub(*spb.SubState) (uint64, error)
+	// it records the subscription's ID in SubState.ID. This ID is to be used
+	// by the other SubStore methods.
+	CreateSub(*spb.SubState) error
 
 	// DeleteSub invalidates this subscription.
 	DeleteSub(subid uint64)

@@ -40,11 +40,11 @@ func storeSub(t *testing.T, s Store, channel string) uint64 {
 		AckInbox:      "ackinbox",
 		AckWaitInSecs: 10,
 	}
-	subID, err := ss.CreateSub(sub)
+	err = ss.CreateSub(sub)
 	if err != nil {
 		t.Fatalf("Error storing subscription into channel [%v]: %v", channel, err)
 	}
-	return subID
+	return sub.ID
 }
 
 func storeSubPending(t *testing.T, s Store, channel string, subID uint64, seqs ...uint64) error {
@@ -277,7 +277,7 @@ func testMaxSubs(t *testing.T, s Store, maxSubs int) {
 	sub := &spb.SubState{}
 	numSubs := 0
 	for i := 0; i < maxSubs+1; i++ {
-		_, err = cs.Subs.CreateSub(sub)
+		err = cs.Subs.CreateSub(sub)
 		if err != nil {
 			break
 		}
@@ -303,18 +303,18 @@ func testBasicSubStore(t *testing.T, s Store) {
 	ss := cs.Subs
 	sub := &spb.SubState{}
 
-	subID, err := ss.CreateSub(sub)
+	err = ss.CreateSub(sub)
 	if err != nil {
 		t.Fatalf("Unexpected error on create sub: %v", err)
 	}
-	if subID == 0 {
-		t.Fatalf("Expected a positive subID, got: %v", subID)
+	if sub.ID == 0 {
+		t.Fatalf("Expected a positive subID, got: %v", sub.ID)
 	}
-	if err := ss.AddSeqPending(subID, 1); err != nil {
+	if err := ss.AddSeqPending(sub.ID, 1); err != nil {
 		t.Fatalf("Unexpected error on AddSeqPending: %v", err)
 	}
-	if err := ss.AckSeqPending(subID, 1); err != nil {
+	if err := ss.AckSeqPending(sub.ID, 1); err != nil {
 		t.Fatalf("Unexpected error on AckSeqPending: %v", err)
 	}
-	ss.DeleteSub(subID)
+	ss.DeleteSub(sub.ID)
 }

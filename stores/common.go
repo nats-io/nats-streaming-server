@@ -246,8 +246,9 @@ func (gss *genericSubStore) init(channel string, limits ChannelLimits) {
 }
 
 // CreateSub records a new subscription represented by SubState. On success,
-// it returns an id that is used by the other methods.
-func (gss *genericSubStore) CreateSub(sub *spb.SubState) (uint64, error) {
+// it records the subscription's ID in SubState.ID. This ID is to be used
+// by the other SubStore methods.
+func (gss *genericSubStore) CreateSub(sub *spb.SubState) error {
 	gss.Lock()
 	defer gss.Unlock()
 
@@ -256,15 +257,17 @@ func (gss *genericSubStore) CreateSub(sub *spb.SubState) (uint64, error) {
 
 // createSub is the unlocked version of CreateSub that can be used by
 // non-generic implementations.
-func (gss *genericSubStore) createSub(sub *spb.SubState) (uint64, error) {
+func (gss *genericSubStore) createSub(sub *spb.SubState) error {
 	if gss.subsCount == gss.limits.MaxSubs {
-		return 0, ErrTooManySubs
+		return ErrTooManySubs
 	}
 
 	gss.nextSubID++
 	gss.subsCount++
 
-	return gss.nextSubID, nil
+	sub.ID = gss.nextSubID
+
+	return nil
 }
 
 // DeleteSub invalidates this subscription.

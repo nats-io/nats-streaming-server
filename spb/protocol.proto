@@ -13,13 +13,26 @@ option (gogoproto.sizer_all) = true;
 option (gogoproto.unmarshaler_all) = true;
 option (gogoproto.goproto_getters_all) = false;
 
+// Enum for start position type.
+enum StartPosition {
+    NewOnly        = 0;
+    LastReceived   = 1;
+    TimeDeltaStart = 2;
+    SequenceStart  = 3;
+    First          = 4;
+  }
+
 // A Subscription State
 message SubState {
-  string    clientID       = 1;  // ClientID
-  string    qGroup         = 2;  // Optional queue group
-  string    inbox          = 3;  // Inbox subject to deliver messages on
-  string    ackInbox       = 4;  // Inbox for acks
-  int32     maxInFlight    = 5;  // Maximum inflight messages without an ack allowed
-  int32     ackWaitInSecs  = 6;  // Timeout for receiving an ack from the client
-  string    durableName    = 7;  // Optional durable name which survives client restarts
+  uint64        ID             = 1;  // Subscription ID assigned by the SubStore interface
+  string        clientID       = 2;  // ClientID
+  string        qGroup         = 3;  // Optional queue group
+  string        inbox          = 4;  // Inbox subject to deliver messages on
+  string        ackInbox       = 5;  // Inbox for acks
+  int32         maxInFlight    = 6;  // Maximum inflight messages without an ack allowed
+  int32         ackWaitInSecs  = 7;  // Timeout for receiving an ack from the client
+  string        durableName    = 8;  // Optional durable name which survives client restarts
+  StartPosition startPosition  = 9;  // Start position
+  uint64        startSequence  = 10; // Optional start sequence number
+  int64         startTimeDelta = 11; // Optional start time
 }
