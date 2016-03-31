@@ -9,13 +9,15 @@ const (
 	defaultDataStore = "../data"
 )
 
-func cleanupDatastore(dir string) {
-	os.RemoveAll(dir)
+func cleanupDatastore(t *testing.T, dir string) {
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("Error cleanup datastore: %v", err)
+	}
 }
 
 func TestFSBasicCreate(t *testing.T) {
-	cleanupDatastore(defaultDataStore)
-	defer cleanupDatastore(defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
 	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
 	if err != nil {
@@ -27,8 +29,8 @@ func TestFSBasicCreate(t *testing.T) {
 }
 
 func TestFSNothingRecoveredOnFreshStart(t *testing.T) {
-	cleanupDatastore(defaultDataStore)
-	defer cleanupDatastore(defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
 	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
 	if err != nil {
@@ -40,8 +42,8 @@ func TestFSNothingRecoveredOnFreshStart(t *testing.T) {
 }
 
 func TestFSNewChannel(t *testing.T) {
-	cleanupDatastore(defaultDataStore)
-	defer cleanupDatastore(defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
 	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
 	if err != nil {
@@ -53,8 +55,8 @@ func TestFSNewChannel(t *testing.T) {
 }
 
 func TestFSCloseIdempotent(t *testing.T) {
-	cleanupDatastore(defaultDataStore)
-	defer cleanupDatastore(defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
 	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
 	if err != nil {
@@ -66,8 +68,8 @@ func TestFSCloseIdempotent(t *testing.T) {
 }
 
 func TestFSBasicMsgStore(t *testing.T) {
-	cleanupDatastore(defaultDataStore)
-	defer cleanupDatastore(defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
 	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
 	if err != nil {
@@ -79,8 +81,8 @@ func TestFSBasicMsgStore(t *testing.T) {
 }
 
 func TestFSBasicRecovery(t *testing.T) {
-	cleanupDatastore(defaultDataStore)
-	defer cleanupDatastore(defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
 	fooRecovered := false
 	barRecovered := false
@@ -150,8 +152,8 @@ func TestFSBasicRecovery(t *testing.T) {
 }
 
 func TestFSMsgsState(t *testing.T) {
-	cleanupDatastore(defaultDataStore)
-	defer cleanupDatastore(defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
 	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
 	if err != nil {
@@ -163,8 +165,8 @@ func TestFSMsgsState(t *testing.T) {
 }
 
 func TestFSMaxMsgs(t *testing.T) {
-	cleanupDatastore(defaultDataStore)
-	defer cleanupDatastore(defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
 	limitCount := 100
 
@@ -181,8 +183,8 @@ func TestFSMaxMsgs(t *testing.T) {
 }
 
 func TestFSMaxChannels(t *testing.T) {
-	cleanupDatastore(defaultDataStore)
-	defer cleanupDatastore(defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
 	limitCount := 2
 
@@ -199,8 +201,8 @@ func TestFSMaxChannels(t *testing.T) {
 }
 
 func TestFSMaxSubs(t *testing.T) {
-	cleanupDatastore(defaultDataStore)
-	defer cleanupDatastore(defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
 	limitCount := 2
 
@@ -217,8 +219,8 @@ func TestFSMaxSubs(t *testing.T) {
 }
 
 func TestFSBasicSubStore(t *testing.T) {
-	cleanupDatastore(defaultDataStore)
-	defer cleanupDatastore(defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
 	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
 	if err != nil {

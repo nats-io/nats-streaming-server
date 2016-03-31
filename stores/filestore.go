@@ -17,7 +17,7 @@ import (
 const (
 	numFiles = 5
 
-	fileVersion = uint8(2)
+	fileVersion = uint8(1)
 
 	addPending = uint8(1)
 	addAck     = uint8(2)
@@ -630,5 +630,29 @@ func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 // by the given subscription.
 func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
 	err := writeUpdate(ss.updatesFile, addAck, subid, seqno)
+	return err
+}
+
+func (ss *FileSubStore) Close() error {
+	ss.RLock()
+	defer ss.RUnlock()
+
+	if ss.closed {
+		return nil
+	}
+
+	ss.closed = true
+
+	var err error
+
+	if ss.subsFile != nil {
+		err = ss.subsFile.Close()
+	}
+	if ss.updatesFile != nil {
+		lerr := ss.updatesFile.Close()
+		if lerr != nil && err == nil {
+			err = lerr
+		}
+	}
 	return err
 }
