@@ -622,14 +622,18 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 
 // AddSeqPending adds the given message seqno to the given subscription.
 func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
+	ss.Lock()
 	err := writeUpdate(ss.updatesFile, addPending, subid, seqno)
+	ss.Unlock()
 	return err
 }
 
 // AckSeqPending records that the given message seqno has been acknowledged
 // by the given subscription.
 func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
+	ss.Lock()
 	err := writeUpdate(ss.updatesFile, addAck, subid, seqno)
+	ss.Unlock()
 	return err
 }
 
