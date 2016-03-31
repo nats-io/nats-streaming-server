@@ -52,10 +52,15 @@ func (ms *MemoryStore) LookupOrCreateChannel(channel string) (*ChannelStore, boo
 		return channelStore, false, nil
 	}
 
+	if err := ms.canAddChannel(); err != nil {
+		return nil, false, err
+	}
+
 	msgStore := &MemoryMsgStore{}
 	msgStore.init(channel, ms.limits)
 
 	subStore := &MemorySubStore{}
+	subStore.init(channel, ms.limits)
 
 	channelStore = &ChannelStore{
 		Subs: subStore,
@@ -99,4 +104,23 @@ func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error)
 	}
 
 	return m, nil
+}
+
+////////////////////////////////////////////////////////////////////////////
+// MemorySubStore methods
+////////////////////////////////////////////////////////////////////////////
+
+// AddSeqPending adds the given message seqno to the given subscription.
+func (*MemorySubStore) AddSeqPending(subid, seqno uint64) error {
+	// Overrides in case genericSubStore does something. For the memory
+	// based store, we want to minimize the cost of this to a minimum.
+	return nil
+}
+
+// AckSeqPending records that the given message seqno has been acknowledged
+// by the given subscription.
+func (*MemorySubStore) AckSeqPending(subid, seqno uint64) error {
+	// Overrides in case genericSubStore does something. For the memory
+	// based store, we want to minimize the cost of this to a minimum.
+	return nil
 }

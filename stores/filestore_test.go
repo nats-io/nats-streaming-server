@@ -106,6 +106,15 @@ func TestFSBasicRecovery(t *testing.T) {
 	storeMsg(t, fs, "foo", []byte("foomsg"))
 	storeMsg(t, fs, "bar", []byte("barmsg"))
 
+	sub1 := storeSub(t, fs, "foo")
+	sub2 := storeSub(t, fs, "bar")
+
+	storeSubPending(t, fs, "foo", sub1, 1, 2, 3)
+	storeSubAck(t, fs, "foo", sub1, 1, 3)
+
+	storeSubPending(t, fs, "bar", sub2, 1, 2, 3, 4)
+	storeSubAck(t, fs, "bar", sub1, 4)
+
 	fs.Close()
 
 	fs, err = NewFileStore(defaultDataStore, DefaultChannelLimits)
@@ -136,6 +145,8 @@ func TestFSBasicRecovery(t *testing.T) {
 	if cs != nil {
 		t.Fatal("Expected to get nil channel for baz, got something instead")
 	}
+
+	// TODO: Check that subscriptions are restored
 }
 
 func TestFSMsgsState(t *testing.T) {
@@ -151,7 +162,7 @@ func TestFSMsgsState(t *testing.T) {
 	testMsgsState(t, fs)
 }
 
-func TestFSLimits(t *testing.T) {
+func TestFSMaxMsgs(t *testing.T) {
 	cleanupDatastore(defaultDataStore)
 	defer cleanupDatastore(defaultDataStore)
 
@@ -166,5 +177,54 @@ func TestFSLimits(t *testing.T) {
 	}
 	defer fs.Close()
 
-	testLimits(t, fs, limitCount)
+	testMaxMsgs(t, fs, limitCount)
+}
+
+func TestFSMaxChannels(t *testing.T) {
+	cleanupDatastore(defaultDataStore)
+	defer cleanupDatastore(defaultDataStore)
+
+	limitCount := 2
+
+	limits := DefaultChannelLimits
+	limits.MaxChannels = limitCount
+
+	fs, err := NewFileStore(defaultDataStore, limits)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	testMaxChannels(t, fs, limitCount)
+}
+
+func TestFSMaxSubs(t *testing.T) {
+	cleanupDatastore(defaultDataStore)
+	defer cleanupDatastore(defaultDataStore)
+
+	limitCount := 2
+
+	limits := DefaultChannelLimits
+	limits.MaxSubs = limitCount
+
+	fs, err := NewFileStore(defaultDataStore, limits)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	testMaxSubs(t, fs, limitCount)
+}
+
+func TestFSBasicSubStore(t *testing.T) {
+	cleanupDatastore(defaultDataStore)
+	defer cleanupDatastore(defaultDataStore)
+
+	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	testBasicSubStore(t, fs)
 }

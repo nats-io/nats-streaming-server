@@ -26,6 +26,9 @@ type genericStore struct {
 // for a given channel.
 type genericSubStore struct {
 	commonStore
+	subject   string // Can't be wildcard
+	subsCount int
+	nextSubID uint64
 }
 
 // genericMsgStore is the generic store implementation that manages messages
@@ -44,11 +47,11 @@ type genericMsgStore struct {
 // genericStore methods
 ////////////////////////////////////////////////////////////////////////////
 
-// Init initializes the structure of a generic store
+// init initializes the structure of a generic store
 func (gs *genericStore) init(name string, limits ChannelLimits) {
 	gs.name = name
 	gs.limits = limits
-	gs.channels = make(map[string]*ChannelStore, 1)
+	gs.channels = make(map[string]*ChannelStore, limits.MaxChannels)
 }
 
 // Name returns the type name of this store
@@ -109,6 +112,15 @@ func (gs *genericStore) MsgsState(channel string) (numMessages int, byteSize uin
 	return
 }
 
+// canAddChannel returns true if the current number of channels is below the limit.
+// Store lock is assumed to be locked.
+func (gs *genericStore) canAddChannel() error {
+	if len(gs.channels) == gs.limits.MaxChannels {
+		return ErrTooManyChannels
+	}
+	return nil
+}
+
 // Close closes all stores
 func (gs *genericStore) Close() error {
 	gs.Lock()
@@ -141,7 +153,7 @@ func (gs *genericStore) Close() error {
 // genericMsgStore methods
 ////////////////////////////////////////////////////////////////////////////
 
-// Init initializes this generic message store
+// init initializes this generic message store
 func (gms *genericMsgStore) init(subject string, limits ChannelLimits) {
 	gms.subject = subject
 	gms.limits = limits
@@ -227,14 +239,40 @@ func (gms *genericMsgStore) Close() error {
 // genericSubStore methods
 ////////////////////////////////////////////////////////////////////////////
 
+// init initializes the structure of a generic sub store
+func (gss *genericSubStore) init(channel string, limits ChannelLimits) {
+	gss.subject = channel
+	gss.limits = limits
+}
+
 // CreateSub records a new subscription represented by SubState. On success,
 // it returns an id that is used by the other methods.
 func (gss *genericSubStore) CreateSub(sub *spb.SubState) (uint64, error) {
-	return 0, nil
+	gss.Lock()
+	defer gss.Unlock()
+
+	return gss.createSub(sub)
+}
+
+// createSub is the unlocked version of CreateSub that can be used by
+// non-generic implementations.
+func (gss *genericSubStore) createSub(sub *spb.SubState) (uint64, error) {
+	if gss.subsCount == gss.limits.MaxSubs {
+		return 0, ErrTooManySubs
+	}
+
+	gss.nextSubID++
+	gss.subsCount++
+
+	return gss.nextSubID, nil
 }
 
 // DeleteSub invalidates this subscription.
 func (gss *genericSubStore) DeleteSub(subid uint64) {
+	gss.Lock()
+	defer gss.Unlock()
+
+	gss.subsCount--
 }
 
 // AddSeqPending adds the given message seqno to the given subscription.

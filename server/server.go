@@ -36,6 +36,8 @@ const (
 	DefaultMsgStoreLimit = 1000000
 	// How many channels (literal subjects) do we allow?
 	DefaultChannelLimit = 100
+	// How many subscriptions per channel do we allow?
+	DefaultSubStoreLimit = 1000
 
 	// Heartbeat intervals.
 	DefaultHeartBeatInterval   = 30 * time.Second
@@ -142,11 +144,15 @@ func (ss *subStore) Store(sub *subState) error {
 	isDurable := sub.isDurable()
 	subStateProto := &sub.SubState
 	store := sub.store
+	clientID := sub.ClientID
+	inbox := sub.Inbox
+	subject := sub.subject
 	sub.RUnlock()
 
 	// Adds to storage.
 	subid, err := store.CreateSub(subStateProto)
 	if err != nil {
+		Errorf("Unable to store subscription [%v:%v] on [%s]: %v", clientID, inbox, subject, err)
 		return err
 	}
 
@@ -288,9 +294,10 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) (*StanServer, error
 
 	// Set limits
 	limits := stores.ChannelLimits{
+		MaxChannels: DefaultChannelLimit,
 		MaxNumMsgs:  DefaultMsgStoreLimit,
 		MaxMsgBytes: DefaultMsgStoreLimit * 1024,
-		MaxSubs:     DefaultChannelLimit,
+		MaxSubs:     DefaultSubStoreLimit,
 	}
 
 	var err error

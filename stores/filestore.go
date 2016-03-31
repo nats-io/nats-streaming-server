@@ -9,11 +9,15 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/nats-io/stan-server/spb"
 	"github.com/nats-io/stan/pb"
 )
 
 const (
 	numFiles = 5
+
+	addPending = uint8(1)
+	addAck     = uint8(2)
 )
 
 // FileStore is a factory for message and subscription stores.
@@ -25,6 +29,9 @@ type FileStore struct {
 // FileSubStore is a subscription store in files.
 type FileSubStore struct {
 	genericSubStore
+	tmpSubBuf   []byte
+	subsFile    *os.File
+	updatesFile *os.File
 }
 
 // fileSlice represents one of the message store file (there are a number
@@ -41,8 +48,15 @@ type fileSlice struct {
 // FileMsgStore is a per channel message file store.
 type FileMsgStore struct {
 	genericMsgStore
+	tmpMsgBuf    []byte
 	files        [numFiles]*fileSlice
 	currSliceIdx int
+}
+
+// make this a function in case OpenFile parameters are not right, easier
+// to change in a single place.
+func openFile(fileName string) (*os.File, error) {
+	return os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -63,6 +77,7 @@ func NewFileStore(rootDir string, limits ChannelLimits) (*FileStore, error) {
 
 	var err error
 	var msgStore *FileMsgStore
+	var subStore *FileSubStore
 
 	// Recover channels
 	var channels []os.FileInfo
@@ -74,126 +89,29 @@ func NewFileStore(rootDir string, limits ChannelLimits) (*FileStore, error) {
 				continue
 			}
 
+			channel := c.Name()
+			channelDirName := filepath.Join(rootDir, channel)
+
 			// Recover messages for this channel
-			msgStore, err = fs.recoverMsgs(c)
+			msgStore, err = NewFileMsgStore(channelDirName, channel, fs.limits, true)
+			if err == nil {
+				subStore, err = NewFileSubStore(channelDirName, channel, fs.limits, true)
+			}
 			if err != nil {
 				break
 			}
 
-			channelName := c.Name()
-
-			fs.channels[channelName] = &ChannelStore{
-				Subs: &FileSubStore{},
+			fs.channels[channel] = &ChannelStore{
+				Subs: subStore,
 				Msgs: msgStore,
 			}
 		}
 	}
+	if err != nil {
+		Errorf("Unable to restore state: %v", err)
+	}
 
 	return fs, err
-}
-
-func (fs *FileStore) recoverMsgs(channelDir os.FileInfo) (*FileMsgStore, error) {
-
-	// Create a message store
-	msgStore := NewFileMsgStore(channelDir.Name(), fs.limits)
-
-	// Go through each file and load messages
-	for i := 0; i < numFiles; i++ {
-		if err := fs.recoverOneMsgFile(msgStore, i); err != nil {
-			Errorf("Unable to restore message store for [%s]: %v", msgStore.subject, err)
-			return nil, err
-		}
-	}
-
-	return msgStore, nil
-}
-
-func (fs *FileStore) recoverOneMsgFile(msgStore *FileMsgStore, numFile int) error {
-	var err error
-	var file *os.File
-
-	fileName := filepath.Join(fs.rootDir, msgStore.subject, fmt.Sprintf("msgs.%d.dat", (numFile+1)))
-	file, err = os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		return err
-	}
-
-	fslice := &fileSlice{
-		fileName: fileName,
-		file:     file,
-	}
-	msgStore.files[numFile] = fslice
-
-	msgSize := int32(0)
-	bufSize := int32(0)
-	var msgBuf []byte
-	var msg *pb.MsgProto
-
-	hasOne := false
-
-	for {
-		// Read the message size as an int32
-		err = binary.Read(file, binary.LittleEndian, &msgSize)
-		if err == io.EOF {
-			// We are done
-			err = nil
-			break
-		}
-
-		if err == nil {
-			// Expand buffer if necessary
-			if msgSize > bufSize {
-				bufSize = int32(float32(msgSize) * 1.10)
-				msgBuf = make([]byte, bufSize)
-			}
-
-			// Read fully the expected number of bytes for this message
-			_, err = io.ReadFull(file, msgBuf[:msgSize])
-		}
-		if err == nil {
-			// Recover this message
-			msg, err = fs.recoverOneMsg(msgBuf[:msgSize])
-		}
-		if err == nil {
-			// Some accounting...
-			hasOne = true
-
-			if fslice.firstMsg == nil {
-				fslice.firstMsg = msg
-
-				if msgStore.currSliceIdx == -1 {
-					msgStore.first = msg.Sequence
-				}
-			}
-			fslice.lastMsg = msg
-			fslice.msgsCount++
-			fslice.msgsSize += uint64(len(msg.Data))
-
-			msgStore.msgs[msg.Sequence] = msg
-		}
-
-		if err != nil {
-			break
-		}
-	}
-
-	// Do more accounting and bump the current slice index if we recovered
-	// at least one message on that file.
-	if err == nil && hasOne {
-		msgStore.last = fslice.lastMsg.Sequence
-		msgStore.totalCount += fslice.msgsCount
-		msgStore.totalBytes += fslice.msgsSize
-		msgStore.currSliceIdx = numFile
-	}
-
-	return err
-}
-
-func (fs *FileStore) recoverOneMsg(buf []byte) (*pb.MsgProto, error) {
-	m := &pb.MsgProto{}
-	err := m.Unmarshal(buf)
-
-	return m, err
 }
 
 // LookupOrCreateChannel returns a ChannelStore for the given channel,
@@ -214,14 +132,27 @@ func (fs *FileStore) LookupOrCreateChannel(channel string) (*ChannelStore, bool,
 		return channelStore, false, nil
 	}
 
-	// We create the channel here...
-
-	msgStore, err := fs.createFileMsgStore(channel)
-	if err != nil {
+	// Check for limits
+	if err := fs.canAddChannel(); err != nil {
 		return nil, false, err
 	}
 
-	subStore := &FileSubStore{}
+	// We create the channel here...
+	var err error
+	var msgStore MsgStore
+	var subStore SubStore
+
+	channelDirName := filepath.Join(fs.rootDir, channel)
+	err = os.MkdirAll(channelDirName, os.ModeDir+os.ModePerm)
+	if err == nil {
+		msgStore, err = NewFileMsgStore(channelDirName, channel, fs.limits, false)
+	}
+	if err == nil {
+		subStore, err = NewFileSubStore(channelDirName, channel, fs.limits, false)
+	}
+	if err != nil {
+		return nil, false, err
+	}
 
 	channelStore = &ChannelStore{
 		Subs: subStore,
@@ -233,47 +164,111 @@ func (fs *FileStore) LookupOrCreateChannel(channel string) (*ChannelStore, bool,
 	return channelStore, true, nil
 }
 
-func (fs *FileStore) createFileMsgStore(channel string) (*FileMsgStore, error) {
-	var fileSlices [numFiles]*fileSlice
-	var err error
-
-	channelName := filepath.Join(fs.rootDir, channel)
-	err = os.Mkdir(channelName, os.ModeDir+os.ModePerm)
-	if err == nil {
-		var file *os.File
-
-		for i := 0; i < numFiles; i++ {
-			fileName := filepath.Join(channelName, fmt.Sprintf("msgs.%d.dat", (i+1)))
-			file, err = os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-			if err == nil {
-				fileSlices[i] = &fileSlice{
-					fileName: fileName,
-					file:     file,
-				}
-			}
-		}
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	msgStore := NewFileMsgStore(channel, fs.limits)
-	msgStore.files = fileSlices
-
-	return msgStore, nil
-}
-
 ////////////////////////////////////////////////////////////////////////////
 // FileMsgStore methods
 ////////////////////////////////////////////////////////////////////////////
 
-// NewFileMsgStore returns a new instace of a file MsgStore
-func NewFileMsgStore(channel string, limits ChannelLimits) *FileMsgStore {
-	fs := &FileMsgStore{}
-	fs.init(channel, limits)
+// NewFileMsgStore returns a new instace of a file MsgStore.
+func NewFileMsgStore(channelDirName, channel string, limits ChannelLimits, doRecover bool) (*FileMsgStore, error) {
+	var err error
 
-	return fs
+	// Create an instance and initialize
+	ms := &FileMsgStore{}
+	ms.init(channel, limits)
+
+	// Open the files
+	for i := 0; (err == nil) && (i < numFiles); i++ {
+		// Fully qualified file name.
+		fileName := filepath.Join(channelDirName, fmt.Sprintf("msgs.%d.dat", (i+1)))
+
+		// Create a file slice.
+		slice := &fileSlice{fileName: fileName}
+
+		// Open the file.
+		slice.file, err = openFile(fileName)
+		if err == nil {
+			// Save slice
+			ms.files[i] = slice
+
+			// Should we try to recover (startup case)
+			if doRecover {
+				err = ms.recoverOneMsgFile(i)
+			}
+		}
+	}
+	if err != nil {
+		Errorf("Unable to restore message store for [%s]: %v", ms.subject, err)
+	}
+	return ms, err
+}
+
+// recovers one of the file
+func (ms *FileMsgStore) recoverOneMsgFile(numFile int) error {
+	var err error
+
+	msgSize := int32(0)
+	bufSize := int32(0)
+	var msgBuf []byte
+	var msg *pb.MsgProto
+
+	fslice := ms.files[numFile]
+	file := fslice.file
+
+	hasOne := false
+
+	for err == nil {
+		// Read the message size as an int32
+		err = binary.Read(file, binary.LittleEndian, &msgSize)
+		if err == io.EOF {
+			// We are done, reset err
+			err = nil
+			break
+		}
+
+		if err == nil {
+			// Expand buffer if necessary
+			if msgSize > bufSize {
+				bufSize = int32(float32(msgSize) * 1.10)
+				msgBuf = make([]byte, bufSize)
+			}
+
+			// Read fully the expected number of bytes for this message
+			_, err = io.ReadFull(file, msgBuf[:msgSize])
+		}
+		if err == nil {
+			// Recover this message
+			msg = &pb.MsgProto{}
+			err = msg.Unmarshal(msgBuf[:msgSize])
+		}
+		if err == nil {
+			// Some accounting...
+			hasOne = true
+
+			if fslice.firstMsg == nil {
+				fslice.firstMsg = msg
+
+				if ms.currSliceIdx == -1 {
+					ms.first = msg.Sequence
+				}
+			}
+			fslice.lastMsg = msg
+			fslice.msgsCount++
+			fslice.msgsSize += uint64(len(msg.Data))
+
+			ms.msgs[msg.Sequence] = msg
+		}
+	}
+
+	// Do more accounting and bump the current slice index if we recovered
+	// at least one message on that file.
+	if err == nil && hasOne {
+		ms.last = fslice.lastMsg.Sequence
+		ms.totalCount += fslice.msgsCount
+		ms.totalBytes += fslice.msgsSize
+		ms.currSliceIdx = numFile
+	}
+
+	return err
 }
 
 // Store a given message.
@@ -294,13 +289,24 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 		Timestamp: time.Now().UnixNano(),
 	}
 
-	storedMsgBytes, err := m.Marshal()
+	// This is the size needed to store the marshalled message
+	bufSize := m.Size()
+
+	// Alloc or realloc if needed
+	if ms.tmpMsgBuf == nil || len(ms.tmpMsgBuf) < bufSize {
+		ms.tmpMsgBuf = make([]byte, int(float32(bufSize)*1.1))
+	}
+
+	// Marshal into the given buffer
+	_, err = m.MarshalTo(ms.tmpMsgBuf)
 	if err == nil {
-		encodedMsgSize := int32(len(storedMsgBytes))
-		err = binary.Write(fslice.file, binary.LittleEndian, encodedMsgSize)
+		// Write the size of the buffer ((int does not work, needs to be int32)
+		bufSizeToWrite := int32(bufSize)
+		err = binary.Write(fslice.file, binary.LittleEndian, bufSizeToWrite)
 	}
 	if err == nil {
-		_, err = fslice.file.Write(storedMsgBytes)
+		// Write the buffer
+		_, err = fslice.file.Write(ms.tmpMsgBuf[:bufSize])
 	}
 	if err != nil {
 		return nil, err
@@ -360,7 +366,7 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 			err = os.Rename(file2.fileName, file1.fileName)
 		}
 		if err == nil {
-			file1.file, err = os.OpenFile(file1.fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+			file1.file, err = openFile(file1.fileName)
 		}
 		if err == nil {
 			// Update total stats for the first store being removed
@@ -388,7 +394,7 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 	if err == nil {
 		// Reset the last
 		fslice := ms.files[numFiles-1]
-		fslice.file, err = os.OpenFile(fslice.fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+		fslice.file, err = openFile(fslice.fileName)
 		if err == nil {
 			fslice.firstMsg = nil
 			fslice.lastMsg = nil
@@ -427,3 +433,87 @@ func (ms *FileMsgStore) Close() error {
 ////////////////////////////////////////////////////////////////////////////
 // FileSubStore methods
 ////////////////////////////////////////////////////////////////////////////
+
+// NewFileSubStore returns a new instace of a file SubStore.
+func NewFileSubStore(channelDirName, channel string, limits ChannelLimits, doRecover bool) (*FileSubStore, error) {
+	ss := &FileSubStore{}
+	ss.init(channel, limits)
+
+	var err error
+
+	subsFileName := filepath.Join(channelDirName, "subs.dat")
+	ss.subsFile, err = openFile(subsFileName)
+	if err == nil {
+		updatesFileName := filepath.Join(channelDirName, "subsup.dat")
+		ss.updatesFile, err = openFile(updatesFileName)
+	}
+	if err == nil && doRecover {
+		// TODO: recovery. Will probably need to have callbacks
+		// so that the server can update its structures.
+	}
+	if err != nil {
+		Errorf("Unable to create subscription store for [%s]: %v", channel, err)
+	}
+	return ss, err
+}
+
+// CreateSub records a new subscription represented by SubState. On success,
+// it returns an id that is used by the other methods.
+func (ss *FileSubStore) CreateSub(sub *spb.SubState) (uint64, error) {
+	ss.Lock()
+	defer ss.Unlock()
+
+	// Size needed to store the marshalled sub state
+	bufSize := sub.Size()
+
+	// Check if we can create the subscription (check limits and update
+	// subscription count)
+	subID, err := ss.createSub(sub)
+	if err == nil {
+		// Write the subID
+		err = binary.Write(ss.subsFile, binary.LittleEndian, subID)
+	}
+	if err == nil {
+		// Alloc or realloc the sub's buffer if needed
+		if ss.tmpSubBuf == nil || bufSize > len(ss.tmpSubBuf) {
+			ss.tmpSubBuf = make([]byte, int(float32(bufSize)*1.1))
+		}
+		// Marshal into the given buffer
+		_, err = sub.MarshalTo(ss.tmpSubBuf)
+	}
+	if err == nil {
+		// Write the size of the buffer (int does not work, needs to be int32)
+		bufSizeToWrite := int32(bufSize)
+		err = binary.Write(ss.subsFile, binary.LittleEndian, bufSizeToWrite)
+	}
+	if err == nil {
+		// Write the buffer
+		_, err = ss.subsFile.Write(ss.tmpSubBuf[:bufSize])
+	}
+	return subID, err
+}
+
+// AddSeqPending adds the given message seqno to the given subscription.
+func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
+	err := binary.Write(ss.updatesFile, binary.LittleEndian, addPending)
+	if err == nil {
+		err = binary.Write(ss.updatesFile, binary.LittleEndian, subid)
+	}
+	if err == nil {
+		err = binary.Write(ss.updatesFile, binary.LittleEndian, seqno)
+	}
+	return err
+}
+
+// AckSeqPending records that the given message seqno has been acknowledged
+// by the given subscription.
+func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
+	err := binary.Write(ss.updatesFile, binary.LittleEndian, addAck)
+	if err == nil {
+		err = binary.Write(ss.updatesFile, binary.LittleEndian, subid)
+	}
+	if err == nil {
+		err = binary.Write(ss.updatesFile, binary.LittleEndian, seqno)
+	}
+	return err
+}

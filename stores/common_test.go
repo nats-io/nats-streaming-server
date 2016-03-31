@@ -1,14 +1,18 @@
 package stores
 
 import (
+	"fmt"
 	"testing"
 
+	"github.com/nats-io/stan-server/spb"
 	"github.com/nats-io/stan/pb"
 )
 
 var DefaultChannelLimits = ChannelLimits{
+	MaxChannels: 100,
 	MaxNumMsgs:  1000000,
 	MaxMsgBytes: 1000000 * 1024,
+	MaxSubs:     1000,
 }
 
 func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
@@ -22,6 +26,53 @@ func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
 		t.Fatalf("Error storing message into channel [%v]: %v", channel, err)
 	}
 	return m
+}
+
+func storeSub(t *testing.T, s Store, channel string) uint64 {
+	cs, _, err := s.LookupOrCreateChannel(channel)
+	if err != nil {
+		t.Fatalf("Error looking up channel [%v]: %v", channel, err)
+	}
+	ss := cs.Subs
+	sub := &spb.SubState{
+		ClientID:      "me",
+		Inbox:         "inbox",
+		AckInbox:      "ackinbox",
+		AckWaitInSecs: 10,
+	}
+	subID, err := ss.CreateSub(sub)
+	if err != nil {
+		t.Fatalf("Error storing subscription into channel [%v]: %v", channel, err)
+	}
+	return subID
+}
+
+func storeSubPending(t *testing.T, s Store, channel string, subID uint64, seqs ...uint64) error {
+	cs := s.LookupChannel(channel)
+	if cs == nil {
+		t.Fatalf("Channel [%v] not found", channel)
+	}
+	ss := cs.Subs
+	for _, s := range seqs {
+		if err := ss.AddSeqPending(subID, s); err != nil {
+			t.Fatalf("Unexpected error adding pending for sub [%v] on channel [%v]: %v", subID, channel, err)
+		}
+	}
+	return nil
+}
+
+func storeSubAck(t *testing.T, s Store, channel string, subID uint64, seqs ...uint64) error {
+	cs := s.LookupChannel(channel)
+	if cs == nil {
+		t.Fatalf("Channel [%v] not found", channel)
+	}
+	ss := cs.Subs
+	for _, s := range seqs {
+		if err := ss.AckSeqPending(subID, s); err != nil {
+			t.Fatalf("Unexpected error adding pending for sub [%v] on channel [%v]: %v", subID, channel, err)
+		}
+	}
+	return nil
 }
 
 func testBasicCreate(t *testing.T, s Store, expectedName string) {
@@ -162,7 +213,7 @@ func testMsgsState(t *testing.T, s Store) {
 	}
 }
 
-func testLimits(t *testing.T, s Store, limitCount int) {
+func testMaxMsgs(t *testing.T, s Store, limitCount int) {
 	payload := []byte("hello")
 	for i := 0; i < 2*limitCount; i++ {
 		storeMsg(t, s, "foo", payload)
@@ -196,4 +247,74 @@ func testLimits(t *testing.T, s Store, limitCount int) {
 	if lastMsg == nil || lastMsg.Sequence != lastSeq || lastSeq != uint64(2*limitCount) {
 		t.Fatalf("Incorrect first message: msg=%v seq=%v", firstMsg, firstSeq)
 	}
+}
+
+func testMaxChannels(t *testing.T, s Store, maxChannels int) {
+	var err error
+	numCh := 0
+	for i := 0; i < maxChannels+1; i++ {
+		_, _, err = s.LookupOrCreateChannel(fmt.Sprintf("foo.%d", i))
+		if err != nil {
+			break
+		}
+		numCh++
+	}
+	if err == nil || err != ErrTooManyChannels {
+		t.Fatalf("Error should have been ErrTooManyChannels, got %v", err)
+	}
+	if numCh != maxChannels {
+		t.Fatalf("Wrong number of channels: %v vs %v", numCh, maxChannels)
+	}
+}
+
+func testMaxSubs(t *testing.T, s Store, maxSubs int) {
+	cs, _, err := s.LookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Unexpected error creating channel: %v", err)
+	}
+
+	err = nil
+	sub := &spb.SubState{}
+	numSubs := 0
+	for i := 0; i < maxSubs+1; i++ {
+		_, err = cs.Subs.CreateSub(sub)
+		if err != nil {
+			break
+		}
+		numSubs++
+	}
+	if err == nil || err != ErrTooManySubs {
+		t.Fatalf("Error should have been ErrTooManySubs, got %v", err)
+	}
+	if numSubs != maxSubs {
+		t.Fatalf("Wrong number of subs: %v vs %v", numSubs, maxSubs)
+	}
+}
+
+func testBasicSubStore(t *testing.T, s Store) {
+	cs, isNew, err := s.LookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !isNew {
+		t.Fatal("Channel should be new")
+	}
+
+	ss := cs.Subs
+	sub := &spb.SubState{}
+
+	subID, err := ss.CreateSub(sub)
+	if err != nil {
+		t.Fatalf("Unexpected error on create sub: %v", err)
+	}
+	if subID == 0 {
+		t.Fatalf("Expected a positive subID, got: %v", subID)
+	}
+	if err := ss.AddSeqPending(subID, 1); err != nil {
+		t.Fatalf("Unexpected error on AddSeqPending: %v", err)
+	}
+	if err := ss.AckSeqPending(subID, 1); err != nil {
+		t.Fatalf("Unexpected error on AckSeqPending: %v", err)
+	}
+	ss.DeleteSub(subID)
 }

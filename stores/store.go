@@ -3,6 +3,7 @@
 package stores
 
 import (
+	"errors"
 	"time"
 
 	"github.com/nats-io/gnatsd/server"
@@ -11,7 +12,14 @@ import (
 )
 
 const (
+	// AllChannels allows to get state for all channels.
 	AllChannels = "*"
+)
+
+// Errors.
+var (
+	ErrTooManyChannels = errors.New("too many channels")
+	ErrTooManySubs     = errors.New("too many subscriptions per channel")
 )
 
 // Errorf generates error message
@@ -21,6 +29,7 @@ func Errorf(format string, v ...interface{}) {
 
 // ChannelLimits defines some limits on the store interface
 type ChannelLimits struct {
+	MaxChannels int
 	MaxNumMsgs  int
 	MaxMsgBytes uint64
 	MaxMsgAge   time.Duration

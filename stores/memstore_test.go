@@ -64,7 +64,7 @@ func TestMSMsgsState(t *testing.T) {
 	testMsgsState(t, ms)
 }
 
-func TestMSLimits(t *testing.T) {
+func TestMSMaxMsgs(t *testing.T) {
 
 	limitCount := 100
 
@@ -77,5 +77,45 @@ func TestMSLimits(t *testing.T) {
 	}
 	defer ms.Close()
 
-	testLimits(t, ms, limitCount)
+	testMaxMsgs(t, ms, limitCount)
+}
+
+func TestMSMaxChannels(t *testing.T) {
+	limitCount := 2
+
+	limits := DefaultChannelLimits
+	limits.MaxChannels = limitCount
+
+	ms, err := NewMemoryStore(limits)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer ms.Close()
+
+	testMaxChannels(t, ms, limitCount)
+}
+
+func TestMSMaxSubs(t *testing.T) {
+	limitCount := 2
+
+	limits := DefaultChannelLimits
+	limits.MaxSubs = limitCount
+
+	ms, err := NewMemoryStore(limits)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer ms.Close()
+
+	testMaxSubs(t, ms, limitCount)
+}
+
+func TestMSBasicSubStore(t *testing.T) {
+	ms, err := NewMemoryStore(DefaultChannelLimits)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer ms.Close()
+
+	testBasicSubStore(t, ms)
 }
