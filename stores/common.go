@@ -161,7 +161,10 @@ func (gms *genericMsgStore) init(subject string, limits ChannelLimits) {
 	gms.first = 1
 	// FIXME(ik) - Long term, msgs map should probably not be part of the
 	// generic store.
-	gms.msgs = make(map[uint64]*pb.MsgProto, gms.limits.MaxNumMsgs)
+	// We could use limits.MaxNumMsgs for the size of the map, but that
+	// may be too big if there is lots of channels with only few messages.
+	// The map will grow as needed.
+	gms.msgs = make(map[uint64]*pb.MsgProto, 64)
 }
 
 // State returns some statistics related to this store
