@@ -1,9 +1,12 @@
+// Copyright 2016 Apcera Inc. All rights reserved.
+
 package stores
 
 import (
 	"fmt"
 	"testing"
 
+	"github.com/nats-io/nuid"
 	"github.com/nats-io/stan-server/spb"
 	"github.com/nats-io/stan/pb"
 )
@@ -13,6 +16,12 @@ var DefaultChannelLimits = ChannelLimits{
 	MaxNumMsgs:  1000000,
 	MaxMsgBytes: 1000000 * 1024,
 	MaxSubs:     1000,
+}
+
+var nuidGen *nuid.NUID
+
+func init() {
+	nuidGen = nuid.New()
 }
 
 func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
@@ -36,8 +45,8 @@ func storeSub(t *testing.T, s Store, channel string) uint64 {
 	ss := cs.Subs
 	sub := &spb.SubState{
 		ClientID:      "me",
-		Inbox:         "inbox",
-		AckInbox:      "ackinbox",
+		Inbox:         nuidGen.Next(),
+		AckInbox:      nuidGen.Next(),
 		AckWaitInSecs: 10,
 	}
 	err = ss.CreateSub(sub)

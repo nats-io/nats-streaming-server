@@ -1,3 +1,5 @@
+// Copyright 2016 Apcera Inc. All rights reserved.
+
 package stores
 
 import (
@@ -137,11 +139,11 @@ func (gs *genericStore) Close() error {
 
 	for _, cs := range gs.channels {
 		lerr = cs.Subs.Close()
-		if err == nil && lerr != nil {
+		if lerr != nil && err == nil {
 			err = lerr
 		}
 		lerr = cs.Msgs.Close()
-		if err == nil && lerr != nil {
+		if lerr != nil && err == nil {
 			err = lerr
 		}
 	}

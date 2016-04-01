@@ -1,8 +1,8 @@
+// Copyright 2016 Apcera Inc. All rights reserved.
+
 package stores
 
 import (
-	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -11,23 +11,35 @@ import (
 	"time"
 
 	"github.com/nats-io/stan-server/spb"
+	"github.com/nats-io/stan-server/util"
 	"github.com/nats-io/stan/pb"
 )
 
 const (
-	numFiles = 5
-
+	// Our file version.
 	fileVersion = uint8(1)
 
-	addPending = uint8(1)
-	addAck     = uint8(2)
+	// Number of files for a MsgStore on a given channel.
+	numFiles = 5
+
+	// Name of the subscriptions file.
+	subsFileName = "subs.dat"
+
+	// record header size of a subscription:
+	// 4 bytes: 1 byte for type, 3 bytes for buffer size
+	subRecordHeaderSize = 4
 )
 
-var byteOrder binary.ByteOrder
+// Type for the records in the subscriptions file
+type subRecordType byte
 
-func init() {
-	byteOrder = binary.LittleEndian
-}
+// Various record types
+const (
+	subRecNew = subRecordType(iota)
+	subRecDel
+	subRecAck
+	subRecMsg
+)
 
 // FileStore is a factory for message and subscription stores.
 type FileStore struct {
@@ -35,12 +47,17 @@ type FileStore struct {
 	rootDir string
 }
 
+type subStateAndPending struct {
+	sub    *spb.SubState
+	seqnos map[uint64]struct{}
+}
+
 // FileSubStore is a subscription store in files.
 type FileSubStore struct {
 	genericSubStore
-	tmpSubBuf   []byte
-	subsFile    *os.File
-	updatesFile *os.File
+	tmpSubBuf     []byte
+	file          *os.File
+	recoveredSubs map[uint64]*subStateAndPending
 }
 
 // fileSlice represents one of the message store file (there are a number
@@ -68,7 +85,7 @@ func openFile(fileName string) (*os.File, error) {
 	checkVersion := false
 
 	// Check if file already exists
-	if _, err := os.Stat(fileName); err == nil {
+	if s, err := os.Stat(fileName); s != nil && err == nil {
 		checkVersion = true
 	}
 	file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
@@ -77,10 +94,14 @@ func openFile(fileName string) (*os.File, error) {
 			err = checkFileVersion(file)
 		} else {
 			// This is a new file, write our file version
-			err = writeUInt8(file, fileVersion)
+			var b [1]byte
+
+			b[0] = fileVersion
+			_, err = file.Write(b[:1])
 		}
 		if err != nil {
 			file.Close()
+			file = nil
 		}
 	}
 	return file, err
@@ -88,103 +109,26 @@ func openFile(fileName string) (*os.File, error) {
 
 // check that the version of the file is understood by this interface
 func checkFileVersion(r io.Reader) error {
-	fv, err := readUInt8(r)
-	if err == nil {
-		if fv > fileVersion {
-			return errors.New(fmt.Sprintf("Unsupported file version: %v (support up to %v)", fv, fileVersion))
-		}
-	}
-	return err
-}
-
-// write a size (as int converted into uint32) to the writer using byteOrder.
-func writeSize(w io.Writer, size int) error {
-	var b [4]byte
-	var bs []byte
-
-	bs = b[:4]
-
-	byteOrder.PutUint32(bs, uint32(size))
-	_, err := w.Write(bs)
-	return err
-}
-
-// read a size (as uint32 converted to int) from the reader using byteOrder.
-func readSize(r io.Reader) (int, error) {
-	var b [4]byte
-	var bs []byte
-
-	bs = b[:4]
-
-	_, err := io.ReadFull(r, bs)
-	if err != nil {
-		return 0, err
-	}
-	return int(byteOrder.Uint32(bs)), nil
-}
-
-// write a subscription update to the writer using byteOrder
-func writeUpdate(w io.Writer, typeUpdate uint8, subid, seqno uint64) error {
-	var b [1 + 8 + 8]byte
-	var bs []byte
-
-	b[0] = byte(typeUpdate)
-
-	bs = b[1:9]
-	byteOrder.PutUint64(bs, subid)
-
-	bs = b[9:17]
-	byteOrder.PutUint64(bs, seqno)
-
-	_, err := w.Write(b[0:17])
-	return err
-}
-
-// read a subscription update from the reader using byteOrder
-func readUInt64(r io.Reader) (uint8, uint64, uint64, error) {
-	var b [1 + 8 + 8]byte
-	var bs []byte
-
-	_, err := io.ReadFull(r, b[0:17])
-	if err != nil {
-		return 0, 0, 0, err
-	}
-
-	typeUpdate := b[0]
-
-	bs = b[1:9]
-	subid := byteOrder.Uint64(bs)
-
-	bs = b[9:17]
-	seqno := byteOrder.Uint64(bs)
-
-	return typeUpdate, subid, seqno, nil
-}
-
-// write an uint8 to the writer using byteOrder.
-func writeUInt8(w io.Writer, v uint8) error {
 	var b [1]byte
-	var bs []byte
 
-	b[0] = byte(v)
-	bs = b[:1]
-
-	_, err := w.Write(bs)
-	return err
+	_, err := r.Read(b[:1])
+	if err != nil {
+		return fmt.Errorf("Unable to verify file version: %v", err)
+	}
+	fv := b[0]
+	if fv > fileVersion {
+		return fmt.Errorf("Unsupported file version: %v (support up to %v)", fv, fileVersion)
+	}
+	return nil
 }
 
-// read an uint8 from the reader using byteOrder.
-func readUInt8(r io.Reader) (uint8, error) {
-	var b [1]byte
-	var bs []byte
-
-	bs = b[:1]
-
-	_, err := io.ReadFull(r, bs)
-	if err != nil {
-		return 0, err
+// write the header in the given buffer.
+func writeHeader(buf []byte, recType subRecordType, recordSize int) {
+	if recordSize > 0xFFFFFF {
+		panic("record size too big")
 	}
-	return bs[0], nil
+	header := int(recType)<<24 | recordSize
+	util.ByteOrder.PutUint32(buf, uint32(header))
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -236,6 +180,10 @@ func NewFileStore(rootDir string, limits ChannelLimits) (*FileStore, error) {
 		}
 	}
 	if err != nil {
+		// Make sure we close to make sure that all files that have been
+		// successfully opened are properly closed.
+		fs.Close()
+
 		Errorf("Unable to restore state: %v", err)
 	}
 
@@ -335,8 +283,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(numFile int) error {
 	var err error
 
 	msgSize := 0
-	bufSize := 0
-	var msgBuf []byte
 	var msg *pb.MsgProto
 
 	fslice := ms.files[numFile]
@@ -346,7 +292,7 @@ func (ms *FileMsgStore) recoverOneMsgFile(numFile int) error {
 
 	for err == nil {
 		// Read the message size as an int32
-		msgSize, err = readSize(file)
+		msgSize, err = util.ReadInt(file)
 		if err == io.EOF {
 			// We are done, reset err
 			err = nil
@@ -355,18 +301,15 @@ func (ms *FileMsgStore) recoverOneMsgFile(numFile int) error {
 
 		if err == nil {
 			// Expand buffer if necessary
-			if msgSize > bufSize {
-				bufSize = int(float32(msgSize) * 1.10)
-				msgBuf = make([]byte, bufSize)
-			}
+			ms.tmpMsgBuf = util.EnsureBufBigEnough(ms.tmpMsgBuf, msgSize)
 
 			// Read fully the expected number of bytes for this message
-			_, err = io.ReadFull(file, msgBuf[:msgSize])
+			_, err = io.ReadFull(file, ms.tmpMsgBuf[:msgSize])
 		}
 		if err == nil {
 			// Recover this message
 			msg = &pb.MsgProto{}
-			err = msg.Unmarshal(msgBuf[:msgSize])
+			err = msg.Unmarshal(ms.tmpMsgBuf[:msgSize])
 		}
 		if err == nil {
 			// Some accounting...
@@ -420,19 +363,20 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	// This is the size needed to store the marshalled message.
 	bufSize := m.Size()
 
+	// This is the size needed to store the size + buffer
+	totalSize := 4 + bufSize
+
 	// Alloc or realloc if needed
-	if ms.tmpMsgBuf == nil || len(ms.tmpMsgBuf) < bufSize {
-		ms.tmpMsgBuf = make([]byte, int(float32(bufSize)*1.1))
-	}
+	ms.tmpMsgBuf = util.EnsureBufBigEnough(ms.tmpMsgBuf, totalSize)
+
+	// Write the size in the buffer
+	util.ByteOrder.PutUint32(ms.tmpMsgBuf[0:4], uint32(bufSize))
 
 	// Marshal into the given buffer
-	_, err = m.MarshalTo(ms.tmpMsgBuf)
-	if err == nil {
-		err = writeSize(fslice.file, bufSize)
-	}
+	_, err = m.MarshalTo(ms.tmpMsgBuf[4:totalSize])
 	if err == nil {
 		// Write the buffer
-		_, err = fslice.file.Write(ms.tmpMsgBuf[:bufSize])
+		_, err = fslice.file.Write(ms.tmpMsgBuf[:totalSize])
 	}
 	if err != nil {
 		return nil, err
@@ -552,7 +496,7 @@ func (ms *FileMsgStore) Close() error {
 		file := ms.files[i].file
 		if file != nil {
 			lerr := file.Close()
-			if err == nil && lerr != nil {
+			if lerr != nil && err == nil {
 				err = lerr
 			}
 		}
@@ -571,15 +515,10 @@ func NewFileSubStore(channelDirName, channel string, limits ChannelLimits, doRec
 
 	var err error
 
-	subsFileName := filepath.Join(channelDirName, "subs.dat")
-	ss.subsFile, err = openFile(subsFileName)
-	if err == nil {
-		updatesFileName := filepath.Join(channelDirName, "subsup.dat")
-		ss.updatesFile, err = openFile(updatesFileName)
-	}
+	fileName := filepath.Join(channelDirName, subsFileName)
+	ss.file, err = openFile(fileName)
 	if err == nil && doRecover {
-		// TODO: recovery. Will probably need to have callbacks
-		// so that the server can update its structures.
+		err = ss.recoverSubscriptions(channel)
 	}
 	if err != nil {
 		Errorf("Unable to create subscription store for [%s]: %v", channel, err)
@@ -587,56 +526,185 @@ func NewFileSubStore(channelDirName, channel string, limits ChannelLimits, doRec
 	return ss, err
 }
 
-// CreateSub records a new subscription represented by SubState. On success,
-// it returns an id that is used by the other methods.
-func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
-	ss.Lock()
-	defer ss.Unlock()
+func (ss *FileSubStore) recoverSubscriptions(channel string) error {
+	// We will store the recovered subscriptions in there.
+	ss.recoveredSubs = make(map[uint64]*subStateAndPending, 16)
 
-	// Check if we can create the subscription (check limits and update
-	// subscription count)
-	err := ss.createSub(sub)
-	if err == nil {
-		// Size need to be checked only after sub is fully initialized,
-		// which happens in createSub (where sub.ID is set)
-		bufSize := sub.Size()
+	var err error
+	var recType subRecordType
+	var newSub *spb.SubState
+	var delSub *spb.SubStateDelete
+	var updateSub *spb.SubStateUpdate
 
-		// Alloc or realloc the sub's buffer if needed
-		if ss.tmpSubBuf == nil || bufSize > len(ss.tmpSubBuf) {
-			ss.tmpSubBuf = make([]byte, int(float32(bufSize)*1.1))
+	recHeader := 0
+	recSize := 0
+	file := ss.file
+
+	for err == nil {
+		// Read the message size as an int32
+		recHeader, err = util.ReadInt(file)
+		if err == io.EOF {
+			// We are done, reset err
+			err = nil
+			break
 		}
 
-		// Marshal into the given buffer
-		_, err = sub.MarshalTo(ss.tmpSubBuf)
 		if err == nil {
-			// Write size of following buffer
-			err = writeSize(ss.subsFile, bufSize)
+			recType = subRecordType(recHeader >> 24 & 0xFF)
+			recSize = recHeader & 0xFFFFFF
+
+			// Expand buffer if necessary
+			ss.tmpSubBuf = util.EnsureBufBigEnough(ss.tmpSubBuf, recSize)
+
+			// Read fully the expected number of bytes for this record
+			_, err = io.ReadFull(file, ss.tmpSubBuf[:recSize])
 		}
 		if err == nil {
-			// Write the buffer
-			_, err = ss.subsFile.Write(ss.tmpSubBuf[:bufSize])
+			// Based on record type...
+			switch recType {
+			case subRecNew:
+				newSub = &spb.SubState{}
+				err = newSub.Unmarshal(ss.tmpSubBuf[:recSize])
+				if err == nil {
+					subAndPending := &subStateAndPending{
+						sub:    newSub,
+						seqnos: make(map[uint64]struct{}, 16),
+					}
+					ss.recoveredSubs[newSub.ID] = subAndPending
+				}
+				break
+			case subRecDel:
+				delSub = &spb.SubStateDelete{}
+				err = delSub.Unmarshal(ss.tmpSubBuf[:recSize])
+				if err == nil {
+					delete(ss.recoveredSubs, delSub.ID)
+				}
+				break
+			case subRecMsg:
+				updateSub = &spb.SubStateUpdate{}
+				err = updateSub.Unmarshal(ss.tmpSubBuf[:recSize])
+				if err == nil {
+					if subAndPending, exists := ss.recoveredSubs[updateSub.ID]; exists {
+						subAndPending.seqnos[updateSub.Seqno] = struct{}{}
+					}
+				}
+				break
+			case subRecAck:
+				updateSub = &spb.SubStateUpdate{}
+				err = updateSub.Unmarshal(ss.tmpSubBuf[:recSize])
+				if err == nil {
+					if subAndPending, exists := ss.recoveredSubs[updateSub.ID]; exists {
+						delete(subAndPending.seqnos, updateSub.Seqno)
+					}
+				}
+				break
+			default:
+				err = fmt.Errorf("Unexpected record type: %v", recType)
+			}
 		}
 	}
 	return err
 }
 
+// CreateSub records a new subscription represented by SubState. On success,
+// it returns an id that is used by the other methods.
+func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
+
+	// Check if we can create the subscription (check limits and update
+	// subscription count)
+	ss.Lock()
+	err := ss.createSub(sub)
+	ss.Unlock()
+	if err == nil {
+		// Locking will be done around file write.
+		err = ss.writeRecord(subRecNew, sub, nil, nil)
+	}
+	return err
+}
+
+// DeleteSub invalidates this subscription.
+func (ss *FileSubStore) DeleteSub(subid uint64) {
+	// Will lock only around the file write call.
+	del := &spb.SubStateDelete{
+		ID: subid,
+	}
+	ss.writeRecord(subRecDel, nil, del, nil)
+}
+
 // AddSeqPending adds the given message seqno to the given subscription.
 func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
-	ss.Lock()
-	err := writeUpdate(ss.updatesFile, addPending, subid, seqno)
-	ss.Unlock()
+	// Will lock only around the file write call.
+	update := &spb.SubStateUpdate{
+		ID:    subid,
+		Seqno: seqno,
+	}
+	err := ss.writeRecord(subRecMsg, nil, nil, update)
 	return err
 }
 
 // AckSeqPending records that the given message seqno has been acknowledged
 // by the given subscription.
 func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
-	ss.Lock()
-	err := writeUpdate(ss.updatesFile, addAck, subid, seqno)
-	ss.Unlock()
+	// Will lock only around the file write call.
+	update := &spb.SubStateUpdate{
+		ID:    subid,
+		Seqno: seqno,
+	}
+	err := ss.writeRecord(subRecAck, nil, nil, update)
 	return err
 }
 
+// writes a record in the subscriptions file.
+func (ss *FileSubStore) writeRecord(recType subRecordType, newSub *spb.SubState,
+	delSub *spb.SubStateDelete, updateSub *spb.SubStateUpdate) error {
+
+	var err error
+	var bufSize int
+
+	// Size needed for the record
+	switch recType {
+	case subRecNew:
+		bufSize = newSub.Size()
+		break
+	case subRecDel:
+		bufSize = delSub.Size()
+		break
+	default:
+		bufSize = updateSub.Size()
+		break
+	}
+
+	// Add record header size
+	totalSize := bufSize + subRecordHeaderSize
+
+	// Alloc or realloc as needed
+	ss.tmpSubBuf = util.EnsureBufBigEnough(ss.tmpSubBuf, totalSize)
+
+	// Prepare header
+	writeHeader(ss.tmpSubBuf[0:subRecordHeaderSize], recType, bufSize)
+
+	// Marshal into the given buffer (offset with header size)
+	switch recType {
+	case subRecNew:
+		_, err = newSub.MarshalTo(ss.tmpSubBuf[subRecordHeaderSize:totalSize])
+		break
+	case subRecDel:
+		_, err = delSub.MarshalTo(ss.tmpSubBuf[subRecordHeaderSize:totalSize])
+		break
+	default:
+		_, err = updateSub.MarshalTo(ss.tmpSubBuf[subRecordHeaderSize:totalSize])
+		break
+	}
+	if err == nil {
+		// Write the header and record
+		ss.Lock()
+		_, err = ss.file.Write(ss.tmpSubBuf[:totalSize])
+		ss.Unlock()
+	}
+	return nil
+}
+
+// Close closes this store
 func (ss *FileSubStore) Close() error {
 	ss.RLock()
 	defer ss.RUnlock()
@@ -648,15 +716,8 @@ func (ss *FileSubStore) Close() error {
 	ss.closed = true
 
 	var err error
-
-	if ss.subsFile != nil {
-		err = ss.subsFile.Close()
-	}
-	if ss.updatesFile != nil {
-		lerr := ss.updatesFile.Close()
-		if lerr != nil && err == nil {
-			err = lerr
-		}
+	if ss.file != nil {
+		err = ss.file.Close()
 	}
 	return err
 }

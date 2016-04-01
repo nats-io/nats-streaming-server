@@ -745,13 +745,6 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 	Tracef("STAN: [Client:%s] Sending msg subject=%s inbox=%s seqno=%d.",
 		sub.ClientID, m.Subject, sub.Inbox, m.Sequence)
 
-	// Store in storage
-	if err := sub.store.AddSeqPending(sub.ID, m.Sequence); err != nil {
-		Errorf("STAN: [Client:%s] Unable to update subscription for %s:%v (%v)",
-			sub.ClientID, m.Subject, m.Sequence, err)
-		return false
-	}
-
 	// Don't send if we have too many outstanding already.
 	if int32(len(sub.acksPending)) >= sub.MaxInFlight {
 		sub.stalled = true
@@ -766,6 +759,14 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 			sub.ClientID, m.Subject, m.Sequence, sub.Inbox, err)
 		return false
 	}
+
+	// Store in storage
+	if err := sub.store.AddSeqPending(sub.ID, m.Sequence); err != nil {
+		Errorf("STAN: [Client:%s] Unable to update subscription for %s:%v (%v)",
+			sub.ClientID, m.Subject, m.Sequence, err)
+		return false
+	}
+
 	// Store in ackPending.
 	sub.acksPending[m.Sequence] = m
 

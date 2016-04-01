@@ -36,3 +36,14 @@ message SubState {
   uint64        startSequence  = 10; // Optional start sequence number
   int64         startTimeDelta = 11; // Optional start time
 }
+
+// Marks a Subscription Delete
+message SubStateDelete {
+  uint64        ID = 1; // Subscription ID being deleted
+}
+
+// A subscription update (either Msg or Ack)
+message SubStateUpdate {
+  uint64        ID 	  = 1; // Subscription ID
+  uint64	    seqno = 2; // Sequence of the message (pending or ack'ed)
+}

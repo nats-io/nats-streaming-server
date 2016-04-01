@@ -10,6 +10,8 @@
 
 	It has these top-level messages:
 		SubState
+		SubStateDelete
+		SubStateUpdate
 */
 package spb
 
@@ -74,8 +76,29 @@ func (m *SubState) Reset()         { *m = SubState{} }
 func (m *SubState) String() string { return proto.CompactTextString(m) }
 func (*SubState) ProtoMessage()    {}
 
+// Marks a Subscription Delete
+type SubStateDelete struct {
+	ID uint64 `protobuf:"varint,1,opt,name=ID,proto3" json:"ID,omitempty"`
+}
+
+func (m *SubStateDelete) Reset()         { *m = SubStateDelete{} }
+func (m *SubStateDelete) String() string { return proto.CompactTextString(m) }
+func (*SubStateDelete) ProtoMessage()    {}
+
+// A subscription update (either Msg or Ack)
+type SubStateUpdate struct {
+	ID    uint64 `protobuf:"varint,1,opt,name=ID,proto3" json:"ID,omitempty"`
+	Seqno uint64 `protobuf:"varint,2,opt,name=seqno,proto3" json:"seqno,omitempty"`
+}
+
+func (m *SubStateUpdate) Reset()         { *m = SubStateUpdate{} }
+func (m *SubStateUpdate) String() string { return proto.CompactTextString(m) }
+func (*SubStateUpdate) ProtoMessage()    {}
+
 func init() {
 	proto.RegisterType((*SubState)(nil), "spb.SubState")
+	proto.RegisterType((*SubStateDelete)(nil), "spb.SubStateDelete")
+	proto.RegisterType((*SubStateUpdate)(nil), "spb.SubStateUpdate")
 	proto.RegisterEnum("spb.StartPosition", StartPosition_name, StartPosition_value)
 }
 func (m *SubState) Marshal() (data []byte, err error) {
@@ -156,6 +179,57 @@ func (m *SubState) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
+func (m *SubStateDelete) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *SubStateDelete) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if m.ID != 0 {
+		data[i] = 0x8
+		i++
+		i = encodeVarintProtocol(data, i, uint64(m.ID))
+	}
+	return i, nil
+}
+
+func (m *SubStateUpdate) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *SubStateUpdate) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if m.ID != 0 {
+		data[i] = 0x8
+		i++
+		i = encodeVarintProtocol(data, i, uint64(m.ID))
+	}
+	if m.Seqno != 0 {
+		data[i] = 0x10
+		i++
+		i = encodeVarintProtocol(data, i, uint64(m.Seqno))
+	}
+	return i, nil
+}
+
 func encodeFixed64Protocol(data []byte, offset int, v uint64) int {
 	data[offset] = uint8(v)
 	data[offset+1] = uint8(v >> 8)
@@ -223,6 +297,27 @@ func (m *SubState) Size() (n int) {
 	}
 	if m.StartTimeDelta != 0 {
 		n += 1 + sovProtocol(uint64(m.StartTimeDelta))
+	}
+	return n
+}
+
+func (m *SubStateDelete) Size() (n int) {
+	var l int
+	_ = l
+	if m.ID != 0 {
+		n += 1 + sovProtocol(uint64(m.ID))
+	}
+	return n
+}
+
+func (m *SubStateUpdate) Size() (n int) {
+	var l int
+	_ = l
+	if m.ID != 0 {
+		n += 1 + sovProtocol(uint64(m.ID))
+	}
+	if m.Seqno != 0 {
+		n += 1 + sovProtocol(uint64(m.Seqno))
 	}
 	return n
 }
@@ -524,6 +619,163 @@ func (m *SubState) Unmarshal(data []byte) error {
 				b := data[iNdEx]
 				iNdEx++
 				m.StartTimeDelta |= (int64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProtocol(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *SubStateDelete) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProtocol
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: SubStateDelete: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: SubStateDelete: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ID", wireType)
+			}
+			m.ID = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				m.ID |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProtocol(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *SubStateUpdate) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProtocol
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: SubStateUpdate: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: SubStateUpdate: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ID", wireType)
+			}
+			m.ID = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				m.ID |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Seqno", wireType)
+			}
+			m.Seqno = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				m.Seqno |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}
