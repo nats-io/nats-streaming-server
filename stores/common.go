@@ -62,11 +62,10 @@ func (gs *genericStore) Name() string {
 }
 
 // SetChannelLimits sets the limit for the messages and subscriptions stores.
-func (gs *genericStore) SetChannelLimits(limits ChannelLimits) error {
+func (gs *genericStore) SetChannelLimits(limits ChannelLimits) {
 	gs.Lock()
 	defer gs.Unlock()
 	gs.limits = limits
-	return nil
 }
 
 // LookupChannel returns a ChannelStore for the given channel.

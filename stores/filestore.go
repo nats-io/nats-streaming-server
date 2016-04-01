@@ -136,11 +136,11 @@ func writeHeader(buf []byte, recType subRecordType, recordSize int) {
 ////////////////////////////////////////////////////////////////////////////
 
 // NewFileStore returns a factory for stores backed by files.
-func NewFileStore(rootDir string, limits ChannelLimits) (*FileStore, error) {
+func NewFileStore(rootDir string) (*FileStore, error) {
 	fs := &FileStore{
 		rootDir: rootDir,
 	}
-	fs.init("FILESTORE", limits)
+	fs.init("FILESTORE", DefaultChannelLimits)
 
 	if err := os.MkdirAll(rootDir, os.ModeDir+os.ModePerm); err != nil && !os.IsExist(err) {
 		Errorf("Unable to create the root directory [%s]: %v", rootDir, err)
@@ -165,9 +165,9 @@ func NewFileStore(rootDir string, limits ChannelLimits) (*FileStore, error) {
 			channelDirName := filepath.Join(rootDir, channel)
 
 			// Recover messages for this channel
-			msgStore, err = NewFileMsgStore(channelDirName, channel, fs.limits, true)
+			msgStore, err = newFileMsgStore(channelDirName, channel, fs.limits, true)
 			if err == nil {
-				subStore, err = NewFileSubStore(channelDirName, channel, fs.limits, true)
+				subStore, err = newFileSubStore(channelDirName, channel, fs.limits, true)
 			}
 			if err != nil {
 				break
@@ -221,10 +221,10 @@ func (fs *FileStore) LookupOrCreateChannel(channel string) (*ChannelStore, bool,
 	channelDirName := filepath.Join(fs.rootDir, channel)
 	err = os.MkdirAll(channelDirName, os.ModeDir+os.ModePerm)
 	if err == nil {
-		msgStore, err = NewFileMsgStore(channelDirName, channel, fs.limits, false)
+		msgStore, err = newFileMsgStore(channelDirName, channel, fs.limits, false)
 	}
 	if err == nil {
-		subStore, err = NewFileSubStore(channelDirName, channel, fs.limits, false)
+		subStore, err = newFileSubStore(channelDirName, channel, fs.limits, false)
 	}
 	if err != nil {
 		return nil, false, err
@@ -244,8 +244,8 @@ func (fs *FileStore) LookupOrCreateChannel(channel string) (*ChannelStore, bool,
 // FileMsgStore methods
 ////////////////////////////////////////////////////////////////////////////
 
-// NewFileMsgStore returns a new instace of a file MsgStore.
-func NewFileMsgStore(channelDirName, channel string, limits ChannelLimits, doRecover bool) (*FileMsgStore, error) {
+// newFileMsgStore returns a new instace of a file MsgStore.
+func newFileMsgStore(channelDirName, channel string, limits ChannelLimits, doRecover bool) (*FileMsgStore, error) {
 	var err error
 
 	// Create an instance and initialize
@@ -508,8 +508,8 @@ func (ms *FileMsgStore) Close() error {
 // FileSubStore methods
 ////////////////////////////////////////////////////////////////////////////
 
-// NewFileSubStore returns a new instace of a file SubStore.
-func NewFileSubStore(channelDirName, channel string, limits ChannelLimits, doRecover bool) (*FileSubStore, error) {
+// newFileSubStore returns a new instace of a file SubStore.
+func newFileSubStore(channelDirName, channel string, limits ChannelLimits, doRecover bool) (*FileSubStore, error) {
 	ss := &FileSubStore{}
 	ss.init(channel, limits)
 

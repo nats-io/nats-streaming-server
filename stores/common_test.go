@@ -11,7 +11,7 @@ import (
 	"github.com/nats-io/stan/pb"
 )
 
-var DefaultChannelLimits = ChannelLimits{
+var testDefaultChannelLimits = ChannelLimits{
 	MaxChannels: 100,
 	MaxNumMsgs:  1000000,
 	MaxMsgBytes: 1000000 * 1024,

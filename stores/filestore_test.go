@@ -17,14 +17,20 @@ func cleanupDatastore(t *testing.T, dir string) {
 	}
 }
 
+func createDefaultFileStore(t *testing.T) *FileStore {
+	fs, err := NewFileStore(defaultDataStore)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	fs.SetChannelLimits(testDefaultChannelLimits)
+	return fs
+}
+
 func TestFSBasicCreate(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
 	testBasicCreate(t, fs, "FILESTORE")
@@ -34,10 +40,7 @@ func TestFSNothingRecoveredOnFreshStart(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
 	testNothingRecoveredOnFreshStart(t, fs)
@@ -47,10 +50,7 @@ func TestFSNewChannel(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
 	testNewChannel(t, fs)
@@ -60,10 +60,7 @@ func TestFSCloseIdempotent(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
 	testCloseIdempotent(t, fs)
@@ -73,10 +70,7 @@ func TestFSBasicMsgStore(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
 	testBasicMsgStore(t, fs)
@@ -89,10 +83,7 @@ func TestFSBasicRecovery(t *testing.T) {
 	fooRecovered := false
 	barRecovered := false
 
-	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
 	if fs.LookupChannel("foo") != nil {
@@ -121,10 +112,7 @@ func TestFSBasicRecovery(t *testing.T) {
 
 	fs.Close()
 
-	fs, err = NewFileStore(defaultDataStore, DefaultChannelLimits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs = createDefaultFileStore(t)
 	defer fs.Close()
 
 	cs := fs.LookupChannel("foo")
@@ -157,10 +145,7 @@ func TestFSMsgsState(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
 	testMsgsState(t, fs)
@@ -170,16 +155,15 @@ func TestFSMaxMsgs(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
 	limitCount := 100
 
-	limits := DefaultChannelLimits
+	limits := testDefaultChannelLimits
 	limits.MaxNumMsgs = limitCount
 
-	fs, err := NewFileStore(defaultDataStore, limits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	defer fs.Close()
+	fs.SetChannelLimits(limits)
 
 	testMaxMsgs(t, fs, limitCount)
 }
@@ -188,16 +172,15 @@ func TestFSMaxChannels(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
 	limitCount := 2
 
-	limits := DefaultChannelLimits
+	limits := testDefaultChannelLimits
 	limits.MaxChannels = limitCount
 
-	fs, err := NewFileStore(defaultDataStore, limits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	defer fs.Close()
+	fs.SetChannelLimits(limits)
 
 	testMaxChannels(t, fs, limitCount)
 }
@@ -206,16 +189,15 @@ func TestFSMaxSubs(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
 	limitCount := 2
 
-	limits := DefaultChannelLimits
+	limits := testDefaultChannelLimits
 	limits.MaxSubs = limitCount
 
-	fs, err := NewFileStore(defaultDataStore, limits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	defer fs.Close()
+	fs.SetChannelLimits(limits)
 
 	testMaxSubs(t, fs, limitCount)
 }
@@ -224,10 +206,7 @@ func TestFSBasicSubStore(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs, err := NewFileStore(defaultDataStore, DefaultChannelLimits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
 	testBasicSubStore(t, fs)

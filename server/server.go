@@ -285,6 +285,18 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) (*StanServer, error
 	// Create clientStore
 	s.clients = &clientStore{clients: make(map[string]*client)}
 
+	var err error
+
+	// Create the store. So far either memory or file-based.
+	if rootDir != "" {
+		s.store, err = stores.NewFileStore(rootDir)
+	} else {
+		s.store, err = stores.NewMemoryStore()
+	}
+	if err != nil {
+		return nil, err
+	}
+
 	// Set limits
 	limits := stores.ChannelLimits{
 		MaxChannels: DefaultChannelLimit,
@@ -292,18 +304,7 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) (*StanServer, error
 		MaxMsgBytes: DefaultMsgStoreLimit * 1024,
 		MaxSubs:     DefaultSubStoreLimit,
 	}
-
-	var err error
-
-	// Create the store. So far either memory or file-based.
-	if rootDir != "" {
-		s.store, err = stores.NewFileStore(rootDir, limits)
-	} else {
-		s.store, err = stores.NewMemoryStore(limits)
-	}
-	if err != nil {
-		return nil, err
-	}
+	s.store.SetChannelLimits(limits)
 
 	// Generate Subjects
 	// FIXME(dlc) guid needs to be shared in cluster mode
@@ -1105,7 +1106,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	// Check SequenceStart out of range
 	if sr.StartPosition == pb.StartPosition_SequenceStart {
-		if !s.startSequenceValid(sr.Subject, sr.StartSequence) {
+		if !s.startSequenceValid(cs, sr.Subject, sr.StartSequence) {
 			Debugf("STAN: [Client:%s] Invalid start sequence in subscription request from %s.",
 				sr.ClientID, m.Subject)
 			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSequence)
@@ -1115,7 +1116,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// Check for SequenceTime out of range
 	if sr.StartPosition == pb.StartPosition_TimeDeltaStart {
 		startTime := time.Now().UnixNano() - sr.StartTimeDelta
-		if !s.startTimeValid(sr.Subject, startTime) {
+		if !s.startTimeValid(cs, sr.Subject, startTime) {
 			Debugf("STAN: [Client:%s] Invalid start time in subscription request from %s.",
 				sr.ClientID, m.Subject)
 			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidTime)
@@ -1275,8 +1276,7 @@ func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subStat
 }
 
 // Check if a startTime is valid.
-func (s *StanServer) startTimeValid(subject string, start int64) bool {
-	cs := s.store.LookupChannel(subject)
+func (s *StanServer) startTimeValid(cs *stores.ChannelStore, subject string, start int64) bool {
 	firstMsg := cs.Msgs.FirstMsg()
 	// simply no messages to return
 	if firstMsg == nil {
@@ -1290,8 +1290,7 @@ func (s *StanServer) startTimeValid(subject string, start int64) bool {
 }
 
 // Check if a startSequence is valid.
-func (s *StanServer) startSequenceValid(subject string, seq uint64) bool {
-	cs := s.store.LookupChannel(subject)
+func (s *StanServer) startSequenceValid(cs *stores.ChannelStore, subject string, seq uint64) bool {
 	first, last := cs.Msgs.FirstAndLastSequence()
 	if seq > last || seq < first {
 		return false
