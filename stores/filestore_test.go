@@ -115,6 +115,34 @@ func TestFSBasicRecovery(t *testing.T) {
 	fs = createDefaultFileStore(t)
 	defer fs.Close()
 
+	// Check that subscriptions are restored
+	if channels := fs.GetChannels(); channels == nil || len(channels) != 2 {
+		for _, c := range channels {
+			recoveredSubs := c.Subs.GetRecoveredState()
+			if recoveredSubs == nil || len(recoveredSubs) != 2 {
+				t.Fatal("Should have recovered 2 subscriptions")
+			}
+			for subID, recSub := range recoveredSubs {
+				if subID != sub1 || subID != sub2 {
+					t.Fatalf("Recovered unknown subscription: %v", subID)
+				} else {
+					for s, _ := range recSub.Seqnos {
+						if subID == sub1 {
+							if s != 2 {
+								t.Fatalf("Unexpected recovered pending seqno for sub1: %v", s)
+							}
+						} else {
+							if s < 1 || s > 3 {
+								t.Fatalf("Unexpected recovered pending seqno for sub2: %v", s)
+							}
+						}
+					}
+				}
+			}
+			c.Subs.ClearRecoverdState()
+		}
+	}
+
 	cs := fs.LookupChannel("foo")
 	if cs == nil {
 		t.Fatalf("Expected channel foo to exist")
@@ -137,8 +165,6 @@ func TestFSBasicRecovery(t *testing.T) {
 	if cs != nil {
 		t.Fatal("Expected to get nil channel for baz, got something instead")
 	}
-
-	// TODO: Check that subscriptions are restored
 }
 
 func TestFSMsgsState(t *testing.T) {

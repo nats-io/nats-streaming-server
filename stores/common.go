@@ -84,6 +84,18 @@ func (gs *genericStore) HasChannel() bool {
 	return len(gs.channels) > 0
 }
 
+func (gs *genericStore) GetChannels() map[string]*ChannelStore {
+	gs.RLock()
+	defer gs.RUnlock()
+
+	// Make a copy of the map (note the values are still referenced).
+	newMap := make(map[string]*ChannelStore, len(gs.channels))
+	for k, v := range gs.channels {
+		newMap[k] = v
+	}
+	return newMap
+}
+
 // State returns message store statistics for a given channel ('*' for all)
 func (gs *genericStore) MsgsState(channel string) (numMessages int, byteSize uint64, err error) {
 	numMessages = 0
@@ -249,6 +261,18 @@ func (gss *genericSubStore) init(channel string, limits ChannelLimits) {
 	gss.limits = limits
 }
 
+// GetRecoveredState returns the restored subscriptions.
+// Stores not supporting recovery will return nil.
+func (gss *genericSubStore) GetRecoveredState() map[uint64]*RecoveredSubState {
+	// no-op
+	return nil
+}
+
+// ClearRecoveredState clears the internal state regarding recoverd subscriptions.
+func (gss *genericSubStore) ClearRecoverdState() {
+	// no-op
+}
+
 // CreateSub records a new subscription represented by SubState. On success,
 // it records the subscription's ID in SubState.ID. This ID is to be used
 // by the other SubStore methods.
@@ -284,16 +308,19 @@ func (gss *genericSubStore) DeleteSub(subid uint64) {
 
 // AddSeqPending adds the given message seqno to the given subscription.
 func (gss *genericSubStore) AddSeqPending(subid, seqno uint64) error {
+	// no-op
 	return nil
 }
 
 // AckSeqPending records that the given message seqno has been acknowledged
 // by the given subscription.
 func (gss *genericSubStore) AckSeqPending(subid, seqno uint64) error {
+	// no-op
 	return nil
 }
 
 // Close closes this store
 func (gss *genericSubStore) Close() error {
+	// no-op
 	return nil
 }

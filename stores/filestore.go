@@ -47,17 +47,12 @@ type FileStore struct {
 	rootDir string
 }
 
-type subStateAndPending struct {
-	sub    *spb.SubState
-	seqnos map[uint64]struct{}
-}
-
 // FileSubStore is a subscription store in files.
 type FileSubStore struct {
 	genericSubStore
 	tmpSubBuf     []byte
 	file          *os.File
-	recoveredSubs map[uint64]*subStateAndPending
+	recoveredSubs map[uint64]*RecoveredSubState
 }
 
 // fileSlice represents one of the message store file (there are a number
@@ -526,9 +521,25 @@ func newFileSubStore(channelDirName, channel string, limits ChannelLimits, doRec
 	return ss, err
 }
 
+// GetRecoveredState returns the restored subscriptions.
+// Stores not supporting recovery will return nil.
+func (ss *FileSubStore) GetRecoveredState() map[uint64]*RecoveredSubState {
+	ss.RLock()
+	defer ss.RUnlock()
+
+	return ss.recoveredSubs
+}
+
+// ClearRecoveredState clears the internal state regarding recoverd subscriptions.
+func (ss *FileSubStore) ClearRecoverdState() {
+	ss.Lock()
+	ss.recoveredSubs = nil
+	ss.Unlock()
+}
+
 func (ss *FileSubStore) recoverSubscriptions(channel string) error {
 	// We will store the recovered subscriptions in there.
-	ss.recoveredSubs = make(map[uint64]*subStateAndPending, 16)
+	ss.recoveredSubs = make(map[uint64]*RecoveredSubState, 16)
 
 	var err error
 	var recType subRecordType
@@ -566,9 +577,9 @@ func (ss *FileSubStore) recoverSubscriptions(channel string) error {
 				newSub = &spb.SubState{}
 				err = newSub.Unmarshal(ss.tmpSubBuf[:recSize])
 				if err == nil {
-					subAndPending := &subStateAndPending{
-						sub:    newSub,
-						seqnos: make(map[uint64]struct{}, 16),
+					subAndPending := &RecoveredSubState{
+						Sub:    newSub,
+						Seqnos: make(map[uint64]struct{}, 16),
 					}
 					ss.recoveredSubs[newSub.ID] = subAndPending
 				}
@@ -585,7 +596,7 @@ func (ss *FileSubStore) recoverSubscriptions(channel string) error {
 				err = updateSub.Unmarshal(ss.tmpSubBuf[:recSize])
 				if err == nil {
 					if subAndPending, exists := ss.recoveredSubs[updateSub.ID]; exists {
-						subAndPending.seqnos[updateSub.Seqno] = struct{}{}
+						subAndPending.Seqnos[updateSub.Seqno] = struct{}{}
 					}
 				}
 				break
@@ -594,7 +605,7 @@ func (ss *FileSubStore) recoverSubscriptions(channel string) error {
 				err = updateSub.Unmarshal(ss.tmpSubBuf[:recSize])
 				if err == nil {
 					if subAndPending, exists := ss.recoveredSubs[updateSub.ID]; exists {
-						delete(subAndPending.seqnos, updateSub.Seqno)
+						delete(subAndPending.Seqnos, updateSub.Seqno)
 					}
 				}
 				break
@@ -609,7 +620,6 @@ func (ss *FileSubStore) recoverSubscriptions(channel string) error {
 // CreateSub records a new subscription represented by SubState. On success,
 // it returns an id that is used by the other methods.
 func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
-
 	// Check if we can create the subscription (check limits and update
 	// subscription count)
 	ss.Lock()

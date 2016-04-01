@@ -122,15 +122,20 @@ func (s *StanServer) lookupOrCreateChannel(channel string) (*stores.ChannelStore
 		return nil, err
 	}
 	if isNew {
-		subs := &subStore{
-			psubs:    make([]*subState, 0, 4),
-			qsubs:    make(map[string]*queueState),
-			durables: make(map[string]*subState),
-			acks:     make(map[string]*subState),
-		}
-		cs.UserData = subs
+		s.addNewSubStoreToChannel(cs)
 	}
 	return cs, nil
+}
+
+func (s *StanServer) addNewSubStoreToChannel(cs *stores.ChannelStore) *subStore {
+	subs := &subStore{
+		psubs:    make([]*subState, 0, 4),
+		qsubs:    make(map[string]*queueState),
+		durables: make(map[string]*subState),
+		acks:     make(map[string]*subState),
+	}
+	cs.UserData = subs
+	return subs
 }
 
 func (ss *subStore) Store(sub *subState) error {
@@ -143,21 +148,32 @@ func (ss *subStore) Store(sub *subState) error {
 	isDurable := sub.isDurable()
 	subStateProto := &sub.SubState
 	store := sub.store
-	clientID := sub.ClientID
-	inbox := sub.Inbox
-	subject := sub.subject
 	sub.RUnlock()
 
 	// Adds to storage.
 	err := store.CreateSub(subStateProto)
 	if err != nil {
+		sub.RLock()
+		clientID := sub.ClientID
+		inbox := sub.Inbox
+		subject := sub.subject
+		sub.RUnlock()
 		Errorf("Unable to store subscription [%v:%v] on [%s]: %v", clientID, inbox, subject, err)
 		return err
 	}
 
 	ss.Lock()
-	defer ss.Unlock()
+	ss.updateState(sub, ackInbox, qgroup, isDurable)
+	ss.Unlock()
 
+	return nil
+}
+
+// Updates the subStore state with this sub.
+// The fields have been acquired from the sub's under its lock, so as not
+// to require sub's lock in this function.
+// The subStore is locked on entry (or does not need to - during startup -).
+func (ss *subStore) updateState(sub *subState, ackInbox, qgroup string, isDurable bool) {
 	// First store by ackInbox for ack direct lookup
 	ss.acks[ackInbox] = sub
 
@@ -182,8 +198,6 @@ func (ss *subStore) Store(sub *subState) error {
 	if isDurable {
 		ss.durables[sub.durableKey()] = sub
 	}
-
-	return nil
 }
 
 // Remove
@@ -297,6 +311,9 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) (*StanServer, error
 		return nil, err
 	}
 
+	// Process potential recovered channels
+	s.processRecoveredChannels()
+
 	// Set limits
 	limits := stores.ChannelLimits{
 		MaxChannels: DefaultChannelLimit,
@@ -343,6 +360,32 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) (*StanServer, error
 	Noticef("STAN: Maximum of %d will be stored", DefaultMsgStoreLimit)
 
 	return &s, nil
+}
+
+// get the list of recovered channels and update the server's
+// subscriptions state.
+func (s *StanServer) processRecoveredChannels() {
+	for _, channel := range s.store.GetChannels() {
+		ss := s.addNewSubStoreToChannel(channel)
+		recoveredSubs := channel.Subs.GetRecoveredState()
+		if recoveredSubs != nil {
+			for _, recSub := range recoveredSubs {
+				// Create a subState
+				sub := &subState{}
+				// Copy over fields from SubState protobuf
+				sub.SubState = *recSub.Sub
+				// Add the pending acks
+				for seqno, _ := range recSub.Seqnos {
+					msg := channel.Msgs.Lookup(seqno)
+					if msg != nil {
+						sub.acksPending[seqno] = msg
+					}
+				}
+				ss.updateState(sub, sub.AckInbox, sub.QGroup, sub.isDurable())
+			}
+		}
+		channel.Subs.ClearRecoverdState()
+	}
 }
 
 // initSubscriptions will setup initial subscriptions for discovery etc.
