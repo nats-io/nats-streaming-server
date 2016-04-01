@@ -131,11 +131,13 @@ func writeHeader(buf []byte, recType subRecordType, recordSize int) {
 ////////////////////////////////////////////////////////////////////////////
 
 // NewFileStore returns a factory for stores backed by files.
-func NewFileStore(rootDir string) (*FileStore, error) {
+// If not limits are provided, the store will be created with
+// DefaultChannelLimits.
+func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, error) {
 	fs := &FileStore{
 		rootDir: rootDir,
 	}
-	fs.init("FILESTORE", DefaultChannelLimits)
+	fs.init("FILESTORE", limits)
 
 	if err := os.MkdirAll(rootDir, os.ModeDir+os.ModePerm); err != nil && !os.IsExist(err) {
 		Errorf("Unable to create the root directory [%s]: %v", rootDir, err)
@@ -397,6 +399,8 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	fslice.lastMsg = m
 
 	// Check to see if we should move to next slice.
+	// FIXME(ik): Need to check total counts first? Not sure about
+	// what to do here.
 	if (fslice.msgsCount >= ms.limits.MaxNumMsgs/(numFiles-1)) ||
 		(fslice.msgsSize >= ms.limits.MaxMsgBytes/(numFiles-1)) {
 
@@ -513,7 +517,7 @@ func newFileSubStore(channelDirName, channel string, limits ChannelLimits, doRec
 	fileName := filepath.Join(channelDirName, subsFileName)
 	ss.file, err = openFile(fileName)
 	if err == nil && doRecover {
-		err = ss.recoverSubscriptions(channel)
+		err = ss.recoverSubscriptions()
 	}
 	if err != nil {
 		Errorf("Unable to create subscription store for [%s]: %v", channel, err)
@@ -522,10 +526,15 @@ func newFileSubStore(channelDirName, channel string, limits ChannelLimits, doRec
 }
 
 // GetRecoveredState returns the restored subscriptions.
-// Stores not supporting recovery will return nil.
+// Stores not supporting recovery must return an empty map.
 func (ss *FileSubStore) GetRecoveredState() map[uint64]*RecoveredSubState {
 	ss.RLock()
 	defer ss.RUnlock()
+
+	// We still need to return an empty map.
+	if ss.recoveredSubs == nil {
+		return make(map[uint64]*RecoveredSubState, 0)
+	}
 
 	return ss.recoveredSubs
 }
@@ -537,7 +546,8 @@ func (ss *FileSubStore) ClearRecoverdState() {
 	ss.Unlock()
 }
 
-func (ss *FileSubStore) recoverSubscriptions(channel string) error {
+// recoverSubscriptions recovers subscriptions state for this store.
+func (ss *FileSubStore) recoverSubscriptions() error {
 	// We will store the recovered subscriptions in there.
 	ss.recoveredSubs = make(map[uint64]*RecoveredSubState, 16)
 
@@ -561,7 +571,10 @@ func (ss *FileSubStore) recoverSubscriptions(channel string) error {
 		}
 
 		if err == nil {
+			// Get type and size from the header:
+			// type is first byte
 			recType = subRecordType(recHeader >> 24 & 0xFF)
+			// size is following 3 bytes.
 			recSize = recHeader & 0xFFFFFF
 
 			// Expand buffer if necessary
@@ -582,13 +595,19 @@ func (ss *FileSubStore) recoverSubscriptions(channel string) error {
 						Seqnos: make(map[uint64]struct{}, 16),
 					}
 					ss.recoveredSubs[newSub.ID] = subAndPending
+					// Keep track of the subscriptions count
+					ss.subsCount++
 				}
 				break
 			case subRecDel:
 				delSub = &spb.SubStateDelete{}
 				err = delSub.Unmarshal(ss.tmpSubBuf[:recSize])
 				if err == nil {
-					delete(ss.recoveredSubs, delSub.ID)
+					if _, exists := ss.recoveredSubs[delSub.ID]; exists {
+						delete(ss.recoveredSubs, delSub.ID)
+						// Keep track of the subscriptions count
+						ss.subsCount--
+					}
 				}
 				break
 			case subRecMsg:

@@ -56,7 +56,7 @@ func storeSub(t *testing.T, s Store, channel string) uint64 {
 	return sub.ID
 }
 
-func storeSubPending(t *testing.T, s Store, channel string, subID uint64, seqs ...uint64) error {
+func storeSubPending(t *testing.T, s Store, channel string, subID uint64, seqs ...uint64) {
 	cs := s.LookupChannel(channel)
 	if cs == nil {
 		t.Fatalf("Channel [%v] not found", channel)
@@ -67,10 +67,9 @@ func storeSubPending(t *testing.T, s Store, channel string, subID uint64, seqs .
 			t.Fatalf("Unexpected error adding pending for sub [%v] on channel [%v]: %v", subID, channel, err)
 		}
 	}
-	return nil
 }
 
-func storeSubAck(t *testing.T, s Store, channel string, subID uint64, seqs ...uint64) error {
+func storeSubAck(t *testing.T, s Store, channel string, subID uint64, seqs ...uint64) {
 	cs := s.LookupChannel(channel)
 	if cs == nil {
 		t.Fatalf("Channel [%v] not found", channel)
@@ -81,7 +80,17 @@ func storeSubAck(t *testing.T, s Store, channel string, subID uint64, seqs ...ui
 			t.Fatalf("Unexpected error adding pending for sub [%v] on channel [%v]: %v", subID, channel, err)
 		}
 	}
-	return nil
+}
+
+func storeSubDelete(t *testing.T, s Store, channel string, subID ...uint64) {
+	cs := s.LookupChannel(channel)
+	if cs == nil {
+		t.Fatalf("Channel [%v] not found", channel)
+	}
+	ss := cs.Subs
+	for _, s := range subID {
+		ss.DeleteSub(s)
+	}
 }
 
 func testBasicCreate(t *testing.T, s Store, expectedName string) {
@@ -326,4 +335,36 @@ func testBasicSubStore(t *testing.T, s Store) {
 		t.Fatalf("Unexpected error on AckSeqPending: %v", err)
 	}
 	ss.DeleteSub(sub.ID)
+
+	// Chekck that there is no error if we add updates for deleted sub.
+	if err := ss.AddSeqPending(sub.ID, 2); err != nil {
+		t.Fatalf("Unexpected error on AddSeqPending: %v", err)
+	}
+	// Check that ack update for non existent sub is OK
+	if err := ss.AckSeqPending(sub.ID+1, 10); err != nil {
+		t.Fatalf("Unexpected error on AddSeqPending: %v", err)
+	}
+}
+
+func testSubStoreGetRecoveredNotNil(t *testing.T, s Store) {
+	cs, _, err := s.LookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Error creating channel foo: %v", err)
+	}
+	recSubs := cs.Subs.GetRecoveredState()
+	if recSubs == nil {
+		t.Fatal("Sub's RecoveredState should never be nil")
+	}
+	if len(recSubs) != 0 {
+		t.Fatalf("There should be no recovered subs, got %v", len(recSubs))
+	}
+	cs.Subs.ClearRecoverdState()
+	// Again, calling GetRecoveredState() should not return nil
+	recSubs = cs.Subs.GetRecoveredState()
+	if recSubs == nil {
+		t.Fatal("Sub's RecoveredState should never be nil")
+	}
+	if len(recSubs) != 0 {
+		t.Fatalf("There should be no recovered subs, got %v", len(recSubs))
+	}
 }

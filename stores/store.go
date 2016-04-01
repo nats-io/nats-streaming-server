@@ -69,10 +69,9 @@ type ChannelStore struct {
 
 // Store is the storage interface for STAN servers.
 //
-// Implementations of this interface should create a Store with DefaultChannelLimits.
-// Note that limits should not be applied on recovery (for implementations that
-// support recovery). The user can specify limits before using the store by using
-// the SetChannelLimits() method.
+// If an implementation has a Store constructor with ChannelLimits, it should be
+// noted that the limits don't apply to any state being restored, for Store
+// implementations supporting recovery.
 //
 // When calling the method LookupOrCreateChannel(), if the channel does not exist,
 // the implementation should create an instance of SubStore and MsgStore, passing
@@ -84,11 +83,13 @@ type ChannelStore struct {
 //
 // The LookupChannel() method should only return a ChannelStore that has been
 // previously created, and nil if it does not exist.
+//
 type Store interface {
 	// Name returns the name type of this store (e.g: MEMORY, FILESTORE, etc...).
 	Name() string
 
-	// SetChannelLimits sets limits per channel.
+	// SetChannelLimits sets limits per channel. The action is not expected
+	// to be retroactive.
 	SetChannelLimits(limits ChannelLimits)
 
 	// LookupOrCreateChannel returns a ChannelStore for the given channel,
@@ -123,7 +124,7 @@ type Store interface {
 // updates.
 type SubStore interface {
 	// GetRecoveredState returns the restored subscriptions.
-	// Stores not supporting recovery will return nil.
+	// Stores not supporting recovery MUST still return an empty map.
 	GetRecoveredState() map[uint64]*RecoveredSubState
 
 	// ClearRecoveredState clears the internal state regarding recoverd subscriptions.

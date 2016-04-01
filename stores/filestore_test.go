@@ -3,8 +3,11 @@
 package stores
 
 import (
+	"fmt"
 	"os"
 	"testing"
+
+	"github.com/nats-io/stan-server/spb"
 )
 
 const (
@@ -18,11 +21,10 @@ func cleanupDatastore(t *testing.T, dir string) {
 }
 
 func createDefaultFileStore(t *testing.T) *FileStore {
-	fs, err := NewFileStore(defaultDataStore)
+	fs, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	fs.SetChannelLimits(testDefaultChannelLimits)
 	return fs
 }
 
@@ -119,8 +121,8 @@ func TestFSBasicRecovery(t *testing.T) {
 	if channels := fs.GetChannels(); channels == nil || len(channels) != 2 {
 		for _, c := range channels {
 			recoveredSubs := c.Subs.GetRecoveredState()
-			if recoveredSubs == nil || len(recoveredSubs) != 2 {
-				t.Fatal("Should have recovered 2 subscriptions")
+			if len(recoveredSubs) != 2 {
+				t.Fatalf("Should have recovered 2 subscriptions, got %v", len(recoveredSubs))
 			}
 			for subID, recSub := range recoveredSubs {
 				if subID != sub1 || subID != sub2 {
@@ -165,6 +167,96 @@ func TestFSBasicRecovery(t *testing.T) {
 	if cs != nil {
 		t.Fatal("Expected to get nil channel for baz, got something instead")
 	}
+}
+
+func TestFSRecoveryLimitsNotApplied(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Store some messages in various channels
+	chanCount := 10
+	msgCount := 50
+	subsCount := 5
+	payload := []byte("hello")
+	expectedMsgCount := chanCount * msgCount
+	expectedMsgBytes := uint64(expectedMsgCount * len(payload))
+	for c := 0; c < chanCount; c++ {
+		channelName := fmt.Sprintf("channel.%d", (c + 1))
+
+		// Create a several subscriptions per channel.
+		for s := 0; s < subsCount; s++ {
+			storeSub(t, fs, channelName)
+		}
+
+		for m := 0; m < msgCount; m++ {
+			storeMsg(t, fs, channelName, payload)
+		}
+	}
+
+	// Close the store
+	fs.Close()
+
+	// Now re-open with limits below all the above counts
+	limit := testDefaultChannelLimits
+	limit.MaxChannels = 1
+	limit.MaxNumMsgs = 1
+	limit.MaxSubs = 1
+	fs, err := NewFileStore(defaultDataStore, &limit)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	// Make sure that all our channels are recovered.
+	channels := fs.GetChannels()
+	if channels == nil {
+		t.Fatal("Channels should have been recovered")
+	}
+	if len(channels) != chanCount {
+		t.Fatalf("Unexpected count of recovered channels: %v vs %v", len(channels), chanCount)
+	}
+	// Make sure that all our subscriptions are recovered.
+	for _, c := range channels {
+		recoveredSubs := c.Subs.GetRecoveredState()
+		if len(recoveredSubs) != subsCount {
+			t.Fatalf("Unexpected count of recovered subs: %v vs %v", len(recoveredSubs), subsCount)
+		}
+		c.Subs.ClearRecoverdState()
+	}
+	// Make sure that all messages are recovered
+	recMsg, recBytes, err := fs.MsgsState(AllChannels)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if recMsg != expectedMsgCount {
+		t.Fatalf("Unexpected count of recovered msgs: %v vs %v", recMsg, expectedMsgCount)
+	}
+	if recBytes != expectedMsgBytes {
+		t.Fatalf("Unexpected count of recovered bytes: %v vs %v", recMsg, expectedMsgBytes)
+	}
+
+	// Now check that any new addition would be rejected
+	if _, _, err := fs.LookupOrCreateChannel("new.channel"); err == nil {
+		t.Fatal("Expected trying to create a new channel to fail")
+	}
+	channelOne := fs.LookupChannel("channel.1")
+	if channelOne == nil {
+		t.Fatal("Expected channel.1 to exist")
+	}
+	sub := &spb.SubState{
+		ClientID:      "me",
+		Inbox:         nuidGen.Next(),
+		AckInbox:      nuidGen.Next(),
+		AckWaitInSecs: 10,
+	}
+	if err := channelOne.Subs.CreateSub(sub); err == nil {
+		t.Fatal("Expected trying to create a new subscription to fail")
+	}
+
+	// TODO: Check for messages. Need to resolve how we enforce limits.
 }
 
 func TestFSMsgsState(t *testing.T) {
@@ -228,6 +320,13 @@ func TestFSMaxSubs(t *testing.T) {
 	testMaxSubs(t, fs, limitCount)
 }
 
+func TestFSSubStoreGetRecoveredNotNil(t *testing.T) {
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	testSubStoreGetRecoveredNotNil(t, fs)
+}
+
 func TestFSBasicSubStore(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
@@ -236,4 +335,68 @@ func TestFSBasicSubStore(t *testing.T) {
 	defer fs.Close()
 
 	testBasicSubStore(t, fs)
+}
+
+func TestFSRecoverSubUpdatesForDeleteSubOK(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Store one sub for which we are going to store updates
+	// and then delete
+	sub1 := storeSub(t, fs, "foo")
+	// This one will stay and should be recovered
+	sub2 := storeSub(t, fs, "foo")
+
+	// Add several pending seq for sub1
+	storeSubPending(t, fs, "foo", sub1, 1, 2, 3)
+
+	// Delete sub
+	storeSubDelete(t, fs, "foo", sub1)
+
+	// Add more updates
+	storeSubPending(t, fs, "foo", sub1, 4, 5)
+	storeSubAck(t, fs, "foo", sub1, 1)
+
+	// Delete unexisting subs
+	storeSubDelete(t, fs, "foo", sub2+1, sub2+2, sub2+3)
+
+	// Close the store
+	fs.Close()
+
+	// Recovers now, should not have any error
+	limits := testDefaultChannelLimits
+	limits.MaxSubs = 1
+	fs, err := NewFileStore(defaultDataStore, &limits)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	if !fs.HasChannel() {
+		t.Fatal("Channel foo should have been recovered")
+	}
+
+	// Only sub2 should be recovered
+	cs := fs.GetChannels()["foo"]
+	recoveredSubs := cs.Subs.GetRecoveredState()
+	if len(recoveredSubs) != 1 {
+		t.Fatalf("A subscription should have been recovered, got %v", len(recoveredSubs))
+	}
+	// Make sure the subs count was not messed-up by the fact
+	// that the store recovered delete requests for un-recovered
+	// subscriptions.
+	// Since we have set the limit of subs to 1, and we have
+	// recovered one, we should fail creating a new one.
+	sub := &spb.SubState{
+		ClientID:      "me",
+		Inbox:         nuidGen.Next(),
+		AckInbox:      nuidGen.Next(),
+		AckWaitInSecs: 10,
+	}
+	if err := cs.Subs.CreateSub(sub); err == nil || err != ErrTooManySubs {
+		t.Fatalf("Should have failed creating a sub, got %v", err)
+	}
 }

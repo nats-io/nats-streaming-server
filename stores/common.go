@@ -50,10 +50,15 @@ type genericMsgStore struct {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes the structure of a generic store
-func (gs *genericStore) init(name string, limits ChannelLimits) {
+func (gs *genericStore) init(name string, limits *ChannelLimits) {
 	gs.name = name
-	gs.limits = limits
-	gs.channels = make(map[string]*ChannelStore, limits.MaxChannels)
+	if limits == nil {
+		gs.limits = DefaultChannelLimits
+	} else {
+		gs.limits = *limits
+	}
+	// Do not use limits values to create the map.
+	gs.channels = make(map[string]*ChannelStore, 16)
 }
 
 // Name returns the type name of this store
@@ -128,7 +133,7 @@ func (gs *genericStore) MsgsState(channel string) (numMessages int, byteSize uin
 // canAddChannel returns true if the current number of channels is below the limit.
 // Store lock is assumed to be locked.
 func (gs *genericStore) canAddChannel() error {
-	if len(gs.channels) == gs.limits.MaxChannels {
+	if len(gs.channels) >= gs.limits.MaxChannels {
 		return ErrTooManyChannels
 	}
 	return nil
@@ -262,10 +267,9 @@ func (gss *genericSubStore) init(channel string, limits ChannelLimits) {
 }
 
 // GetRecoveredState returns the restored subscriptions.
-// Stores not supporting recovery will return nil.
+// Stores not supporting recovery must still return an empty map.
 func (gss *genericSubStore) GetRecoveredState() map[uint64]*RecoveredSubState {
-	// no-op
-	return nil
+	return make(map[uint64]*RecoveredSubState, 0)
 }
 
 // ClearRecoveredState clears the internal state regarding recoverd subscriptions.
@@ -286,7 +290,7 @@ func (gss *genericSubStore) CreateSub(sub *spb.SubState) error {
 // createSub is the unlocked version of CreateSub that can be used by
 // non-generic implementations.
 func (gss *genericSubStore) createSub(sub *spb.SubState) error {
-	if gss.subsCount == gss.limits.MaxSubs {
+	if gss.subsCount >= gss.limits.MaxSubs {
 		return ErrTooManySubs
 	}
 

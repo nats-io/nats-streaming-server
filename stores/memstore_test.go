@@ -7,11 +7,10 @@ import (
 )
 
 func createDefaultMemStore(t *testing.T) *MemoryStore {
-	ms, err := NewMemoryStore()
+	ms, err := NewMemoryStore(&testDefaultChannelLimits)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	ms.SetChannelLimits(testDefaultChannelLimits)
 	return ms
 }
 
@@ -104,4 +103,11 @@ func TestMSBasicSubStore(t *testing.T) {
 	defer ms.Close()
 
 	testBasicSubStore(t, ms)
+}
+
+func TestMSSubStoreGetRecoveredNotNil(t *testing.T) {
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+
+	testSubStoreGetRecoveredNotNil(t, ms)
 }

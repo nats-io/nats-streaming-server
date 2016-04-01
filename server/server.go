@@ -299,13 +299,21 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) (*StanServer, error
 	// Create clientStore
 	s.clients = &clientStore{clients: make(map[string]*client)}
 
+	// Set limits
+	limits := &stores.ChannelLimits{
+		MaxChannels: DefaultChannelLimit,
+		MaxNumMsgs:  DefaultMsgStoreLimit,
+		MaxMsgBytes: DefaultMsgStoreLimit * 1024,
+		MaxSubs:     DefaultSubStoreLimit,
+	}
+
 	var err error
 
 	// Create the store. So far either memory or file-based.
 	if rootDir != "" {
-		s.store, err = stores.NewFileStore(rootDir)
+		s.store, err = stores.NewFileStore(rootDir, limits)
 	} else {
-		s.store, err = stores.NewMemoryStore()
+		s.store, err = stores.NewMemoryStore(limits)
 	}
 	if err != nil {
 		return nil, err
@@ -313,15 +321,6 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) (*StanServer, error
 
 	// Process potential recovered channels
 	s.processRecoveredChannels()
-
-	// Set limits
-	limits := stores.ChannelLimits{
-		MaxChannels: DefaultChannelLimit,
-		MaxNumMsgs:  DefaultMsgStoreLimit,
-		MaxMsgBytes: DefaultMsgStoreLimit * 1024,
-		MaxSubs:     DefaultSubStoreLimit,
-	}
-	s.store.SetChannelLimits(limits)
 
 	// Generate Subjects
 	// FIXME(dlc) guid needs to be shared in cluster mode
@@ -368,21 +367,19 @@ func (s *StanServer) processRecoveredChannels() {
 	for _, channel := range s.store.GetChannels() {
 		ss := s.addNewSubStoreToChannel(channel)
 		recoveredSubs := channel.Subs.GetRecoveredState()
-		if recoveredSubs != nil {
-			for _, recSub := range recoveredSubs {
-				// Create a subState
-				sub := &subState{}
-				// Copy over fields from SubState protobuf
-				sub.SubState = *recSub.Sub
-				// Add the pending acks
-				for seqno, _ := range recSub.Seqnos {
-					msg := channel.Msgs.Lookup(seqno)
-					if msg != nil {
-						sub.acksPending[seqno] = msg
-					}
+		for _, recSub := range recoveredSubs {
+			// Create a subState
+			sub := &subState{}
+			// Copy over fields from SubState protobuf
+			sub.SubState = *recSub.Sub
+			// Add the pending acks
+			for seqno, _ := range recSub.Seqnos {
+				msg := channel.Msgs.Lookup(seqno)
+				if msg != nil {
+					sub.acksPending[seqno] = msg
 				}
-				ss.updateState(sub, sub.AckInbox, sub.QGroup, sub.isDurable())
 			}
+			ss.updateState(sub, sub.AckInbox, sub.QGroup, sub.isDurable())
 		}
 		channel.Subs.ClearRecoverdState()
 	}
@@ -1189,7 +1186,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 
 		// set the start sequence of the subscriber.
-		s.setSubStartSequence(sub, sr, cs)
+		s.setSubStartSequence(cs, sub, sr)
 
 		// add the subscription to stan
 		if err := s.addSubscription(cs, sub); err != nil {
@@ -1346,7 +1343,7 @@ func (s *StanServer) getSequenceFromStartTime(cs *stores.ChannelStore, startTime
 }
 
 // Setup the start position for the subscriber.
-func (s *StanServer) setSubStartSequence(sub *subState, sr *pb.SubscriptionRequest, cs *stores.ChannelStore) {
+func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState, sr *pb.SubscriptionRequest) {
 	sub.Lock()
 	defer sub.Unlock()
 

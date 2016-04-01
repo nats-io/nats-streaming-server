@@ -28,9 +28,11 @@ type MemoryMsgStore struct {
 ////////////////////////////////////////////////////////////////////////////
 
 // NewMemoryStore returns a factory for stores held in memory.
-func NewMemoryStore() (*MemoryStore, error) {
+// If not limits are provided, the store will be created with
+// DefaultChannelLimits.
+func NewMemoryStore(limits *ChannelLimits) (*MemoryStore, error) {
 	ms := &MemoryStore{}
-	ms.init("MEMORY", DefaultChannelLimits)
+	ms.init("MEMORY", limits)
 	return ms, nil
 }
 
