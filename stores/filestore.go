@@ -59,7 +59,6 @@ type FileSubStore struct {
 // of files for a MsgStore on a given channel).
 type fileSlice struct {
 	fileName  string
-	file      *os.File
 	firstMsg  *pb.MsgProto
 	lastMsg   *pb.MsgProto
 	msgsCount int
@@ -70,6 +69,7 @@ type fileSlice struct {
 type FileMsgStore struct {
 	genericMsgStore
 	tmpMsgBuf    []byte
+	file         *os.File
 	files        [numFiles]*fileSlice
 	currSliceIdx int
 }
@@ -242,28 +242,32 @@ func (fs *FileStore) LookupOrCreateChannel(channel string) (*ChannelStore, bool,
 // newFileMsgStore returns a new instace of a file MsgStore.
 func newFileMsgStore(channelDirName, channel string, limits ChannelLimits, doRecover bool) (*FileMsgStore, error) {
 	var err error
+	var file *os.File
 
 	// Create an instance and initialize
 	ms := &FileMsgStore{}
 	ms.init(channel, limits)
 
-	// Open the files
+	// Open/create all the files
 	for i := 0; (err == nil) && (i < numFiles); i++ {
 		// Fully qualified file name.
 		fileName := filepath.Join(channelDirName, fmt.Sprintf("msgs.%d.dat", (i+1)))
 
-		// Create a file slice.
-		slice := &fileSlice{fileName: fileName}
-
 		// Open the file.
-		slice.file, err = openFile(fileName)
+		file, err = openFile(fileName)
 		if err == nil {
 			// Save slice
-			ms.files[i] = slice
+			ms.files[i] = &fileSlice{fileName: fileName}
 
 			// Should we try to recover (startup case)
 			if doRecover {
-				err = ms.recoverOneMsgFile(i)
+				err = ms.recoverOneMsgFile(file, i)
+			} else if i == 0 {
+				// Otherwise, keep the first file opened...
+				ms.file = file
+			} else {
+				// and close all others.
+				file.Close()
 			}
 		}
 	}
@@ -274,16 +278,13 @@ func newFileMsgStore(channelDirName, channel string, limits ChannelLimits, doRec
 }
 
 // recovers one of the file
-func (ms *FileMsgStore) recoverOneMsgFile(numFile int) error {
+func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 	var err error
 
 	msgSize := 0
 	var msg *pb.MsgProto
 
 	fslice := ms.files[numFile]
-	file := fslice.file
-
-	hasOne := false
 
 	for err == nil {
 		// Read the message size as an int32
@@ -307,9 +308,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(numFile int) error {
 			err = msg.Unmarshal(ms.tmpMsgBuf[:msgSize])
 		}
 		if err == nil {
-			// Some accounting...
-			hasOne = true
-
 			if fslice.firstMsg == nil {
 				fslice.firstMsg = msg
 
@@ -327,13 +325,25 @@ func (ms *FileMsgStore) recoverOneMsgFile(numFile int) error {
 
 	// Do more accounting and bump the current slice index if we recovered
 	// at least one message on that file.
-	if err == nil && hasOne {
+	if err == nil && fslice.msgsCount > 0 {
 		ms.last = fslice.lastMsg.Sequence
 		ms.totalCount += fslice.msgsCount
 		ms.totalBytes += fslice.msgsSize
 		ms.currSliceIdx = numFile
-	}
 
+		// Close the previous file
+		if numFile > 0 {
+			err = ms.file.Close()
+			ms.file = nil
+		}
+	}
+	// Keep the file opened if this is the first or messages were recovered
+	if err == nil && (fslice.msgsCount > 0 || numFile == 0) {
+		ms.file = file
+	} else {
+		// Close otherwise...
+		err = file.Close()
+	}
 	return err
 }
 
@@ -371,7 +381,7 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	_, err = m.MarshalTo(ms.tmpMsgBuf[4:totalSize])
 	if err == nil {
 		// Write the buffer
-		_, err = fslice.file.Write(ms.tmpMsgBuf[:totalSize])
+		_, err = ms.file.Write(ms.tmpMsgBuf[:totalSize])
 	}
 	if err != nil {
 		return nil, err
@@ -402,39 +412,42 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	if (fslice.msgsCount >= ms.limits.MaxNumMsgs/(numFiles-1)) ||
 		(fslice.msgsSize >= ms.limits.MaxMsgBytes/(numFiles-1)) {
 
-		if ms.currSliceIdx+1 == numFiles {
-			// Delete first file and shift remaning. We will
+		nextSlice := ms.currSliceIdx + 1
+
+		if nextSlice == numFiles {
+			// Delete first file and shift remaining. We will
 			// keep currSliceIdx to the current value.
 			Noticef("WARNING: Limit reached, discarding messages for subject %s", ms.subject)
 			err = ms.removeAndShiftFiles()
 		} else {
-			ms.currSliceIdx++
+			var file *os.File
+
+			// Close the file and open the next slice
+			err = ms.file.Close()
+			if err == nil {
+				file, err = openFile(ms.files[nextSlice].fileName)
+			}
+			if err == nil {
+				ms.file = file
+				ms.currSliceIdx = nextSlice
+			}
 		}
 	}
-
 	return m, err
 }
 
 func (ms *FileMsgStore) removeAndShiftFiles() error {
 	var err error
 
+	// Close the currently opened file (should be the numFile's file)
+	err = ms.file.Close()
+
 	// Rename msgs.2.dat to msgs.1.dat, refresh state, etc...
-	for i := 0; i < numFiles-1; i++ {
+	for i := 0; (err == nil) && (i < numFiles-1); i++ {
 		file1 := ms.files[i]
 		file2 := ms.files[i+1]
 
-		if i == 0 {
-			err = file1.file.Close()
-		}
-		if err == nil {
-			err = file2.file.Close()
-		}
-		if err == nil {
-			err = os.Rename(file2.fileName, file1.fileName)
-		}
-		if err == nil {
-			file1.file, err = openFile(file1.fileName)
-		}
+		err = os.Rename(file2.fileName, file1.fileName)
 		if err == nil {
 			// Update total stats for the first store being removed
 			if i == 0 {
@@ -459,21 +472,26 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 		}
 	}
 	if err == nil {
+		var file *os.File
+
 		// Reset the last
 		fslice := ms.files[numFiles-1]
-		fslice.file, err = openFile(fslice.fileName)
+		file, err = openFile(fslice.fileName)
 		if err == nil {
 			// Move to the end of the file (offset 0 relative to end)
-			_, err = fslice.file.Seek(0, 2)
+			_, err = file.Seek(0, 2)
+			if err != nil {
+				file.Close()
+			}
 		}
 		if err == nil {
+			ms.file = file
 			fslice.firstMsg = nil
 			fslice.lastMsg = nil
 			fslice.msgsCount = 0
 			fslice.msgsSize = uint64(0)
 		}
 	}
-
 	return err
 }
 
@@ -489,14 +507,8 @@ func (ms *FileMsgStore) Close() error {
 	ms.closed = true
 
 	var err error
-	for i := 0; i < numFiles; i++ {
-		file := ms.files[i].file
-		if file != nil {
-			lerr := file.Close()
-			if lerr != nil && err == nil {
-				err = lerr
-			}
-		}
+	if ms.file != nil {
+		err = ms.file.Close()
 	}
 	return err
 }
