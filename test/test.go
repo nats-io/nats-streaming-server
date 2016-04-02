@@ -8,6 +8,5 @@ import (
 
 // RunServer will startup and embedded STAN server and a nats-server to support it.
 func RunServer(ID string) *server.StanServer {
-	s, _ := server.RunServer(ID, "")
-	return s
+	return server.RunServer(ID, "")
 }

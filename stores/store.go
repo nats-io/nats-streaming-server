@@ -22,6 +22,11 @@ var (
 	ErrTooManySubs     = errors.New("too many subscriptions per channel")
 )
 
+// Noticef logs a notice statement
+func Noticef(format string, v ...interface{}) {
+	server.Noticef(format, v...)
+}
+
 // Errorf generates error message
 func Errorf(format string, v ...interface{}) {
 	server.Errorf(format, v...)

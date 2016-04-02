@@ -128,7 +128,7 @@ func TestFSBasicRecovery(t *testing.T) {
 				if subID != sub1 || subID != sub2 {
 					t.Fatalf("Recovered unknown subscription: %v", subID)
 				} else {
-					for s, _ := range recSub.Seqnos {
+					for s := range recSub.Seqnos {
 						if subID == sub1 {
 							if s != 2 {
 								t.Fatalf("Unexpected recovered pending seqno for sub1: %v", s)

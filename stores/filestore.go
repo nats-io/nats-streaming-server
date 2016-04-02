@@ -180,8 +180,6 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, error) {
 		// Make sure we close to make sure that all files that have been
 		// successfully opened are properly closed.
 		fs.Close()
-
-		Errorf("Unable to restore state: %v", err)
 	}
 
 	return fs, err
@@ -407,7 +405,7 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 		if ms.currSliceIdx+1 == numFiles {
 			// Delete first file and shift remaning. We will
 			// keep currSliceIdx to the current value.
-			Errorf("WARNING: Limit reached, discarding messages for subject %s", ms.subject)
+			Noticef("WARNING: Limit reached, discarding messages for subject %s", ms.subject)
 			err = ms.removeAndShiftFiles()
 		} else {
 			ms.currSliceIdx++
@@ -539,7 +537,7 @@ func (ss *FileSubStore) GetRecoveredState() map[uint64]*RecoveredSubState {
 	return ss.recoveredSubs
 }
 
-// ClearRecoveredState clears the internal state regarding recoverd subscriptions.
+// ClearRecoverdState clears the internal state regarding recoverd subscriptions.
 func (ss *FileSubStore) ClearRecoverdState() {
 	ss.Lock()
 	ss.recoveredSubs = nil
@@ -643,47 +641,50 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 	// subscription count)
 	ss.Lock()
 	err := ss.createSub(sub)
-	ss.Unlock()
 	if err == nil {
-		// Locking will be done around file write.
 		err = ss.writeRecord(subRecNew, sub, nil, nil)
 	}
+	ss.Unlock()
 	return err
 }
 
 // DeleteSub invalidates this subscription.
 func (ss *FileSubStore) DeleteSub(subid uint64) {
-	// Will lock only around the file write call.
+	ss.Lock()
 	del := &spb.SubStateDelete{
 		ID: subid,
 	}
 	ss.writeRecord(subRecDel, nil, del, nil)
+	ss.Unlock()
 }
 
 // AddSeqPending adds the given message seqno to the given subscription.
 func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
-	// Will lock only around the file write call.
+	ss.Lock()
 	update := &spb.SubStateUpdate{
 		ID:    subid,
 		Seqno: seqno,
 	}
 	err := ss.writeRecord(subRecMsg, nil, nil, update)
+	ss.Unlock()
 	return err
 }
 
 // AckSeqPending records that the given message seqno has been acknowledged
 // by the given subscription.
 func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
-	// Will lock only around the file write call.
+	ss.Lock()
 	update := &spb.SubStateUpdate{
 		ID:    subid,
 		Seqno: seqno,
 	}
 	err := ss.writeRecord(subRecAck, nil, nil, update)
+	ss.Unlock()
 	return err
 }
 
 // writes a record in the subscriptions file.
+// store's lock is held on entry.
 func (ss *FileSubStore) writeRecord(recType subRecordType, newSub *spb.SubState,
 	delSub *spb.SubStateDelete, updateSub *spb.SubStateUpdate) error {
 
@@ -726,9 +727,7 @@ func (ss *FileSubStore) writeRecord(recType subRecordType, newSub *spb.SubState,
 	}
 	if err == nil {
 		// Write the header and record
-		ss.Lock()
 		_, err = ss.file.Write(ss.tmpSubBuf[:totalSize])
-		ss.Unlock()
 	}
 	return nil
 }

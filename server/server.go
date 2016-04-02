@@ -32,14 +32,15 @@ const (
 	DefaultUnSubPrefix    = "_STAN.unsub"
 	DefaultClosePrefix    = "_STAN.close"
 
-	// How many messages per channel will we store?
+	// DefaultMsgStoreLimit defines how many messages per channel we will store
 	DefaultMsgStoreLimit = 1000000
-	// How many channels (literal subjects) do we allow?
+	// DefaultChannelLimit defines how many channels (literal subjects) we allow
 	DefaultChannelLimit = 100
-	// How many subscriptions per channel do we allow?
+	// DefaultSubStoreLimit defines how many subscriptions per channel we allow
 	DefaultSubStoreLimit = 1000
 
 	// Heartbeat intervals.
+
 	DefaultHeartBeatInterval   = 30 * time.Second
 	DefaultClientHBTimeout     = 10 * time.Second
 	DefaultMaxFailedHeartBeats = int((5 * time.Minute) / DefaultHeartBeatInterval)
@@ -134,6 +135,7 @@ func (s *StanServer) addNewSubStoreToChannel(cs *stores.ChannelStore) *subStore 
 		durables: make(map[string]*subState),
 		acks:     make(map[string]*subState),
 	}
+	// Keep a reference to the subStore in the ChannelStore.
 	cs.UserData = subs
 	return subs
 }
@@ -292,7 +294,7 @@ func EnableDefaultLogger(opts *server.Options) {
 }
 
 // RunServer will startup and embedded STAN server and a nats-server to support it.
-func RunServer(ID, rootDir string, optsA ...*server.Options) (*StanServer, error) {
+func RunServer(ID, rootDir string, optsA ...*server.Options) *StanServer {
 	// Run a nats server by default
 	s := StanServer{clusterID: ID, serverID: nuid.Next(), opts: &DefaultServerOptions}
 
@@ -316,11 +318,11 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) (*StanServer, error
 		s.store, err = stores.NewMemoryStore(limits)
 	}
 	if err != nil {
-		return nil, err
+		panic(fmt.Sprintf("Could create store, %v", err))
 	}
 
-	// Process potential recovered channels
-	s.processRecoveredChannels()
+	// Process recovered channels (if any).
+	recoveredSubs := s.processRecoveredChannels()
 
 	// Generate Subjects
 	// FIXME(dlc) guid needs to be shared in cluster mode
@@ -355,34 +357,88 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) (*StanServer, error
 
 	s.initSubscriptions()
 
+	// Recreate NATS subscribers on AckInbox'es for recovered subscriptions.
+	if err := s.recreateAckInboxSubs(recoveredSubs); err != nil {
+		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
+	}
+
+	// Flush to make sure all subscriptions are processed before
+	// we return control to the user.
+	if err := s.nc.Flush(); err != nil {
+		panic(fmt.Sprintf("Could not flush the subscriptions, %v\n", err))
+	}
+
 	Noticef("STAN: Message store is %s", s.store.Name())
 	Noticef("STAN: Maximum of %d will be stored", DefaultMsgStoreLimit)
 
-	return &s, nil
+	return &s
 }
 
-// get the list of recovered channels and update the server's
-// subscriptions state.
-func (s *StanServer) processRecoveredChannels() {
-	for _, channel := range s.store.GetChannels() {
+// Reconstruct the subscription state on restart.
+// We don't use locking in there because there is no communication
+// with the NATS server and/or clients, so no chance that the state
+// changes while we are doing this.
+func (s *StanServer) processRecoveredChannels() []*subState {
+	// We will return the recovered subscriptions
+	allSubs := make([]*subState, 0, 16)
+
+	channels := s.store.GetChannels()
+	for channelName, channel := range channels {
+		// Create the subStore for this channel
 		ss := s.addNewSubStoreToChannel(channel)
+
+		// Get the recovered subscriptions for this channel.
 		recoveredSubs := channel.Subs.GetRecoveredState()
 		for _, recSub := range recoveredSubs {
 			// Create a subState
-			sub := &subState{}
+			sub := &subState{
+				subject:     channelName,
+				ackWait:     time.Duration(recSub.Sub.AckWaitInSecs) * time.Second,
+				acksPending: make(map[uint64]*pb.MsgProto),
+				store:       channel.Subs,
+			}
+
 			// Copy over fields from SubState protobuf
 			sub.SubState = *recSub.Sub
+
 			// Add the pending acks
-			for seqno, _ := range recSub.Seqnos {
+			for seqno := range recSub.Seqnos {
 				msg := channel.Msgs.Lookup(seqno)
 				if msg != nil {
 					sub.acksPending[seqno] = msg
 				}
 			}
+			// Update subStore based on the following information.
 			ss.updateState(sub, sub.AckInbox, sub.QGroup, sub.isDurable())
+
+			// Add to the array
+			allSubs = append(allSubs, sub)
 		}
+		// Clear the recovered state for this store since we don't need it
+		// anymore.
 		channel.Subs.ClearRecoverdState()
 	}
+	return allSubs
+}
+
+// Recreate NATS subscriptions on AckInbox for recovered subscriptions.
+func (s *StanServer) recreateAckInboxSubs(recoveredSubs []*subState) error {
+	var err error
+
+	for _, sub := range recoveredSubs {
+		sub.Lock()
+		// To be on the safe side, just check that the ackSub has not
+		// been created (may happen with durables that may reconnect maybe?)
+		if sub.ackSub == nil {
+			// Subscribe to acks
+			sub.ackSub, err = s.nc.Subscribe(sub.AckInbox, s.processAckMsg)
+		}
+		sub.Unlock()
+		if err != nil {
+			break
+		}
+	}
+	return err
 }
 
 // initSubscriptions will setup initial subscriptions for discovery etc.
@@ -413,12 +469,6 @@ func (s *StanServer) initSubscriptions() {
 	_, err = s.nc.Subscribe(s.closeRequests, s.processCloseRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to close request subject, %v\n", err))
-	}
-	// Flush to make sure those subscriptions are processed before the upper layer
-	// returns to the user.
-	err = s.nc.Flush()
-	if err != nil {
-		panic(fmt.Sprintf("Could not flush the request subscriptions, %v\n", err))
 	}
 
 	Debugf("STAN: discover subject: %s", discoverSubject)
@@ -801,11 +851,13 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 		return false
 	}
 
-	// Store in storage
-	if err := sub.store.AddSeqPending(sub.ID, m.Sequence); err != nil {
-		Errorf("STAN: [Client:%s] Unable to update subscription for %s:%v (%v)",
-			sub.ClientID, m.Subject, m.Sequence, err)
-		return false
+	// Store in storage (only if not a redelivery)
+	if !m.Redelivered {
+		if err := sub.store.AddSeqPending(sub.ID, m.Sequence); err != nil {
+			Errorf("STAN: [Client:%s] Unable to update subscription for %s:%v (%v)",
+				sub.ClientID, m.Subject, m.Sequence, err)
+			return false
+		}
 	}
 
 	// Store in ackPending.

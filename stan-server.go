@@ -4,7 +4,6 @@ package main
 
 import (
 	"flag"
-	"os"
 	"runtime"
 
 	"fmt"
@@ -27,10 +26,7 @@ func main() {
 
 	server.Noticef("Starting stan-server[%s] version %s", ID, stan.Version)
 
-	_, err := server.RunServer(ID, filestore, opts)
-	if err != nil {
-		os.Exit(1)
-	}
+	server.RunServer(ID, filestore, opts)
 
 	runtime.Goexit()
 }
