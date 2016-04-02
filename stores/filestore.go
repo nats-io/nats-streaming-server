@@ -308,6 +308,9 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 			err = msg.Unmarshal(ms.tmpMsgBuf[:msgSize])
 		}
 		if err == nil {
+			// Mark this message as redelivered.
+			msg.Redelivered = true
+
 			if fslice.firstMsg == nil {
 				fslice.firstMsg = msg
 
