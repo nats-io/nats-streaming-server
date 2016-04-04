@@ -19,8 +19,7 @@ func TestServerParameters(t *testing.T) {
 	s.Shutdown()
 
 	if "foo" != clusterID {
-		t.Fatal("Expected cluster ID of foo, found %s", s.ClusterID())
+		t.Fatalf("Expected cluster ID of foo, found %s\n", clusterID)
 	}
 	s.Shutdown()
-
 }
