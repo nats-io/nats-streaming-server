@@ -10,7 +10,6 @@ import (
 	natsd "github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/stan"
 	stand "github.com/nats-io/stan-server/server"
-	"time"
 )
 
 func main() {
@@ -25,7 +24,6 @@ func main() {
 }
 
 func parseFlags() (stand.ServerOptions, natsd.Options) {
-
 	var showVersion bool
 	var debugAndTrace bool
 	var showTLSHelp bool

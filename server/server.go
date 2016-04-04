@@ -375,22 +375,22 @@ func RunServer(ID string) *StanServer {
 // RunServerWithOpts will startup an embedded STAN server and a nats-server to support it.
 func RunServerWithOpts(stanOpts *ServerOptions, natsOpts *server.Options) *StanServer {
 	// Run a nats server by default
-	var sOpts ServerOptions
-	var nOpts server.Options
+	var sOpts *ServerOptions
+	var nOpts *server.Options
 
 	if stanOpts == nil {
-		sOpts = DefaultServerOptions
+		sOpts = &DefaultServerOptions
 	} else {
-		sOpts = *stanOpts
+		sOpts = stanOpts
 	}
 
 	if natsOpts == nil {
-		nOpts = DefaultNatsServerOptions
+		nOpts = &DefaultNatsServerOptions
 	} else {
-		nOpts = *natsOpts
+		nOpts = natsOpts
 	}
 
-	s := StanServer{clusterID: sOpts.ID, serverID: nuid.Next(), opts: &sOpts}
+	s := StanServer{clusterID: sOpts.ID, serverID: nuid.Next(), opts: sOpts}
 
 	// Create clientStore
 	s.clients = &clientStore{clients: make(map[string]*client)}
@@ -405,7 +405,7 @@ func RunServerWithOpts(stanOpts *ServerOptions, natsOpts *server.Options) *StanS
 	s.unsubRequests = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
 	s.closeRequests = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
 
-	s.natsServer = natsd.RunServer(&nOpts)
+	s.natsServer = natsd.RunServer(nOpts)
 
 	natsURL := fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port)
 	var err error
