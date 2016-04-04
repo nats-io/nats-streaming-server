@@ -35,9 +35,10 @@ const (
 	DefaultChannelLimit = 100
 
 	// Heartbeat intervals.
-	DefaultHeartBeatInterval   = 30 * time.Second
-	DefaultClientHBTimeout     = 10 * time.Second
-	DefaultMaxFailedHeartBeats = int((5 * time.Minute) / DefaultHeartBeatInterval)
+	DefaultHeartBeatInterval   = 200 * time.Millisecond
+	DefaultClientHBTimeout     = 150 * time.Millisecond
+	DefaultMaxFailedHeartBeats = int((2 * time.Second) / DefaultHeartBeatInterval)
+
 )
 
 // Errors.
@@ -503,12 +504,10 @@ func (s *StanServer) checkClientHealth(clientID string) {
 		return
 	}
 	client.Lock()
-	defer client.Unlock()
-
 	_, err := s.nc.Request(client.hbInbox, nil, DefaultClientHBTimeout)
 	if err != nil {
 		client.fhb++
-		if client.fhb > DefaultMaxFailedHeartBeats { // 5 minutes
+		if client.fhb > DefaultMaxFailedHeartBeats {
 			Debugf("STAN: [Client:%s]  Timed out on hearbeats.", client.clientID)
 			defer s.closeClient(client.clientID)
 		}
@@ -516,6 +515,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 		client.fhb = 0
 	}
 	client.hbt.Reset(DefaultHeartBeatInterval)
+	client.Unlock()
 }
 
 // Close a client
