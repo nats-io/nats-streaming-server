@@ -22,7 +22,9 @@ import (
 
 // A single STAN server
 
+// Server defaults.
 const (
+	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
 	DefaultPubPrefix      = "_STAN.pub"
 	DefaultSubPrefix      = "_STAN.sub"
@@ -38,7 +40,6 @@ const (
 	DefaultHeartBeatInterval   = 200 * time.Millisecond
 	DefaultClientHBTimeout     = 150 * time.Millisecond
 	DefaultMaxFailedHeartBeats = int((2 * time.Second) / DefaultHeartBeatInterval)
-
 )
 
 // Errors.
@@ -320,12 +321,21 @@ func (ms *msgStore) LastMsg() *pb.MsgProto {
 
 // ServerOptions
 type ServerOptions struct {
+	ID             string
 	DiscoverPrefix string
 }
 
-// Set the default discover prefix.
+// DefaultStanServerOptions are the default options for the server.
 var DefaultServerOptions = ServerOptions{
+	ID:             DefaultClusterID,
 	DiscoverPrefix: DefaultDiscoverPrefix,
+}
+
+// DefaultNatsServerOptions are default options for the NATS server
+var DefaultNatsServerOptions = server.Options{
+	Host:  "localhost",
+	Port:  4222,
+	NoLog: true,
 }
 
 func stanDisconnectedHandler(nc *nats.Conn) {
@@ -340,9 +350,8 @@ func stanErrorHandler(nc *nats.Conn, sub *nats.Subscription, err error) {
 	Errorf("STAN: Asynchronous error on subject %s: %s.", sub.Subject, err)
 }
 
-// Convenience API to set the default logger.
+// EnableDefaultLogger is a convenience API to set a default logger.
 func EnableDefaultLogger(opts *server.Options) {
-	//	var log natsd.Logger
 	colors := true
 	// Check to see if stderr is being redirected and if so turn off color
 	// Also turn off colors if we're running on Windows where os.Stderr.Stat() returns an invalid handle-error
@@ -356,10 +365,32 @@ func EnableDefaultLogger(opts *server.Options) {
 	s.SetLogger(log, opts.Debug, opts.Trace)
 }
 
-// RunServer will startup and embedded STAN server and a nats-server to support it.
-func RunServer(ID string, optsA ...*server.Options) *StanServer {
+// RunServer will startup an embedded STAN server and a nats-server to support it.
+func RunServer(ID string) *StanServer {
+	sOpts := DefaultServerOptions
+	sOpts.ID = ID
+	return RunServerWithOpts(&sOpts, &DefaultNatsServerOptions)
+}
+
+// RunServerWithOpts will startup an embedded STAN server and a nats-server to support it.
+func RunServerWithOpts(stanOpts *ServerOptions, natsOpts *server.Options) *StanServer {
 	// Run a nats server by default
-	s := StanServer{clusterID: ID, serverID: nuid.Next(), opts: &DefaultServerOptions}
+	var sOpts ServerOptions
+	var nOpts server.Options
+
+	if stanOpts == nil {
+		sOpts = DefaultServerOptions
+	} else {
+		sOpts = *stanOpts
+	}
+
+	if natsOpts == nil {
+		nOpts = DefaultNatsServerOptions
+	} else {
+		nOpts = *natsOpts
+	}
+
+	s := StanServer{clusterID: sOpts.ID, serverID: nuid.Next(), opts: &sOpts}
 
 	// Create clientStore
 	s.clients = &clientStore{clients: make(map[string]*client)}
@@ -374,22 +405,9 @@ func RunServer(ID string, optsA ...*server.Options) *StanServer {
 	s.unsubRequests = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
 	s.closeRequests = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
 
-	// hack
-	var opts *server.Options
-	if len(optsA) > 0 {
-		opts = optsA[0]
-	} else {
-		opts = &natsd.DefaultTestOptions
-	}
-	noLog = opts.NoLog
+	s.natsServer = natsd.RunServer(&nOpts)
 
-	if opts.Host == "" {
-		opts.Host = "localhost"
-	}
-
-	s.natsServer = natsd.RunServer(opts)
-
-	natsURL := fmt.Sprintf("nats://%s:%d", opts.Host, opts.Port)
+	natsURL := fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port)
 	var err error
 	if s.nc, err = nats.Connect(natsURL); err != nil {
 		panic(fmt.Sprintf("Can't connect to NATS server: %v\n", err))
@@ -456,6 +474,8 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 	req := &pb.ConnectRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil || req.ClientID == "" || req.HeartbeatInbox == "" {
+		Debugf("STAN: [Client:?] Invalid conn request: ClientID=%s, HBInbox=%s, err=%v.",
+			req.ClientID, req.HeartbeatInbox, err)
 		cr := &pb.ConnectResponse{Error: ErrInvalidConnReq.Error()}
 		b, _ := cr.Marshal()
 		s.nc.Publish(m.Reply, b)
@@ -1366,6 +1386,11 @@ func (s *StanServer) setSubStartSequence(sub *subState, sr *pb.SubscriptionReque
 		Debugf("STAN: [Client:%s] Sending from beginngin, subject=%s seq=%d",
 			sub.clientID, sub.subject, sub.lastSent)
 	}
+}
+
+// Shutdown will close our NATS connection and shutdown any embedded NATS server.
+func (s *StanServer) ClusterID() string {
+	return s.clusterID
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.
