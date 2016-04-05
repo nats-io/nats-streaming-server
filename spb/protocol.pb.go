@@ -27,49 +27,17 @@ var _ = proto.Marshal
 var _ = fmt.Errorf
 var _ = math.Inf
 
-// Enum for start position type.
-type StartPosition int32
-
-const (
-	StartPosition_NewOnly        StartPosition = 0
-	StartPosition_LastReceived   StartPosition = 1
-	StartPosition_TimeDeltaStart StartPosition = 2
-	StartPosition_SequenceStart  StartPosition = 3
-	StartPosition_First          StartPosition = 4
-)
-
-var StartPosition_name = map[int32]string{
-	0: "NewOnly",
-	1: "LastReceived",
-	2: "TimeDeltaStart",
-	3: "SequenceStart",
-	4: "First",
-}
-var StartPosition_value = map[string]int32{
-	"NewOnly":        0,
-	"LastReceived":   1,
-	"TimeDeltaStart": 2,
-	"SequenceStart":  3,
-	"First":          4,
-}
-
-func (x StartPosition) String() string {
-	return proto.EnumName(StartPosition_name, int32(x))
-}
-
 // A Subscription State
 type SubState struct {
-	ID             uint64        `protobuf:"varint,1,opt,name=ID,proto3" json:"ID,omitempty"`
-	ClientID       string        `protobuf:"bytes,2,opt,name=clientID,proto3" json:"clientID,omitempty"`
-	QGroup         string        `protobuf:"bytes,3,opt,name=qGroup,proto3" json:"qGroup,omitempty"`
-	Inbox          string        `protobuf:"bytes,4,opt,name=inbox,proto3" json:"inbox,omitempty"`
-	AckInbox       string        `protobuf:"bytes,5,opt,name=ackInbox,proto3" json:"ackInbox,omitempty"`
-	MaxInFlight    int32         `protobuf:"varint,6,opt,name=maxInFlight,proto3" json:"maxInFlight,omitempty"`
-	AckWaitInSecs  int32         `protobuf:"varint,7,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
-	DurableName    string        `protobuf:"bytes,8,opt,name=durableName,proto3" json:"durableName,omitempty"`
-	StartPosition  StartPosition `protobuf:"varint,9,opt,name=startPosition,proto3,enum=spb.StartPosition" json:"startPosition,omitempty"`
-	StartSequence  uint64        `protobuf:"varint,10,opt,name=startSequence,proto3" json:"startSequence,omitempty"`
-	StartTimeDelta int64         `protobuf:"varint,11,opt,name=startTimeDelta,proto3" json:"startTimeDelta,omitempty"`
+	ID            uint64 `protobuf:"varint,1,opt,name=ID,proto3" json:"ID,omitempty"`
+	ClientID      string `protobuf:"bytes,2,opt,name=clientID,proto3" json:"clientID,omitempty"`
+	QGroup        string `protobuf:"bytes,3,opt,name=qGroup,proto3" json:"qGroup,omitempty"`
+	Inbox         string `protobuf:"bytes,4,opt,name=inbox,proto3" json:"inbox,omitempty"`
+	AckInbox      string `protobuf:"bytes,5,opt,name=ackInbox,proto3" json:"ackInbox,omitempty"`
+	MaxInFlight   int32  `protobuf:"varint,6,opt,name=maxInFlight,proto3" json:"maxInFlight,omitempty"`
+	AckWaitInSecs int32  `protobuf:"varint,7,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
+	DurableName   string `protobuf:"bytes,8,opt,name=durableName,proto3" json:"durableName,omitempty"`
+	LastSent      uint64 `protobuf:"varint,9,opt,name=lastSent,proto3" json:"lastSent,omitempty"`
 }
 
 func (m *SubState) Reset()         { *m = SubState{} }
@@ -99,7 +67,6 @@ func init() {
 	proto.RegisterType((*SubState)(nil), "spb.SubState")
 	proto.RegisterType((*SubStateDelete)(nil), "spb.SubStateDelete")
 	proto.RegisterType((*SubStateUpdate)(nil), "spb.SubStateUpdate")
-	proto.RegisterEnum("spb.StartPosition", StartPosition_name, StartPosition_value)
 }
 func (m *SubState) Marshal() (data []byte, err error) {
 	size := m.Size()
@@ -161,20 +128,10 @@ func (m *SubState) MarshalTo(data []byte) (int, error) {
 		i = encodeVarintProtocol(data, i, uint64(len(m.DurableName)))
 		i += copy(data[i:], m.DurableName)
 	}
-	if m.StartPosition != 0 {
+	if m.LastSent != 0 {
 		data[i] = 0x48
 		i++
-		i = encodeVarintProtocol(data, i, uint64(m.StartPosition))
-	}
-	if m.StartSequence != 0 {
-		data[i] = 0x50
-		i++
-		i = encodeVarintProtocol(data, i, uint64(m.StartSequence))
-	}
-	if m.StartTimeDelta != 0 {
-		data[i] = 0x58
-		i++
-		i = encodeVarintProtocol(data, i, uint64(m.StartTimeDelta))
+		i = encodeVarintProtocol(data, i, uint64(m.LastSent))
 	}
 	return i, nil
 }
@@ -289,14 +246,8 @@ func (m *SubState) Size() (n int) {
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
-	if m.StartPosition != 0 {
-		n += 1 + sovProtocol(uint64(m.StartPosition))
-	}
-	if m.StartSequence != 0 {
-		n += 1 + sovProtocol(uint64(m.StartSequence))
-	}
-	if m.StartTimeDelta != 0 {
-		n += 1 + sovProtocol(uint64(m.StartTimeDelta))
+	if m.LastSent != 0 {
+		n += 1 + sovProtocol(uint64(m.LastSent))
 	}
 	return n
 }
@@ -568,9 +519,9 @@ func (m *SubState) Unmarshal(data []byte) error {
 			iNdEx = postIndex
 		case 9:
 			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field StartPosition", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field LastSent", wireType)
 			}
-			m.StartPosition = 0
+			m.LastSent = 0
 			for shift := uint(0); ; shift += 7 {
 				if shift >= 64 {
 					return ErrIntOverflowProtocol
@@ -580,45 +531,7 @@ func (m *SubState) Unmarshal(data []byte) error {
 				}
 				b := data[iNdEx]
 				iNdEx++
-				m.StartPosition |= (StartPosition(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		case 10:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field StartSequence", wireType)
-			}
-			m.StartSequence = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProtocol
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := data[iNdEx]
-				iNdEx++
-				m.StartSequence |= (uint64(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-		case 11:
-			if wireType != 0 {
-				return fmt.Errorf("proto: wrong wireType = %d for field StartTimeDelta", wireType)
-			}
-			m.StartTimeDelta = 0
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProtocol
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := data[iNdEx]
-				iNdEx++
-				m.StartTimeDelta |= (int64(b) & 0x7F) << shift
+				m.LastSent |= (uint64(b) & 0x7F) << shift
 				if b < 0x80 {
 					break
 				}

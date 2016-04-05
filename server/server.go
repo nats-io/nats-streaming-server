@@ -104,7 +104,6 @@ type subState struct {
 	spb.SubState // Embedded protobuf. Used for storage.
 	subject      string
 	qstate       *queueState
-	lastSent     uint64
 	// ackWait expressed as a duration so that we don't need
 	// to multiply by time.Second anytime we use this.
 	ackWait      time.Duration
@@ -672,7 +671,7 @@ func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto) bool {
 	}
 	sub.Lock()
 	didSend := s.sendMsgToSubAndUpdateLastSent(sub, m)
-	lastSent := sub.lastSent
+	lastSent := sub.LastSent
 	sub.Unlock()
 	if !didSend {
 		qs.stalled = true
@@ -884,7 +883,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 // Sub lock should be held before calling.
 func (s *StanServer) sendMsgToSubAndUpdateLastSent(sub *subState, m *pb.MsgProto) bool {
 	if s.sendMsgToSub(sub, m) {
-		sub.lastSent = m.Sequence
+		sub.LastSent = m.Sequence
 		return true
 	}
 	return false
@@ -1229,16 +1228,13 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	if sub == nil {
 		sub = &subState{
 			SubState: spb.SubState{
-				ClientID:       sr.ClientID,
-				QGroup:         sr.QGroup,
-				Inbox:          sr.Inbox,
-				AckInbox:       nats.NewInbox(),
-				MaxInFlight:    sr.MaxInFlight,
-				AckWaitInSecs:  sr.AckWaitInSecs,
-				DurableName:    sr.DurableName,
-				StartPosition:  spb.StartPosition(sr.StartPosition),
-				StartSequence:  sr.StartSequence,
-				StartTimeDelta: sr.StartTimeDelta,
+				ClientID:      sr.ClientID,
+				QGroup:        sr.QGroup,
+				Inbox:         sr.Inbox,
+				AckInbox:      nats.NewInbox(),
+				MaxInFlight:   sr.MaxInFlight,
+				AckWaitInSecs: sr.AckWaitInSecs,
+				DurableName:   sr.DurableName,
 			},
 			subject:     sr.Subject,
 			ackWait:     time.Duration(sr.AckWaitInSecs) * time.Second,
@@ -1368,7 +1364,7 @@ func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subStat
 	sub.Lock()
 	defer sub.Unlock()
 
-	for nextSeq := sub.lastSent + 1; ; nextSeq++ {
+	for nextSeq := sub.LastSent + 1; ; nextSeq++ {
 		nextMsg := cs.Msgs.Lookup(nextSeq)
 		if nextMsg == nil || s.sendMsgToSubAndUpdateLastSent(sub, nextMsg) == false {
 			break
@@ -1408,29 +1404,32 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 	sub.Lock()
 	defer sub.Unlock()
 
+	lastSent := uint64(0)
+
 	switch sr.StartPosition {
 	case pb.StartPosition_NewOnly:
-		sub.lastSent = cs.Msgs.LastSequence()
+		lastSent = cs.Msgs.LastSequence()
 		Debugf("STAN: [Client:%s] Sending new-only subject=%s, seq=%d.",
-			sub.ClientID, sub.subject, sub.lastSent)
+			sub.ClientID, sub.subject, lastSent)
 	case pb.StartPosition_LastReceived:
-		sub.lastSent = cs.Msgs.LastSequence() - 1
+		lastSent = cs.Msgs.LastSequence() - 1
 		Debugf("STAN: [Client:%s] Sending last message, subject=%s.",
 			sub.ClientID, sub.subject)
 	case pb.StartPosition_TimeDeltaStart:
 		startTime := time.Now().UnixNano() - sr.StartTimeDelta
-		sub.lastSent = s.getSequenceFromStartTime(cs, startTime) - 1
+		lastSent = s.getSequenceFromStartTime(cs, startTime) - 1
 		Debugf("STAN: [Client:%s] Sending from time, subject=%s time=%d seq=%d",
-			sub.ClientID, sub.subject, startTime, sub.lastSent)
+			sub.ClientID, sub.subject, startTime, lastSent)
 	case pb.StartPosition_SequenceStart:
-		sub.lastSent = sr.StartSequence - 1
+		lastSent = sr.StartSequence - 1
 		Debugf("STAN: [Client:%s] Sending from sequence, subject=%s seq=%d",
-			sub.ClientID, sub.subject, sub.lastSent)
+			sub.ClientID, sub.subject, lastSent)
 	case pb.StartPosition_First:
-		sub.lastSent = cs.Msgs.FirstSequence() - 1
+		lastSent = cs.Msgs.FirstSequence() - 1
 		Debugf("STAN: [Client:%s] Sending from beginngin, subject=%s seq=%d",
-			sub.ClientID, sub.subject, sub.lastSent)
+			sub.ClientID, sub.subject, lastSent)
 	}
+	sub.LastSent = lastSent
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.
