@@ -7,19 +7,23 @@ import (
 	"github.com/nats-io/stan-server/server"
 )
 
+// RunServer launches a server with the specified ID and default options.
 func RunServer(ID string) *server.StanServer {
 	return server.RunServer(ID)
 }
 
-// Helper to assist debugging
+// RunServerWithDebugTrace is a helper to assist debugging
 func RunServerWithDebugTrace(ID string, enableDebug, enableTrace bool) *server.StanServer {
-	opts := &natsd.Options{}
+	natsdOpts := &natsd.Options{}
 
-	opts.Debug = enableDebug
-	opts.Trace = enableTrace
-	opts.NoLog = false
+	natsdOpts.Debug = enableDebug
+	natsdOpts.Trace = enableTrace
+	natsdOpts.NoLog = false
 
-	server.EnableDefaultLogger(opts)
+	stanOpts := &server.DefaultServerOptions
+	stanOpts.ID = ID
 
-	return server.RunServer(ID, opts)
+	server.EnableDefaultLogger(natsdOpts)
+
+	return server.RunServerWithOpts(stanOpts, natsdOpts)
 }
