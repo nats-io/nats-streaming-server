@@ -54,11 +54,15 @@ var DefaultChannelLimits = ChannelLimits{
 // RecoveredState is a map of recovered subscriptions, keyed by channel name.
 type RecoveredState map[string][]*RecoveredSubState
 
+// PendingAcks is a map of messages waiting to be acknowledged, keyed by
+// message sequence number.
+type PendingAcks map[uint64]*pb.MsgProto
+
 // RecoveredSubState represents a recovered Subscription with a map
 // of pending messages.
 type RecoveredSubState struct {
 	Sub     *spb.SubState
-	Pending map[uint64]*pb.MsgProto
+	Pending PendingAcks
 }
 
 // ChannelStore contains a reference to both Subscription and Message stores.

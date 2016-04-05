@@ -185,7 +185,7 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, RecoveredS
 		for _, sub := range subs {
 			rss := &RecoveredSubState{
 				Sub:     sub.sub,
-				Pending: make(map[uint64]*pb.MsgProto),
+				Pending: make(PendingAcks),
 			}
 			// If we recovered any seqno...
 			if len(sub.seqnos) > 0 {
