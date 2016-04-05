@@ -89,18 +89,6 @@ func (gs *genericStore) HasChannel() bool {
 	return len(gs.channels) > 0
 }
 
-func (gs *genericStore) GetChannels() map[string]*ChannelStore {
-	gs.RLock()
-	defer gs.RUnlock()
-
-	// Make a copy of the map (note the values are still referenced).
-	newMap := make(map[string]*ChannelStore, len(gs.channels))
-	for k, v := range gs.channels {
-		newMap[k] = v
-	}
-	return newMap
-}
-
 // State returns message store statistics for a given channel ('*' for all)
 func (gs *genericStore) MsgsState(channel string) (numMessages int, byteSize uint64, err error) {
 	numMessages = 0
@@ -234,15 +222,15 @@ func (gms *genericMsgStore) LastMsg() *pb.MsgProto {
 	return gms.msgs[gms.last]
 }
 
-// GetSequenceFromStartTime returns the sequence of the first message whose
-// timestamp is greater or equal to given startTime.
-func (gms *genericMsgStore) GetSequenceFromStartTime(startTime int64) uint64 {
+// GetSequenceFromTimestamp returns the sequence of the first message whose
+// timestamp is greater or equal to given timestamp.
+func (gms *genericMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
 	gms.RLock()
 	defer gms.RUnlock()
 
 	index := sort.Search(len(gms.msgs), func(i int) bool {
 		m := gms.msgs[uint64(i)+gms.first]
-		if m.Timestamp >= startTime {
+		if m.Timestamp >= timestamp {
 			return true
 		}
 		return false
@@ -264,17 +252,6 @@ func (gms *genericMsgStore) Close() error {
 func (gss *genericSubStore) init(channel string, limits ChannelLimits) {
 	gss.subject = channel
 	gss.limits = limits
-}
-
-// GetRecoveredState returns the restored subscriptions.
-// Stores not supporting recovery must still return an empty map.
-func (gss *genericSubStore) GetRecoveredState() map[uint64]*RecoveredSubState {
-	return make(map[uint64]*RecoveredSubState, 0)
-}
-
-// ClearRecoveredState clears the internal state regarding recoverd subscriptions.
-func (gss *genericSubStore) ClearRecoverdState() {
-	// no-op
 }
 
 // CreateSub records a new subscription represented by SubState. On success,

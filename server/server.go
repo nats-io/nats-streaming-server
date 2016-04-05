@@ -310,10 +310,11 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) *StanServer {
 	}
 
 	var err error
+	var recoveredState stores.RecoveredState
 
 	// Create the store. So far either memory or file-based.
 	if rootDir != "" {
-		s.store, err = stores.NewFileStore(rootDir, limits)
+		s.store, recoveredState, err = stores.NewFileStore(rootDir, limits)
 	} else {
 		s.store, err = stores.NewMemoryStore(limits)
 	}
@@ -322,7 +323,7 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) *StanServer {
 	}
 
 	// Process recovered channels (if any).
-	recoveredSubs := s.processRecoveredChannels()
+	recoveredSubs := s.processRecoveredChannels(recoveredState)
 
 	// Generate Subjects
 	// FIXME(dlc) guid needs to be shared in cluster mode
@@ -357,8 +358,9 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) *StanServer {
 
 	s.initSubscriptions()
 
-	// Recreate NATS subscribers on AckInbox'es for recovered subscriptions.
-	if err := s.recreateAckInboxSubs(recoveredSubs); err != nil {
+	// Recreate NATS subscribers on AckInbox'es for recovered subscriptions
+	// and setup the ackTimer.
+	if err := s.finishSubsSetup(recoveredSubs); err != nil {
 		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
 	}
 
@@ -378,53 +380,45 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) *StanServer {
 // We don't use locking in there because there is no communication
 // with the NATS server and/or clients, so no chance that the state
 // changes while we are doing this.
-func (s *StanServer) processRecoveredChannels() []*subState {
+func (s *StanServer) processRecoveredChannels(state stores.RecoveredState) []*subState {
 	// We will return the recovered subscriptions
 	allSubs := make([]*subState, 0, 16)
 
-	channels := s.store.GetChannels()
-	for channelName, channel := range channels {
+	for channelName, recoveredSubs := range state {
+		// Lookup the ChannelStore from the store
+		channel := s.store.LookupChannel(channelName)
 		// Create the subStore for this channel
 		ss := s.addNewSubStoreToChannel(channel)
-
 		// Get the recovered subscriptions for this channel.
-		recoveredSubs := channel.Subs.GetRecoveredState()
 		for _, recSub := range recoveredSubs {
 			// Create a subState
 			sub := &subState{
 				subject:     channelName,
 				ackWait:     time.Duration(recSub.Sub.AckWaitInSecs) * time.Second,
-				acksPending: make(map[uint64]*pb.MsgProto),
+				acksPending: recSub.Pending,
 				store:       channel.Subs,
 			}
-
+			// Ensure acksPending is not nil
+			if sub.acksPending == nil {
+				// Create an empty map
+				sub.acksPending = make(map[uint64]*pb.MsgProto)
+			}
 			// Copy over fields from SubState protobuf
 			sub.SubState = *recSub.Sub
-
-			// Add the pending acks
-			for seqno := range recSub.Seqnos {
-				msg := channel.Msgs.Lookup(seqno)
-				if msg != nil {
-					sub.acksPending[seqno] = msg
-				}
-			}
 			// Update subStore based on the following information.
 			ss.updateState(sub, sub.AckInbox, sub.QGroup, sub.isDurable())
 
 			// Add to the array
 			allSubs = append(allSubs, sub)
 		}
-		// Clear the recovered state for this store since we don't need it
-		// anymore.
-		channel.Subs.ClearRecoverdState()
 	}
 	return allSubs
 }
 
-// Recreate NATS subscriptions on AckInbox for recovered subscriptions.
-func (s *StanServer) recreateAckInboxSubs(recoveredSubs []*subState) error {
+// Recreate NATS subscriptions on AckInbox and setup ackTimer for
+// recovered subscriptions
+func (s *StanServer) finishSubsSetup(recoveredSubs []*subState) error {
 	var err error
-
 	for _, sub := range recoveredSubs {
 		sub.Lock()
 		// To be on the safe side, just check that the ackSub has not
@@ -432,13 +426,25 @@ func (s *StanServer) recreateAckInboxSubs(recoveredSubs []*subState) error {
 		if sub.ackSub == nil {
 			// Subscribe to acks
 			sub.ackSub, err = s.nc.Subscribe(sub.AckInbox, s.processAckMsg)
+			if err != nil {
+				sub.Unlock()
+				return err
+			}
+		}
+		if sub.ackTimer == nil {
+			// Setup the redelivery timer. The callback will figure out
+			// if there are messages to redeliver or not and adjust the
+			// timer for us.
+			sub.ackTimer = time.AfterFunc(sub.ackWait, func() {
+				s.performAckExpirationRedelivery(sub)
+			})
+			// Set the floor to 0 since we don't know (or want to find
+			// out) the lowest msg's timestamp for this subscription.
+			sub.ackTimeFloor = 0
 		}
 		sub.Unlock()
-		if err != nil {
-			break
-		}
 	}
-	return err
+	return nil
 }
 
 // initSubscriptions will setup initial subscriptions for discovery etc.
@@ -609,16 +615,16 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	////////////////////////////////////////////////////////////////////////////
 
 	cs, err := s.assignAndStore(pm)
+	if err != nil {
+		Errorf("Error processing message: %v\n", err)
+		return
+	}
 
 	////////////////////////////////////////////////////////////////////////////
 	// Now trigger sends to any active subscribers
 	////////////////////////////////////////////////////////////////////////////
 
-	if err == nil {
-		s.processMsg(cs)
-	} else {
-		Errorf("Error processing message: %v\n", err)
-	}
+	s.processMsg(cs)
 }
 
 // FIXME(dlc) - place holder to pick sub that has least outstanding, should just sort,
@@ -887,10 +893,13 @@ func (s *StanServer) sendMsgToSubAndUpdateLastSent(sub *subState, m *pb.MsgProto
 // assignAndStore will assign a sequence ID and then store the message.
 func (s *StanServer) assignAndStore(pm *pb.PubMsg) (*stores.ChannelStore, error) {
 	cs, err := s.lookupOrCreateChannel(pm.Subject)
-	if err == nil {
-		_, err = cs.Msgs.Store(pm.Reply, pm.Data)
+	if err != nil {
+		return nil, err
 	}
-	return cs, err
+	if _, err := cs.Msgs.Store(pm.Reply, pm.Data); err != nil {
+		return nil, err
+	}
+	return cs, nil
 }
 
 // ackPublisher sends the ack for a message.
@@ -1391,7 +1400,7 @@ func (s *StanServer) startSequenceValid(cs *stores.ChannelStore, subject string,
 }
 
 func (s *StanServer) getSequenceFromStartTime(cs *stores.ChannelStore, startTime int64) uint64 {
-	return cs.Msgs.GetSequenceFromStartTime(startTime)
+	return cs.Msgs.GetSequenceFromTimestamp(startTime)
 }
 
 // Setup the start position for the subscriber.

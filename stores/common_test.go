@@ -5,6 +5,7 @@ package stores
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nuid"
 	"github.com/nats-io/stan-server/spb"
@@ -346,25 +347,23 @@ func testBasicSubStore(t *testing.T, s Store) {
 	}
 }
 
-func testSubStoreGetRecoveredNotNil(t *testing.T, s Store) {
-	cs, _, err := s.LookupOrCreateChannel("foo")
-	if err != nil {
-		t.Fatalf("Error creating channel foo: %v", err)
+func testGetSeqFromStartTime(t *testing.T, s Store) {
+	count := 100
+	msgs := make([]*pb.MsgProto, 0, count)
+	payload := []byte("hello")
+	for i := 0; i < count; i++ {
+		m := storeMsg(t, s, "foo", payload)
+		msgs = append(msgs, m)
+		time.Sleep(1 * time.Millisecond)
 	}
-	recSubs := cs.Subs.GetRecoveredState()
-	if recSubs == nil {
-		t.Fatal("Sub's RecoveredState should never be nil")
+
+	cs := s.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel foo should exist")
 	}
-	if len(recSubs) != 0 {
-		t.Fatalf("There should be no recovered subs, got %v", len(recSubs))
-	}
-	cs.Subs.ClearRecoverdState()
-	// Again, calling GetRecoveredState() should not return nil
-	recSubs = cs.Subs.GetRecoveredState()
-	if recSubs == nil {
-		t.Fatal("Sub's RecoveredState should never be nil")
-	}
-	if len(recSubs) != 0 {
-		t.Fatalf("There should be no recovered subs, got %v", len(recSubs))
+	startMsg := msgs[count/2]
+	seq := cs.Msgs.GetSequenceFromTimestamp(startMsg.Timestamp)
+	if seq != startMsg.Sequence {
+		t.Fatalf("Invalid start sequence. Expected %v got %v", startMsg.Sequence, seq)
 	}
 }

@@ -27,11 +27,6 @@ func Noticef(format string, v ...interface{}) {
 	server.Noticef(format, v...)
 }
 
-// Errorf generates error message
-func Errorf(format string, v ...interface{}) {
-	server.Errorf(format, v...)
-}
-
 // ChannelLimits defines some limits on the store interface
 type ChannelLimits struct {
 	// How many channels are allowed.
@@ -46,8 +41,9 @@ type ChannelLimits struct {
 	MaxSubs int
 }
 
-// DefaultChannelLimits are the default channel limits that a Store must
-// use when created. Use Store.SetChannelLimits() to change the limits.
+// DefaultChannelLimits are the channel limits that a Store must
+// use when none are specified to the Store constructor.
+// Store limits can be changed with the Store.SetChannelLimits() method.
 var DefaultChannelLimits = ChannelLimits{
 	MaxChannels: 100,
 	MaxNumMsgs:  1000000,
@@ -55,11 +51,14 @@ var DefaultChannelLimits = ChannelLimits{
 	MaxSubs:     1000,
 }
 
-// RecoveredSubState represents a recovered Subscription with the list
-// of pending message sequence numbers.
+// RecoveredState is a map of recovered subscriptions, keyed by channel name.
+type RecoveredState map[string][]*RecoveredSubState
+
+// RecoveredSubState represents a recovered Subscription with a map
+// of pending messages.
 type RecoveredSubState struct {
-	Sub    *spb.SubState
-	Seqnos map[uint64]struct{}
+	Sub     *spb.SubState
+	Pending map[uint64]*pb.MsgProto
 }
 
 // ChannelStore contains a reference to both Subscription and Message stores.
@@ -109,11 +108,6 @@ type Store interface {
 	// HasChannel returns true if this store has any channel.
 	HasChannel() bool
 
-	// GetChannels returns a map of all Store's ChannelStore.
-	// If the caller deletes entries, it will have no effect to the
-	// channels stored in this Store.
-	GetChannels() map[string]*ChannelStore
-
 	// State returns message store statistics for a given channel, or all
 	// if 'channel' is AllChannels.
 	MsgsState(channel string) (numMessages int, byteSize uint64, err error)
@@ -128,13 +122,6 @@ type Store interface {
 // a subscription is valid (that is, has not been deleted) when processing
 // updates.
 type SubStore interface {
-	// GetRecoveredState returns the restored subscriptions.
-	// Stores not supporting recovery MUST still return an empty map.
-	GetRecoveredState() map[uint64]*RecoveredSubState
-
-	// ClearRecoveredState clears the internal state regarding recoverd subscriptions.
-	ClearRecoverdState()
-
 	// CreateSub records a new subscription represented by SubState. On success,
 	// it records the subscription's ID in SubState.ID. This ID is to be used
 	// by the other SubStore methods.
@@ -174,9 +161,9 @@ type MsgStore interface {
 	// FirstAndLastSequence returns sequences for the first and last messages stored.
 	FirstAndLastSequence() (uint64, uint64)
 
-	// GetSequenceFromStartTime returns the sequence of the first message whose
-	// timestamp is greater or equal to given startTime.
-	GetSequenceFromStartTime(startTime int64) uint64
+	// GetSequenceFromTimestamp returns the sequence of the first message whose
+	// timestamp is greater or equal to given timestamp.
+	GetSequenceFromTimestamp(timestamp int64) uint64
 
 	// FirstMsg returns the first message stored.
 	FirstMsg() *pb.MsgProto

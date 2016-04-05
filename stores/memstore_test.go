@@ -3,6 +3,7 @@
 package stores
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -19,6 +20,17 @@ func TestMSBasicCreate(t *testing.T) {
 	defer ms.Close()
 
 	testBasicCreate(t, ms, "MEMORY")
+}
+
+func TestMSUseDefaultLimits(t *testing.T) {
+	ms, err := NewMemoryStore(nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer ms.Close()
+	if !reflect.DeepEqual(ms.limits, DefaultChannelLimits) {
+		t.Fatalf("Default limits are not used: %v\n", ms.limits)
+	}
 }
 
 func TestMSNothingRecoveredOnFreshStart(t *testing.T) {
@@ -105,9 +117,9 @@ func TestMSBasicSubStore(t *testing.T) {
 	testBasicSubStore(t, ms)
 }
 
-func TestMSSubStoreGetRecoveredNotNil(t *testing.T) {
+func TestMSGetSeqFromTimestamp(t *testing.T) {
 	ms := createDefaultMemStore(t)
 	defer ms.Close()
 
-	testSubStoreGetRecoveredNotNil(t, ms)
+	testGetSeqFromStartTime(t, ms)
 }
