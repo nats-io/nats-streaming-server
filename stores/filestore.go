@@ -283,11 +283,11 @@ func (fs *FileStore) LookupOrCreateChannel(channel string) (*ChannelStore, bool,
 
 // For STAN tests when RunServer defaults to a filestore
 //func (fs *FileStore) Close() error {
-//    err := fs.genericStore.Close()
-//    if err == nil {
-//    	err = os.RemoveAll(fs.rootDir)
-//    }
-//    return err
+//	err := fs.genericStore.Close()
+//	if err == nil {
+//		err = os.RemoveAll(fs.rootDir)
+//	}
+//	return err
 //}
 
 ////////////////////////////////////////////////////////////////////////////

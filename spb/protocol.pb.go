@@ -38,6 +38,7 @@ type SubState struct {
 	AckWaitInSecs int32  `protobuf:"varint,7,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
 	DurableName   string `protobuf:"bytes,8,opt,name=durableName,proto3" json:"durableName,omitempty"`
 	LastSent      uint64 `protobuf:"varint,9,opt,name=lastSent,proto3" json:"lastSent,omitempty"`
+	HbInbox       string `protobuf:"bytes,10,opt,name=hbInbox,proto3" json:"hbInbox,omitempty"`
 }
 
 func (m *SubState) Reset()         { *m = SubState{} }
@@ -132,6 +133,12 @@ func (m *SubState) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x48
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.LastSent))
+	}
+	if len(m.HbInbox) > 0 {
+		data[i] = 0x52
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.HbInbox)))
+		i += copy(data[i:], m.HbInbox)
 	}
 	return i, nil
 }
@@ -248,6 +255,10 @@ func (m *SubState) Size() (n int) {
 	}
 	if m.LastSent != 0 {
 		n += 1 + sovProtocol(uint64(m.LastSent))
+	}
+	l = len(m.HbInbox)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
 	}
 	return n
 }
@@ -536,6 +547,35 @@ func (m *SubState) Unmarshal(data []byte) error {
 					break
 				}
 			}
+		case 10:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field HbInbox", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.HbInbox = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipProtocol(data[iNdEx:])

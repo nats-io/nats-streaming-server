@@ -60,6 +60,7 @@ var (
 	ErrInvalidAckWait  = errors.New("stan: invalid ack wait time, should be >= 1s")
 	ErrDupDurable      = errors.New("stan: duplicate durable registration")
 	ErrDurableQueue    = errors.New("stan: queue subscribers can't be durable")
+	ErrUnknownClient   = errors.New("stan: unkwown clientID")
 )
 
 type StanServer struct {
@@ -234,9 +235,9 @@ func (ss *subStore) Remove(sub *subState) {
 
 	// Delete ourselves from the list
 	if qs != nil {
-		qs.subs = sub.deleteFromList(qs.subs)
+		qs.subs, _ = sub.deleteFromList(qs.subs)
 	} else {
-		ss.psubs = sub.deleteFromList(ss.psubs)
+		ss.psubs, _ = sub.deleteFromList(ss.psubs)
 	}
 }
 
@@ -244,7 +245,8 @@ func (ss *subStore) Remove(sub *subState) {
 func (ss *subStore) LookupByDurable(durableName string) *subState {
 	ss.RLock()
 	defer ss.RUnlock()
-	return ss.durables[durableName]
+	sub := ss.durables[durableName]
+	return sub
 }
 
 // Lookup by ackInbox name.
@@ -357,9 +359,9 @@ func RunServer(ID, rootDir string, optsA ...*server.Options) *StanServer {
 
 	s.initSubscriptions()
 
-	// Recreate NATS subscribers on AckInbox'es for recovered subscriptions
-	// and setup the ackTimer.
-	if err := s.finishSubsSetup(recoveredSubs); err != nil {
+	// Do some post recovery processing (create subs on AckInbox, setup
+	// some timers, etc...)
+	if err := s.postRecoveryProcessing(recoveredSubs); err != nil {
 		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
 	}
 
@@ -406,6 +408,10 @@ func (s *StanServer) processRecoveredChannels(state stores.RecoveredState) []*su
 			sub.SubState = *recSub.Sub
 			// Update subStore based on the following information.
 			ss.updateState(sub, sub.AckInbox, sub.QGroup, sub.isDurable())
+			// Recreate the client if need be
+			c, _ := s.clients.Register(sub.ClientID, sub.HbInbox)
+			// Add the subscription to the client
+			c.subs = append(c.subs, sub)
 
 			// Add to the array
 			allSubs = append(allSubs, sub)
@@ -414,9 +420,9 @@ func (s *StanServer) processRecoveredChannels(state stores.RecoveredState) []*su
 	return allSubs
 }
 
-// Recreate NATS subscriptions on AckInbox and setup ackTimer for
-// recovered subscriptions
-func (s *StanServer) finishSubsSetup(recoveredSubs []*subState) error {
+// Do some final setup. Be minded of locking here since the server
+// has started communication with NATS server/clients.
+func (s *StanServer) postRecoveryProcessing(recoveredSubs []*subState) error {
 	var err error
 	for _, sub := range recoveredSubs {
 		sub.Lock()
@@ -442,6 +448,15 @@ func (s *StanServer) finishSubsSetup(recoveredSubs []*subState) error {
 			sub.ackTimeFloor = 0
 		}
 		sub.Unlock()
+	}
+	// Go through the list of clients and ensure their Hb timer is set.
+	clients := s.clients.GetClients()
+	for _, c := range clients {
+		c.Lock()
+		if c.hbt == nil {
+			c.hbt = time.AfterFunc(DefaultHeartBeatInterval, func() { s.checkClientHealth(c.clientID) })
+		}
+		c.Unlock()
 	}
 	return nil
 }
@@ -495,22 +510,15 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 		return
 	}
 
-	// Check if already connected.
-	if c := s.clients.Lookup(req.ClientID); c != nil {
+	// Register if not already
+	client, isNew := s.clients.Register(req.ClientID, req.HeartbeatInbox)
+	if !isNew {
 		cr := &pb.ConnectResponse{Error: ErrInvalidClient.Error()}
 		b, _ := cr.Marshal()
 		s.nc.Publish(m.Reply, b)
-		Debugf("STAN: [Client:%s] Connect failed; already connected.", c.clientID)
+		Debugf("STAN: [Client:%s] Connect failed; already connected.", client.clientID)
 		return
 	}
-
-	// Register the new connection.
-	client := &client{
-		clientID: req.ClientID,
-		hbInbox:  req.HeartbeatInbox,
-		subs:     make([]*subState, 0, 4),
-	}
-	s.clients.Register(client)
 
 	// Respond with our ConnectResponse
 	cr := &pb.ConnectResponse{
@@ -744,15 +752,22 @@ func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	floorTimestamp := sub.ackTimeFloor
 	sub.RUnlock()
 
-	// If the client has some failed heartbeats, ignore this request.
+	// If we don't find the client, we are done.
 	client := s.clients.Lookup(clientID)
 	if client == nil {
 		return
 	}
+	// If the client has some failed heartbeats, ignore this request.
 	client.RLock()
 	fhbs := client.fhb
 	client.RUnlock()
 	if fhbs != 0 {
+		// Reset the timer.
+		sub.Lock()
+		if sub.ackTimer != nil {
+			sub.ackTimer.Reset(sub.ackWait)
+		}
+		sub.Unlock()
 		return
 	}
 
@@ -912,16 +927,16 @@ func (s *StanServer) ackPublisher(pm *pb.PubMsg, reply string) {
 }
 
 // Delete a sub from a given list.
-func (sub *subState) deleteFromList(sl []*subState) []*subState {
+func (sub *subState) deleteFromList(sl []*subState) ([]*subState, bool) {
 	for i := 0; i < len(sl); i++ {
 		if sl[i] == sub {
 			sl[i] = sl[len(sl)-1]
 			sl[len(sl)-1] = nil
 			sl = sl[:len(sl)-1]
-			return shrinkSubListIfNeeded(sl)
+			return shrinkSubListIfNeeded(sl), true
 		}
 	}
-	return sl
+	return sl, false
 }
 
 // Checks if we need to do a resize. This is for very large growth then
@@ -942,14 +957,8 @@ func shrinkSubListIfNeeded(sl []*subState) []*subState {
 
 // removeAllNonDurableSubscribers will remove all non-durable subscribers for the client.
 func (s *StanServer) removeAllNonDurableSubscribers(clientID string) {
-	client := s.clients.Lookup(clientID)
-	if client == nil {
-		return
-	}
-	client.RLock()
-	defer client.RUnlock()
-
-	for _, sub := range client.subs {
+	subs := s.clients.GetSubs(clientID)
+	for _, sub := range subs {
 		sub.Lock()
 		sub.clearAckTimer()
 		subject := sub.subject
@@ -961,6 +970,8 @@ func (s *StanServer) removeAllNonDurableSubscribers(clientID string) {
 		if isDurable {
 			continue
 		}
+
+		// Remove from subStore
 		cs := s.store.LookupChannel(subject)
 		if cs == nil {
 			continue
@@ -1001,11 +1012,13 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 	ss.Remove(sub)
 
 	// Remove from Client
-	if client := s.clients.Lookup(req.ClientID); client != nil {
-		Debugf("STAN: [Client:%s] Unsubscribing subject=%s.",
-			req.ClientID, sub.subject)
-		client.RemoveSub(sub)
+	if s.clients.RemoveSub(req.ClientID, sub) == nil {
+		Errorf("STAN: [Client:%s] unsub request for missing client", req.ClientID)
+		s.sendSubscriptionResponseErr(m.Reply, ErrUnknownClient)
+		return
 	}
+
+	Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", req.ClientID, sub.subject)
 
 	// Create a non-error response
 	resp := &pb.SubscriptionResponse{AckInbox: req.Inbox}
@@ -1109,15 +1122,21 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 
 func (s *StanServer) addSubscription(cs *stores.ChannelStore, sub *subState) error {
 
-	// Store this subscription
-	ss := cs.UserData.(*subStore)
-	if err := ss.Store(sub); err != nil {
-		return err
-	}
+	// Store in client
+	if client := s.clients.AddSub(sub.ClientID, sub); client != nil {
 
-	// Also store in client
-	if client := s.clients.Lookup(sub.ClientID); client != nil {
-		client.AddSub(sub)
+		// Piggy-back the heartbeat inbox in the subscription, so
+		// that we can re-create the clients map on restart without
+		// the need for a dedicated persistent client store.
+		sub.HbInbox = client.hbInbox
+
+		// Store this subscription
+		ss := cs.UserData.(*subStore)
+		if err := ss.Store(sub); err != nil {
+			return err
+		}
+	} else {
+		return fmt.Errorf("can't find clientID: %v", sub.ClientID)
 	}
 
 	Debugf("STAN: [Client:%s] Subscribed. subject=%s, inbox=%s.",
@@ -1247,7 +1266,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 		// add the subscription to stan
 		if err := s.addSubscription(cs, sub); err != nil {
-			Errorf("STAN: Unable to persist subscription for %s.", sr.Subject)
+			Errorf("STAN: Unable to persist subscription for %s: %v", sr.Subject, err)
 			s.sendSubscriptionResponseErr(m.Reply, err)
 			return
 		}
