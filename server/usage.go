@@ -11,7 +11,9 @@ var usageStr = `
 Usage: stan-server [options]
 
 STAN Options:
-        --cluster_id  <cluster ID>   Cluster ID (default: test-cluster)
+        -cluster_id  <cluster ID>    Cluster ID (default: test-cluster)
+        -store <type>                Store type: MEMORY|FILE (default: MEMORY)
+        -dir <directory>             For FILE store type, this is the root directory
 
 Embedded NATS Server Options:
     -a, --addr <host>                Bind to host address (default: 0.0.0.0)

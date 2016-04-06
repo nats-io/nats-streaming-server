@@ -4,12 +4,15 @@ package main
 
 import (
 	"flag"
+	"os"
 	"runtime"
+	"strings"
 
 	"fmt"
 	natsd "github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/stan"
 	stand "github.com/nats-io/stan-server/server"
+	"github.com/nats-io/stan-server/stores"
 )
 
 func main() {
@@ -31,6 +34,8 @@ func parseFlags() (stand.ServerOptions, natsd.Options) {
 
 	stanOpts := stand.DefaultServerOptions
 	flag.StringVar(&stanOpts.ID, "cluster_id", stand.DefaultClusterID, "Cluster ID.")
+	flag.StringVar(&stanOpts.StoreType, "store", stores.TypeMemory, fmt.Sprintf("Store type: (%s|%s)", stores.TypeMemory, stores.TypeFile))
+	flag.StringVar(&stanOpts.FilestoreDir, "dir", "", "Root directory")
 
 	natsOpts := natsd.Options{}
 
@@ -96,10 +101,27 @@ func parseFlags() (stand.ServerOptions, natsd.Options) {
 		natsd.PrintTLSHelpAndDie()
 	}
 
+	// Ensure some options are set based on selected store type
+	checkStoreOpts(&stanOpts)
+
 	// One flag can set multiple options.
 	if debugAndTrace {
 		natsOpts.Trace, natsOpts.Debug = true, true
 	}
 
 	return stanOpts, natsOpts
+}
+
+func checkStoreOpts(opts *stand.ServerOptions) {
+	// Convert the user input to upper case
+	storeType := strings.ToUpper(opts.StoreType)
+
+	// If FILE, check some parameters
+	if storeType == stores.TypeFile {
+		if opts.FilestoreDir == "" {
+			fmt.Printf("\nFor %v stores, option \"-dir\" must be specified\n", stores.TypeFile)
+			flag.Usage()
+			os.Exit(0)
+		}
+	}
 }
