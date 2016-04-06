@@ -19,7 +19,7 @@ func TestMSBasicCreate(t *testing.T) {
 	ms := createDefaultMemStore(t)
 	defer ms.Close()
 
-	testBasicCreate(t, ms, "MEMORY")
+	testBasicCreate(t, ms, TypeMemory)
 }
 
 func TestMSUseDefaultLimits(t *testing.T) {

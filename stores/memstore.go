@@ -32,7 +32,7 @@ type MemoryMsgStore struct {
 // DefaultChannelLimits.
 func NewMemoryStore(limits *ChannelLimits) (*MemoryStore, error) {
 	ms := &MemoryStore{}
-	ms.init("MEMORY", limits)
+	ms.init(TypeMemory, limits)
 	return ms, nil
 }
 

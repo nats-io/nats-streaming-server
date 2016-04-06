@@ -109,10 +109,10 @@ func openFile(fileName string) (*os.File, error) {
 func checkFileVersion(r io.Reader) error {
 	fv, err := util.ReadInt(r)
 	if err != nil {
-		return fmt.Errorf("Unable to verify file version: %v", err)
+		return fmt.Errorf("unable to verify file version: %v", err)
 	}
 	if fv == 0 || fv > fileVersion {
-		return fmt.Errorf("Unsupported file version: %v (supports [1..%v])", fv, fileVersion)
+		return fmt.Errorf("unsupported file version: %v (supports [1..%v])", fv, fileVersion)
 	}
 	return nil
 }
@@ -138,10 +138,10 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, RecoveredS
 	fs := &FileStore{
 		rootDir: rootDir,
 	}
-	fs.init("FILESTORE", limits)
+	fs.init(TypeFile, limits)
 
 	if err := os.MkdirAll(rootDir, os.ModeDir+os.ModePerm); err != nil && !os.IsExist(err) {
-		return nil, nil, fmt.Errorf("Unable to create the root directory [%s]: %v", rootDir, err)
+		return nil, nil, fmt.Errorf("unable to create the root directory [%s]: %v", rootDir, err)
 	}
 
 	var err error
@@ -338,7 +338,7 @@ func newFileMsgStore(channelDirName, channel string, limits ChannelLimits, doRec
 		if doRecover {
 			action = "recover"
 		}
-		err = fmt.Errorf("Unable to %s message store for [%s]: %v", action, channel, err)
+		err = fmt.Errorf("unable to %s message store for [%s]: %v", action, channel, err)
 		return nil, err
 	}
 	return ms, nil
@@ -599,7 +599,7 @@ func newFileSubStore(channelDirName, channel string, limits ChannelLimits, doRec
 		ss.Close()
 		ss = nil
 		subs = nil
-		return nil, nil, fmt.Errorf("Unable to create subscription store for [%s]: %v", channel, err)
+		return nil, nil, fmt.Errorf("unable to create subscription store for [%s]: %v", channel, err)
 	}
 	return ss, subs, nil
 }
@@ -690,7 +690,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 			}
 			break
 		default:
-			return nil, fmt.Errorf("Unexpected record type: %v", recType)
+			return nil, fmt.Errorf("unexpected record type: %v", recType)
 		}
 	}
 	return recoveredSubs, nil

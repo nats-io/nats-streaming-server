@@ -12,6 +12,11 @@ import (
 )
 
 const (
+	TypeMemory = "MEMORY"
+	TypeFile   = "FILE"
+)
+
+const (
 	// AllChannels allows to get state for all channels.
 	AllChannels = "*"
 )

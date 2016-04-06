@@ -41,7 +41,7 @@ func TestFSBasicCreate(t *testing.T) {
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
-	testBasicCreate(t, fs, "FILESTORE")
+	testBasicCreate(t, fs, TypeFile)
 }
 
 func TestFSUseDefaultLimits(t *testing.T) {
