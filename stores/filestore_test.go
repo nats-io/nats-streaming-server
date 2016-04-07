@@ -498,6 +498,76 @@ func TestFSRecoverSubUpdatesForDeleteSubOK(t *testing.T) {
 	}
 }
 
+func TestFSNoSubIdCollisionAfterRecovery(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Store a subscription.
+	sub1 := storeSub(t, fs, "foo")
+
+	// Close the store
+	fs.Close()
+
+	// Recovers now
+	fs, state, err := NewFileStore(defaultDataStore, nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	if !fs.HasChannel() || state == nil || len(state) != 1 || state["foo"] == nil {
+		t.Fatal("Channel foo should have been recovered")
+	}
+
+	// sub1 should be recovered
+	recoveredSubs := state["foo"]
+	if len(recoveredSubs) != 1 {
+		t.Fatalf("A subscription should have been recovered, got %v", len(recoveredSubs))
+	}
+
+	// Store new subscription
+	sub2 := storeSub(t, fs, "foo")
+
+	if sub2 <= sub1 {
+		t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", sub1+1, sub2)
+	}
+
+	// Store a delete subscription with higher ID and make sure
+	// we use something higher on restart
+	delSub := uint64(sub1 + 10)
+	storeSubDelete(t, fs, "foo", delSub)
+
+	// Close the store
+	fs.Close()
+
+	// Recovers now
+	fs, state, err = NewFileStore(defaultDataStore, nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	if !fs.HasChannel() || state == nil || len(state) != 1 || state["foo"] == nil {
+		t.Fatal("Channel foo should have been recovered")
+	}
+
+	// sub1 & sub2 should be recovered
+	recoveredSubs = state["foo"]
+	if len(recoveredSubs) != 2 {
+		t.Fatalf("A subscription should have been recovered, got %v", len(recoveredSubs))
+	}
+
+	// Store new subscription
+	sub3 := storeSub(t, fs, "foo")
+
+	if sub3 <= sub1 || sub3 <= delSub {
+		t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", delSub+1, sub3)
+	}
+}
+
 func TestFSGetSeqFromTimestamp(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
