@@ -4,6 +4,7 @@
 rm -rf ./cov
 mkdir cov
 go test -v -covermode=atomic -coverprofile=./cov/server.out ./server
+go test -v -covermode=atomic -coverprofile=./cov/stores.out ./stores
 go test -v -covermode=atomic -coverprofile=./cov/test.out ./test
 gocovmerge ./cov/*.out > acc.out
 rm -rf ./cov
