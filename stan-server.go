@@ -26,13 +26,13 @@ func main() {
 	runtime.Goexit()
 }
 
-func parseFlags() (stand.ServerOptions, natsd.Options) {
+func parseFlags() (stand.Options, natsd.Options) {
 	var showVersion bool
 	var debugAndTrace bool
 	var showTLSHelp bool
 	var configFile string
 
-	stanOpts := stand.DefaultServerOptions
+	stanOpts := stand.DefaultOptions
 	flag.StringVar(&stanOpts.ID, "cluster_id", stand.DefaultClusterID, "Cluster ID.")
 	flag.StringVar(&stanOpts.StoreType, "store", stores.TypeMemory, fmt.Sprintf("Store type: (%s|%s)", stores.TypeMemory, stores.TypeFile))
 	flag.StringVar(&stanOpts.FilestoreDir, "dir", "", "Root directory")
@@ -112,7 +112,7 @@ func parseFlags() (stand.ServerOptions, natsd.Options) {
 	return stanOpts, natsOpts
 }
 
-func checkStoreOpts(opts *stand.ServerOptions) {
+func checkStoreOpts(opts *stand.Options) {
 	// Convert the user input to upper case
 	storeType := strings.ToUpper(opts.StoreType)
 
