@@ -14,6 +14,11 @@ STAN Options:
         -cluster_id  <cluster ID>    Cluster ID (default: test-cluster)
         -store <type>                Store type: MEMORY|FILE (default: MEMORY)
         -dir <directory>             For FILE store type, this is the root directory
+        -max_channels <number>       Max number of channels
+        -max_subs <number>           Max number of subscriptions per channel
+        -max_msgs <number>           Max number of messages per channel
+        -max_bytes <number>          Max messages total size per channel
+
 
 Embedded NATS Server Options:
     -a, --addr <host>                Bind to host address (default: 0.0.0.0)
