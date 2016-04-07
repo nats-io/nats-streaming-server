@@ -1,17 +1,22 @@
 language: go
 sudo: false
 go:
-- 1.5
+- 1.6
 before_install:
-- echo -e "machine github.com\n login $TRAVIS_CI_TOKEN" >>
-  ~/.netrc
+- echo -e "machine github.com\n login $TRAVIS_CI_TOKEN" >> ~/.netrc
 install:
 - go get -t ./...
 - go get github.com/nats-io/gnatsd
+- go get github.com/mattn/goveralls
+- go get github.com/wadey/gocovmerge
 script:
+- go build
 - go fmt ./...
 - go vet ./...
+- go test -i -race ./...
 - go test -race -v ./...
+- "./scripts/cov.sh TRAVIS"
 env:
   global:
-    secure: W/YEfiLslsEe2M9QsxQH0DoW1ow5tJcFi58vG/eLJNQBiJ4jCIeyKTdM+YyigoaN4boS9RxllEiN9aG63dQEvo4oNJgDRZG559g9b6PZu8/kdkW3XGSjMCeP7t6ZIEYOSEC85Rmhk9TjbxvGoO8tNlLL84HLN+T5Gsp9xTUiR4+NaNuvdggJCYbuzwRNFBwRV4n9y5MWmYmlhpn0yU7Rhy8OZHvhoXCMqlQNwdfPQxfdqFJM2qwiptNimeEcacSr4cJKXTnPwYWadniqGEAX6LQ+FzBlu3jMkV7tQQJI9zHd47trxTbruZxLOBVqXxEIEdCyMjqV2NA1W0CiJ2KdTEEJKBySSOql6837ecNalvTpOQtAE5SPc7bN0kXZEgG90RVJHZkLNs11Hs4vISO0FdKvps/tJMsU2xSSPKeaoTP2srqWHrMFGqcJw7rE4xtoCExJhLymhkxRYIM0YsR0I2Q5yTcPHn2okm39owswWWo4sIH7GBmKqe8FPyKV3gRSzGZ83Vv64DgAk3hMP8P597sUUM8xkKfT22IYqRZlYxm9vgfUfue0rct7nDw1mi5wPIPoT/T0p03NKnyS5AG1XSm5FXM6hCgmXy3vd/2SQTwcFim+J7xz35T1LBJaqORnvBrVXz5+iRCzc2N955YpUD+wheXm1+gcam57rnzijcE=
+  - secure: W/YEfiLslsEe2M9QsxQH0DoW1ow5tJcFi58vG/eLJNQBiJ4jCIeyKTdM+YyigoaN4boS9RxllEiN9aG63dQEvo4oNJgDRZG559g9b6PZu8/kdkW3XGSjMCeP7t6ZIEYOSEC85Rmhk9TjbxvGoO8tNlLL84HLN+T5Gsp9xTUiR4+NaNuvdggJCYbuzwRNFBwRV4n9y5MWmYmlhpn0yU7Rhy8OZHvhoXCMqlQNwdfPQxfdqFJM2qwiptNimeEcacSr4cJKXTnPwYWadniqGEAX6LQ+FzBlu3jMkV7tQQJI9zHd47trxTbruZxLOBVqXxEIEdCyMjqV2NA1W0CiJ2KdTEEJKBySSOql6837ecNalvTpOQtAE5SPc7bN0kXZEgG90RVJHZkLNs11Hs4vISO0FdKvps/tJMsU2xSSPKeaoTP2srqWHrMFGqcJw7rE4xtoCExJhLymhkxRYIM0YsR0I2Q5yTcPHn2okm39owswWWo4sIH7GBmKqe8FPyKV3gRSzGZ83Vv64DgAk3hMP8P597sUUM8xkKfT22IYqRZlYxm9vgfUfue0rct7nDw1mi5wPIPoT/T0p03NKnyS5AG1XSm5FXM6hCgmXy3vd/2SQTwcFim+J7xz35T1LBJaqORnvBrVXz5+iRCzc2N955YpUD+wheXm1+gcam57rnzijcE=
+  - secure: nUIIhLrsH0zkultEwP+dUe/ODyfGCNCsdJzzb9iV8FXtRR2XpEE9eIV9Cg/XBtXUadG/7fp+5Z9QKrxdRMKw7okCJuJL9R6t5HQ++k2WUWEEfy9Yp4ncDRAsRou/IghLZKaSIBR1oUaxDHuYY0lbUFkZiv6vFJ8kxNRsbd4kF+J+vkNW/hSn53Y2NEzAMKwjZEx/eYQ/7X1hUejJcXF3D6VVlYTdivxxHwN0dtqf+doQt5t1kdYXAAHcyQZbZe+GRp05LmWyuw4vcVuWPmtglf1KBdH8agvGZ1BADnlV0kBcLsvoaNNPiXdlwtUpYpoeg7hlE+mb8ylB2WFF07mU2UpbC+pSzGxwuxjlHopK9IuKg4OIRzH1G4/K03s8CCZalU6GefsxJZlne/ZasqvwA3njlrcZVeHMyqnYEsY3/27uaEOfFTF4r7hvgkw1PDvnhCPX4RWUBohXnZALUCyOLGICD2vAtzkFrmzKHOjt+J4safaCorfIkbhfQsXcOu+seGdpJMe1+mzQouScw0qrfBBcXNChc8P/hEVp+BljArDuQdH5S2LhZiBx5L3PD6l0nbQjAgZhF8Qa/pDBJZs0baDtn30OnSCEYUPb3vSq6zNsYyrCOxWufYjCujmVkTMlmgoo78JqwBTXv7HH4pQbPyqAK0AmuRvcb+mmGbxCRG4=
