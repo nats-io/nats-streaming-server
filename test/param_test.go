@@ -7,7 +7,7 @@ import (
 
 // TestServerParameters
 func TestServerParameters(t *testing.T) {
-	serverOpts := &server.DefaultServerOptions
+	serverOpts := &server.DefaultOptions
 
 	// Test passing nil options
 	s := server.RunServerWithOpts(nil, nil)

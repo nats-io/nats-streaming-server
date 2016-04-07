@@ -12,8 +12,10 @@ import (
 )
 
 const (
+	// TypeMemory is the store type name for memory based stores
 	TypeMemory = "MEMORY"
-	TypeFile   = "FILE"
+	// TypeFile is the store type name for file based stores
+	TypeFile = "FILE"
 )
 
 const (

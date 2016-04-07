@@ -65,6 +65,7 @@ var (
 	ErrUnknownClient   = errors.New("stan: unkwown clientID")
 )
 
+// StanServer structure represents the STAN server
 type StanServer struct {
 	clusterID     string
 	serverID      string
@@ -73,7 +74,7 @@ type StanServer struct {
 	unsubRequests string // Subject we receive unsubscribe requests on.
 	closeRequests string // Subject we receive close requests on.
 	natsServer    *server.Server
-	opts          *ServerOptions
+	opts          *Options
 	nc            *nats.Conn
 
 	// Clients
@@ -258,16 +259,16 @@ func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 	return ss.acks[ackInbox]
 }
 
-// ServerOptions
-type ServerOptions struct {
+// Options for STAN Server
+type Options struct {
 	ID             string
 	DiscoverPrefix string
 	StoreType      string
 	FilestoreDir   string
 }
 
-// DefaultStanServerOptions are the default options for the server.
-var DefaultServerOptions = ServerOptions{
+// DefaultOptions are default options for the STAN server
+var DefaultOptions = Options{
 	ID:             DefaultClusterID,
 	DiscoverPrefix: DefaultDiscoverPrefix,
 	StoreType:      DefaultStoreType,
@@ -309,19 +310,19 @@ func EnableDefaultLogger(opts *server.Options) {
 
 // RunServer will startup an embedded STAN server and a nats-server to support it.
 func RunServer(ID string) *StanServer {
-	sOpts := DefaultServerOptions
+	sOpts := DefaultOptions
 	sOpts.ID = ID
 	return RunServerWithOpts(&sOpts, &DefaultNatsServerOptions)
 }
 
 // RunServerWithOpts will startup an embedded STAN server and a nats-server to support it.
-func RunServerWithOpts(stanOpts *ServerOptions, natsOpts *server.Options) *StanServer {
+func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer {
 	// Run a nats server by default
-	var sOpts *ServerOptions
+	var sOpts *Options
 	var nOpts *server.Options
 
 	if stanOpts == nil {
-		sOpts = &DefaultServerOptions
+		sOpts = &DefaultOptions
 	} else {
 		sOpts = stanOpts
 	}
@@ -1211,7 +1212,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	if sr.ClientID == "" {
 		Debugf("STAN: missing clientID in subscription request from %s", m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply,
-			errors.New("stan: malformed subscription request, clientID missing."))
+			errors.New("stan: malformed subscription request, clientID missing"))
 		return
 	}
 
@@ -1485,7 +1486,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 	sub.LastSent = lastSent
 }
 
-// Shutdown will close our NATS connection and shutdown any embedded NATS server.
+// ClusterID returns the STAN Server's ID.
 func (s *StanServer) ClusterID() string {
 	return s.clusterID
 }

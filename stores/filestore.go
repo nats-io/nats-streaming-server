@@ -191,7 +191,7 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, RecoveredS
 			if len(sub.seqnos) > 0 {
 				// Lookup messages, and if we find those, update the
 				// Pending map.
-				for seq, _ := range sub.seqnos {
+				for seq := range sub.seqnos {
 					// Access directly 'msgs' here. If we have a
 					// different implementation where we don't
 					// keep messages around, we would still have

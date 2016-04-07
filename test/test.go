@@ -20,7 +20,7 @@ func RunServerWithDebugTrace(ID string, enableDebug, enableTrace bool) *server.S
 	natsdOpts.Trace = enableTrace
 	natsdOpts.NoLog = false
 
-	stanOpts := &server.DefaultServerOptions
+	stanOpts := &server.DefaultOptions
 	stanOpts.ID = ID
 
 	server.EnableDefaultLogger(natsdOpts)

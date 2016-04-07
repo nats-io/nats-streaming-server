@@ -7,6 +7,8 @@ import (
 	"io"
 )
 
+// ByteOrder specifies how to convert byte sequences into 16-, 32-, or 64-bit
+// unsigned integers.
 var ByteOrder binary.ByteOrder
 
 func init() {
