@@ -659,9 +659,9 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 			recoveredSubs[newSub.ID] = subAndPending
 			// Keep track of the subscriptions count
 			ss.subsCount++
-			// Update nextSubID to max of recovered subIds.
-			if newSub.ID > ss.nextSubID {
-				ss.nextSubID = newSub.ID
+			// Keep track of max subscription ID found.
+			if newSub.ID > ss.maxSubID {
+				ss.maxSubID = newSub.ID
 			}
 			break
 		case subRecDel:
@@ -674,9 +674,9 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 				// Keep track of the subscriptions count
 				ss.subsCount--
 			}
-			// Update nextSubID to max of recovered subIds.
-			if delSub.ID > ss.nextSubID {
-				ss.nextSubID = delSub.ID
+			// Keep track of max subscription ID found.
+			if delSub.ID >= ss.maxSubID {
+				ss.maxSubID = delSub.ID
 			}
 			break
 		case subRecMsg:

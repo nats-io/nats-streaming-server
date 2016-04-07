@@ -30,7 +30,7 @@ type genericSubStore struct {
 	commonStore
 	subject   string // Can't be wildcard
 	subsCount int
-	nextSubID uint64
+	maxSubID  uint64
 }
 
 // genericMsgStore is the generic store implementation that manages messages
@@ -271,10 +271,12 @@ func (gss *genericSubStore) createSub(sub *spb.SubState) error {
 		return ErrTooManySubs
 	}
 
-	gss.nextSubID++
+	// Bump the max value before assigning it to the new subscription.
+	gss.maxSubID++
 	gss.subsCount++
 
-	sub.ID = gss.nextSubID
+	// This new subscription has the max value.
+	sub.ID = gss.maxSubID
 
 	return nil
 }
