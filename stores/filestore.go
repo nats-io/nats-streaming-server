@@ -659,6 +659,10 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 			recoveredSubs[newSub.ID] = subAndPending
 			// Keep track of the subscriptions count
 			ss.subsCount++
+			// Keep track of max subscription ID found.
+			if newSub.ID > ss.maxSubID {
+				ss.maxSubID = newSub.ID
+			}
 			break
 		case subRecDel:
 			delSub = &spb.SubStateDelete{}
@@ -669,6 +673,10 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 				delete(recoveredSubs, delSub.ID)
 				// Keep track of the subscriptions count
 				ss.subsCount--
+			}
+			// Keep track of max subscription ID found.
+			if delSub.ID > ss.maxSubID {
+				ss.maxSubID = delSub.ID
 			}
 			break
 		case subRecMsg:
