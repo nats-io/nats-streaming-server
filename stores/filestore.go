@@ -675,7 +675,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 				ss.subsCount--
 			}
 			// Keep track of max subscription ID found.
-			if delSub.ID >= ss.maxSubID {
+			if delSub.ID > ss.maxSubID {
 				ss.maxSubID = delSub.ID
 			}
 			break
