@@ -40,8 +40,8 @@ func (c *client) removeSub(sub *subState) bool {
 	return removed
 }
 
-// Register a client if new, otherwise returns the client and 'isNew'
-// will be set to false.
+// Register a client if new, otherwise returns the client already registered
+// and 'isNew' is set to false.
 func (cs *clientStore) Register(ID, hbInbox string) (c *client, isNew bool) {
 	c = cs.Lookup(ID)
 	if c != nil {
