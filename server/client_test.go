@@ -4,8 +4,8 @@ package server
 
 import (
 	"fmt"
-	"sync"
 	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/nats-io/nuid"
@@ -83,19 +83,36 @@ func TestClientParallelRegister(t *testing.T) {
 	wg.Add(2)
 
 	totalClients := 100
+	errors := make(chan error, 2)
 
 	for i := 0; i < 2; i++ {
 		go func() {
+			defer wg.Done()
+
 			for j := 0; j < totalClients; j++ {
 				clientID := fmt.Sprintf("clientID-%v", j)
-				cs.Register(clientID, hbInbox)
+				c, isNew := cs.Register(clientID, hbInbox)
+				if c == nil {
+					errors <- fmt.Errorf("client should not be nil")
+					return
+				}
+				if !isNew && cs.Lookup(clientID) == nil {
+					errors <- fmt.Errorf("Register returned isNew false, but clientID %v can't be found", clientID)
+				}
 				runtime.Gosched()
 			}
-			wg.Done()
+
 		}()
 	}
 
 	wg.Wait()
+
+	// Fail with the first error found.
+	select {
+	case e := <-errors:
+		t.Fatalf("%v", e)
+	default:
+	}
 
 	// We should not get more than totalClients
 	func() {
