@@ -263,17 +263,14 @@ func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 
 // Options for STAN Server
 type Options struct {
-	ID             string
-	DiscoverPrefix string
-	StoreType      string
-	FilestoreDir   string
-	MaxChannels    int
-	// MaxMsgs is the maximum number of messages per channel
-	MaxMsgs int
-	// MaxBytes is the maximum number of bytes used by messages per channel
-	MaxBytes uint64
-	// MaxSubscriptions is the maximum number of subscriptions per channel
-	MaxSubscriptions int
+	ID               string
+	DiscoverPrefix   string
+	StoreType        string
+	FilestoreDir     string
+	MaxChannels      int
+	MaxMsgs          int    // Maximum number of messages per channel
+	MaxBytes         uint64 // Maximum number of bytes used by messages per channel
+	MaxSubscriptions int    // Maximum number of subscriptions per channel
 }
 
 // DefaultOptions are default options for the STAN server
