@@ -381,6 +381,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	s.unsubRequests = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
 	s.closeRequests = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
 
+	if nOpts.Host == "" {
+		nOpts.Host = "localhost"
+	}
 	s.natsServer = natsd.RunServer(nOpts)
 
 	natsURL := fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port)
