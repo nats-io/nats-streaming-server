@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,10 +35,28 @@ type tLogger interface {
 	Errorf(format string, args ...interface{})
 }
 
+func stackFatalf(t tLogger, f string, args ...interface{}) {
+	lines := make([]string, 0, 32)
+	msg := fmt.Sprintf(f, args...)
+	lines = append(lines, msg)
+
+	// Generate the Stack of callers:
+	for i := 1; true; i++ {
+		_, file, line, ok := runtime.Caller(i)
+		if ok == false {
+			break
+		}
+		msg := fmt.Sprintf("%d - %s:%d", i, file, line)
+		lines = append(lines, msg)
+	}
+
+	t.Fatalf("%s", strings.Join(lines, "\n"))
+}
+
 func NewDefaultConnection(t tLogger) stan.Conn {
 	sc, err := stan.Connect(clusterName, clientName)
 	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v", err)
+		stackFatalf(t, "Expected to connect correctly, got err %v", err)
 	}
 	return sc
 }
@@ -813,6 +833,91 @@ func TestRunServerWithFileBased(t *testing.T) {
 			t.Fatal("Did not receive the old message")
 		}
 	}
+}
+
+func checkDurable(t *testing.T, s *StanServer, channel, durName, durKey string) {
+	c := s.clients.Lookup(clientName)
+	if c == nil {
+		stackFatalf(t, "Expected client %v to be registered", clientName)
+	}
+	c.RLock()
+	subs := c.subs
+	c.RUnlock()
+	if len(subs) != 1 {
+		stackFatalf(t, "Expected 1 sub, got %v", len(subs))
+	}
+	sub := subs[0]
+	if sub.DurableName != durName {
+		stackFatalf(t, "Expected durable name %v, got %v", durName, sub.DurableName)
+	}
+	// Check that durable is also in subStore
+	cs := s.store.LookupChannel(channel)
+	if cs == nil {
+		stackFatalf(t, "Expected channel %q to be created", channel)
+	}
+	ss := cs.UserData.(*subStore)
+	ss.RLock()
+	durInSS := ss.durables[durKey]
+	ss.RUnlock()
+	if durInSS == nil || durInSS.DurableName != durName {
+		stackFatalf(t, "Expected durable to be in subStore")
+	}
+}
+
+func TestDurableCanReconnect(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	cb := func(_ *stan.Msg) {}
+
+	durName := "mydur"
+	sr := &pb.SubscriptionRequest{
+		ClientID:    clientName,
+		Subject:     "foo",
+		DurableName: durName,
+	}
+	durKey := durableKey(sr)
+
+	// Create durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is created
+	checkDurable(t, s, "foo", durName, durKey)
+
+	// Close stan connection
+	sc.Close()
+
+	// Connect again
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Start the durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is found
+	checkDurable(t, s, "foo", durName, durKey)
+
+	// Close stan connection
+	sc.Close()
+
+	// Connect again
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Start the durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is found
+	checkDurable(t, s, "foo", durName, durKey)
 }
 
 func TestClientCrashAndReconnect(t *testing.T) {
