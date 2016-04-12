@@ -163,13 +163,16 @@ type MsgStore interface {
 	// Lookup returns the stored message with given sequence number.
 	Lookup(seq uint64) *pb.MsgProto
 
-	// FirstSequence returns sequence for first message stored.
+	// FirstSequence returns sequence for first message stored, 0 if no
+	// message is stored.
 	FirstSequence() uint64
 
-	// LastSequence returns sequence for last message stored.
+	// LastSequence returns sequence for last message stored, 0 if no
+	// message is stored.
 	LastSequence() uint64
 
-	// FirstAndLastSequence returns sequences for the first and last messages stored.
+	// FirstAndLastSequence returns sequences for the first and last messages stored,
+	// 0 if no message is stored.
 	FirstAndLastSequence() (uint64, uint64)
 
 	// GetSequenceFromTimestamp returns the sequence of the first message whose

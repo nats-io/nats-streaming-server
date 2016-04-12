@@ -156,6 +156,33 @@ func testCloseIdempotent(t *testing.T, s Store) {
 }
 
 func testBasicMsgStore(t *testing.T, s Store) {
+	cs, isNew, err := s.LookupOrCreateChannel("foo")
+	if err != nil || !isNew {
+		t.Fatalf("Failed to create channel foo: %v (isNew=%v)", err, isNew)
+	}
+	ms := cs.Msgs
+
+	// No message is stored, verify expected values.
+	if ms.FirstMsg() != nil {
+		t.Fatalf("Unexpected first message: %v vs %v", ms.FirstMsg(), nil)
+	}
+
+	if ms.LastMsg() != nil {
+		t.Fatalf("Unexpected first message: %v vs %v", ms.LastMsg(), nil)
+	}
+
+	if ms.FirstSequence() != 0 {
+		t.Fatalf("Unexpected first sequence: %v vs %v", ms.FirstSequence(), 0)
+	}
+
+	if ms.LastSequence() != 0 {
+		t.Fatalf("Unexpected first sequence: %v vs %v", ms.FirstSequence(), 0)
+	}
+
+	if s1, s2 := ms.FirstAndLastSequence(); s1 != 0 || s2 != 0 {
+		t.Fatalf("Unexpected sequences: %v,%v", s1, s2)
+	}
+
 	payload1 := []byte("m1")
 	m1 := storeMsg(t, s, "foo", payload1)
 
@@ -168,8 +195,6 @@ func testBasicMsgStore(t *testing.T, s Store) {
 	if string(payload2) != string(m2.Data) {
 		t.Fatalf("Unexpected payload: %v", string(m1.Data))
 	}
-
-	ms := s.LookupChannel("foo").Msgs
 
 	if ms.FirstMsg() != m1 {
 		t.Fatalf("Unexpected first message: %v vs %v", ms.FirstMsg(), m1)

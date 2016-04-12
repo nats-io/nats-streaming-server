@@ -1494,26 +1494,40 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 
 	lastSent := uint64(0)
 
+	// In all start position cases, if there is no message, ensure
+	// lastSent stays at 0.
+
 	switch sr.StartPosition {
 	case pb.StartPosition_NewOnly:
 		lastSent = cs.Msgs.LastSequence()
 		Debugf("STAN: [Client:%s] Sending new-only subject=%s, seq=%d.",
 			sub.ClientID, sub.subject, lastSent)
 	case pb.StartPosition_LastReceived:
-		lastSent = cs.Msgs.LastSequence() - 1
+		lastSeq := cs.Msgs.LastSequence()
+		if lastSeq > 0 {
+			lastSent = lastSeq - 1
+		}
 		Debugf("STAN: [Client:%s] Sending last message, subject=%s.",
 			sub.ClientID, sub.subject)
 	case pb.StartPosition_TimeDeltaStart:
 		startTime := time.Now().UnixNano() - sr.StartTimeDelta
-		lastSent = s.getSequenceFromStartTime(cs, startTime) - 1
+		seq := s.getSequenceFromStartTime(cs, startTime)
+		if seq > 0 {
+			lastSent = seq - 1
+		}
 		Debugf("STAN: [Client:%s] Sending from time, subject=%s time=%d seq=%d",
 			sub.ClientID, sub.subject, startTime, lastSent)
 	case pb.StartPosition_SequenceStart:
-		lastSent = sr.StartSequence - 1
+		if sr.StartSequence > 0 {
+			lastSent = sr.StartSequence - 1
+		}
 		Debugf("STAN: [Client:%s] Sending from sequence, subject=%s seq=%d",
 			sub.ClientID, sub.subject, lastSent)
 	case pb.StartPosition_First:
-		lastSent = cs.Msgs.FirstSequence() - 1
+		firstSeq := cs.Msgs.FirstSequence()
+		if firstSeq > 0 {
+			lastSent = firstSeq - 1
+		}
 		Debugf("STAN: [Client:%s] Sending from beginngin, subject=%s seq=%d",
 			sub.ClientID, sub.subject, lastSent)
 	}
