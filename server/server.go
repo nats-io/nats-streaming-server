@@ -50,16 +50,17 @@ const (
 
 // Errors.
 var (
-	ErrBadPubMsg       = errors.New("stan: malformed publish message envelope")
-	ErrBadSubRequest   = errors.New("stan: malformed subscription request")
 	ErrInvalidSubject  = errors.New("stan: invalid subject")
 	ErrInvalidSequence = errors.New("stan: invalid start sequence")
 	ErrInvalidTime     = errors.New("stan: invalid start time")
 	ErrInvalidSub      = errors.New("stan: invalid subscription")
-	ErrInvalidConnReq  = errors.New("stan: invalid connection request")
 	ErrInvalidClient   = errors.New("stan: clientID already registered")
-	ErrInvalidCloseReq = errors.New("stan: invalid close request")
 	ErrInvalidAckWait  = errors.New("stan: invalid ack wait time, should be >= 1s")
+	ErrInvalidConnReq  = errors.New("stan: invalid connection request")
+	ErrInvalidPubReq   = errors.New("stan: invalid publish request")
+	ErrInvalidSubReq   = errors.New("stan: invalid subscription request")
+	ErrInvalidUnsubReq = errors.New("stan: invalid unsubscribe request")
+	ErrInvalidCloseReq = errors.New("stan: invalid close request")
 	ErrDupDurable      = errors.New("stan: duplicate durable registration")
 	ErrDurableQueue    = errors.New("stan: queue subscribers can't be durable")
 	ErrUnknownClient   = errors.New("stan: unkwown clientID")
@@ -380,6 +381,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	s.unsubRequests = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
 	s.closeRequests = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
 
+	if nOpts.Host == "" {
+		nOpts.Host = "localhost"
+	}
 	s.natsServer = natsd.RunServer(nOpts)
 
 	natsURL := fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port)
@@ -613,9 +617,10 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	if err != nil {
 		Errorf("STAN: Received invalid close request, subject=%s.", m.Subject)
 		resp := &pb.CloseResponse{Error: ErrInvalidCloseReq.Error()}
-		if b, err := resp.Marshal(); err != nil {
+		if b, err := resp.Marshal(); err == nil {
 			s.nc.Publish(m.Reply, b)
 		}
+		return
 	}
 
 	s.closeClient(req.ClientID)
@@ -635,7 +640,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	// Make sure we have a clientID, guid, etc.
 	if pm.Guid == "" || !s.isValidClient(pm.ClientID) || !isValidSubject(pm.Subject) {
 		Errorf("STAN: Received invalid client publish message %v.", pm)
-		badMsgAck := &pb.PubAck{Guid: pm.Guid, Error: ErrBadPubMsg.Error()}
+		badMsgAck := &pb.PubAck{Guid: pm.Guid, Error: ErrInvalidPubReq.Error()}
 		if b, err := badMsgAck.Marshal(); err == nil {
 			s.nc.Publish(m.Reply, b)
 		}
@@ -1021,7 +1026,7 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 	err := req.Unmarshal(m.Data)
 	if err != nil {
 		Errorf("STAN: Invalid unsub request from %s.", m.Subject)
-		s.sendSubscriptionResponseErr(m.Reply, err)
+		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidUnsubReq)
 		return
 	}
 
@@ -1043,8 +1048,6 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
 	}
-	// Remove the subscription.
-	ss.Remove(sub)
 
 	// Remove from Client
 	if s.clients.RemoveSub(req.ClientID, sub) == nil {
@@ -1052,6 +1055,9 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 		s.sendSubscriptionResponseErr(m.Reply, ErrUnknownClient)
 		return
 	}
+
+	// Remove the subscription.
+	ss.Remove(sub)
 
 	Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", req.ClientID, sub.subject)
 
@@ -1108,15 +1114,19 @@ func (sub *subState) adjustAckTimer(firstUnackedTimestamp int64) {
 		// Capture time
 		now := time.Now().UnixNano()
 
-		// If it is in the past (which will happen when a message is
-		// redelivered more than once), or 0, use the default ackWait
-		if firstUnackedTimestamp <= now {
+		// ackWait in int64
+		expTime := int64(sub.ackWait)
+
+		// If the message timestamp + expiration is in the past
+		// (which will happen when a message is redelivered more
+		// than once), or if timestamp is 0, use the default ackWait
+		if firstUnackedTimestamp+expTime <= now {
 			sub.ackTimer.Reset(sub.ackWait)
 		} else {
 			// Compute the time the ackTimer should fire, which is the
 			// ack timeout less the duration the message has been in
 			// the server.
-			fireIn := (firstUnackedTimestamp - now) + int64(sub.ackWait)
+			fireIn := (firstUnackedTimestamp + expTime - now)
 
 			sub.ackTimer.Reset(time.Duration(fireIn))
 
@@ -1186,7 +1196,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	err := sr.Unmarshal(m.Data)
 	if err != nil {
 		Errorf("STAN:  Invalid Subscription request from %s.", m.Subject)
-		s.sendSubscriptionResponseErr(m.Reply, err)
+		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubReq)
 		return
 	}
 
