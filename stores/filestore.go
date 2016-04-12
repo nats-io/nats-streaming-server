@@ -33,6 +33,16 @@ const (
 // Type for the records in the subscriptions file
 type subRecordType byte
 
+// Subscription protobuf do not share a common interface, yet, when saving a
+// subscription on disk, we have to get the size and marshal the record in
+// a buffer. These methods are available in all the protobuf.
+// So we create this interface with those two methods to be used by the
+// writeRecord method.
+type subRecord interface {
+	Size() int
+	MarshalTo([]byte) (int, error)
+}
+
 // Various record types
 const (
 	subRecNew = subRecordType(iota)
@@ -714,7 +724,7 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 	if err := ss.createSub(sub); err != nil {
 		return err
 	}
-	if err := ss.writeRecord(subRecNew, sub, nil, nil); err != nil {
+	if err := ss.writeRecord(subRecNew, sub); err != nil {
 		return err
 	}
 	return nil
@@ -726,7 +736,7 @@ func (ss *FileSubStore) DeleteSub(subid uint64) {
 	del := &spb.SubStateDelete{
 		ID: subid,
 	}
-	ss.writeRecord(subRecDel, nil, del, nil)
+	ss.writeRecord(subRecDel, del)
 	ss.Unlock()
 }
 
@@ -737,7 +747,7 @@ func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 		ID:    subid,
 		Seqno: seqno,
 	}
-	err := ss.writeRecord(subRecMsg, nil, nil, update)
+	err := ss.writeRecord(subRecMsg, update)
 	ss.Unlock()
 	return err
 }
@@ -750,31 +760,16 @@ func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
 		ID:    subid,
 		Seqno: seqno,
 	}
-	err := ss.writeRecord(subRecAck, nil, nil, update)
+	err := ss.writeRecord(subRecAck, update)
 	ss.Unlock()
 	return err
 }
 
 // writes a record in the subscriptions file.
 // store's lock is held on entry.
-func (ss *FileSubStore) writeRecord(recType subRecordType, newSub *spb.SubState,
-	delSub *spb.SubStateDelete, updateSub *spb.SubStateUpdate) error {
+func (ss *FileSubStore) writeRecord(recType subRecordType, rec subRecord) error {
 
-	var err error
-	var bufSize int
-
-	// Size needed for the record
-	switch recType {
-	case subRecNew:
-		bufSize = newSub.Size()
-		break
-	case subRecDel:
-		bufSize = delSub.Size()
-		break
-	default:
-		bufSize = updateSub.Size()
-		break
-	}
+	bufSize := rec.Size()
 
 	// Add record header size
 	totalSize := bufSize + subRecordHeaderSize
@@ -786,17 +781,7 @@ func (ss *FileSubStore) writeRecord(recType subRecordType, newSub *spb.SubState,
 	writeHeader(ss.tmpSubBuf[0:subRecordHeaderSize], recType, bufSize)
 
 	// Marshal into the given buffer (offset with header size)
-	switch recType {
-	case subRecNew:
-		_, err = newSub.MarshalTo(ss.tmpSubBuf[subRecordHeaderSize:totalSize])
-		break
-	case subRecDel:
-		_, err = delSub.MarshalTo(ss.tmpSubBuf[subRecordHeaderSize:totalSize])
-		break
-	default:
-		_, err = updateSub.MarshalTo(ss.tmpSubBuf[subRecordHeaderSize:totalSize])
-		break
-	}
+	_, err := rec.MarshalTo(ss.tmpSubBuf[subRecordHeaderSize:totalSize])
 	if err == nil {
 		// Write the header and record
 		_, err = ss.file.Write(ss.tmpSubBuf[:totalSize])
