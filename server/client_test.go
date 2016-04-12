@@ -19,8 +19,6 @@ func createClientStore() *clientStore {
 }
 
 func createClientInfo() (string, string) {
-	nuid := nuid.New()
-
 	clientID := "me"
 	hbInbox := nuid.Next()
 
@@ -130,7 +128,7 @@ func TestClientUnregister(t *testing.T) {
 
 	clientID, hbInbox := createClientInfo()
 
-	// Unregister one that does not exist should not cause a crash
+	// Unregistering one that does not exist should not cause a crash
 	cs.Unregister(clientID)
 
 	// Now register a client
@@ -146,7 +144,7 @@ func TestClientUnregister(t *testing.T) {
 		}
 	}()
 
-	// Unregister now
+	// Unregistering now
 	cs.Unregister(clientID)
 
 	// Verify it's gone.
@@ -178,7 +176,7 @@ func TestClientLookup(t *testing.T) {
 		t.Fatal("Should have looked-up the client")
 	}
 
-	// Unregister
+	// Unregistering
 	cs.Unregister(clientID)
 
 	// Lookup, should not be there
