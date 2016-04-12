@@ -1002,7 +1002,7 @@ func TestStartPositionFirstSequence(t *testing.T) {
 	// Start a subscriber with "FirstSequence" as start position.
 	// Since there was no message previously sent, it should
 	// not receive anything yet.
-	sub, err := sc.Subscribe("foo", cb, stan.StartAt(pb.StartPosition_First))
+	sub, err := sc.Subscribe("foo", cb, stan.DeliverAllAvailable())
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
@@ -1038,7 +1038,7 @@ func TestStartPositionFirstSequence(t *testing.T) {
 	}
 
 	// Start a subscriber with "FirstPosition" as start position.
-	sub2, err := sc.Subscribe("bar", cb, stan.StartAt(pb.StartPosition_First))
+	sub2, err := sc.Subscribe("bar", cb, stan.DeliverAllAvailable())
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
