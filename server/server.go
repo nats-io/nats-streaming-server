@@ -35,12 +35,14 @@ const (
 	DefaultClosePrefix    = "_STAN.close"
 	DefaultStoreType      = stores.TypeMemory
 
-	// DefaultMsgStoreLimit defines how many messages per channel we will store
-	DefaultMsgStoreLimit = 1000000
 	// DefaultChannelLimit defines how many channels (literal subjects) we allow
 	DefaultChannelLimit = 100
 	// DefaultSubStoreLimit defines how many subscriptions per channel we allow
 	DefaultSubStoreLimit = 1000
+	// DefaultMsgStoreLimit defines how many messages per channel we allow
+	DefaultMsgStoreLimit = 1000000
+	// DefaultMsgSizeStoreLimit defines how many bytes per channel we allow
+	DefaultMsgSizeStoreLimit = DefaultMsgStoreLimit * 1024
 
 	// Heartbeat intervals.
 	DefaultHeartBeatInterval   = 200 * time.Millisecond
@@ -262,10 +264,14 @@ func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 
 // Options for STAN Server
 type Options struct {
-	ID             string
-	DiscoverPrefix string
-	StoreType      string
-	FilestoreDir   string
+	ID               string
+	DiscoverPrefix   string
+	StoreType        string
+	FilestoreDir     string
+	MaxChannels      int
+	MaxMsgs          int    // Maximum number of messages per channel
+	MaxBytes         uint64 // Maximum number of bytes used by messages per channel
+	MaxSubscriptions int    // Maximum number of subscriptions per channel
 }
 
 // DefaultOptions are default options for the STAN server
@@ -347,6 +353,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		MaxSubs:     DefaultSubStoreLimit,
 	}
 
+	// Override with Options if needed
+	overrideLimits(limits, sOpts)
+
 	var err error
 	var recoveredState stores.RecoveredState
 
@@ -413,6 +422,21 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	Noticef("STAN: Maximum of %d will be stored", DefaultMsgStoreLimit)
 
 	return &s
+}
+
+func overrideLimits(limits *stores.ChannelLimits, opts *Options) {
+	if opts.MaxChannels != 0 {
+		limits.MaxChannels = opts.MaxChannels
+	}
+	if opts.MaxMsgs != 0 {
+		limits.MaxNumMsgs = opts.MaxMsgs
+	}
+	if opts.MaxBytes != 0 {
+		limits.MaxMsgBytes = opts.MaxBytes
+	}
+	if opts.MaxSubscriptions != 0 {
+		limits.MaxSubs = opts.MaxSubscriptions
+	}
 }
 
 // Reconstruct the subscription state on restart.
