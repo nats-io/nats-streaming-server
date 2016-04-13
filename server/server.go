@@ -663,11 +663,8 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 
 	// Make sure we have a clientID, guid, etc.
 	if pm.Guid == "" || !s.isValidClient(pm.ClientID) || !isValidSubject(pm.Subject) {
-		Errorf("STAN: Received invalid client publish message %v.", pm)
-		badMsgAck := &pb.PubAck{Guid: pm.Guid, Error: ErrInvalidPubReq.Error()}
-		if b, err := badMsgAck.Marshal(); err == nil {
-			s.nc.Publish(m.Reply, b)
-		}
+		Errorf("STAN: Received invalid client publish message %v", pm)
+		s.sendPublishErr(m.Reply, pm.Guid, ErrInvalidPubReq)
 		return
 	}
 
@@ -676,26 +673,34 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	// potential cluster to do so as well, once we have a quorom someone can
 	// ack the publisher. We simply do so here for now.
 	////////////////////////////////////////////////////////////////////////////
-
-	s.ackPublisher(pm, m.Reply)
-
 	////////////////////////////////////////////////////////////////////////////
 	// Once we have ack'd the publisher, we need to assign this a sequence ID.
 	// This will be done by a master election within the cluster, for now we
 	// assume we are the master and assign the sequence ID here.
 	////////////////////////////////////////////////////////////////////////////
 
+	// Store first, and check for error.
 	cs, err := s.assignAndStore(pm)
 	if err != nil {
-		Errorf("Error processing message: %v\n", err)
+		Errorf("STAN: Error processing message: %v", err)
+		s.sendPublishErr(m.Reply, pm.Guid, err)
 		return
 	}
+
+	s.ackPublisher(pm, m.Reply)
 
 	////////////////////////////////////////////////////////////////////////////
 	// Now trigger sends to any active subscribers
 	////////////////////////////////////////////////////////////////////////////
 
 	s.processMsg(cs)
+}
+
+func (s *StanServer) sendPublishErr(subj, guid string, err error) {
+	badMsgAck := &pb.PubAck{Guid: guid, Error: err.Error()}
+	if b, err := badMsgAck.Marshal(); err == nil {
+		s.nc.Publish(subj, b)
+	}
 }
 
 // FIXME(dlc) - place holder to pick sub that has least outstanding, should just sort,

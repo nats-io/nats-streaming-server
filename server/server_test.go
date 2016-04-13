@@ -583,16 +583,14 @@ func TestTooManyChannelsOnPublish(t *testing.T) {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 
-	// FIXME(ik) There is a defect that does not cause failure on
-	// publish. For now lookup for the channel instead.
+	// This should fail since we reached the max channels limit
+	if err := sc.Publish("bar", []byte("hello")); err == nil {
+		t.Fatalf("Expected error due to too many channels, got none")
+	}
 
-	// This should fail because we reached the limit
-	//    if err := sc.Publish("bar", []byte("hello")); err == nil {
-	//        t.Fatalf("Expected error due to too many channels, got none")
-	//    }
-	sc.Publish("bar", []byte("hello"))
+	// Check that channel bar was not created
 	if s.store.LookupChannel("bar") != nil {
-		t.Fatalf("Expected bar to not be created")
+		t.Fatal("Channel bar should not have been created")
 	}
 }
 
