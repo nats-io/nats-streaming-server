@@ -682,7 +682,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	// Store first, and check for error.
 	cs, err := s.assignAndStore(pm)
 	if err != nil {
-		Errorf("STAN: Error processing message: %v", err)
+		Errorf("STAN: [Client:%s] Error processing message for subject %q: %v", pm.ClientID, pm.Subject, err)
 		s.sendPublishErr(m.Reply, pm.Guid, err)
 		return
 	}
