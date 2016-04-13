@@ -1289,6 +1289,14 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			sub.AckInbox = nats.NewInbox()
 			sub.Inbox = sr.Inbox
 			sub.Unlock()
+
+			// We need to add the subscription to the client's state here.
+			if s.clients.AddSub(sr.ClientID, sub) == nil {
+				Debugf("STAN: [Client:%s] Couldn't add durable %s",
+					sr.ClientID, sr.DurableName)
+				s.sendSubscriptionResponseErr(m.Reply, ErrUnknownClient)
+				return
+			}
 		}
 	}
 
