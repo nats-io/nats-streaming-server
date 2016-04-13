@@ -869,3 +869,296 @@ func TestClientCrashAndReconnect(t *testing.T) {
 	}
 	defer sc.Close()
 }
+
+func TestStartPositionNewOnly(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	rch := make(chan bool)
+
+	cb := func(_ *stan.Msg) {
+		rch <- true
+	}
+
+	// Start a subscriber with "NewOnly" as start position.
+	// Since there was no message previously sent, it should
+	// not receive anything yet.
+	sub, err := sc.Subscribe("foo", cb, stan.StartAt(pb.StartPosition_NewOnly))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Wait a little bit and ensure no message was received
+	if err := WaitTime(rch, 500*time.Millisecond); err == nil {
+		t.Fatal("No message should have been received")
+	}
+
+	// Send a message now.
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Message should be received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not receive our message")
+	}
+
+	// Start another subscriber with "NewOnly" as start position.
+	sub2, err := sc.Subscribe("foo", cb, stan.StartAt(pb.StartPosition_NewOnly))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub2.Unsubscribe()
+
+	// It should not receive anything
+	if err := WaitTime(rch, 500*time.Millisecond); err == nil {
+		t.Fatal("No message should have been received")
+	}
+}
+
+func TestStartPositionLastReceived(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	rch := make(chan bool)
+
+	cb := func(_ *stan.Msg) {
+		rch <- true
+	}
+
+	// Start a subscriber with "LastReceived" as start position.
+	// Since there was no message previously sent, it should
+	// not receive anything yet.
+	sub, err := sc.Subscribe("foo", cb, stan.StartWithLastReceived())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Wait a little bit and ensure no message was received
+	if err := WaitTime(rch, 500*time.Millisecond); err == nil {
+		t.Fatal("No message should have been received")
+	}
+
+	// Send a message now.
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Message should be received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not receive our message")
+	}
+
+	rch = make(chan bool)
+
+	cb = func(m *stan.Msg) {
+		if string(m.Data) == "msg2" {
+			rch <- true
+		}
+	}
+
+	// Send two messages
+	if err := sc.Publish("bar", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	if err := sc.Publish("bar", []byte("msg2")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Start a subscriber with "LastReceived" as start position.
+	sub2, err := sc.Subscribe("bar", cb, stan.StartWithLastReceived())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub2.Unsubscribe()
+
+	// The second message should be received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not receive our message")
+	}
+}
+
+func TestStartPositionFirstSequence(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	rch := make(chan bool)
+
+	cb := func(_ *stan.Msg) {
+		rch <- true
+	}
+
+	// Start a subscriber with "FirstSequence" as start position.
+	// Since there was no message previously sent, it should
+	// not receive anything yet.
+	sub, err := sc.Subscribe("foo", cb, stan.DeliverAllAvailable())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Wait a little bit and ensure no message was received
+	if err := WaitTime(rch, 500*time.Millisecond); err == nil {
+		t.Fatal("No message should have been received")
+	}
+
+	// Send a message now.
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Message should be received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not receive our message")
+	}
+
+	mch := make(chan *stan.Msg, 2)
+
+	cb = func(m *stan.Msg) {
+		mch <- m
+	}
+
+	// Send two messages
+	if err := sc.Publish("bar", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	if err := sc.Publish("bar", []byte("msg2")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Start a subscriber with "FirstPosition" as start position.
+	sub2, err := sc.Subscribe("bar", cb, stan.DeliverAllAvailable())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub2.Unsubscribe()
+
+	first := true
+	select {
+	case m := <-mch:
+		if first {
+			if string(m.Data) != "msg1" {
+				t.Fatalf("Expected msg1 first, got %v", string(m.Data))
+			}
+			first = false
+		} else {
+			if string(m.Data) != "msg2" {
+				t.Fatalf("Expected msg2 second, got %v", string(m.Data))
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Did not get our message")
+	}
+}
+
+func TestStartPositionSequenceStart(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	rch := make(chan bool)
+
+	cb := func(_ *stan.Msg) {
+		rch <- true
+	}
+
+	// Start a subscriber with "Sequence" as start position.
+	// Since there was no message previously sent, it should
+	// not receive anything yet.
+	sub, err := sc.Subscribe("foo", cb, stan.StartAtSequence(0))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Wait a little bit and ensure no message was received
+	if err := WaitTime(rch, 500*time.Millisecond); err == nil {
+		t.Fatal("No message should have been received")
+	}
+
+	// Send a message now.
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Message should be received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not receive our message")
+	}
+
+	rch = make(chan bool)
+
+	// Send 1 message on new subject
+	if err := sc.Publish("bar", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Create a new subscriber with "Sequence" 1
+	sub2, err := sc.Subscribe("bar", cb, stan.StartAtSequence(1))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub2.Unsubscribe()
+
+	// Message should be received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not receive our message")
+	}
+}
+
+func TestStartPositionTimeDelta(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	rch := make(chan bool)
+
+	cb := func(m *stan.Msg) {
+		if string(m.Data) == "msg2" {
+			rch <- true
+		}
+	}
+
+	//FIXME(ik): As of now, start at a time delta when no message
+	// has been stored would return an error. So test only with
+	// messages present.
+	// Send a message.
+	if err := sc.Publish("foo", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Wait 1.5 seconds.
+	time.Sleep(1500 * time.Millisecond)
+
+	// Sends a second message
+	if err := sc.Publish("foo", []byte("msg2")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Start a subscriber with "TimeDelta" as start position.
+	sub, err := sc.Subscribe("foo", cb, stan.StartAtTimeDelta(1*time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Message 2 should be received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not receive our message")
+	}
+}

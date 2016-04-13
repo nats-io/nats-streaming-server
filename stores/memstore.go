@@ -83,6 +83,9 @@ func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error)
 	ms.Lock()
 	defer ms.Unlock()
 
+	if ms.first == 0 {
+		ms.first = 1
+	}
 	ms.last++
 	m := &pb.MsgProto{
 		Sequence:  ms.last,

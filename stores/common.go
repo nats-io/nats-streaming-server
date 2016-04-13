@@ -163,7 +163,6 @@ func (gs *genericStore) Close() error {
 func (gms *genericMsgStore) init(subject string, limits ChannelLimits) {
 	gms.subject = subject
 	gms.limits = limits
-	gms.first = 1
 	// FIXME(ik) - Long term, msgs map should probably not be part of the
 	// generic store.
 	// We could use limits.MaxNumMsgs for the size of the map, but that

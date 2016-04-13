@@ -401,6 +401,9 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 		fslice.msgsCount++
 		fslice.msgsSize += uint64(len(msg.Data))
 
+		if ms.first == 0 {
+			ms.first = msg.Sequence
+		}
 		ms.msgs[msg.Sequence] = msg
 	}
 
@@ -465,6 +468,9 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 		return nil, err
 	}
 
+	if ms.first == 0 {
+		ms.first = 1
+	}
 	ms.last = seq
 	ms.msgs[ms.last] = m
 
