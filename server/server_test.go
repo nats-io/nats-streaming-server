@@ -1179,17 +1179,11 @@ func TestStartPositionSequenceStart(t *testing.T) {
 	}
 
 	// Start a subscriber with "Sequence" as start position.
-	// Since there was no message previously sent, it should
-	// not receive anything yet.
+	// As of now, since there is no message, the call will fail.
 	sub, err := sc.Subscribe("foo", cb, stan.StartAtSequence(0))
-	if err != nil {
-		t.Fatalf("Unexpected error on subscribe: %v", err)
-	}
-	defer sub.Unsubscribe()
-
-	// Wait a little bit and ensure no message was received
-	if err := WaitTime(rch, 500*time.Millisecond); err == nil {
-		t.Fatal("No message should have been received")
+	if err == nil {
+		sub.Unsubscribe()
+		t.Fatal("Expected error on subscribe, got none")
 	}
 
 	// Send a message now.
@@ -1197,20 +1191,8 @@ func TestStartPositionSequenceStart(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
-	// Message should be received
-	if err := Wait(rch); err != nil {
-		t.Fatal("Did not receive our message")
-	}
-
-	rch = make(chan bool)
-
-	// Send 1 message on new subject
-	if err := sc.Publish("bar", []byte("msg1")); err != nil {
-		t.Fatalf("Unexpected error on publish: %v", err)
-	}
-
 	// Create a new subscriber with "Sequence" 1
-	sub2, err := sc.Subscribe("bar", cb, stan.StartAtSequence(1))
+	sub2, err := sc.Subscribe("foo", cb, stan.StartAtSequence(1))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}

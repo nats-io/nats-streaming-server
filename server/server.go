@@ -1490,7 +1490,7 @@ func (s *StanServer) startTimeValid(cs *stores.ChannelStore, subject string, sta
 // Check if a startSequence is valid.
 func (s *StanServer) startSequenceValid(cs *stores.ChannelStore, subject string, seq uint64) bool {
 	first, last := cs.Msgs.FirstAndLastSequence()
-	if seq > last || seq < first {
+	if first == 0 || seq > last || seq < first {
 		return false
 	}
 	return true
