@@ -1265,6 +1265,8 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	var sub *subState
 
+	createSub := true
+
 	// Check for DurableSubscriber status
 	if sr.DurableName != "" {
 		// Can't be durable and a queue subscriber
@@ -1289,9 +1291,8 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			// FIXME(dlc) - Do we error on options? They should be ignored if the new conflicts with old.
 			sub.Lock()
 			// Set new clientID and reset lastSent
+			// Keep the AckInbox from the remembered durable.
 			sub.ClientID = sr.ClientID
-			// Also grab a new ackInbox and the sr's inbox.
-			sub.AckInbox = nats.NewInbox()
 			sub.Inbox = sr.Inbox
 			sub.Unlock()
 
@@ -1302,6 +1303,9 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 				s.sendSubscriptionResponseErr(m.Reply, ErrUnknownClient)
 				return
 			}
+
+			// No need to create the subscriber, since we already have it.
+			createSub = false
 		}
 	}
 
@@ -1354,10 +1358,12 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 	}
 
-	// Subscribe to acks
-	sub.ackSub, err = s.nc.Subscribe(sub.AckInbox, s.processAckMsg)
-	if err != nil {
-		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
+	// Subscribe to acks, unless it is already done (restart of a durable)
+	if createSub {
+		sub.ackSub, err = s.nc.Subscribe(sub.AckInbox, s.processAckMsg)
+		if err != nil {
+			panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
+		}
 	}
 
 	// Create a non-error response
