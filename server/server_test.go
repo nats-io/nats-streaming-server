@@ -918,6 +918,143 @@ func TestDurableCanReconnect(t *testing.T) {
 	checkDurable(t, s, "foo", durName, durKey)
 }
 
+func TestDurableAckedMsgNotRedelivered(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Make a channel big enough so that we don't block
+	msgs := make(chan *stan.Msg, 10)
+
+	cb := func(m *stan.Msg) {
+		msgs <- m
+	}
+
+	durName := "mydur"
+	sr := &pb.SubscriptionRequest{
+		ClientID:    clientName,
+		Subject:     "foo",
+		DurableName: durName,
+	}
+	durKey := durableKey(sr)
+
+	// Create durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is created
+	checkDurable(t, s, "foo", durName, durKey)
+
+	// We verified that there is 1 sub, and this is our durable.
+	subs := s.clients.GetSubs(clientName)
+	durable := subs[0]
+	durable.RLock()
+	// Get the AckInbox.
+	ackInbox := durable.AckInbox
+	// Get the ack subscriber
+	ackSub := durable.ackSub
+	durable.RUnlock()
+
+	// Send a message
+	if err := sc.Publish("foo", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Verify message is acked.
+	checkDurableNoPendingAck(t, s, ackInbox, ackSub, 1)
+
+	// Close stan connection
+	sc.Close()
+
+	// Connect again
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Start the durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is found
+	checkDurable(t, s, "foo", durName, durKey)
+
+	// Send a second message
+	if err := sc.Publish("foo", []byte("msg2")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Verify that we have maintained the same AckInbox and message is acked.
+	checkDurableNoPendingAck(t, s, ackInbox, ackSub, 2)
+
+	// Close stan connection
+	sc.Close()
+
+	// Connect again
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Start the durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is found
+	checkDurable(t, s, "foo", durName, durKey)
+
+	// Verify that we have maintained the same AckInbox and message is acked.
+	checkDurableNoPendingAck(t, s, ackInbox, ackSub, 2)
+
+	numMsgs := len(msgs)
+	if numMsgs > 2 {
+		t.Fatalf("Expected only 2 messages to be delivered, got %v", numMsgs)
+	}
+	for i := 0; i < numMsgs; i++ {
+		m := <-msgs
+		if m.Redelivered {
+			t.Fatal("Unexpected redelivered message")
+		}
+		if m.Sequence != uint64(i+1) {
+			t.Fatalf("Expected message %v's sequence to be %v, got %v", (i + 1), (i + 1), m.Sequence)
+		}
+	}
+}
+
+func checkDurableNoPendingAck(t *testing.T, s *StanServer, ackInbox string, ackSub *nats.Subscription, expectedSeq uint64) {
+	// When called, we know that there is 1 sub, and the sub is a durable.
+	subs := s.clients.GetSubs(clientName)
+	durable := subs[0]
+	durable.RLock()
+	durAckInbox := durable.AckInbox
+	durAckSub := durable.ackSub
+	durable.RUnlock()
+
+	if durAckInbox != ackInbox {
+		stackFatalf(t, "Expected ackInbox %v, got %v", ackInbox, durAckInbox)
+	}
+	if durAckSub != ackSub {
+		stackFatalf(t, "Expected subscriber on ack to be %p, got %p", ackSub, durAckSub)
+	}
+
+	limit := time.Now().Add(5 * time.Second)
+	for time.Now().Before(limit) {
+		durable.RLock()
+		lastSent := durable.LastSent
+		acks := len(durable.acksPending)
+		durable.RUnlock()
+
+		if lastSent != expectedSeq || acks > 0 {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		// We are ok
+		return
+	}
+	stackFatalf(t, "Message was not acknowledged")
+}
+
 func TestClientCrashAndReconnect(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
