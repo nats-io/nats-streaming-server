@@ -257,9 +257,21 @@ func testMsgsState(t *testing.T, s Store) {
 	}
 }
 
-func testMaxMsgs(t *testing.T, s Store, limitCount int) {
+func testMaxMsgs(t *testing.T, s Store) {
 	payload := []byte("hello")
-	for i := 0; i < 2*limitCount; i++ {
+
+	limitCount := 100
+
+	limits := testDefaultChannelLimits
+	limits.MaxNumMsgs = limitCount
+	limits.MaxMsgBytes = uint64(limitCount * len(payload))
+
+	s.SetChannelLimits(limits)
+
+	totalSent := limitCount + 60
+	firstSeqAfterLimitReached := uint64(totalSent - limitCount + 1)
+
+	for i := 0; i < totalSent; i++ {
 		storeMsg(t, s, "foo", payload)
 	}
 
@@ -276,7 +288,7 @@ func testMaxMsgs(t *testing.T, s Store, limitCount int) {
 	}
 
 	// Check that older messages are no longer avail.
-	if cs.Msgs.Lookup(1) != nil || cs.Msgs.Lookup(uint64(limitCount/2)) != nil {
+	if cs.Msgs.Lookup(1) != nil || cs.Msgs.Lookup(uint64(firstSeqAfterLimitReached-1)) != nil {
 		t.Fatal("Older messages still available")
 	}
 
@@ -285,11 +297,22 @@ func testMaxMsgs(t *testing.T, s Store, limitCount int) {
 	lastMsg := cs.Msgs.LastMsg()
 	lastSeq := cs.Msgs.LastSequence()
 
-	if firstMsg == nil || firstMsg.Sequence != firstSeq || firstSeq == 1 {
+	if firstMsg == nil || firstMsg.Sequence != firstSeq || firstSeq != firstSeqAfterLimitReached {
 		t.Fatalf("Incorrect first message: msg=%v seq=%v", firstMsg, firstSeq)
 	}
-	if lastMsg == nil || lastMsg.Sequence != lastSeq || lastSeq != uint64(2*limitCount) {
-		t.Fatalf("Incorrect first message: msg=%v seq=%v", firstMsg, firstSeq)
+	if lastMsg == nil || lastMsg.Sequence != lastSeq || lastSeq != uint64(totalSent) {
+		t.Fatalf("Incorrect last message: msg=%v seq=%v", firstMsg, firstSeq)
+	}
+
+	// Store a message with a payload larger than the limit.
+	// Make sure that the message is stored, but all others should
+	// be removed.
+	bigMsg := make([]byte, limits.MaxMsgBytes+100)
+	storeMsg(t, s, "foo", bigMsg)
+
+	count, bytes, err = s.MsgsState("foo")
+	if count != 1 || bytes != uint64(len(bigMsg)) || err != nil {
+		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, len(bigMsg), err)
 	}
 }
 

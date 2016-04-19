@@ -72,14 +72,7 @@ func TestMSMaxMsgs(t *testing.T) {
 	ms := createDefaultMemStore(t)
 	defer ms.Close()
 
-	limitCount := 100
-
-	limits := testDefaultChannelLimits
-	limits.MaxNumMsgs = limitCount
-
-	ms.SetChannelLimits(limits)
-
-	testMaxMsgs(t, ms, limitCount)
+	testMaxMsgs(t, ms)
 }
 
 func TestMSMaxChannels(t *testing.T) {

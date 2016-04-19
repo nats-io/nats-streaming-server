@@ -17,7 +17,7 @@ import (
 const (
 	// CAUTION! Tests will remove the directory and all its content,
 	// so pick a directory where there is nothing.
-	defaultDataStore = "../data"
+	defaultDataStore = "../stores_data"
 )
 
 func cleanupDatastore(t *testing.T, dir string) {
@@ -312,7 +312,7 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	// Now re-open with limits below all the above counts
 	limit := testDefaultChannelLimits
 	limit.MaxChannels = 1
-	limit.MaxNumMsgs = 1
+	limit.MaxNumMsgs = 4
 	limit.MaxSubs = 1
 	fs, state, err := NewFileStore(defaultDataStore, &limit)
 	if err != nil {
@@ -360,7 +360,47 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 		t.Fatal("Expected trying to create a new subscription to fail")
 	}
 
-	// TODO: Check for messages. Need to resolve how we enforce limits.
+	// Store one message
+	lastMsg := storeMsg(t, fs, "channel.1", payload)
+
+	// Check limits (should be 4 msgs)
+	recMsg, recBytes, err = fs.MsgsState("channel.1")
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if recMsg != limit.MaxNumMsgs {
+		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", limit.MaxNumMsgs, recMsg)
+	}
+	expectedMsgBytes = uint64(limit.MaxNumMsgs * len(payload))
+	if recBytes != expectedMsgBytes {
+		t.Fatalf("Unexpected count of recovered bytes: Expected %v, got %v", expectedMsgBytes, recBytes)
+	}
+
+	cs := fs.channels["channel.1"]
+	msgStore := cs.Msgs.(*FileMsgStore)
+
+	// Check first avail message sequence
+	expectedNewFirstSeq := uint64((msgCount + 1 - limit.MaxNumMsgs) + 1)
+	if msgStore.first != expectedNewFirstSeq {
+		t.Fatalf("Expected first sequence to be %v, got %v", expectedNewFirstSeq, msgStore.first)
+	}
+	// We should have moved to the second slice
+	if msgStore.currSliceIdx != 1 {
+		t.Fatalf("Expected file slice to be the second one, got %v", msgStore.currSliceIdx)
+	}
+	// Check second slice content
+	secondSlice := msgStore.files[1]
+	if secondSlice.msgsCount != 1 {
+		t.Fatalf("Expected second slice to have 1 mesage, got %v", secondSlice.msgsCount)
+	}
+	if secondSlice.firstMsg != lastMsg {
+		t.Fatalf("Expected last message to be %v, got %v", lastMsg, secondSlice.firstMsg)
+	}
+	// The first slice should have the new limit msgs count - 1.
+	firstSlice := msgStore.files[0]
+	if firstSlice.msgsCount != limit.MaxNumMsgs-1 {
+		t.Fatalf("Expected first slice to have %v msgs, got %v", limit.MaxNumMsgs-1, firstSlice.msgsCount)
+	}
 }
 
 func TestFSMsgsState(t *testing.T) {
@@ -380,14 +420,7 @@ func TestFSMaxMsgs(t *testing.T) {
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
-	limitCount := 100
-
-	limits := testDefaultChannelLimits
-	limits.MaxNumMsgs = limitCount
-
-	fs.SetChannelLimits(limits)
-
-	testMaxMsgs(t, fs, limitCount)
+	testMaxMsgs(t, fs)
 }
 
 func TestFSMaxChannels(t *testing.T) {
