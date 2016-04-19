@@ -6,8 +6,8 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/nats-io/go-stan/pb"
 	"github.com/nats-io/stan-server/spb"
-	"github.com/nats-io/stan/pb"
 )
 
 // commonStore contains everything that is common to any type of store
