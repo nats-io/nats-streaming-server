@@ -614,7 +614,10 @@ func (s *StanServer) checkClientHealth(clientID string) {
 		client.fhb++
 		if client.fhb > DefaultMaxFailedHeartBeats {
 			Debugf("STAN: [Client:%s]  Timed out on hearbeats.", client.clientID)
-			defer s.closeClient(client.clientID)
+			client.hbt.Stop()
+			client.Unlock()
+			s.closeClient(client.clientID)
+			return
 		}
 	} else {
 		client.fhb = 0
