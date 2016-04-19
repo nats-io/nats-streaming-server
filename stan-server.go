@@ -10,7 +10,7 @@ import (
 
 	"fmt"
 	natsd "github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/stan"
+	"github.com/nats-io/go-stan"
 	stand "github.com/nats-io/stan-server/server"
 	"github.com/nats-io/stan-server/stores"
 )

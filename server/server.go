@@ -13,10 +13,10 @@ import (
 
 	"github.com/nats-io/gnatsd/logger"
 	"github.com/nats-io/gnatsd/server"
+	"github.com/nats-io/go-stan/pb"
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nuid"
 	"github.com/nats-io/stan-server/spb"
-	"github.com/nats-io/stan/pb"
 
 	natsd "github.com/nats-io/gnatsd/test"
 
