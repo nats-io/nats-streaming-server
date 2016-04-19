@@ -1547,7 +1547,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 		if firstSeq > 0 {
 			lastSent = firstSeq - 1
 		}
-		Debugf("STAN: [Client:%s] Sending from beginngin, subject=%s seq=%d",
+		Debugf("STAN: [Client:%s] Sending from beginning, subject=%s seq=%d",
 			sub.ClientID, sub.subject, lastSent)
 	}
 	sub.LastSent = lastSent
