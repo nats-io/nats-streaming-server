@@ -357,7 +357,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	overrideLimits(limits, sOpts)
 
 	var err error
-	var recoveredState stores.RecoveredState
+	var recoveredState *stores.RecoveredState
+	var recoveredSubs []*subState
 
 	// Ensure store type option is in upper-case
 	sOpts.StoreType = strings.ToUpper(sOpts.StoreType)
@@ -380,8 +381,13 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		panic(fmt.Sprintf("%v", err))
 	}
 
-	// Process recovered channels (if any).
-	recoveredSubs := s.processRecoveredChannels(recoveredState)
+	if recoveredState != nil {
+		// Restore clients state
+		s.processRecoveredClients(recoveredState.Clients)
+
+		// Process recovered channels (if any).
+		recoveredSubs = s.processRecoveredChannels(recoveredState.Subs)
+	}
 
 	// Generate Subjects
 	// FIXME(dlc) guid needs to be shared in cluster mode
@@ -439,15 +445,26 @@ func overrideLimits(limits *stores.ChannelLimits, opts *Options) {
 	}
 }
 
+// Reconstruct the clients map.
+func (s *StanServer) processRecoveredClients(clients []*stores.RecoveredClient) {
+	for _, c := range clients {
+		// Note that s.clients does not have a reference to a store yet,
+		// so this call cannot fail.
+		if _, isNew, _ := s.clients.Register(c.ClientID, c.HbInbox); !isNew {
+			Errorf("Ignoring duplicate clientID: %v", c.ClientID)
+		}
+	}
+}
+
 // Reconstruct the subscription state on restart.
 // We don't use locking in there because there is no communication
 // with the NATS server and/or clients, so no chance that the state
 // changes while we are doing this.
-func (s *StanServer) processRecoveredChannels(state stores.RecoveredState) []*subState {
+func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubscriptions) []*subState {
 	// We will return the recovered subscriptions
 	allSubs := make([]*subState, 0, 16)
 
-	for channelName, recoveredSubs := range state {
+	for channelName, recoveredSubs := range subscriptions {
 		// Lookup the ChannelStore from the store
 		channel := s.store.LookupChannel(channelName)
 		// Create the subStore for this channel
@@ -468,15 +485,15 @@ func (s *StanServer) processRecoveredChannels(state stores.RecoveredState) []*su
 			}
 			// Copy over fields from SubState protobuf
 			sub.SubState = *recSub.Sub
-			// Update subStore based on the following information.
-			ss.updateState(sub, sub.AckInbox, sub.QGroup, sub.isDurable())
-			// Recreate the client if need be
-			c, _ := s.clients.Register(sub.ClientID, sub.HbInbox)
-			// Add the subscription to the client
-			c.subs = append(c.subs, sub)
-
-			// Add to the array
-			allSubs = append(allSubs, sub)
+			// Add the subscription to the corresponding client
+			if s.clients.AddSub(sub.ClientID, sub) == nil {
+				Errorf("Client %q not found, skipping subscription on ['%s']", sub.ClientID, channelName)
+			} else {
+				// Update subStore based on the following information.
+				ss.updateState(sub, sub.AckInbox, sub.QGroup, sub.isDurable())
+				// Add to the array
+				allSubs = append(allSubs, sub)
+			}
 		}
 	}
 	return allSubs
@@ -511,6 +528,8 @@ func (s *StanServer) postRecoveryProcessing(recoveredSubs []*subState) error {
 		}
 		sub.Unlock()
 	}
+	// Set the store reference so that further Register/Unregister are stored.
+	s.clients.SetStore(s.store)
 	// Go through the list of clients and ensure their Hb timer is set.
 	clients := s.clients.GetClients()
 	for _, c := range clients {
@@ -575,9 +594,14 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 	}
 
 	// Register if not already
-	client, isNew := s.clients.Register(req.ClientID, req.HeartbeatInbox)
-	if !isNew {
-		cr := &pb.ConnectResponse{Error: ErrInvalidClient.Error()}
+	client, isNew, err := s.clients.Register(req.ClientID, req.HeartbeatInbox)
+	if !isNew || err != nil {
+		cr := &pb.ConnectResponse{}
+		if err == nil {
+			cr.Error = ErrInvalidClient.Error()
+		} else {
+			cr.Error = err.Error()
+		}
 		b, _ := cr.Marshal()
 		s.nc.Publish(m.Reply, b)
 		Debugf("STAN: [Client:%s] Connect failed; already connected.", client.clientID)
@@ -1201,12 +1225,6 @@ func (s *StanServer) addSubscription(cs *stores.ChannelStore, sub *subState) err
 
 	// Store in client
 	if client := s.clients.AddSub(sub.ClientID, sub); client != nil {
-
-		// Piggy-back the heartbeat inbox in the subscription, so
-		// that we can re-create the clients map on restart without
-		// the need for a dedicated persistent client store.
-		sub.HbInbox = client.hbInbox
-
 		// Store this subscription
 		ss := cs.UserData.(*subStore)
 		if err := ss.Store(sub); err != nil {

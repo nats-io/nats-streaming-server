@@ -3,6 +3,7 @@
 package server
 
 import (
+	"github.com/nats-io/stan-server/stores"
 	"sync"
 	"time"
 )
@@ -11,6 +12,7 @@ import (
 type clientStore struct {
 	sync.RWMutex
 	clients map[string]*client
+	store   stores.Store
 }
 
 // Hold for client
@@ -42,19 +44,26 @@ func (c *client) removeSub(sub *subState) bool {
 
 // Register a client if new, otherwise returns the client already registered
 // and 'isNew' is set to false.
-func (cs *clientStore) Register(ID, hbInbox string) (c *client, isNew bool) {
+func (cs *clientStore) Register(ID, hbInbox string) (c *client, isNew bool, err error) {
 	c = cs.Lookup(ID)
 	if c != nil {
-		return c, false
+		return c, false, nil
 	}
 
 	cs.Lock()
 	defer cs.Unlock()
 	c = cs.clients[ID]
 	if c != nil {
-		return c, false
+		return c, false, nil
 	}
 	// Create a new client here...
+	// Store the client first.
+	if cs.store != nil {
+		if err := cs.store.AddClient(ID, hbInbox); err != nil {
+			return nil, false, err
+		}
+	}
+	// Add to the map
 	c = &client{
 		clientID: ID,
 		hbInbox:  hbInbox,
@@ -63,7 +72,7 @@ func (cs *clientStore) Register(ID, hbInbox string) (c *client, isNew bool) {
 	cs.clients[c.clientID] = c
 
 	// Return the client and 'true' to indicate that the client is new.
-	return c, true
+	return c, true, nil
 }
 
 // Unregister a client
@@ -73,8 +82,12 @@ func (cs *clientStore) Unregister(ID string) {
 	client := cs.clients[ID]
 	if client != nil {
 		client.subs = nil
+		delete(cs.clients, ID)
+		if cs.store != nil {
+			cs.store.DeleteClient(ID)
+		}
 	}
-	delete(cs.clients, ID)
+
 }
 
 // Check validity of a client.
@@ -143,4 +156,11 @@ func (cs *clientStore) RemoveSub(ID string, sub *subState) *client {
 		return c
 	}
 	return nil
+}
+
+// SetStore sets the store to be used when registering/unregistering clients.
+func (cs *clientStore) SetStore(store stores.Store) {
+	cs.Lock()
+	cs.store = store
+	cs.Unlock()
 }

@@ -58,8 +58,20 @@ var DefaultChannelLimits = ChannelLimits{
 	MaxSubs:     1000,
 }
 
-// RecoveredState is a map of recovered subscriptions, keyed by channel name.
-type RecoveredState map[string][]*RecoveredSubState
+// RecoveredState allows the server to reconstruct its state after a restart.
+type RecoveredState struct {
+	Clients []*RecoveredClient
+	Subs    RecoveredSubscriptions
+}
+
+// RecoveredClient represents a recovered Client with ID and Heartbeat Inbox
+type RecoveredClient struct {
+	ClientID string
+	HbInbox  string
+}
+
+// RecoveredSubscriptions is a map of recovered subscriptions, keyed by channel name.
+type RecoveredSubscriptions map[string][]*RecoveredSubState
 
 // PendingAcks is a map of messages waiting to be acknowledged, keyed by
 // message sequence number.
@@ -85,14 +97,14 @@ type ChannelStore struct {
 // Store is the storage interface for STAN servers.
 //
 // If an implementation has a Store constructor with ChannelLimits, it should be
-// noted that the limits don't apply to any state being restored, for Store
+// noted that the limits don't apply to any state being recovered, for Store
 // implementations supporting recovery.
 //
 // When calling the method LookupOrCreateChannel(), if the channel does not exist,
 // the implementation should create an instance of SubStore and MsgStore, passing
 // the Store's channel limits. Then, it should create a ChannelStore structure,
 // which holds reference to those two stores, and return it, along with a boolean
-// indicating the the channel has been created during this call. If the channel
+// indicating if the channel has been created during this call. If the channel
 // does exist, then LookupOrCreateChannel() behaves like LookupChannel() and
 // the boolean returned is false.
 //
@@ -119,9 +131,15 @@ type Store interface {
 	// HasChannel returns true if this store has any channel.
 	HasChannel() bool
 
-	// State returns message store statistics for a given channel, or all
+	// MsgsState returns message store statistics for a given channel, or all
 	// if 'channel' is AllChannels.
 	MsgsState(channel string) (numMessages int, byteSize uint64, err error)
+
+	// AddClient stores information about the client identified by `clientID`.
+	AddClient(clientID, hbInbox string) error
+
+	// DeleteClient invalidates the client identified by `clientID`.
+	DeleteClient(clientID string)
 
 	// Close closes all stores.
 	Close() error

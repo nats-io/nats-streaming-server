@@ -647,7 +647,7 @@ func TestTooManySubs(t *testing.T) {
 	}()
 }
 
-func TestRunServerWithFileBased(t *testing.T) {
+func TestRunServerWithFileStore(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
