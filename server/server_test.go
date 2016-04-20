@@ -185,7 +185,7 @@ func TestInvalidRequests(t *testing.T) {
 	}
 }
 
-func TestInvalidClientID(t *testing.T) {
+func TestClientIDIsValid(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
@@ -199,8 +199,9 @@ func TestInvalidClientID(t *testing.T) {
 	// Get the connect subject
 	connSubj := fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, clusterName)
 
-	invalidClientIDs := []string{"", "id with spaces", "id:with:columns", "id,with,commas",
-		"id with spaces, commas and: columns"}
+	invalidClientIDs := []string{"", "id with spaces", "id:with:columns",
+		"id,with,commas", "id.with.dots", "id with spaces, commas and: columns and dots.",
+		"idWithLotsOfNotAllowedCharacters!@#$%^&*()"}
 
 	for _, cID := range invalidClientIDs {
 		req := &pb.ConnectRequest{ClientID: cID, HeartbeatInbox: "hbInbox"}
@@ -217,6 +218,26 @@ func TestInvalidClientID(t *testing.T) {
 		}
 		if r.Error == "" {
 			t.Fatal("Expected error, got none")
+		}
+	}
+
+	validClientIDs := []string{"id", "id_with_underscores", "id-with-hypens"}
+
+	for _, cID := range validClientIDs {
+		req := &pb.ConnectRequest{ClientID: cID, HeartbeatInbox: "hbInbox"}
+		b, _ := req.Marshal()
+
+		resp, err := nc.Request(connSubj, b, time.Second)
+		if err != nil {
+			t.Fatalf("Unexpected error on publishing request: %v", err)
+		}
+		r := &pb.ConnectResponse{}
+		err = r.Unmarshal(resp.Data)
+		if err != nil {
+			t.Fatalf("Unexpected response object: %v", err)
+		}
+		if r.Error != "" {
+			t.Fatalf("Unexpected response error: %v", r.Error)
 		}
 	}
 }

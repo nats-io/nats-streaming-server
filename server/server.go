@@ -21,6 +21,7 @@ import (
 	natsd "github.com/nats-io/gnatsd/test"
 
 	stores "github.com/nats-io/stan-server/stores"
+	"regexp"
 )
 
 // A single STAN server
@@ -67,6 +68,19 @@ var (
 	ErrDurableQueue    = errors.New("stan: queue subscribers can't be durable")
 	ErrUnknownClient   = errors.New("stan: unkwown clientID")
 )
+
+// Shared regular expression to check clientID validity.
+// No lock required since from doc: https://golang.org/pkg/regexp/
+// A Regexp is safe for concurrent use by multiple goroutines.
+var clientIDRegEx *regexp.Regexp
+
+func init() {
+	if re, err := regexp.Compile("^[a-zA-Z0-9_-]*$"); err != nil {
+		panic("Unable to compile regular expression")
+	} else {
+		clientIDRegEx = re
+	}
+}
 
 // StanServer structure represents the STAN server
 type StanServer struct {
@@ -606,10 +620,10 @@ func isValidClientID(clientID string) bool {
 	if clientID == "" {
 		return false
 	}
-	if strings.ContainsAny(clientID, " :,") {
-		return false
+	if clientIDRegEx.MatchString(clientID) {
+		return true
 	}
-	return true
+	return false
 }
 
 // Send a heartbeat call to the client.
