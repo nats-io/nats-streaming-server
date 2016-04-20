@@ -75,7 +75,7 @@ var (
 var clientIDRegEx *regexp.Regexp
 
 func init() {
-	if re, err := regexp.Compile("^[a-zA-Z0-9_-]*$"); err != nil {
+	if re, err := regexp.Compile("^[a-zA-Z0-9_-]+$"); err != nil {
 		panic("Unable to compile regular expression")
 	} else {
 		clientIDRegEx = re
@@ -579,7 +579,7 @@ func (s *StanServer) initSubscriptions() {
 func (s *StanServer) connectCB(m *nats.Msg) {
 	req := &pb.ConnectRequest{}
 	err := req.Unmarshal(m.Data)
-	if err != nil || !isValidClientID(req.ClientID) || req.HeartbeatInbox == "" {
+	if err != nil || !clientIDRegEx.MatchString(req.ClientID) || req.HeartbeatInbox == "" {
 		Debugf("STAN: [Client:?] Invalid conn request: ClientID=%s, HBInbox=%s, err=%v.",
 			req.ClientID, req.HeartbeatInbox, err)
 		cr := &pb.ConnectResponse{Error: ErrInvalidConnReq.Error()}
@@ -614,16 +614,6 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 	client.Unlock()
 
 	Debugf("STAN: [Client:%s] connected.", client.clientID)
-}
-
-func isValidClientID(clientID string) bool {
-	if clientID == "" {
-		return false
-	}
-	if clientIDRegEx.MatchString(clientID) {
-		return true
-	}
-	return false
 }
 
 // Send a heartbeat call to the client.
