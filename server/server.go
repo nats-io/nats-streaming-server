@@ -565,7 +565,7 @@ func (s *StanServer) initSubscriptions() {
 func (s *StanServer) connectCB(m *nats.Msg) {
 	req := &pb.ConnectRequest{}
 	err := req.Unmarshal(m.Data)
-	if err != nil || req.ClientID == "" || req.HeartbeatInbox == "" {
+	if err != nil || !isValidClientID(req.ClientID) || req.HeartbeatInbox == "" {
 		Debugf("STAN: [Client:?] Invalid conn request: ClientID=%s, HBInbox=%s, err=%v.",
 			req.ClientID, req.HeartbeatInbox, err)
 		cr := &pb.ConnectResponse{Error: ErrInvalidConnReq.Error()}
@@ -600,6 +600,16 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 	client.Unlock()
 
 	Debugf("STAN: [Client:%s] connected.", client.clientID)
+}
+
+func isValidClientID(clientID string) bool {
+	if clientID == "" {
+		return false
+	}
+	if strings.ContainsAny(clientID, " :,") {
+		return false
+	}
+	return true
 }
 
 // Send a heartbeat call to the client.

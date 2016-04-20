@@ -185,6 +185,42 @@ func TestInvalidRequests(t *testing.T) {
 	}
 }
 
+func TestInvalidClientID(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	// Use a bare NATS connection to send incorrect requests
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	// Get the connect subject
+	connSubj := fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, clusterName)
+
+	invalidClientIDs := []string{"", "id with spaces", "id:with:columns", "id,with,commas",
+		"id with spaces, commas and: columns"}
+
+	for _, cID := range invalidClientIDs {
+		req := &pb.ConnectRequest{ClientID: cID, HeartbeatInbox: "hbInbox"}
+		b, _ := req.Marshal()
+
+		resp, err := nc.Request(connSubj, b, time.Second)
+		if err != nil {
+			t.Fatalf("Unexpected error on publishing request: %v", err)
+		}
+		r := &pb.ConnectResponse{}
+		err = r.Unmarshal(resp.Data)
+		if err != nil {
+			t.Fatalf("Unexpected response object: %v", err)
+		}
+		if r.Error == "" {
+			t.Fatal("Expected error, got none")
+		}
+	}
+}
+
 func sendInvalidSubRequest(s *StanServer, nc *nats.Conn, req *pb.SubscriptionRequest) error {
 	b, err := req.Marshal()
 	if err != nil {
