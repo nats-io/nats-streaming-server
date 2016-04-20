@@ -610,28 +610,7 @@ func TestFSAddDeleteClient(t *testing.T) {
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
-	// Delete client that does not exist
-	fs.DeleteClient("client1")
-
-	// Delete a client before adding it
-	fs.DeleteClient("client2")
-
-	// Adding it after the delete
-	if err := fs.AddClient("client2", "hbInbox"); err != nil {
-		t.Fatalf("Unexpected error adding client: %v", err)
-	}
-
-	// Add a client
-	if err := fs.AddClient("client3", "hbInbox"); err != nil {
-		t.Fatalf("Unexpected error adding client: %v", err)
-	}
-
-	// Add a client then..
-	if err := fs.AddClient("client4", "hbInbox"); err != nil {
-		t.Fatalf("Unexpected error adding client: %v", err)
-	}
-	// Delete it.
-	fs.DeleteClient("client4")
+	testAddDeleteClient(t, fs)
 
 	// Restart the store
 	fs.Close()

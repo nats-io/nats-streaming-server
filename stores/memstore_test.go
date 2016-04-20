@@ -123,3 +123,10 @@ func TestMSGetSeqFromTimestamp(t *testing.T) {
 
 	testGetSeqFromStartTime(t, ms)
 }
+
+func TestMSAddDeleteClient(t *testing.T) {
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+
+	testAddDeleteClient(t, ms)
+}

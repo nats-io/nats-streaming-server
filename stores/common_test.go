@@ -392,3 +392,28 @@ func testGetSeqFromStartTime(t *testing.T, s Store) {
 		t.Fatalf("Invalid start sequence. Expected %v got %v", startMsg.Sequence, seq)
 	}
 }
+
+func testAddDeleteClient(t *testing.T, s Store) {
+	// Delete client that does not exist
+	s.DeleteClient("client1")
+
+	// Delete a client before adding it
+	s.DeleteClient("client2")
+
+	// Adding it after the delete
+	if err := s.AddClient("client2", "hbInbox"); err != nil {
+		t.Fatalf("Unexpected error adding client: %v", err)
+	}
+
+	// Add a client
+	if err := s.AddClient("client3", "hbInbox"); err != nil {
+		t.Fatalf("Unexpected error adding client: %v", err)
+	}
+
+	// Add a client then..
+	if err := s.AddClient("client4", "hbInbox"); err != nil {
+		t.Fatalf("Unexpected error adding client: %v", err)
+	}
+	// Delete it.
+	s.DeleteClient("client4")
+}
