@@ -438,6 +438,29 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 
 	fslice := ms.files[ms.currSliceIdx]
 
+	// Check if we need to move to next file slice
+	if (ms.currSliceIdx < numFiles-1) &&
+		((fslice.msgsCount >= ms.limits.MaxNumMsgs/(numFiles-1)) ||
+			(fslice.msgsSize >= ms.limits.MaxMsgBytes/(numFiles-1))) {
+
+		// Don't change store variable until success...
+		nextSlice := ms.currSliceIdx + 1
+
+		// Close the file and open the next slice
+		if err := ms.file.Close(); err != nil {
+			return nil, err
+		}
+		file, err := openFile(ms.files[nextSlice].fileName)
+		if err != nil {
+			return nil, err
+		}
+		// Success, update the store's variables
+		ms.file = file
+		ms.currSliceIdx = nextSlice
+
+		fslice = ms.files[ms.currSliceIdx]
+	}
+
 	seq := ms.last + 1
 	m := &pb.MsgProto{
 		Sequence:  seq,
@@ -490,39 +513,76 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	}
 	fslice.lastMsg = m
 
-	// Check to see if we should move to next slice.
-	// FIXME(ik): Need to check total counts first? Not sure about
-	// what to do here.
-	if (fslice.msgsCount >= ms.limits.MaxNumMsgs/(numFiles-1)) ||
-		(fslice.msgsSize >= ms.limits.MaxMsgBytes/(numFiles-1)) {
-
-		nextSlice := ms.currSliceIdx + 1
-
-		if nextSlice == numFiles {
-			// Delete first file and shift remaining. We will
-			// keep currSliceIdx to the current value.
-			Noticef("WARNING: Limit reached, discarding messages for subject %s", ms.subject)
-			if err := ms.removeAndShiftFiles(); err != nil {
-				return nil, err
-			}
-		} else {
-			// Close the file and open the next slice
-			if err := ms.file.Close(); err != nil {
-				return nil, err
-			}
-			file, err := openFile(ms.files[nextSlice].fileName)
-			if err != nil {
-				return nil, err
-			}
-			ms.file = file
-			ms.currSliceIdx = nextSlice
-		}
+	// Enfore limits and update file slice if needed.
+	if err := ms.enforceLimits(); err != nil {
+		return nil, err
 	}
 	return m, nil
 }
 
+// enforceLimits checks total counts with current msg store's limits,
+// removing a file slice and/or updating slices' count as necessary.
+func (ms *FileMsgStore) enforceLimits() error {
+	// We may inspect several slices, start with the first at index 0.
+	idx := 0
+	// Check if we need to remove any (but leave at least the last added).
+	// Note that we may have to remove more than one msg if we are here
+	// after a restart with smaller limits than originally set.
+	for ms.totalCount > 1 &&
+		((ms.totalCount > ms.limits.MaxNumMsgs) ||
+			(ms.totalBytes > ms.limits.MaxMsgBytes)) {
+
+		// slice we are inspecting
+		slice := ms.files[idx]
+		// Size of the first message in this slice
+		firstMsgSize := uint64(len(slice.firstMsg.Data))
+		// Update slice and total counts
+		slice.msgsCount--
+		slice.msgsSize -= firstMsgSize
+		ms.totalCount--
+		ms.totalBytes -= firstMsgSize
+
+		// Remove the first message from our cache
+		Noticef("WARNING: Removing message[%d] from the store for [`%s`]", ms.first, ms.subject)
+		delete(ms.msgs, ms.first)
+
+		// Messages sequence is incremental with no gap on a given msgstore.
+		ms.first++
+		// Is file slice "empty"
+		if slice.msgsCount == 0 {
+			// If we are at the last file slice, remove the first.
+			if ms.currSliceIdx == numFiles-1 {
+				if err := ms.removeAndShiftFiles(); err != nil {
+					return err
+				}
+				// Decrement the current slice. It will be bumped if needed
+				// before storing the next message.
+				ms.currSliceIdx--
+				// The first slice is gone, go back to 0.
+				idx = 0
+			} else {
+				// No more message...
+				slice.firstMsg = nil
+				slice.lastMsg = nil
+
+				// We move the index to check the other slices if needed.
+				idx++
+				// This should not happen, but just in case...
+				if idx > ms.currSliceIdx {
+					break
+				}
+			}
+		} else {
+			// This is the new first message in this slice.
+			slice.firstMsg = ms.msgs[ms.first]
+		}
+	}
+	return nil
+}
+
+// removeAndShiftFiles
 func (ms *FileMsgStore) removeAndShiftFiles() error {
-	// Close the currently opened file (should be the numFile's file)
+	// Close the currently opened file since it is going to be renamed.
 	if err := ms.file.Close(); err != nil {
 		return err
 	}
@@ -559,20 +619,27 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 
 	var err error
 
-	// Reset the last
+	// Create a new file for the last slice.
 	fslice := ms.files[numFiles-1]
-	ms.file, err = openFile(fslice.fileName)
+	file, err := openFile(fslice.fileName)
 	if err != nil {
 		return err
 	}
-	// Move to the end of the file (offset 0 relative to end)
-	if _, err := ms.file.Seek(0, 2); err != nil {
+	if err := file.Close(); err != nil {
 		return err
 	}
+	// Reset the last slice's counts.
 	fslice.firstMsg = nil
 	fslice.lastMsg = nil
 	fslice.msgsCount = 0
 	fslice.msgsSize = uint64(0)
+
+	// Now re-open the file we closed at the beginning, which is the one
+	// before last.
+	ms.file, err = openFile(ms.files[numFiles-2].fileName)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 

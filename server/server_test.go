@@ -21,7 +21,7 @@ import (
 const (
 	// CAUTION! Tests will remove the directory and all its content,
 	// so pick a directory where there is nothing.
-	defaultDataStore = "../data"
+	defaultDataStore = "../server_data"
 )
 
 const (
@@ -658,7 +658,7 @@ func TestRunServerWithFileBased(t *testing.T) {
 	defer s.Shutdown()
 
 	// Create our own NATS connection to control reconnect wait
-	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
+	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(500*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Unexpected error on connect: %v", err)
 	}
@@ -804,7 +804,7 @@ func TestRunServerWithFileBased(t *testing.T) {
 
 	// Wait more than the reconnect wait, to make sure that
 	// the new publisher's new message is delivered
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(700 * time.Millisecond)
 
 	// For now, we need to use a new connection for the new message
 	// because on restart PUB inbox is different.
