@@ -550,6 +550,24 @@ func TestRedelivery(t *testing.T) {
 	}(subs[0])
 }
 
+func TestRedeliveryRace(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.AckWait(time.Second), stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	time.Sleep(time.Second)
+	sub.Unsubscribe()
+}
+
 func TestQueueRedelivery(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
