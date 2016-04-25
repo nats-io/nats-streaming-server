@@ -640,6 +640,48 @@ func TestQueueRedelivery(t *testing.T) {
 	}(subs[0])
 }
 
+func TestDurableRedelivery(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	rch := make(chan bool)
+	count := 0
+	cb := func(m *stan.Msg) {
+		count++
+		if count == 2 {
+			rch <- true
+		}
+	}
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	_, err := sc.Subscribe("foo", cb, stan.DurableName("dur"), stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Close the client
+	sc.Close()
+
+	// Restart client
+	sc2 := NewDefaultConnection(t)
+	defer sc2.Close()
+
+	sub2, err := sc2.Subscribe("foo", cb, stan.DurableName("dur"), stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub2.Unsubscribe()
+
+	if err := Wait(rch); err != nil {
+		t.Fatal("Messages were not redelivered to durable")
+	}
+}
+
 func TestTooManyChannelsOnCreateSub(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
