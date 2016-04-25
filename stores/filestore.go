@@ -178,6 +178,10 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 	// Recover the clients file
 	err = fs.recoverClients(&recoveredState.Clients)
 	if err != nil {
+		// If the file was opened/created, make sure we close it here.
+		if fs.clientsFile != nil {
+			fs.clientsFile.Close()
+		}
 		return nil, nil, err
 	}
 
@@ -275,13 +279,25 @@ func (fs *FileStore) recoverClients(clients *[]*RecoveredClient) error {
 	for scanner.Scan() {
 		line := scanner.Text()
 		fmt.Sscanf(line, "%s %s %s", &action, &clientID, &hbInbox)
-		if action == addClient {
+		switch action {
+		case addClient:
+			if clientID == "" {
+				return fmt.Errorf("missing client ID in ADD client instruction")
+			}
+			if hbInbox == "" {
+				return fmt.Errorf("missing client heartbeat inbox in ADD client instruction")
+			}
 			c := &RecoveredClient{ClientID: clientID, HbInbox: hbInbox}
 			// Add to the map. Note that if one already exists, which should
 			// not, just replace with this most recent one.
 			clientsMap[clientID] = c
-		} else {
+		case delClient:
+			if clientID == "" {
+				return fmt.Errorf("missing client ID in DELETE client instruction")
+			}
 			delete(clientsMap, clientID)
+		default:
+			return fmt.Errorf("invalid client action %q", action)
 		}
 	}
 	err = scanner.Err()

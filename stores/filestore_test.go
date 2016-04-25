@@ -603,6 +603,54 @@ func TestFSGetSeqFromTimestamp(t *testing.T) {
 	testGetSeqFromStartTime(t, fs)
 }
 
+func TestFSBadClientFile(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	if err := os.MkdirAll(defaultDataStore, os.ModeDir+os.ModePerm); err != nil && !os.IsExist(err) {
+		t.Fatalf("Unable to create the root directory: %v", err)
+	}
+	fileName := filepath.Join(defaultDataStore, clientsFileName)
+	// This will create the file without the file version
+	if file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666); err != nil {
+		t.Fatalf("Error creating client file: %v", err)
+	} else {
+		file.Close()
+	}
+	// So we should fail to create the filestore
+	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+	if err == nil {
+		fs.Close()
+		t.Fatalf("Expected error opening file store, got none")
+	}
+	// Now test with various unexpected content
+	contents := []string{"Nothing as expected", "A clientID-alone", "A", "D"}
+	for _, c := range contents {
+		// Delete the previous client file
+		if err := os.Remove(fileName); err != nil {
+			t.Fatalf("Unexpected error removing file: %v", err)
+		}
+		// Now create the file with proper file version
+		file, err := openFile(fileName)
+		if err != nil {
+			t.Fatalf("Error creating client file: %v", err)
+		}
+		// Add something that is not what we expect to read back
+		if _, err := file.WriteString(c); err != nil {
+			t.Fatalf("Unexpected error writing content: %v", err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatalf("Unexpected error closing file: %v", err)
+		}
+		// We should fail to create the filestore
+		fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+		if err == nil {
+			fs.Close()
+			t.Fatalf("Expected error opening file store with content %q, got none", c)
+		}
+	}
+}
+
 func TestFSAddDeleteClient(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
