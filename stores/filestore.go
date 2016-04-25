@@ -171,12 +171,11 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 	var subs map[uint64]*recoveredSub
 
 	recoveredState := &RecoveredState{
-		Clients: make([]*RecoveredClient, 0, 16),
-		Subs:    make(RecoveredSubscriptions),
+		Subs: make(RecoveredSubscriptions),
 	}
 
 	// Recover the clients file
-	err = fs.recoverClients(&recoveredState.Clients)
+	recoveredState.Clients, err = fs.recoverClients()
 	if err != nil {
 		// If the file was opened/created, make sure we close it here.
 		if fs.clientsFile != nil {
@@ -261,8 +260,8 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 	return fs, recoveredState, nil
 }
 
-// recoverClients reads the client files and fills the given array with RecoveredClient
-func (fs *FileStore) recoverClients(clients *[]*RecoveredClient) error {
+// recoverClients reads the client files and returns an array of RecoveredClient
+func (fs *FileStore) recoverClients() ([]*RecoveredClient, error) {
 	clientsMap := make(map[string]*RecoveredClient)
 
 	var err error
@@ -270,7 +269,7 @@ func (fs *FileStore) recoverClients(clients *[]*RecoveredClient) error {
 	fileName := filepath.Join(fs.rootDir, clientsFileName)
 	fs.clientsFile, err = openFile(fileName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var action, clientID, hbInbox string
@@ -282,10 +281,10 @@ func (fs *FileStore) recoverClients(clients *[]*RecoveredClient) error {
 		switch action {
 		case addClient:
 			if clientID == "" {
-				return fmt.Errorf("missing client ID in ADD client instruction")
+				return nil, fmt.Errorf("missing client ID in ADD client instruction")
 			}
 			if hbInbox == "" {
-				return fmt.Errorf("missing client heartbeat inbox in ADD client instruction")
+				return nil, fmt.Errorf("missing client heartbeat inbox in ADD client instruction")
 			}
 			c := &RecoveredClient{ClientID: clientID, HbInbox: hbInbox}
 			// Add to the map. Note that if one already exists, which should
@@ -293,22 +292,25 @@ func (fs *FileStore) recoverClients(clients *[]*RecoveredClient) error {
 			clientsMap[clientID] = c
 		case delClient:
 			if clientID == "" {
-				return fmt.Errorf("missing client ID in DELETE client instruction")
+				return nil, fmt.Errorf("missing client ID in DELETE client instruction")
 			}
 			delete(clientsMap, clientID)
 		default:
-			return fmt.Errorf("invalid client action %q", action)
+			return nil, fmt.Errorf("invalid client action %q", action)
 		}
 	}
 	err = scanner.Err()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	clients := make([]*RecoveredClient, len(clientsMap))
+	i := 0
 	// Convert the map into an array
 	for _, c := range clientsMap {
-		*clients = append(*clients, c)
+		clients[i] = c
+		i++
 	}
-	return nil
+	return clients, nil
 }
 
 // LookupOrCreateChannel returns a ChannelStore for the given channel,
