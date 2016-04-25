@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/nats-io/nuid"
+	"github.com/nats-io/stan-server/stores"
 )
 
 func createClientStore() *clientStore {
@@ -31,7 +32,7 @@ func TestClientRegister(t *testing.T) {
 	clientID, hbInbox := createClientInfo()
 
 	// Register a new one
-	c, isNew := cs.Register(clientID, hbInbox)
+	c, isNew, _ := cs.Register(clientID, hbInbox)
 	if c == nil || !isNew {
 		t.Fatal("Expected client to be new")
 	}
@@ -66,7 +67,7 @@ func TestClientRegister(t *testing.T) {
 	}()
 
 	// Register with same info
-	secondCli, isNew := cs.Register(clientID, hbInbox)
+	secondCli, isNew, _ := cs.Register(clientID, hbInbox)
 	if secondCli != c || isNew {
 		t.Fatal("Expected to get the same client")
 	}
@@ -89,7 +90,7 @@ func TestClientParallelRegister(t *testing.T) {
 
 			for j := 0; j < totalClients; j++ {
 				clientID := fmt.Sprintf("clientID-%v", j)
-				c, isNew := cs.Register(clientID, hbInbox)
+				c, isNew, _ := cs.Register(clientID, hbInbox)
 				if c == nil {
 					errors <- fmt.Errorf("client should not be nil")
 					return
@@ -335,5 +336,24 @@ func TestClientGetSubs(t *testing.T) {
 		if s.subject != "foo" && s.subject != "bar" {
 			t.Fatalf("Unexpected subject: %v", s.subject)
 		}
+	}
+}
+
+func TestClientSetStore(t *testing.T) {
+	cs := createClientStore()
+
+	// nil is OK
+	cs.SetStore(nil)
+	if cs.store != nil {
+		t.Fatal("Expected store to be nil")
+	}
+
+	ms, err := stores.NewMemoryStore(nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	cs.SetStore(ms)
+	if cs.store != ms {
+		t.Fatal("Unexpected nil store")
 	}
 }

@@ -704,7 +704,7 @@ func TestTooManySubs(t *testing.T) {
 	}()
 }
 
-func TestRunServerWithFileBased(t *testing.T) {
+func TestRunServerWithFileStore(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
@@ -1439,5 +1439,51 @@ func TestStartPositionTimeDelta(t *testing.T) {
 	// Message 2 should be received
 	if err := Wait(rch); err != nil {
 		t.Fatal("Did not receive our message")
+	}
+}
+
+func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := DefaultOptions
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(&opts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// For delete the client
+	s.clients.Unregister(clientName)
+
+	// Shutdown the server
+	s.Shutdown()
+
+	// Restart the server
+	s = RunServerWithOpts(&opts, nil)
+	defer s.Shutdown()
+
+	// Check that client does not exist
+	if s.clients.Lookup(clientName) != nil {
+		t.Fatal("Client should not have been recovered")
+	}
+	// Channel would be recovered
+	cs := s.store.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel foo should have been recovered")
+	}
+	// But there should not be any subscription
+	ss := cs.UserData.(*subStore)
+	ss.RLock()
+	numSubs := len(ss.psubs)
+	ss.RUnlock()
+	if numSubs > 0 {
+		t.Fatalf("Should not have restored subscriptions, got %v", numSubs)
 	}
 }

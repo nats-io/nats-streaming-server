@@ -201,8 +201,13 @@ func TestFSBasicRecovery(t *testing.T) {
 	}
 	defer fs.Close()
 
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	subs := state.Subs
+
 	// Check that subscriptions are restored
-	for channel, recoveredSubs := range state {
+	for channel, recoveredSubs := range subs {
 		if len(recoveredSubs) != 1 {
 			t.Fatalf("Incorrect size of recovered subs. Expected 1, got %v ", len(recoveredSubs))
 		}
@@ -320,12 +325,17 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	}
 	defer fs.Close()
 
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	subs := state.Subs
+
 	// Make sure that all our channels are recovered.
-	if state == nil || len(state) != chanCount {
-		t.Fatalf("Unexpected count of recovered channels. Expected %v, got %v", chanCount, len(state))
+	if len(subs) != chanCount {
+		t.Fatalf("Unexpected count of recovered channels. Expected %v, got %v", chanCount, len(state.Subs))
 	}
 	// Make sure that all our subscriptions are recovered.
-	for _, recoveredSubs := range state {
+	for _, recoveredSubs := range subs {
 		if len(recoveredSubs) != subsCount {
 			t.Fatalf("Unexpected count of recovered subs. Expected %v, got %v", subsCount, len(recoveredSubs))
 		}
@@ -505,12 +515,17 @@ func TestFSRecoverSubUpdatesForDeleteSubOK(t *testing.T) {
 	}
 	defer fs.Close()
 
-	if !fs.HasChannel() || state == nil || len(state) != 1 || state["foo"] == nil {
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	subs := state.Subs
+
+	if !fs.HasChannel() || len(subs) != 1 || subs["foo"] == nil {
 		t.Fatal("Channel foo should have been recovered")
 	}
 
 	// Only sub2 should be recovered
-	recoveredSubs := state["foo"]
+	recoveredSubs := subs["foo"]
 	if len(recoveredSubs) != 1 {
 		t.Fatalf("A subscription should have been recovered, got %v", len(recoveredSubs))
 	}
@@ -551,12 +566,17 @@ func TestFSNoSubIdCollisionAfterRecovery(t *testing.T) {
 	}
 	defer fs.Close()
 
-	if !fs.HasChannel() || state == nil || len(state) != 1 || state["foo"] == nil {
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	subs := state.Subs
+
+	if !fs.HasChannel() || len(subs) != 1 || subs["foo"] == nil {
 		t.Fatal("Channel foo should have been recovered")
 	}
 
 	// sub1 should be recovered
-	recoveredSubs := state["foo"]
+	recoveredSubs := subs["foo"]
 	if len(recoveredSubs) != 1 {
 		t.Fatalf("A subscription should have been recovered, got %v", len(recoveredSubs))
 	}
@@ -583,12 +603,17 @@ func TestFSNoSubIdCollisionAfterRecovery(t *testing.T) {
 	}
 	defer fs.Close()
 
-	if !fs.HasChannel() || state == nil || len(state) != 1 || state["foo"] == nil {
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	subs = state.Subs
+
+	if !fs.HasChannel() || len(subs) != 1 || subs["foo"] == nil {
 		t.Fatal("Channel foo should have been recovered")
 	}
 
 	// sub1 & sub2 should be recovered
-	recoveredSubs = state["foo"]
+	recoveredSubs = subs["foo"]
 	if len(recoveredSubs) != 2 {
 		t.Fatalf("A subscription should have been recovered, got %v", len(recoveredSubs))
 	}
@@ -609,4 +634,83 @@ func TestFSGetSeqFromTimestamp(t *testing.T) {
 	defer fs.Close()
 
 	testGetSeqFromStartTime(t, fs)
+}
+
+func TestFSBadClientFile(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	if err := os.MkdirAll(defaultDataStore, os.ModeDir+os.ModePerm); err != nil && !os.IsExist(err) {
+		t.Fatalf("Unable to create the root directory: %v", err)
+	}
+	fileName := filepath.Join(defaultDataStore, clientsFileName)
+	// This will create the file without the file version
+	if file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666); err != nil {
+		t.Fatalf("Error creating client file: %v", err)
+	} else {
+		file.Close()
+	}
+	// So we should fail to create the filestore
+	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+	if err == nil {
+		fs.Close()
+		t.Fatalf("Expected error opening file store, got none")
+	}
+	// Now test with various unexpected content
+	contents := []string{"Nothing as expected", "A clientID-alone", "A", "D"}
+	for _, c := range contents {
+		// Delete the previous client file
+		if err := os.Remove(fileName); err != nil {
+			t.Fatalf("Unexpected error removing file: %v", err)
+		}
+		// Now create the file with proper file version
+		file, err := openFile(fileName)
+		if err != nil {
+			t.Fatalf("Error creating client file: %v", err)
+		}
+		// Add something that is not what we expect to read back
+		if _, err := file.WriteString(c); err != nil {
+			t.Fatalf("Unexpected error writing content: %v", err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatalf("Unexpected error closing file: %v", err)
+		}
+		// We should fail to create the filestore
+		fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+		if err == nil {
+			fs.Close()
+			t.Fatalf("Expected error opening file store with content %q, got none", c)
+		}
+	}
+}
+
+func TestFSAddDeleteClient(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	testAddDeleteClient(t, fs)
+
+	// Restart the store
+	fs.Close()
+
+	fs, state, err := NewFileStore(defaultDataStore, nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	if len(state.Clients) != 2 {
+		t.Fatalf("Expected 2 clients to be recovered, got %v", len(state.Clients))
+	}
+	for _, c := range state.Clients {
+		if c.ClientID != "client2" && c.ClientID != "client3" {
+			t.Fatalf("Unexpected recovered client: %v", c.ClientID)
+		}
+	}
 }

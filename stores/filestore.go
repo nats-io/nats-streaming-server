@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"bufio"
 	"github.com/nats-io/go-stan/pb"
 	"github.com/nats-io/stan-server/spb"
 	"github.com/nats-io/stan-server/util"
@@ -24,6 +25,9 @@ const (
 
 	// Name of the subscriptions file.
 	subsFileName = "subs.dat"
+
+	// Name of the clients file.
+	clientsFileName = "clients.dat"
 
 	// record header size of a subscription:
 	// 4 bytes: 1 byte for type, 3 bytes for buffer size
@@ -51,10 +55,17 @@ const (
 	subRecMsg
 )
 
-// FileStore is a factory for message and subscription stores.
+// Actions for client store
+const (
+	addClient = "A"
+	delClient = "D"
+)
+
+// FileStore is the storage interface for STAN servers, backed by files.
 type FileStore struct {
 	genericStore
-	rootDir string
+	rootDir     string
+	clientsFile *os.File
 }
 
 type recoveredSub struct {
@@ -144,7 +155,7 @@ func writeHeader(buf []byte, recType subRecordType, recordSize int) {
 // any state present.
 // If not limits are provided, the store will be created with
 // DefaultChannelLimits.
-func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, RecoveredState, error) {
+func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *RecoveredState, error) {
 	fs := &FileStore{
 		rootDir: rootDir,
 	}
@@ -159,7 +170,19 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, RecoveredS
 	var subStore *FileSubStore
 	var subs map[uint64]*recoveredSub
 
-	recoveredState := make(RecoveredState)
+	recoveredState := &RecoveredState{
+		Subs: make(RecoveredSubscriptions),
+	}
+
+	// Recover the clients file
+	recoveredState.Clients, err = fs.recoverClients()
+	if err != nil {
+		// If the file was opened/created, make sure we close it here.
+		if fs.clientsFile != nil {
+			fs.clientsFile.Close()
+		}
+		return nil, nil, err
+	}
 
 	// Get the channels (there are subdirectories of rootDir)
 	var channels []os.FileInfo
@@ -218,7 +241,7 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, RecoveredS
 		}
 
 		// This is the recovered subscription state for this channel
-		recoveredState[channel] = rssArray
+		recoveredState.Subs[channel] = rssArray
 
 		fs.channels[channel] = &ChannelStore{
 			Subs: subStore,
@@ -235,6 +258,59 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, RecoveredS
 	}
 
 	return fs, recoveredState, nil
+}
+
+// recoverClients reads the client files and returns an array of RecoveredClient
+func (fs *FileStore) recoverClients() ([]*RecoveredClient, error) {
+	clientsMap := make(map[string]*RecoveredClient)
+
+	var err error
+
+	fileName := filepath.Join(fs.rootDir, clientsFileName)
+	fs.clientsFile, err = openFile(fileName)
+	if err != nil {
+		return nil, err
+	}
+
+	var action, clientID, hbInbox string
+
+	scanner := bufio.NewScanner(fs.clientsFile)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Sscanf(line, "%s %s %s", &action, &clientID, &hbInbox)
+		switch action {
+		case addClient:
+			if clientID == "" {
+				return nil, fmt.Errorf("missing client ID in ADD client instruction")
+			}
+			if hbInbox == "" {
+				return nil, fmt.Errorf("missing client heartbeat inbox in ADD client instruction")
+			}
+			c := &RecoveredClient{ClientID: clientID, HbInbox: hbInbox}
+			// Add to the map. Note that if one already exists, which should
+			// not, just replace with this most recent one.
+			clientsMap[clientID] = c
+		case delClient:
+			if clientID == "" {
+				return nil, fmt.Errorf("missing client ID in DELETE client instruction")
+			}
+			delete(clientsMap, clientID)
+		default:
+			return nil, fmt.Errorf("invalid client action %q", action)
+		}
+	}
+	err = scanner.Err()
+	if err != nil {
+		return nil, err
+	}
+	clients := make([]*RecoveredClient, len(clientsMap))
+	i := 0
+	// Convert the map into an array
+	for _, c := range clientsMap {
+		clients[i] = c
+		i++
+	}
+	return clients, nil
 }
 
 // LookupOrCreateChannel returns a ChannelStore for the given channel,
@@ -291,14 +367,46 @@ func (fs *FileStore) LookupOrCreateChannel(channel string) (*ChannelStore, bool,
 	return channelStore, true, nil
 }
 
-// For STAN tests when RunServer defaults to a filestore
-//func (fs *FileStore) Close() error {
-//	err := fs.genericStore.Close()
-//	if err == nil {
-//		err = os.RemoveAll(fs.rootDir)
-//	}
-//	return err
-//}
+// AddClient stores information about the client identified by `clientID`.
+func (fs *FileStore) AddClient(clientID, hbInbox string) error {
+	line := fmt.Sprintf("%s %s %s\r\n", addClient, clientID, hbInbox)
+	fs.Lock()
+	defer fs.Unlock()
+	if _, err := fs.clientsFile.WriteString(line); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeleteClient invalidates the client identified by `clientID`.
+func (fs *FileStore) DeleteClient(clientID string) {
+	line := fmt.Sprintf("%s %s\r\n", delClient, clientID)
+	fs.Lock()
+	defer fs.Unlock()
+	fs.clientsFile.WriteString(line)
+}
+
+// Close closes all stores.
+func (fs *FileStore) Close() error {
+	fs.Lock()
+	defer fs.Unlock()
+	if fs.closed {
+		return nil
+	}
+	fs.closed = true
+
+	var err error
+
+	err = fs.genericStore.close()
+	if fs.clientsFile != nil {
+		if lerr := fs.clientsFile.Close(); lerr != nil {
+			if err == nil {
+				err = lerr
+			}
+		}
+	}
+	return err
+}
 
 ////////////////////////////////////////////////////////////////////////////
 // FileMsgStore methods

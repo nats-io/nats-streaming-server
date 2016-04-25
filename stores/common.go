@@ -127,17 +127,30 @@ func (gs *genericStore) canAddChannel() error {
 	return nil
 }
 
+// AddClient stores information about the client identified by `clientID`.
+func (gs *genericStore) AddClient(clientID, hbInbox string) error {
+	// no-op
+	return nil
+}
+
+// DeleteClient deletes the client identified by `clientID`.
+func (gs *genericStore) DeleteClient(clientID string) {
+	// no-op
+}
+
 // Close closes all stores
 func (gs *genericStore) Close() error {
 	gs.Lock()
 	defer gs.Unlock()
-
 	if gs.closed {
 		return nil
 	}
-
 	gs.closed = true
+	return gs.close()
+}
 
+// close closes all stores. Store lock is assumed held on entry
+func (gs *genericStore) close() error {
 	var err error
 	var lerr error
 
@@ -151,7 +164,6 @@ func (gs *genericStore) Close() error {
 			err = lerr
 		}
 	}
-
 	return err
 }
 
