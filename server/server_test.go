@@ -116,6 +116,22 @@ func TestRunServer(t *testing.T) {
 	defer s.Shutdown()
 }
 
+func TestDoubleShutdown(t *testing.T) {
+	s := RunServer(clusterName)
+	s.Shutdown()
+
+	ch := make(chan bool)
+
+	go func() {
+		s.Shutdown()
+		ch <- true
+	}()
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Second shutdown blocked")
+	}
+}
+
 type response interface {
 	Unmarshal([]byte) error
 }
@@ -1021,7 +1037,7 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 	}
 
 	// Verify message is acked.
-	checkDurableNoPendingAck(t, s, ackInbox, ackSub, 1)
+	checkDurableNoPendingAck(t, s, true, ackInbox, ackSub, 1)
 
 	// Close stan connection
 	sc.Close()
@@ -1043,8 +1059,8 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
-	// Verify that we have maintained the same AckInbox and message is acked.
-	checkDurableNoPendingAck(t, s, ackInbox, ackSub, 2)
+	// Verify that we have different AckInbox and ackSub and message is acked.
+	checkDurableNoPendingAck(t, s, false, ackInbox, ackSub, 2)
 
 	// Close stan connection
 	sc.Close()
@@ -1061,8 +1077,8 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 	// Check durable is found
 	checkDurable(t, s, "foo", durName, durKey)
 
-	// Verify that we have maintained the same AckInbox and message is acked.
-	checkDurableNoPendingAck(t, s, ackInbox, ackSub, 2)
+	// Verify that we have different AckInbox and ackSub and message is acked.
+	checkDurableNoPendingAck(t, s, false, ackInbox, ackSub, 2)
 
 	numMsgs := len(msgs)
 	if numMsgs > 2 {
@@ -1079,7 +1095,8 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 	}
 }
 
-func checkDurableNoPendingAck(t *testing.T, s *StanServer, ackInbox string, ackSub *nats.Subscription, expectedSeq uint64) {
+func checkDurableNoPendingAck(t *testing.T, s *StanServer, isSame bool,
+	ackInbox string, ackSub *nats.Subscription, expectedSeq uint64) {
 	// When called, we know that there is 1 sub, and the sub is a durable.
 	subs := s.clients.GetSubs(clientName)
 	durable := subs[0]
@@ -1088,11 +1105,20 @@ func checkDurableNoPendingAck(t *testing.T, s *StanServer, ackInbox string, ackS
 	durAckSub := durable.ackSub
 	durable.RUnlock()
 
-	if durAckInbox != ackInbox {
-		stackFatalf(t, "Expected ackInbox %v, got %v", ackInbox, durAckInbox)
-	}
-	if durAckSub != ackSub {
-		stackFatalf(t, "Expected subscriber on ack to be %p, got %p", ackSub, durAckSub)
+	if isSame {
+		if durAckInbox != ackInbox {
+			stackFatalf(t, "Expected ackInbox %v, got %v", ackInbox, durAckInbox)
+		}
+		if durAckSub != ackSub {
+			stackFatalf(t, "Expected subscriber on ack to be %p, got %p", ackSub, durAckSub)
+		}
+	} else {
+		if durAckInbox == ackInbox {
+			stackFatalf(t, "Expected different ackInbox'es")
+		}
+		if durAckSub == ackSub {
+			stackFatalf(t, "Expected different ackSub")
+		}
 	}
 
 	limit := time.Now().Add(5 * time.Second)
@@ -1137,34 +1163,21 @@ func TestClientCrashAndReconnect(t *testing.T) {
 	// kill the NATS conn
 	nc.Close()
 
-	// should get a duplicate clientID error
-	if sc2, err := stan.Connect(clusterName, clientName); err == nil {
-		sc2.Close()
-		t.Fatal("Expected to be unable to connect")
+	// Since the original client won't respond to a ping, we should
+	// be able to connect, and it should not take too long.
+	start := time.Now()
+
+	// should succeed
+	if sc2, err := stan.Connect(clusterName, clientName); err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	} else {
+		defer sc2.Close()
 	}
 
-	ok := false
-	timeout := time.Now().Add(5 * time.Second)
-	for time.Now().Before(timeout) {
-		clients := s.clients.GetClients()
-		if len(clients) > 0 {
-			time.Sleep(100 * time.Millisecond)
-		} else {
-			ok = true
-			break
-		}
+	duration := time.Now().Sub(start)
+	if duration > 5*time.Second {
+		t.Fatalf("Took too long to be able to connect: %v", duration)
 	}
-
-	if !ok {
-		t.Fatal("Timeout before client purged")
-	}
-
-	// should be able to connect
-	sc, err = stan.Connect(clusterName, clientName)
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v", err)
-	}
-	defer sc.Close()
 }
 
 func TestStartPositionNewOnly(t *testing.T) {
@@ -1485,5 +1498,48 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	ss.RUnlock()
 	if numSubs > 0 {
 		t.Fatalf("Should not have restored subscriptions, got %v", numSubs)
+	}
+}
+
+func TestCheckClientHealth(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	// Override HB settings
+	s.Lock()
+	s.hbInterval = 200 * time.Millisecond
+	s.hbTimeout = 10 * time.Millisecond
+	s.maxFailedHB = 10
+	s.Unlock()
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// kill the NATS conn
+	nc.Close()
+
+	// Check that the server closes the connection
+	ok := false
+	timeout := time.Now().Add(5 * time.Second)
+	for time.Now().Before(timeout) {
+		clients := s.clients.GetClients()
+		if len(clients) > 0 {
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		t.Fatal("Timeout before client purged")
 	}
 }
