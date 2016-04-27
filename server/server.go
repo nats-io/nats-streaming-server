@@ -1015,19 +1015,35 @@ func makeSortedMsgs(msgs map[uint64]*pb.MsgProto) []*pb.MsgProto {
 
 // Redeliver all outstanding messages to a durable subscriber, used on resubscribe.
 func (s *StanServer) performDurableRedelivery(sub *subState) {
-	Debugf("STAN:[Client:%s] Redelivering to durable %s.", sub.ClientID, sub.DurableName)
-	s.performRedelivery(sub, false)
+	// Sort our messages outstanding from acksPending, grab some state and unlock.
+	sub.RLock()
+	sortedMsgs := makeSortedMsgs(sub.acksPending)
+	clientID := sub.ClientID
+	durName := sub.DurableName
+	sub.RUnlock()
+
+	Debugf("STAN: [Client:%s] Redelivering to durable %s", clientID, durName)
+
+	// If we don't find the client, we are done.
+	client := s.clients.Lookup(clientID)
+	if client == nil {
+		return
+	}
+	// Go through all messages
+	for _, m := range sortedMsgs {
+		Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", clientID, m.Sequence)
+
+		// Flag as redelivered.
+		m.Redelivered = true
+
+		sub.Lock()
+		s.sendMsgToSub(sub, m)
+		sub.Unlock()
+	}
 }
 
 // Redeliver all outstanding messages that have expired.
 func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
-	Debugf("STAN: [Client:%s] Redelivering on ack expiration. subject=%s, inbox=%s.",
-		sub.ClientID, sub.subject, sub.Inbox)
-	s.performRedelivery(sub, true)
-}
-
-// Performs redelivery, takes a flag on whether to honor expiration.
-func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.RLock()
 	expTime := int64(sub.ackWait)
@@ -1036,7 +1052,11 @@ func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	qs := sub.qstate
 	clientID := sub.ClientID
 	floorTimestamp := sub.ackTimeFloor
+	inbox := sub.Inbox
 	sub.RUnlock()
+
+	Debugf("STAN: [Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
+		clientID, subject, inbox)
 
 	// If we don't find the client, we are done.
 	client := s.clients.Lookup(clientID)
@@ -1063,24 +1083,20 @@ func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 
 	// We will move through acksPending(sorted) and see what needs redelivery.
 	for _, m := range sortedMsgs {
-		if checkExpiration {
-			// Ignore messages with a timestamp below our floor
-			if floorTimestamp > 0 && floorTimestamp > m.Timestamp {
-				continue
-			}
-
-			if m.Timestamp+expTime > now {
-				// the messages are ordered by seq so the expiration
-				// times are ascending.  Once we've get here, we've hit an
-				// unexpired message, and we're done. Reset the sub's ack
-				// timer to fire on the next message expiration.
-				Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
-				sub.adjustAckTimer(m.Timestamp)
-				return
-			}
+		// Ignore messages with a timestamp below our floor
+		if floorTimestamp > 0 && floorTimestamp > m.Timestamp {
+			continue
 		}
 
-		Tracef("STAN: [Client:%s] redelivery, sending seqno=%d.", clientID, m.Sequence)
+		if m.Timestamp+expTime > now {
+			// the messages are ordered by seq so the expiration
+			// times are ascending.  Once we've get here, we've hit an
+			// unexpired message, and we're done. Reset the sub's ack
+			// timer to fire on the next message expiration.
+			Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
+			sub.adjustAckTimer(m.Timestamp)
+			return
+		}
 
 		// Flag as redelivered.
 		m.Redelivered = true
@@ -1101,7 +1117,7 @@ func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 			ss.Unlock()
 
 			if pick == nil {
-				Errorf("STAN: [Client:%s] Unable to find queue subscriber.", clientID)
+				Errorf("STAN: [Client:%s] Unable to find queue subscriber", clientID)
 				break
 			}
 		} else {
@@ -1109,27 +1125,26 @@ func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 		}
 
 		pick.Lock()
+		Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", pick.ClientID, m.Sequence)
 		s.sendMsgToSub(pick, m)
 		pick.Unlock()
 	}
 
-	if checkExpiration {
-		// The messages from sortedMsgs above may have all been acknowledged
-		// by now, but we are going to set the timer based on the oldest on
-		// that list, which is the sooner the timer should fire anyway.
-		// The timer will correctly be adjusted.
+	// The messages from sortedMsgs above may have all been acknowledged
+	// by now, but we are going to set the timer based on the oldest on
+	// that list, which is the sooner the timer should fire anyway.
+	// The timer will correctly be adjusted.
 
-		firstUnacked := int64(0)
+	firstUnacked := int64(0)
 
-		// Because of locking and timing, it's possible that the sortedMsgs
-		// map was empty even on entry.
-		if len(sortedMsgs) > 0 {
-			firstUnacked = sortedMsgs[0].Timestamp
-		}
-
-		// Adjust the timer
-		sub.adjustAckTimer(firstUnacked)
+	// Because of locking and timing, it's possible that the sortedMsgs
+	// map was empty even on entry.
+	if len(sortedMsgs) > 0 {
+		firstUnacked = sortedMsgs[0].Timestamp
 	}
+
+	// Adjust the timer
+	sub.adjustAckTimer(firstUnacked)
 }
 
 // Sends the message to the subscriber

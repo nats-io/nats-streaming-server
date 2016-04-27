@@ -567,6 +567,24 @@ func TestRedelivery(t *testing.T) {
 	}(subs[0])
 }
 
+func TestRedeliveryRace(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.AckWait(time.Second), stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	time.Sleep(time.Second)
+	sub.Unsubscribe()
+}
+
 func TestQueueRedelivery(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
@@ -637,6 +655,71 @@ func TestQueueRedelivery(t *testing.T) {
 			t.Fatalf("Expected timer to be nil")
 		}
 	}(subs[0])
+}
+
+func TestDurableRedelivery(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	ch := make(chan bool)
+	rch := make(chan bool)
+	errors := make(chan error, 5)
+	count := 0
+	cb := func(m *stan.Msg) {
+		count++
+		switch count {
+		case 1:
+			ch <- true
+		case 2:
+			rch <- true
+		default:
+			errors <- fmt.Errorf("Unexpected message %v", m)
+		}
+	}
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	_, err := sc.Subscribe("foo", cb, stan.DurableName("dur"), stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Wait for first message to be received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Failed to receive first message")
+	}
+
+	// Report error if any
+	if len(errors) > 0 {
+		t.Fatalf("%v", <-errors)
+	}
+
+	// Close the client
+	sc.Close()
+
+	// Restart client
+	sc2 := NewDefaultConnection(t)
+	defer sc2.Close()
+
+	sub2, err := sc2.Subscribe("foo", cb, stan.DurableName("dur"), stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub2.Unsubscribe()
+
+	// Wait for redelivered message
+	if err := Wait(rch); err != nil {
+		t.Fatal("Messages were not redelivered to durable")
+	}
+
+	// Report error if any
+	if len(errors) > 0 {
+		t.Fatalf("%v", <-errors)
+	}
 }
 
 func TestTooManyChannelsOnCreateSub(t *testing.T) {
