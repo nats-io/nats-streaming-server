@@ -50,13 +50,12 @@ const (
 	DefaultClientHBTimeout     = 10 * time.Second
 	DefaultMaxFailedHeartBeats = int((5 * time.Minute) / DefaultHeartBeatInterval)
 
-	// When a client connects with a clientID that is already registered,
-	// the server is going to ping the known HbInbox to see if the client
-	// is still alive. If not, the old client is unregistered and replaced
-	// with the new. Since there is a request with 1 second timeout, this is
-	// done in a different go-routine using a channel to avoid blocking the
-	// server. This is the channel size.
-	connReqWithDupIDBacklog = 100
+	// Max number of outstanding go-routines handling connect requests for
+	// duplicate client IDs.
+	defaultMaxDupCIDRoutines = 100
+	// Timeout used to ping the known client when processing a connection
+	// request for a duplicate client ID.
+	defaultCheckDupCIDTimeout = 500 * time.Millisecond
 )
 
 // Errors.
@@ -103,8 +102,7 @@ type StanServer struct {
 	natsServer    *server.Server
 	opts          *Options
 	nc            *nats.Conn
-	crDupIDCh     chan *connRequest // Connection requests for which a client ID already exists
-	wg            sync.WaitGroup    // Wait on go routines during shutdown
+	wg            sync.WaitGroup // Wait on go routines during shutdown
 
 	// For now, these will be set to the constants DefaultHeartBeatInterval, etc...
 	// but allow to override in tests.
@@ -112,19 +110,19 @@ type StanServer struct {
 	hbTimeout   time.Duration
 	maxFailedHB int
 
+	// Used when processing connect requests for client ID already registered
+	dupCIDGuard       sync.RWMutex
+	dupCIDMap         map[string]struct{}
+	dupCIDwg          sync.WaitGroup // To wait for one routine to end when we have reached the max.
+	dupCIDswg         bool           // To instruct one go routine to decrement the wait group.
+	dupCIDTimeout     time.Duration
+	dupMaxCIDRoutines int
+
 	// Clients
 	clients *clientStore
 
 	// Store
 	store stores.Store
-}
-
-// connRequest holds information necessary to process a connect request
-// in a different go-routine when detecting a duplicate client ID.
-type connRequest struct {
-	client     *client
-	req        *pb.ConnectRequest
-	replyInbox string
 }
 
 // subStore holds all known state for all subscriptions
@@ -384,17 +382,16 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	}
 
 	s := StanServer{
-		clusterID:   sOpts.ID,
-		serverID:    nuid.Next(),
-		opts:        sOpts,
-		crDupIDCh:   make(chan *connRequest, connReqWithDupIDBacklog),
-		hbInterval:  DefaultHeartBeatInterval,
-		hbTimeout:   DefaultClientHBTimeout,
-		maxFailedHB: DefaultMaxFailedHeartBeats,
+		clusterID:         sOpts.ID,
+		serverID:          nuid.Next(),
+		opts:              sOpts,
+		hbInterval:        DefaultHeartBeatInterval,
+		hbTimeout:         DefaultClientHBTimeout,
+		maxFailedHB:       DefaultMaxFailedHeartBeats,
+		dupCIDMap:         make(map[string]struct{}),
+		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
+		dupCIDTimeout:     defaultCheckDupCIDTimeout,
 	}
-
-	s.wg.Add(1)
-	go s.processConnecRequestWithDupID()
 
 	// Create clientStore
 	s.clients = &clientStore{clients: make(map[string]*client)}
@@ -654,7 +651,56 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 	}
 	// Handle duplicate IDs in a dedicated go-routine
 	if !isNew {
-		s.crDupIDCh <- &connRequest{client: client, req: req, replyInbox: m.Reply}
+		// Do we have a routine in progress for this client ID?
+		s.dupCIDGuard.RLock()
+		_, inProgress := s.dupCIDMap[req.ClientID]
+		s.dupCIDGuard.RUnlock()
+
+		// Yes, fail this request here.
+		if inProgress {
+			Debugf("STAN: [Client:%s] Connect failed; already connected", req.ClientID)
+			s.sendConnectErr(m.Reply, ErrInvalidClient.Error())
+			return
+		}
+
+		// If server has started shutdown, we can't call wg.Add() so we need
+		// to check on shutdown status. Note that s.wg is for all server's
+		// go routines, not specific to duplicate CID handling. Use server's
+		// lock here.
+		s.Lock()
+		shutdown := s.shutdown
+		if !shutdown {
+			// Assume we are going to start a go routine.
+			s.wg.Add(1)
+		}
+		s.Unlock()
+
+		if shutdown {
+			// The client will timeout on connect
+			return
+		}
+
+		// If we have exhausted the max number of go routines, we will have
+		// to wait that one finishes.
+		needToWait := false
+
+		s.dupCIDGuard.Lock()
+		s.dupCIDMap[req.ClientID] = struct{}{}
+		if len(s.dupCIDMap) > s.dupMaxCIDRoutines {
+			s.dupCIDswg = true
+			s.dupCIDwg.Add(1)
+			needToWait = true
+		}
+		s.dupCIDGuard.Unlock()
+
+		// If we need to wait for a go routine to return...
+		if needToWait {
+			s.dupCIDwg.Wait()
+		}
+		// Start a go-routine to handle this connect request
+		go func() {
+			s.processConnectRequestWithDupID(client, req, m.Reply)
+		}()
 		return
 	}
 
@@ -685,60 +731,54 @@ func (s *StanServer) finishConnectRequest(client *client, replyInbox string) {
 	Debugf("STAN: [Client:%s] connected.", clientID)
 }
 
-func (s *StanServer) processConnecRequestWithDupID() {
-	defer s.wg.Done()
+func (s *StanServer) processConnectRequestWithDupID(client *client, req *pb.ConnectRequest, replyInbox string) {
+	sendErr := true
 
-	s.RLock()
-	ch := s.crDupIDCh
-	s.RUnlock()
-	if ch == nil {
+	client.RLock()
+	hbInbox := client.hbInbox
+	clientID := client.clientID
+	client.RUnlock()
+
+	defer s.wg.Done()
+	defer func() {
+		s.dupCIDGuard.Lock()
+		delete(s.dupCIDMap, clientID)
+		if s.dupCIDswg {
+			s.dupCIDswg = false
+			s.dupCIDwg.Done()
+		}
+		s.dupCIDGuard.Unlock()
+	}()
+
+	// This is the HbInbox from the "old" client. See if it is up and
+	// running by sending a ping to that inbox.
+	if _, err := s.nc.Request(hbInbox, nil, s.dupCIDTimeout); err != nil {
+		// The old client didn't reply, assume it is dead, close it and continue.
+		s.closeClient(client)
+
+		// Between the close and the new registration below, it is possible
+		// that a connection request came in (in connectCB) and since the
+		// client is now unregistered, the new connection was accepted there.
+		// The registration below will then fail, in which case we will fail
+		// this request.
+
+		// Need to re-register now based on the new request info.
+		var isNew bool
+		client, isNew, err = s.clients.Register(req.ClientID, req.HeartbeatInbox)
+		if err == nil && isNew {
+			// We could register the new client.
+			sendErr = false
+		}
+	}
+	// The currently registered client is responding, or we failed to register,
+	// so fail the request of the incoming client connect request.
+	if sendErr {
+		Debugf("STAN: [Client:%s] Connect failed; already connected", clientID)
+		s.sendConnectErr(replyInbox, ErrInvalidClient.Error())
 		return
 	}
-	for {
-		connReq, ok := <-ch
-		if !ok {
-			break
-		}
-
-		client := connReq.client
-		req := connReq.req
-		replyInbox := connReq.replyInbox
-		sendErr := true
-
-		client.RLock()
-		hbInbox := client.hbInbox
-		clientID := client.clientID
-		client.RUnlock()
-
-		// This is the HbInbox from the "old" client. See if it is up and
-		// running by sending a ping to that inbox.
-		_, err := s.nc.Request(hbInbox, nil, 1*time.Second)
-		// The old client didn't reply
-		if err != nil {
-			// Assume the old client id dead, close it and continue.
-			s.closeClient(client)
-
-			// Need to re-register now based on the new request info.
-			var isNew bool
-			client, isNew, err = s.clients.Register(req.ClientID, req.HeartbeatInbox)
-			// Accept the new client's connection request if we are able to
-			// register and another app with same client ID did not beat us
-			// to the registration.
-			if err == nil && isNew {
-				// We could register the new client.
-				sendErr = false
-			} // else, we were unable to register this client, we have to fail it.
-		}
-		// The currently registered client is responding, so fail the request of
-		// the incoming client connect request.
-		if sendErr {
-			Debugf("STAN: [Client:%s] Connect failed; already connected", clientID)
-			s.sendConnectErr(replyInbox, ErrInvalidClient.Error())
-			continue
-		}
-		// We have replaced the old with the new.
-		s.finishConnectRequest(client, replyInbox)
-	}
+	// We have replaced the old with the new.
+	s.finishConnectRequest(client, replyInbox)
 }
 
 func (s *StanServer) sendConnectErr(replyInbox, err string) {
@@ -1766,7 +1806,6 @@ func (s *StanServer) Shutdown() {
 	s.shutdown = true
 
 	// Capture under lock
-	ch := s.crDupIDCh
 	store := s.store
 	ns := s.natsServer
 	// Do not set s.nc to nil since it is used in many place without locking.
@@ -1778,10 +1817,6 @@ func (s *StanServer) Shutdown() {
 	// directly (instead of calling RunServer() and the like), these should
 	// not be nil.
 
-	// Kick out the go-routine
-	if ch != nil {
-		close(ch)
-	}
 	// Wait for go-routines to return
 	s.wg.Wait()
 
