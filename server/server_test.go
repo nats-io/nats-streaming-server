@@ -1614,7 +1614,7 @@ func TestConnectsWithDupCID(t *testing.T) {
 	}
 
 	// Start this go routine that will try to connect 2*total-1
-	// times. These all shoul fail (quickly) since the one
+	// times. These all should fail (quickly) since the one
 	// connecting below should be the one that connects.
 	go func() {
 		defer wg.Done()

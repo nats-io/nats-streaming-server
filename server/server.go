@@ -636,7 +636,7 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 	req := &pb.ConnectRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil || !clientIDRegEx.MatchString(req.ClientID) || req.HeartbeatInbox == "" {
-		Debugf("STAN: [Client:?] Invalid conn request: ClientID=%s, HBInbox=%s, err=%v.",
+		Debugf("STAN: [Client:?] Invalid conn request: ClientID=%s, Inbox=%s, err=%v",
 			req.ClientID, req.HeartbeatInbox, err)
 		s.sendConnectErr(m.Reply, ErrInvalidConnReq.Error())
 		return
@@ -725,10 +725,11 @@ func (s *StanServer) finishConnectRequest(client *client, replyInbox string) {
 	// Heartbeat timer.
 	client.Lock()
 	clientID := client.clientID
+	hbInbox := client.hbInbox
 	client.hbt = time.AfterFunc(hbInterval, func() { s.checkClientHealth(clientID) })
 	client.Unlock()
 
-	Debugf("STAN: [Client:%s] connected.", clientID)
+	Debugf("STAN: [Client:%s] Connected (Inbox=%v)", clientID, hbInbox)
 }
 
 func (s *StanServer) processConnectRequestWithDupID(client *client, req *pb.ConnectRequest, replyInbox string) {
@@ -739,7 +740,6 @@ func (s *StanServer) processConnectRequestWithDupID(client *client, req *pb.Conn
 	clientID := client.clientID
 	client.RUnlock()
 
-	defer s.wg.Done()
 	defer func() {
 		s.dupCIDGuard.Lock()
 		delete(s.dupCIDMap, clientID)
@@ -748,6 +748,7 @@ func (s *StanServer) processConnectRequestWithDupID(client *client, req *pb.Conn
 			s.dupCIDwg.Done()
 		}
 		s.dupCIDGuard.Unlock()
+		defer s.wg.Done()
 	}()
 
 	// This is the HbInbox from the "old" client. See if it is up and
@@ -767,6 +768,7 @@ func (s *StanServer) processConnectRequestWithDupID(client *client, req *pb.Conn
 		client, isNew, err = s.clients.Register(req.ClientID, req.HeartbeatInbox)
 		if err == nil && isNew {
 			// We could register the new client.
+			Debugf("STAN: [Client:%s] Replaced old client (Inbox=%v)", req.ClientID, hbInbox)
 			sendErr = false
 		}
 	}
@@ -826,6 +828,7 @@ func (s *StanServer) closeClient(client *client) {
 		client.hbt.Stop()
 	}
 	clientID := client.clientID
+	hbInbox := client.hbInbox
 	client.Unlock()
 
 	// Remove all non-durable subscribers.
@@ -834,7 +837,7 @@ func (s *StanServer) closeClient(client *client) {
 	// Remove from our clientStore
 	s.clients.Unregister(clientID)
 
-	Debugf("STAN: [Client:%s] Closed.", clientID)
+	Debugf("STAN: [Client:%s] Closed (Inbox=%v)", clientID, hbInbox)
 }
 
 // processCloseRequest process inbound messages from clients.
@@ -1271,13 +1274,10 @@ func (s *StanServer) removeAllNonDurableSubscribers(clientID string) {
 			ss.Lock()
 			delete(ss.acks, ackInbox)
 			ss.Unlock()
-
-			// Skip removal if durable.
-			continue
+		} else {
+			// Remove from subStore
+			ss.Remove(sub)
 		}
-
-		// Remove from subStore
-		ss.Remove(sub)
 	}
 }
 
