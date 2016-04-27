@@ -822,7 +822,7 @@ func (s *StanServer) performDurableRedelivery(sub *subState) {
 	durName := sub.DurableName
 	sub.RUnlock()
 
-	Debugf("STAN:[Client:%s] Redelivering to durable %s.", clientID, durName)
+	Debugf("STAN: [Client:%s] Redelivering to durable %s", clientID, durName)
 
 	// If we don't find the client, we are done.
 	client := s.clients.Lookup(clientID)
@@ -831,7 +831,7 @@ func (s *StanServer) performDurableRedelivery(sub *subState) {
 	}
 	// Go through all messages
 	for _, m := range sortedMsgs {
-		Tracef("STAN: [Client:%s] redelivery, sending seqno=%d.", clientID, m.Sequence)
+		Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", clientID, m.Sequence)
 
 		// Flag as redelivered.
 		m.Redelivered = true
@@ -855,7 +855,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	inbox := sub.Inbox
 	sub.RUnlock()
 
-	Debugf("STAN: [Client:%s] Redelivering on ack expiration. subject=%s, inbox=%s.",
+	Debugf("STAN: [Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
 		clientID, subject, inbox)
 
 	// If we don't find the client, we are done.
@@ -898,8 +898,6 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			return
 		}
 
-		Tracef("STAN: [Client:%s] redelivery, sending seqno=%d.", clientID, m.Sequence)
-
 		// Flag as redelivered.
 		m.Redelivered = true
 
@@ -919,7 +917,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			ss.Unlock()
 
 			if pick == nil {
-				Errorf("STAN: [Client:%s] Unable to find queue subscriber.", clientID)
+				Errorf("STAN: [Client:%s] Unable to find queue subscriber", clientID)
 				break
 			}
 		} else {
@@ -927,6 +925,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 		}
 
 		pick.Lock()
+		Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", pick.ClientID, m.Sequence)
 		s.sendMsgToSub(pick, m)
 		pick.Unlock()
 	}
