@@ -64,7 +64,7 @@ func NewDefaultConnection(t tLogger) stan.Conn {
 
 func cleanupDatastore(t *testing.T, dir string) {
 	if err := os.RemoveAll(dir); err != nil {
-		t.Fatalf("Error cleanup datastore: %v", err)
+		stackFatalf(t, "Error cleanup datastore: %v", err)
 	}
 }
 
@@ -178,25 +178,25 @@ func TestInvalidRequests(t *testing.T) {
 	}
 
 	// Send a dummy message on the STAN publish subject
-	if err := checkServerResponse(nc, s.pubPrefix+".foo", ErrInvalidPubReq,
+	if err := checkServerResponse(nc, s.info.Publish+".foo", ErrInvalidPubReq,
 		&pb.PubAck{}); err != nil {
 		t.Fatalf("%v", err)
 	}
 
 	// Send a dummy message on the STAN subscription init subject
-	if err := checkServerResponse(nc, s.subRequests, ErrInvalidSubReq,
+	if err := checkServerResponse(nc, s.info.Subscribe, ErrInvalidSubReq,
 		&pb.SubscriptionResponse{}); err != nil {
 		t.Fatalf("%v", err)
 	}
 
 	// Send a dummy message on the STAN subscription unsub subject
-	if err := checkServerResponse(nc, s.unsubRequests, ErrInvalidUnsubReq,
+	if err := checkServerResponse(nc, s.info.Unsubscribe, ErrInvalidUnsubReq,
 		&pb.SubscriptionResponse{}); err != nil {
 		t.Fatalf("%v", err)
 	}
 
 	// Send a dummy message on the STAN close subject
-	if err := checkServerResponse(nc, s.closeRequests, ErrInvalidCloseReq,
+	if err := checkServerResponse(nc, s.info.Close, ErrInvalidCloseReq,
 		&pb.CloseResponse{}); err != nil {
 		t.Fatalf("%v", err)
 	}
@@ -264,7 +264,7 @@ func sendInvalidSubRequest(s *StanServer, nc *nats.Conn, req *pb.SubscriptionReq
 	if err != nil {
 		return fmt.Errorf("Error during marshal: %v", err)
 	}
-	rep, err := nc.Request(s.subRequests, b, time.Second)
+	rep, err := nc.Request(s.info.Subscribe, b, time.Second)
 	if err != nil {
 		return fmt.Errorf("Unexpected error: %v", err)
 	}
@@ -383,7 +383,7 @@ func sendInvalidUnsubRequest(s *StanServer, nc *nats.Conn, req *pb.UnsubscribeRe
 	if err != nil {
 		return fmt.Errorf("Error during marshal: %v", err)
 	}
-	rep, err := nc.Request(s.unsubRequests, b, time.Second)
+	rep, err := nc.Request(s.info.Unsubscribe, b, time.Second)
 	if err != nil {
 		return fmt.Errorf("Unexpected error: %v", err)
 	}
@@ -963,22 +963,14 @@ func TestRunServerWithFileStore(t *testing.T) {
 	// the new publisher's new message is delivered
 	time.Sleep(700 * time.Millisecond)
 
-	// For now, we need to use a new connection for the new message
-	// because on restart PUB inbox is different.
-	sc2, err := stan.Connect(opts.ID, "otherClient")
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
-	defer sc2.Close()
-
 	// Send new messages, should be received.
-	if err := sc2.Publish("bar", []byte("New Msg for bar")); err != nil {
+	if err := sc.Publish("bar", []byte("New Msg for bar")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
-	if err := sc2.Publish("baz", []byte("New Msg for baz")); err != nil {
+	if err := sc.Publish("baz", []byte("New Msg for baz")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
-	if err := sc2.Publish("foo", []byte("New Msg for foo")); err != nil {
+	if err := sc.Publish("foo", []byte("New Msg for foo")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
@@ -1835,4 +1827,67 @@ func TestConnectsWithDupCID(t *testing.T) {
 	if errs := getErrors(); errs != "" {
 		t.Fatalf("Test failed: %v", errs)
 	}
+}
+
+func TestStoreTypeUnknown(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := DefaultOptions
+	opts.StoreType = "MyType"
+
+	var failedServer *StanServer
+	defer func() {
+		if r := recover(); r == nil {
+			if failedServer != nil {
+				failedServer.Shutdown()
+			}
+			t.Fatal("Server should have failed with a panic because of unknown store type")
+		}
+	}()
+	failedServer = RunServerWithOpts(&opts, nil)
+}
+
+func TestFileStoreMissingDirectory(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := DefaultOptions
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = ""
+
+	var failedServer *StanServer
+	defer func() {
+		if r := recover(); r == nil {
+			if failedServer != nil {
+				failedServer.Shutdown()
+			}
+			t.Fatal("Server should have failed with a panic because missing directory")
+		}
+	}()
+	failedServer = RunServerWithOpts(&opts, nil)
+}
+
+func TestFileStoreChangedClusterID(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := DefaultOptions
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(&opts, nil)
+	s.Shutdown()
+
+	var failedServer *StanServer
+	defer func() {
+		if r := recover(); r == nil {
+			if failedServer != nil {
+				failedServer.Shutdown()
+			}
+			t.Fatal("Server should have failed with a panic because of different IDs")
+		}
+	}()
+	// Change cluster ID, running the server should fail with a panic
+	opts.ID = "differentID"
+	failedServer = RunServerWithOpts(&opts, nil)
 }

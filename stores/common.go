@@ -61,6 +61,11 @@ func (gs *genericStore) init(name string, limits *ChannelLimits) {
 	gs.channels = make(map[string]*ChannelStore, 16)
 }
 
+// Init can be used to initialize the store with server's information.
+func (gs *genericStore) Init(info *spb.ServerInfo) error {
+	return nil
+}
+
 // Name returns the type name of this store
 func (gs *genericStore) Name() string {
 	return gs.name

@@ -29,6 +29,9 @@ const (
 	// Name of the clients file.
 	clientsFileName = "clients.dat"
 
+	// Name of the server file.
+	serverFileName = "server.dat"
+
 	// record header size of a subscription:
 	// 4 bytes: 1 byte for type, 3 bytes for buffer size
 	subRecordHeaderSize = 4
@@ -166,29 +169,45 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 	}
 
 	var err error
+	var recoveredState *RecoveredState
+	var serverInfo *spb.ServerInfo
+	var recoveredClients []*RecoveredClient
+	var recoveredSubs = make(RecoveredSubscriptions)
+	var channels []os.FileInfo
 	var msgStore *FileMsgStore
 	var subStore *FileSubStore
 	var subs map[uint64]*recoveredSub
 
-	recoveredState := &RecoveredState{
-		Subs: make(RecoveredSubscriptions),
+	// Open/Create the client file now since we are going to bail out
+	// early if there is no server info recovered. Otherwise, we would
+	// have to check/create the file when adding/deleting a client.
+	fileName := filepath.Join(fs.rootDir, clientsFileName)
+	fs.clientsFile, err = openFile(fileName)
+	if err != nil {
+		goto errorBlock
+	}
+
+	// Open/Create and/or Recover the server file.
+	serverInfo, err = fs.recoverServerInfo()
+	if err != nil {
+		goto errorBlock
+	}
+	// If the server file is empty, then we are done
+	if serverInfo == nil {
+		// We return the file store instance, but no recovered state.
+		return fs, nil, nil
 	}
 
 	// Recover the clients file
-	recoveredState.Clients, err = fs.recoverClients()
+	recoveredClients, err = fs.recoverClients()
 	if err != nil {
-		// If the file was opened/created, make sure we close it here.
-		if fs.clientsFile != nil {
-			fs.clientsFile.Close()
-		}
-		return nil, nil, err
+		goto errorBlock
 	}
 
 	// Get the channels (there are subdirectories of rootDir)
-	var channels []os.FileInfo
 	channels, err = ioutil.ReadDir(rootDir)
 	if err != nil {
-		return nil, nil, err
+		goto errorBlock
 	}
 	// Go through the list
 	for _, c := range channels {
@@ -241,7 +260,7 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 		}
 
 		// This is the recovered subscription state for this channel
-		recoveredState.Subs[channel] = rssArray
+		recoveredSubs[channel] = rssArray
 
 		fs.channels[channel] = &ChannelStore{
 			Subs: subStore,
@@ -249,15 +268,59 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 		}
 	}
 	if err != nil {
-		// Make sure we close to ensure that all files that have been
-		// successfully opened are properly closed.
-		fs.Close()
-		fs = nil
-		recoveredState = nil
-		return nil, nil, err
+		goto errorBlock
+	}
+	// Create the recovered state to return
+	recoveredState = &RecoveredState{
+		Info:    serverInfo,
+		Clients: recoveredClients,
+		Subs:    recoveredSubs,
+	}
+	return fs, recoveredState, nil
+
+errorBlock:
+	// Make sure we close to ensure that all files that have been
+	// successfully opened are properly closed.
+	fs.Close()
+	fs = nil
+	return nil, nil, err
+}
+
+// Init is used to persist server's information after the first start
+func (fs *FileStore) Init(info *spb.ServerInfo) error {
+	fs.Lock()
+	defer fs.Unlock()
+
+	// We could keep the file opened and have a reference to it in FileStore,
+	// and simply truncate the file here, unfortunately, this does not work
+	// on Windows (access denied, we need to close the file first).
+	// So we create a local file instance instead. Also, Init() is likely
+	// to happen only once when the server starts for the first time.
+	fileName := filepath.Join(fs.rootDir, serverFileName)
+	if err := os.Truncate(fileName, 4); err != nil {
+		return err
+	}
+	// Open the file that has just the file version.
+	f, err := openFile(fileName)
+	if err != nil {
+		return err
 	}
 
-	return fs, recoveredState, nil
+	// Write the size of the record first
+	err = util.WriteInt(f, info.Size())
+	if err == nil {
+		b, _ := info.Marshal()
+		// Now the content
+		_, err = f.Write(b)
+	}
+	// We close the file and want to report an error if none was
+	// previously set.
+	if lerr := f.Close(); lerr != nil {
+		if err == nil {
+			err = lerr
+		}
+	}
+	return err
 }
 
 // recoverClients reads the client files and returns an array of RecoveredClient
@@ -265,13 +328,6 @@ func (fs *FileStore) recoverClients() ([]*RecoveredClient, error) {
 	clientsMap := make(map[string]*RecoveredClient)
 
 	var err error
-
-	fileName := filepath.Join(fs.rootDir, clientsFileName)
-	fs.clientsFile, err = openFile(fileName)
-	if err != nil {
-		return nil, err
-	}
-
 	var action, clientID, hbInbox string
 
 	scanner := bufio.NewScanner(fs.clientsFile)
@@ -311,6 +367,52 @@ func (fs *FileStore) recoverClients() ([]*RecoveredClient, error) {
 		i++
 	}
 	return clients, nil
+}
+
+// recoverServerInfo reads the server file and returns a ServerInfo structure
+func (fs *FileStore) recoverServerInfo() (*spb.ServerInfo, error) {
+	// Refer to Init() as to why we use a local file instance.
+	file, err := openFile(filepath.Join(fs.rootDir, serverFileName))
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	info := &spb.ServerInfo{}
+	first := true
+	for {
+		// Read the message size as an int32
+		size, err := util.ReadInt(file)
+		if err != nil {
+			if err == io.EOF {
+				// We are done, reset err
+				err = nil
+				break
+			} else {
+				return nil, err
+			}
+		}
+		// Check that there is no more than one record or extra data in the file
+		if !first {
+			return nil, fmt.Errorf("unexpected content in server file")
+		}
+		first = false
+		buf := make([]byte, size)
+		// Read fully the expected number of bytes for this record
+		if _, err := io.ReadFull(file, buf); err != nil {
+			return nil, err
+		}
+		// Reconstruct now
+		if err := info.Unmarshal(buf); err != nil {
+			return nil, err
+		}
+	}
+	// If we are here with 'first' true (and no error) that means that the file
+	// is empty, and no state should be recovered.
+	if first {
+		return nil, nil
+	}
+	return info, nil
 }
 
 // LookupOrCreateChannel returns a ChannelStore for the given channel,

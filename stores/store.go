@@ -60,6 +60,7 @@ var DefaultChannelLimits = ChannelLimits{
 
 // RecoveredState allows the server to reconstruct its state after a restart.
 type RecoveredState struct {
+	Info    *spb.ServerInfo
 	Clients []*RecoveredClient
 	Subs    RecoveredSubscriptions
 }
@@ -112,6 +113,9 @@ type ChannelStore struct {
 // previously created, and nil if it does not exist.
 //
 type Store interface {
+	// Init can be used to initialize the store with server's information.
+	Init(info *spb.ServerInfo) error
+
 	// Name returns the name type of this store (e.g: MEMORY, FILESTORE, etc...).
 	Name() string
 
