@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/go-stan"
+	"github.com/nats-io/go-stan/pb"
 	"github.com/nats-io/nats"
-	"github.com/nats-io/stan"
 	"github.com/nats-io/stan-server/stores"
-	"github.com/nats-io/stan/pb"
 
 	natsd "github.com/nats-io/gnatsd/server"
 )
@@ -83,15 +83,23 @@ func WaitTime(ch chan bool, timeout time.Duration) error {
 
 // RunServerWithDebugTrace is a helper to assist debugging
 func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) *StanServer {
-	natsdOpts := &natsd.Options{}
+	var sOpts *Options
 
-	natsdOpts.Debug = enableDebug
-	natsdOpts.Trace = enableTrace
-	natsdOpts.NoLog = false
+	if opts == nil {
+		sOpts = GetDefaultOptions()
+	} else {
+		sOpts = opts
+	}
 
-	EnableDefaultLogger(natsdOpts)
+	nOpts := natsd.Options{}
 
-	return RunServerWithOpts(opts, natsdOpts)
+	sOpts.Debug = enableDebug
+	sOpts.Trace = enableTrace
+	nOpts.NoLog = false
+
+	ConfigureLogger(sOpts, &nOpts)
+
+	return RunServerWithOpts(sOpts, nil)
 }
 
 func TestRunServer(t *testing.T) {
@@ -100,8 +108,8 @@ func TestRunServer(t *testing.T) {
 	s.Shutdown()
 
 	// Test passing stan options, nil nats options
-	opts := DefaultOptions
-	s = RunServerWithOpts(&opts, nil)
+	opts := GetDefaultOptions()
+	s = RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 	clusterID := s.ClusterID()
 
@@ -112,8 +120,20 @@ func TestRunServer(t *testing.T) {
 
 	// Test passing nil stan options, some nats options
 	nOpts := &natsd.Options{}
+	nOpts.NoLog = true
 	s = RunServerWithOpts(nil, nOpts)
 	defer s.Shutdown()
+}
+
+func TestDefaultOptions(t *testing.T) {
+
+	opts := GetDefaultOptions()
+	opts.Debug = !defaultOptions.Debug
+
+	opts2 := GetDefaultOptions()
+	if opts2.Debug == opts.Debug {
+		t.Fatal("Modified original default options.")
+	}
 }
 
 type response interface {
@@ -651,10 +671,10 @@ func TestRunServerWithFileBased(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := DefaultOptions
+	opts := GetDefaultOptions()
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
-	s := RunServerWithOpts(&opts, nil)
+	s := RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
 	// Create our own NATS connection to control reconnect wait
@@ -714,7 +734,7 @@ func TestRunServerWithFileBased(t *testing.T) {
 	s.Shutdown()
 
 	// Recover
-	s = RunServerWithOpts(&opts, nil)
+	s = RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
 	// Check server recovered state

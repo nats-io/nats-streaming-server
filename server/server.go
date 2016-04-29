@@ -11,12 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/gnatsd/logger"
 	"github.com/nats-io/gnatsd/server"
+	"github.com/nats-io/go-stan/pb"
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nuid"
 	"github.com/nats-io/stan-server/spb"
-	"github.com/nats-io/stan/pb"
 
 	natsd "github.com/nats-io/gnatsd/test"
 
@@ -27,6 +26,9 @@ import (
 
 // Server defaults.
 const (
+	// VERSION is the current version for the stan server.
+	VERSION = "0.0.1.alpha"
+
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
 	DefaultPubPrefix      = "_STAN.pub"
@@ -272,13 +274,20 @@ type Options struct {
 	MaxMsgs          int    // Maximum number of messages per channel
 	MaxBytes         uint64 // Maximum number of bytes used by messages per channel
 	MaxSubscriptions int    // Maximum number of subscriptions per channel
+	Trace            bool
+	Debug            bool
 }
 
 // DefaultOptions are default options for the STAN server
-var DefaultOptions = Options{
+var defaultOptions = Options{
 	ID:             DefaultClusterID,
 	DiscoverPrefix: DefaultDiscoverPrefix,
 	StoreType:      DefaultStoreType,
+}
+
+func GetDefaultOptions() (o *Options) {
+	opts := defaultOptions
+	return &opts
 }
 
 // DefaultNatsServerOptions are default options for the NATS server
@@ -300,26 +309,22 @@ func stanErrorHandler(nc *nats.Conn, sub *nats.Subscription, err error) {
 	Errorf("STAN: Asynchronous error on subject %s: %s.", sub.Subject, err)
 }
 
-// EnableDefaultLogger is a convenience API to set a default logger.
-func EnableDefaultLogger(opts *server.Options) {
-	colors := true
+func useColors() (colors bool) {
+	colors = true
 	// Check to see if stderr is being redirected and if so turn off color
 	// Also turn off colors if we're running on Windows where os.Stderr.Stat() returns an invalid handle-error
 	stat, err := os.Stderr.Stat()
 	if err != nil || (stat.Mode()&os.ModeCharDevice) == 0 {
 		colors = false
 	}
-	log := logger.NewStdLogger(opts.Logtime, opts.Debug, opts.Trace, colors, true)
-
-	var s *server.Server
-	s.SetLogger(log, opts.Debug, opts.Trace)
+	return
 }
 
 // RunServer will startup an embedded STAN server and a nats-server to support it.
 func RunServer(ID string) *StanServer {
-	sOpts := DefaultOptions
+	sOpts := GetDefaultOptions()
 	sOpts.ID = ID
-	return RunServerWithOpts(&sOpts, &DefaultNatsServerOptions)
+	return RunServerWithOpts(sOpts, &DefaultNatsServerOptions)
 }
 
 // RunServerWithOpts will startup an embedded STAN server and a nats-server to support it.
@@ -329,7 +334,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	var nOpts *server.Options
 
 	if stanOpts == nil {
-		sOpts = &DefaultOptions
+		sOpts = GetDefaultOptions()
 	} else {
 		sOpts = stanOpts
 	}
@@ -339,6 +344,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	} else {
 		nOpts = natsOpts
 	}
+
+	Noticef("Starting stan-server[%s] version %s", sOpts.ID, VERSION)
 
 	s := StanServer{clusterID: sOpts.ID, serverID: nuid.Next(), opts: sOpts}
 

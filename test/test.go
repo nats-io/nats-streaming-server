@@ -13,17 +13,20 @@ func RunServer(ID string) *server.StanServer {
 }
 
 // RunServerWithDebugTrace is a helper to assist debugging
-func RunServerWithDebugTrace(ID string, enableDebug, enableTrace bool) *server.StanServer {
-	natsdOpts := &natsd.Options{}
+func RunServerWithDebugTrace(ID string, enableSTANDebug, enableSTANTrace, enableNATSDebug, enableNATSTrace bool) *server.StanServer {
 
-	natsdOpts.Debug = enableDebug
-	natsdOpts.Trace = enableTrace
-	natsdOpts.NoLog = false
+	nOpts := natsd.Options{}
+	nOpts.Debug = enableNATSDebug
+	nOpts.Trace = enableNATSTrace
+	nOpts.NoLog = false
 
-	stanOpts := &server.DefaultOptions
-	stanOpts.ID = ID
+	sOpts := server.GetDefaultOptions()
+	sOpts.Debug = enableSTANDebug
+	sOpts.Trace = enableSTANTrace
+	sOpts.ID = ID
 
-	server.EnableDefaultLogger(natsdOpts)
+	// enable logging
+        server.ConfigureLogger(sOpts, &nOpts)
 
-	return server.RunServerWithOpts(stanOpts, natsdOpts)
+	return server.RunServerWithOpts(sOpts, &nOpts)
 }

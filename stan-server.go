@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"fmt"
+
 	natsd "github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/stan"
 	stand "github.com/nats-io/stan-server/server"
 	"github.com/nats-io/stan-server/stores"
 )
@@ -19,20 +19,18 @@ func main() {
 
 	// Parse flags
 	sOpts, nOpts := parseFlags()
-	stand.EnableDefaultLogger(&nOpts)
-	stand.Noticef("Starting stan-server[%s] version %s", sOpts.ID, stan.Version)
-	stand.RunServerWithOpts(&sOpts, &nOpts)
+	stand.ConfigureLogger(sOpts, nOpts)
+	stand.RunServerWithOpts(sOpts, nOpts)
 
 	runtime.Goexit()
 }
 
-func parseFlags() (stand.Options, natsd.Options) {
-	var showVersion bool
-	var debugAndTrace bool
-	var showTLSHelp bool
-	var configFile string
+func parseFlags() (*stand.Options, *natsd.Options) {
 
-	stanOpts := stand.DefaultOptions
+	// STAN options
+	var stanDebugAndTrace bool
+
+	stanOpts := stand.GetDefaultOptions()
 	flag.StringVar(&stanOpts.ID, "cluster_id", stand.DefaultClusterID, "Cluster ID.")
 	flag.StringVar(&stanOpts.StoreType, "store", stores.TypeMemory, fmt.Sprintf("Store type: (%s|%s)", stores.TypeMemory, stores.TypeFile))
 	flag.StringVar(&stanOpts.FilestoreDir, "dir", "", "Root directory")
@@ -40,6 +38,17 @@ func parseFlags() (stand.Options, natsd.Options) {
 	flag.IntVar(&stanOpts.MaxSubscriptions, "max_subs", stand.DefaultSubStoreLimit, "Max number of subscriptions per channel")
 	flag.IntVar(&stanOpts.MaxMsgs, "max_msgs", stand.DefaultMsgStoreLimit, "Max number of messages per channel")
 	flag.Uint64Var(&stanOpts.MaxBytes, "max_bytes", stand.DefaultMsgSizeStoreLimit, "Max messages total size per channel")
+	flag.BoolVar(&stanOpts.Debug, "SD", false, "Enable STAN Debug logging.")
+	flag.BoolVar(&stanOpts.Debug, "stan_debug", false, "Enable STAN Debug logging.")
+	flag.BoolVar(&stanOpts.Trace, "SV", false, "Enable STAN Trace logging.")
+	flag.BoolVar(&stanOpts.Trace, "stan_trace", false, "Enable STAN Trace logging.")
+	flag.BoolVar(&stanDebugAndTrace, "SDV", false, "Enable STAN Debug and Trace logging.")
+
+	// NATS options
+	var showVersion bool
+	var natsDebugAndTrace bool
+	var showTLSHelp bool
+	var configFile string
 
 	natsOpts := natsd.Options{}
 
@@ -55,7 +64,7 @@ func parseFlags() (stand.Options, natsd.Options) {
 	flag.BoolVar(&natsOpts.Debug, "debug", false, "Enable Debug logging.")
 	flag.BoolVar(&natsOpts.Trace, "V", false, "Enable Trace logging.")
 	flag.BoolVar(&natsOpts.Trace, "trace", false, "Enable Trace logging.")
-	flag.BoolVar(&debugAndTrace, "DV", false, "Enable Debug and Trace logging.")
+	flag.BoolVar(&natsDebugAndTrace, "DV", false, "Enable Debug and Trace logging.")
 	flag.BoolVar(&natsOpts.Logtime, "T", true, "Timestamp log entries.")
 	flag.BoolVar(&natsOpts.Logtime, "logtime", true, "Timestamp log entries.")
 	flag.StringVar(&natsOpts.Username, "user", "", "Username required for connection.")
@@ -93,23 +102,37 @@ func parseFlags() (stand.Options, natsd.Options) {
 
 	// Show version and exit
 	if showVersion {
-		fmt.Printf("stan-server version %s, ", stan.Version)
+		fmt.Printf("stan-server version %s, ", stand.VERSION)
 		natsd.PrintServerAndExit()
 	}
 
+	//
+	// NATS server option special handling
+	//
 	if showTLSHelp {
 		natsd.PrintTLSHelpAndDie()
 	}
 
-	// Ensure some options are set based on selected store type
-	checkStoreOpts(&stanOpts)
-
 	// One flag can set multiple options.
-	if debugAndTrace {
+	if natsDebugAndTrace {
 		natsOpts.Trace, natsOpts.Debug = true, true
 	}
 
-	return stanOpts, natsOpts
+	// for now, key off of one flag - the NATS flag to disable logging.
+	natsOpts.NoLog = false
+
+	//
+	// STAN server special option handling
+	//
+	// Ensure some options are set based on selected store type
+	checkStoreOpts(stanOpts)
+
+	// One flag can set multiple options.
+	if stanDebugAndTrace {
+		stanOpts.Trace, stanOpts.Debug = true, true
+	}
+
+	return stanOpts, &natsOpts
 }
 
 func checkStoreOpts(opts *stand.Options) {
