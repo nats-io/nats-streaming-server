@@ -15,7 +15,7 @@ import (
 // The STAN logger is an instance of a NATS logger, (basically duplicated
 // from the NATS server code), and is passed into the NATS server.
 //
-// A note on Debugf and Tracef.  These will be enabled within the log if
+// A note on Debugf and Tracef:  These will be enabled within the log if
 // either STAN or the NATS server enables them.  However, STAN will only
 // trace/debug if the local STAN debug/trace flags are set.  NATS will do
 // the same with it's logger flags.  This enables us to use the same logger,
@@ -48,8 +48,7 @@ func ConfigureLogger(stanOpts *Options, natsOpts *natsd.Options) {
 		sOpts = GetDefaultOptions()
 	}
 	if nOpts == nil {
-		o := natsd.Options{}
-		nOpts = &o
+		nOpts = &natsd.Options{}
 	}
 
 	enableDebug := nOpts.Debug || sOpts.Debug
@@ -110,20 +109,16 @@ func Noticef(format string, v ...interface{}) {
 
 // Errorf logs an error
 func Errorf(format string, v ...interface{}) {
-	if atomic.LoadInt32(&debug) != 0 {
-		executeLogCall(func(log natsd.Logger, format string, v ...interface{}) {
-			log.Errorf(format, v...)
-		}, format, v...)
-	}
+	executeLogCall(func(log natsd.Logger, format string, v ...interface{}) {
+		log.Errorf(format, v...)
+	}, format, v...)
 }
 
 // Fatalf logs a fatal error
 func Fatalf(format string, v ...interface{}) {
-	if atomic.LoadInt32(&debug) != 0 {
-		executeLogCall(func(log natsd.Logger, format string, v ...interface{}) {
-			log.Fatalf(format, v...)
-		}, format, v...)
-	}
+	executeLogCall(func(log natsd.Logger, format string, v ...interface{}) {
+		log.Fatalf(format, v...)
+	}, format, v...)
 }
 
 // Debugf logs a debug statement

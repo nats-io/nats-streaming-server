@@ -321,6 +321,7 @@ var defaultOptions = Options{
 	StoreType:      DefaultStoreType,
 }
 
+// GetDefaultOptions returns default options for the STAN server
 func GetDefaultOptions() (o *Options) {
 	opts := defaultOptions
 	return &opts
