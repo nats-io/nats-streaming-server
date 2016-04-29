@@ -92,17 +92,13 @@ func init() {
 // StanServer structure represents the STAN server
 type StanServer struct {
 	sync.RWMutex
-	shutdown      bool
-	clusterID     string
-	serverID      string
-	pubPrefix     string // Subject prefix we received published messages on.
-	subRequests   string // Subject we receive subscription requests on.
-	unsubRequests string // Subject we receive unsubscribe requests on.
-	closeRequests string // Subject we receive close requests on.
-	natsServer    *server.Server
-	opts          *Options
-	nc            *nats.Conn
-	wg            sync.WaitGroup // Wait on go routines during shutdown
+	shutdown   bool
+	serverID   string
+	info       spb.ServerInfo // Contains cluster ID and subjects
+	natsServer *server.Server
+	opts       *Options
+	nc         *nats.Conn
+	wg         sync.WaitGroup // Wait on go routines during shutdown
 
 	// For now, these will be set to the constants DefaultHeartBeatInterval, etc...
 	// but allow to override in tests.
@@ -382,7 +378,6 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	}
 
 	s := StanServer{
-		clusterID:         sOpts.ID,
 		serverID:          nuid.Next(),
 		opts:              sOpts,
 		hbInterval:        DefaultHeartBeatInterval,
@@ -432,20 +427,49 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		panic(fmt.Sprintf("%v", err))
 	}
 
+	// After this point, if the server panics, and s.store is not closed,
+	// it will prevent tests on Windows to properly cleanup the datastore
+	// because files will still be opened. So we recover from the panic
+	// in order to close the store, then issue the original panic.
+	defer func() {
+		if r := recover(); r != nil {
+			if s.store != nil {
+				s.store.Close()
+			}
+			// Issue the original panic now that the store is closed.
+			panic(r.(error))
+		}
+	}()
+
 	if recoveredState != nil {
+		// Copy content
+		s.info = *recoveredState.Info
+		// Check cluster IDs match
+		if s.opts.ID != s.info.ClusterID {
+			panic(fmt.Errorf("Cluster ID %q does not match recovered value of %q",
+				s.opts.ID, s.info.ClusterID))
+		}
+
 		// Restore clients state
 		s.processRecoveredClients(recoveredState.Clients)
 
 		// Process recovered channels (if any).
 		recoveredSubs = s.processRecoveredChannels(recoveredState.Subs)
-	}
+	} else {
+		s.info.ClusterID = s.opts.ID
+		// Generate Subjects
+		// FIXME(dlc) guid needs to be shared in cluster mode
+		s.info.Discovery = fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.info.ClusterID)
+		s.info.Publish = fmt.Sprintf("%s.%s", DefaultPubPrefix, nuid.Next())
+		s.info.Subscribe = fmt.Sprintf("%s.%s", DefaultSubPrefix, nuid.Next())
+		s.info.Unsubscribe = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
+		s.info.Close = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
 
-	// Generate Subjects
-	// FIXME(dlc) guid needs to be shared in cluster mode
-	s.pubPrefix = fmt.Sprintf("%s.%s", DefaultPubPrefix, nuid.Next())
-	s.subRequests = fmt.Sprintf("%s.%s", DefaultSubPrefix, nuid.Next())
-	s.unsubRequests = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
-	s.closeRequests = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
+		// Initialize the store with the server info
+		if err := s.store.Init(&s.info); err != nil {
+			panic(fmt.Errorf("Unable to initialize the store: %v", err))
+		}
+	}
 
 	if nOpts.Host == "" {
 		nOpts.Host = "localhost"
@@ -596,38 +620,37 @@ func (s *StanServer) postRecoveryProcessing(recoveredSubs []*subState) error {
 // initSubscriptions will setup initial subscriptions for discovery etc.
 func (s *StanServer) initSubscriptions() {
 	// Listen for connection requests.
-	discoverSubject := fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.clusterID)
-	_, err := s.nc.Subscribe(discoverSubject, s.connectCB)
+	_, err := s.nc.Subscribe(s.info.Discovery, s.connectCB)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to discover subject, %v\n", err))
 	}
 	// Receive published messages from clients.
-	pubSubject := fmt.Sprintf("%s.>", s.pubPrefix)
+	pubSubject := fmt.Sprintf("%s.>", s.info.Publish)
 	_, err = s.nc.Subscribe(pubSubject, s.processClientPublish)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to publish subject, %v\n", err))
 	}
 	// Receive subscription requests from clients.
-	_, err = s.nc.Subscribe(s.subRequests, s.processSubscriptionRequest)
+	_, err = s.nc.Subscribe(s.info.Subscribe, s.processSubscriptionRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to subscribe request subject, %v\n", err))
 	}
 	// Receive unsubscribe requests from clients.
-	_, err = s.nc.Subscribe(s.unsubRequests, s.processUnSubscribeRequest)
+	_, err = s.nc.Subscribe(s.info.Unsubscribe, s.processUnSubscribeRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to unsubscribe request subject, %v\n", err))
 	}
 	// Receive close requests from clients.
-	_, err = s.nc.Subscribe(s.closeRequests, s.processCloseRequest)
+	_, err = s.nc.Subscribe(s.info.Close, s.processCloseRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to close request subject, %v\n", err))
 	}
 
-	Debugf("STAN: discover subject: %s", discoverSubject)
-	Debugf("STAN: publish subject:  %s", pubSubject)
-	Debugf("STAN: subcribe subject: %s", s.subRequests)
-	Debugf("STAN: unsub subject:    %s", s.unsubRequests)
-	Debugf("STAN: close subject:    %s", s.closeRequests)
+	Debugf("STAN: Discover subject:    %s", s.info.Discovery)
+	Debugf("STAN: Publish subject:     %s", pubSubject)
+	Debugf("STAN: Subscribe subject:   %s", s.info.Subscribe)
+	Debugf("STAN: Unsubscribe subject: %s", s.info.Unsubscribe)
+	Debugf("STAN: Close subject:       %s", s.info.Close)
 
 }
 
@@ -710,10 +733,10 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 
 func (s *StanServer) finishConnectRequest(client *client, replyInbox string) {
 	cr := &pb.ConnectResponse{
-		PubPrefix:     s.pubPrefix,
-		SubRequests:   s.subRequests,
-		UnsubRequests: s.unsubRequests,
-		CloseRequests: s.closeRequests,
+		PubPrefix:     s.info.Publish,
+		SubRequests:   s.info.Subscribe,
+		UnsubRequests: s.info.Unsubscribe,
+		CloseRequests: s.info.Close,
 	}
 	b, _ := cr.Marshal()
 	s.nc.Publish(replyInbox, b)
@@ -1804,7 +1827,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 
 // ClusterID returns the STAN Server's ID.
 func (s *StanServer) ClusterID() string {
-	return s.clusterID
+	return s.info.ClusterID
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.

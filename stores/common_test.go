@@ -10,6 +10,8 @@ import (
 	"github.com/nats-io/go-stan/pb"
 	"github.com/nats-io/nuid"
 	"github.com/nats-io/stan-server/spb"
+	"runtime"
+	"strings"
 )
 
 var testDefaultChannelLimits = ChannelLimits{
@@ -23,6 +25,29 @@ var nuidGen *nuid.NUID
 
 func init() {
 	nuidGen = nuid.New()
+}
+
+type tLogger interface {
+	Fatalf(format string, args ...interface{})
+	Errorf(format string, args ...interface{})
+}
+
+func stackFatalf(t tLogger, f string, args ...interface{}) {
+	lines := make([]string, 0, 32)
+	msg := fmt.Sprintf(f, args...)
+	lines = append(lines, msg)
+
+	// Generate the Stack of callers:
+	for i := 1; true; i++ {
+		_, file, line, ok := runtime.Caller(i)
+		if ok == false {
+			break
+		}
+		msg := fmt.Sprintf("%d - %s:%d", i, file, line)
+		lines = append(lines, msg)
+	}
+
+	t.Fatalf("%s", strings.Join(lines, "\n"))
 }
 
 func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {

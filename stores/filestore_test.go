@@ -20,18 +20,51 @@ const (
 	defaultDataStore = "../stores_data"
 )
 
+var testDefaultServerInfo = spb.ServerInfo{
+	ClusterID:   "id",
+	Discovery:   "discovery",
+	Publish:     "publish",
+	Subscribe:   "subscribe",
+	Unsubscribe: "unsubscribe",
+	Close:       "close",
+}
+
 func cleanupDatastore(t *testing.T, dir string) {
 	if err := os.RemoveAll(dir); err != nil {
-		t.Fatalf("Error cleanup datastore: %v", err)
+		stackFatalf(t, "Error cleaning up datastore: %v", err)
 	}
 }
 
 func createDefaultFileStore(t *testing.T) *FileStore {
-	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+	fs, state, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
 	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
+		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
+	}
+	if state == nil {
+		info := testDefaultServerInfo
+
+		if err := fs.Init(&info); err != nil {
+			stackFatalf(t, "Unexpected error durint Init: %v", err)
+		}
 	}
 	return fs
+}
+
+func openDefaultFileStore(t *testing.T) (*FileStore, *RecoveredState) {
+	fs, state, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+	if err != nil {
+		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
+	}
+	return fs, state
+}
+
+func expectedErrorOpeningDefaultFileStore(t *testing.T) error {
+	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+	if err == nil {
+		fs.Close()
+		stackFatalf(t, "Expected an error opening the FileStore, got none")
+	}
+	return err
 }
 
 func TestFSBasicCreate(t *testing.T) {
@@ -42,6 +75,37 @@ func TestFSBasicCreate(t *testing.T) {
 	defer fs.Close()
 
 	testBasicCreate(t, fs, TypeFile)
+}
+
+func TestFSInit(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Init is done in createDefaultFileStore().
+	// A second call to Init() should not fail, and data should be replaced.
+	newInfo := testDefaultServerInfo
+	newInfo.ClusterID = "newID"
+	if err := fs.Init(&newInfo); err != nil {
+		t.Fatalf("Unexpected failure on store init: %v", err)
+	}
+
+	// Close the store
+	fs.Close()
+
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	// Check content
+	info := *state.Info
+	if !reflect.DeepEqual(newInfo, info) {
+		t.Fatalf("Unexpected server info, expected %v, got %v",
+			newInfo, info)
+	}
 }
 
 func TestFSUseDefaultLimits(t *testing.T) {
@@ -72,12 +136,8 @@ func TestFSUnsupportedFileVersion(t *testing.T) {
 
 	var err error
 
-	// Recover store
-	fs, _, err = NewFileStore(defaultDataStore, &testDefaultChannelLimits)
-	if err == nil {
-		fs.Close()
-		t.Fatal("Expected an error")
-	}
+	// Recover store (should fail)
+	err = expectedErrorOpeningDefaultFileStore(t)
 	fileVerStr := fmt.Sprintf("%d", (fileVersion + 1))
 	if !strings.Contains(err.Error(), fileVerStr) {
 		t.Fatalf("Expected error to report unsupported file version %q, got %v", fileVerStr, err)
@@ -89,12 +149,8 @@ func TestFSUnsupportedFileVersion(t *testing.T) {
 	// Overwrite the file version of the subscriptions store to an unsupported version
 	writeVersion(t, filepath.Join(defaultDataStore, "foo", "subs.dat"), fileVersion+1)
 
-	// Recover store
-	fs, _, err = NewFileStore(defaultDataStore, &testDefaultChannelLimits)
-	if err == nil {
-		fs.Close()
-		t.Fatal("Expected an error")
-	}
+	// Recover store (should fail)
+	err = expectedErrorOpeningDefaultFileStore(t)
 	if !strings.Contains(err.Error(), fileVerStr) {
 		t.Fatalf("Expected error to report unsupported file version %q, got %v", fileVerStr, err)
 	}
@@ -195,12 +251,8 @@ func TestFSBasicRecovery(t *testing.T) {
 
 	fs.Close()
 
-	fs, state, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs, state := openDefaultFileStore(t)
 	defer fs.Close()
-
 	if state == nil {
 		t.Fatal("Expected state to be recovered")
 	}
@@ -560,12 +612,8 @@ func TestFSNoSubIdCollisionAfterRecovery(t *testing.T) {
 	fs.Close()
 
 	// Recovers now
-	fs, state, err := NewFileStore(defaultDataStore, nil)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs, state := openDefaultFileStore(t)
 	defer fs.Close()
-
 	if state == nil {
 		t.Fatal("Expected state to be recovered")
 	}
@@ -597,12 +645,8 @@ func TestFSNoSubIdCollisionAfterRecovery(t *testing.T) {
 	fs.Close()
 
 	// Recovers now
-	fs, state, err = NewFileStore(defaultDataStore, nil)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs, state = openDefaultFileStore(t)
 	defer fs.Close()
-
 	if state == nil {
 		t.Fatal("Expected state to be recovered")
 	}
@@ -640,10 +684,16 @@ func TestFSBadClientFile(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	if err := os.MkdirAll(defaultDataStore, os.ModeDir+os.ModePerm); err != nil && !os.IsExist(err) {
-		t.Fatalf("Unable to create the root directory: %v", err)
-	}
+	// Create a valid store file first
+	fs := createDefaultFileStore(t)
+	// Close it
+	fs.Close()
+
+	// Delete the client's file
 	fileName := filepath.Join(defaultDataStore, clientsFileName)
+	if err := os.Remove(fileName); err != nil {
+		t.Fatalf("Unable to delete the client's file %q: %v", fileName, err)
+	}
 	// This will create the file without the file version
 	if file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666); err != nil {
 		t.Fatalf("Error creating client file: %v", err)
@@ -651,11 +701,7 @@ func TestFSBadClientFile(t *testing.T) {
 		file.Close()
 	}
 	// So we should fail to create the filestore
-	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
-	if err == nil {
-		fs.Close()
-		t.Fatalf("Expected error opening file store, got none")
-	}
+	expectedErrorOpeningDefaultFileStore(t)
 	// Now test with various unexpected content
 	contents := []string{"Nothing as expected", "A clientID-alone", "A", "D"}
 	for _, c := range contents {
@@ -696,12 +742,8 @@ func TestFSAddDeleteClient(t *testing.T) {
 	// Restart the store
 	fs.Close()
 
-	fs, state, err := NewFileStore(defaultDataStore, nil)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs, state := openDefaultFileStore(t)
 	defer fs.Close()
-
 	if state == nil {
 		t.Fatal("Expected state to be recovered")
 	}
@@ -713,4 +755,148 @@ func TestFSAddDeleteClient(t *testing.T) {
 			t.Fatalf("Unexpected recovered client: %v", c.ClientID)
 		}
 	}
+}
+
+func TestFSBadServerFile(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// Create a valid store file first
+	fs := createDefaultFileStore(t)
+	// Close it
+	fs.Close()
+
+	// Delete the server's file
+	fileName := filepath.Join(defaultDataStore, serverFileName)
+	if err := os.Remove(fileName); err != nil {
+		t.Fatalf("Unable to delete the client's file %q: %v", fileName, err)
+	}
+	// This will create the file without the file version
+	if file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666); err != nil {
+		t.Fatalf("Error creating client file: %v", err)
+	} else {
+		file.Close()
+	}
+	// So we should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	resetToValidFile := func() *os.File {
+		// First remove the file
+		if err := os.Remove(fileName); err != nil {
+			t.Fatalf("Unexpected error removing file: %v", err)
+		}
+		// Create the file with proper file version
+		file, err := openFile(fileName)
+		if err != nil {
+			t.Fatalf("Error creating client file: %v", err)
+		}
+		return file
+	}
+
+	// Now test with two ServerInfos, and expect to fail
+	file := resetToValidFile()
+
+	// Write two server info records
+	for i := 0; i < 2; i++ {
+		info := testDefaultServerInfo
+		b, _ := info.Marshal()
+		// Write the size of the proto buf
+		if err := util.WriteInt(file, info.Size()); err != nil {
+			t.Fatalf("Error writing zie: %v", err)
+		}
+		// Write content
+		if _, err := file.Write(b); err != nil {
+			t.Fatalf("Error writing info: %v", err)
+		}
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	// Write a single record, but with the size that's
+	// more than the actual record.
+	file = resetToValidFile()
+	info := testDefaultServerInfo
+	b, _ := info.Marshal()
+	// Write the incorrect size (too big) of the proto buf
+	if err := util.WriteInt(file, info.Size()+10); err != nil {
+		t.Fatalf("Error writing zie: %v", err)
+	}
+	// Write content
+	if _, err := file.Write(b); err != nil {
+		t.Fatalf("Error writing info: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	// Write a single record, but with the size that's
+	// less than the actual record.
+	file = resetToValidFile()
+	info = testDefaultServerInfo
+	b, _ = info.Marshal()
+	// Write the incorrect size (too small) of the proto buf
+	if err := util.WriteInt(file, info.Size()-10); err != nil {
+		t.Fatalf("Error writing zie: %v", err)
+	}
+	// Write content
+	if _, err := file.Write(b); err != nil {
+		t.Fatalf("Error writing info: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	// Write a single record and then extra data
+	file = resetToValidFile()
+	info = testDefaultServerInfo
+	b, _ = info.Marshal()
+	// Write the size of the proto buf
+	if err := util.WriteInt(file, info.Size()); err != nil {
+		t.Fatalf("Error writing zie: %v", err)
+	}
+	// Write content
+	if _, err := file.Write(b); err != nil {
+		t.Fatalf("Error writing info: %v", err)
+	}
+	// Write some extra content
+	if _, err := file.Write([]byte("more data")); err != nil {
+		t.Fatalf("Error writing info: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	// Write a single record but corrupt the protobuf
+	file = resetToValidFile()
+	info = testDefaultServerInfo
+	b, _ = info.Marshal()
+	// Write the size of the proto buf
+	if err := util.WriteInt(file, info.Size()); err != nil {
+		t.Fatalf("Error writing zie: %v", err)
+	}
+	// Alter the content
+	copy(b, []byte("hello"))
+	// Write the corrupted content
+	if _, err := file.Write(b); err != nil {
+		t.Fatalf("Error writing info: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
 }

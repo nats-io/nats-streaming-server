@@ -3,6 +3,7 @@
 package stores
 
 import (
+	"github.com/nats-io/stan-server/spb"
 	"reflect"
 	"testing"
 )
@@ -20,6 +21,29 @@ func TestMSBasicCreate(t *testing.T) {
 	defer ms.Close()
 
 	testBasicCreate(t, ms, TypeMemory)
+}
+
+func TestMSInit(t *testing.T) {
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+
+	info := spb.ServerInfo{
+		ClusterID:   "id",
+		Discovery:   "discovery",
+		Publish:     "publish",
+		Subscribe:   "subscribe",
+		Unsubscribe: "unsubscribe",
+		Close:       "close",
+	}
+	// Should not fail
+	if err := ms.Init(&info); err != nil {
+		t.Fatalf("Error during init: %v", err)
+	}
+	info.ClusterID = "newId"
+	// Should not fail
+	if err := ms.Init(&info); err != nil {
+		t.Fatalf("Error during init: %v", err)
+	}
 }
 
 func TestMSUseDefaultLimits(t *testing.T) {
