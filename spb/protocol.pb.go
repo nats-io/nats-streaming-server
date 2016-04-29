@@ -66,7 +66,7 @@ func (*SubStateUpdate) ProtoMessage()    {}
 
 // ServerInfo contains basic information regarding the Server
 type ServerInfo struct {
-	ID          string `protobuf:"bytes,1,opt,name=ID,proto3" json:"ID,omitempty"`
+	ClusterID   string `protobuf:"bytes,1,opt,name=ClusterID,proto3" json:"ClusterID,omitempty"`
 	Discovery   string `protobuf:"bytes,2,opt,name=Discovery,proto3" json:"Discovery,omitempty"`
 	Publish     string `protobuf:"bytes,3,opt,name=Publish,proto3" json:"Publish,omitempty"`
 	Subscribe   string `protobuf:"bytes,4,opt,name=Subscribe,proto3" json:"Subscribe,omitempty"`
@@ -218,11 +218,11 @@ func (m *ServerInfo) MarshalTo(data []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
-	if len(m.ID) > 0 {
+	if len(m.ClusterID) > 0 {
 		data[i] = 0xa
 		i++
-		i = encodeVarintProtocol(data, i, uint64(len(m.ID)))
-		i += copy(data[i:], m.ID)
+		i = encodeVarintProtocol(data, i, uint64(len(m.ClusterID)))
+		i += copy(data[i:], m.ClusterID)
 	}
 	if len(m.Discovery) > 0 {
 		data[i] = 0x12
@@ -346,7 +346,7 @@ func (m *SubStateUpdate) Size() (n int) {
 func (m *ServerInfo) Size() (n int) {
 	var l int
 	_ = l
-	l = len(m.ID)
+	l = len(m.ClusterID)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
@@ -845,7 +845,7 @@ func (m *ServerInfo) Unmarshal(data []byte) error {
 		switch fieldNum {
 		case 1:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field ID", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field ClusterID", wireType)
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
@@ -870,7 +870,7 @@ func (m *ServerInfo) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.ID = string(data[iNdEx:postIndex])
+			m.ClusterID = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
 		case 2:
 			if wireType != 2 {

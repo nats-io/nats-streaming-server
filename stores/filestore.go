@@ -68,6 +68,7 @@ const (
 type FileStore struct {
 	genericStore
 	rootDir     string
+	serverFile  *os.File
 	clientsFile *os.File
 }
 
@@ -102,16 +103,27 @@ type FileMsgStore struct {
 	currSliceIdx int
 }
 
-// openFile opens the file (and create it if needed). If the file exists,
-// it checks that the version is supported.
-func openFile(fileName string) (*os.File, error) {
+// openFile opens the file specified by `filename`.
+// If the file exists, it checks that the version is supported.
+// If no file mode is provided, the file is created if not present,
+// opened in Read/Write and Append mode.
+func openFile(fileName string, modes ...int) (*os.File, error) {
 	checkVersion := false
+
+	mode := os.O_RDWR | os.O_CREATE | os.O_APPEND
+	if len(modes) > 0 {
+		// Use the provided modes instead
+		mode = 0
+		for _, m := range modes {
+			mode |= m
+		}
+	}
 
 	// Check if file already exists
 	if s, err := os.Stat(fileName); s != nil && err == nil {
 		checkVersion = true
 	}
-	file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	file, err := os.OpenFile(fileName, mode, 0666)
 	if err != nil {
 		return nil, err
 	}
@@ -178,19 +190,32 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 	var subStore *FileSubStore
 	var subs map[uint64]*recoveredSub
 
-	// Open/Create the client file now since we are going to bail out
-	// early if there is no server info recovered. Otherwise, we would
-	// have to check/create the file when adding/deleting a client.
-	fileName := filepath.Join(fs.rootDir, clientsFileName)
-	fs.clientsFile, err = openFile(fileName)
+	// Ensure store is closed in case of return with error
+	defer func() {
+		if err != nil {
+			fs.Close()
+		}
+	}()
+
+	// Open/Create the server file (note that this file must not be opened,
+	// in APPEND mode to allow truncate to work).
+	fileName := filepath.Join(fs.rootDir, serverFileName)
+	fs.serverFile, err = openFile(fileName, os.O_RDWR, os.O_CREATE)
 	if err != nil {
-		goto errorBlock
+		return nil, nil, err
 	}
 
-	// Open/Create and/or Recover the server file.
+	// Open/Create the client file.
+	fileName = filepath.Join(fs.rootDir, clientsFileName)
+	fs.clientsFile, err = openFile(fileName)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Recover the server file.
 	serverInfo, err = fs.recoverServerInfo()
 	if err != nil {
-		goto errorBlock
+		return nil, nil, err
 	}
 	// If the server file is empty, then we are done
 	if serverInfo == nil {
@@ -201,13 +226,13 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 	// Recover the clients file
 	recoveredClients, err = fs.recoverClients()
 	if err != nil {
-		goto errorBlock
+		return nil, nil, err
 	}
 
 	// Get the channels (there are subdirectories of rootDir)
 	channels, err = ioutil.ReadDir(rootDir)
 	if err != nil {
-		goto errorBlock
+		return nil, nil, err
 	}
 	// Go through the list
 	for _, c := range channels {
@@ -268,7 +293,7 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 		}
 	}
 	if err != nil {
-		goto errorBlock
+		return nil, nil, err
 	}
 	// Create the recovered state to return
 	recoveredState = &RecoveredState{
@@ -277,13 +302,6 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 		Subs:    recoveredSubs,
 	}
 	return fs, recoveredState, nil
-
-errorBlock:
-	// Make sure we close to ensure that all files that have been
-	// successfully opened are properly closed.
-	fs.Close()
-	fs = nil
-	return nil, nil, err
 }
 
 // Init is used to persist server's information after the first start
@@ -291,34 +309,21 @@ func (fs *FileStore) Init(info *spb.ServerInfo) error {
 	fs.Lock()
 	defer fs.Unlock()
 
-	// We could keep the file opened and have a reference to it in FileStore,
-	// and simply truncate the file here, unfortunately, this does not work
-	// on Windows (access denied, we need to close the file first).
-	// So we create a local file instance instead. Also, Init() is likely
-	// to happen only once when the server starts for the first time.
-	fileName := filepath.Join(fs.rootDir, serverFileName)
-	if err := os.Truncate(fileName, 4); err != nil {
-		return err
+	f := fs.serverFile
+	// Truncate the file (4 is the size of the fileVersion record)
+	err := f.Truncate(4)
+	if err == nil {
+		// Move offset to 4 (truncate does not do that)
+		_, err = f.Seek(4, 0)
 	}
-	// Open the file that has just the file version.
-	f, err := openFile(fileName)
-	if err != nil {
-		return err
+	if err == nil {
+		// Write the size of the record first
+		err = util.WriteInt(f, info.Size())
 	}
-
-	// Write the size of the record first
-	err = util.WriteInt(f, info.Size())
 	if err == nil {
 		b, _ := info.Marshal()
 		// Now the content
 		_, err = f.Write(b)
-	}
-	// We close the file and want to report an error if none was
-	// previously set.
-	if lerr := f.Close(); lerr != nil {
-		if err == nil {
-			err = lerr
-		}
 	}
 	return err
 }
@@ -371,46 +376,38 @@ func (fs *FileStore) recoverClients() ([]*RecoveredClient, error) {
 
 // recoverServerInfo reads the server file and returns a ServerInfo structure
 func (fs *FileStore) recoverServerInfo() (*spb.ServerInfo, error) {
-	// Refer to Init() as to why we use a local file instance.
-	file, err := openFile(filepath.Join(fs.rootDir, serverFileName))
+	file := fs.serverFile
+	info := &spb.ServerInfo{}
+	// Read the message size as an int32
+	size, err := util.ReadInt(file)
+	if err != nil {
+		if err == io.EOF {
+			// We are done, no state recovered
+			return nil, nil
+		}
+		return nil, err
+	}
+	// Check that the size of the file is consistent with the size
+	// of the record we are supposed to recover. Account for the
+	// 8 bytes (4 + 4) corresponding to the fileVersion and record
+	// size.
+	fstat, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
-
-	info := &spb.ServerInfo{}
-	first := true
-	for {
-		// Read the message size as an int32
-		size, err := util.ReadInt(file)
-		if err != nil {
-			if err == io.EOF {
-				// We are done, reset err
-				err = nil
-				break
-			} else {
-				return nil, err
-			}
-		}
-		// Check that there is no more than one record or extra data in the file
-		if !first {
-			return nil, fmt.Errorf("unexpected content in server file")
-		}
-		first = false
-		buf := make([]byte, size)
-		// Read fully the expected number of bytes for this record
-		if _, err := io.ReadFull(file, buf); err != nil {
-			return nil, err
-		}
-		// Reconstruct now
-		if err := info.Unmarshal(buf); err != nil {
-			return nil, err
-		}
+	expectedSize := int64(size + 8)
+	if fstat.Size() != expectedSize {
+		return nil, fmt.Errorf("incorrect file size, expected %v bytes, got %v bytes",
+			expectedSize, fstat.Size())
 	}
-	// If we are here with 'first' true (and no error) that means that the file
-	// is empty, and no state should be recovered.
-	if first {
-		return nil, nil
+	buf := make([]byte, size)
+	// Read fully the expected number of bytes for this record
+	if _, err := io.ReadFull(file, buf); err != nil {
+		return nil, err
+	}
+	// Reconstruct now
+	if err := info.Unmarshal(buf); err != nil {
+		return nil, err
 	}
 	return info, nil
 }
@@ -498,15 +495,17 @@ func (fs *FileStore) Close() error {
 	fs.closed = true
 
 	var err error
-
-	err = fs.genericStore.close()
-	if fs.clientsFile != nil {
-		if lerr := fs.clientsFile.Close(); lerr != nil {
-			if err == nil {
-				err = lerr
-			}
+	closeFile := func(f *os.File) {
+		if f == nil {
+			return
+		}
+		if lerr := f.Close(); lerr != nil && err == nil {
+			err = lerr
 		}
 	}
+	err = fs.genericStore.close()
+	closeFile(fs.serverFile)
+	closeFile(fs.clientsFile)
 	return err
 }
 

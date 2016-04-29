@@ -445,9 +445,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		// Copy content
 		s.info = *recoveredState.Info
 		// Check cluster IDs match
-		if s.info.ID != s.opts.ID {
+		if s.opts.ID != s.info.ClusterID {
 			panic(fmt.Errorf("Cluster ID %q does not match recovered value of %q",
-				s.opts.ID, s.info.ID))
+				s.opts.ID, s.info.ClusterID))
 		}
 
 		// Restore clients state
@@ -456,10 +456,10 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		// Process recovered channels (if any).
 		recoveredSubs = s.processRecoveredChannels(recoveredState.Subs)
 	} else {
-		s.info.ID = s.opts.ID
+		s.info.ClusterID = s.opts.ID
 		// Generate Subjects
 		// FIXME(dlc) guid needs to be shared in cluster mode
-		s.info.Discovery = fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.info.ID)
+		s.info.Discovery = fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.info.ClusterID)
 		s.info.Publish = fmt.Sprintf("%s.%s", DefaultPubPrefix, nuid.Next())
 		s.info.Subscribe = fmt.Sprintf("%s.%s", DefaultSubPrefix, nuid.Next())
 		s.info.Unsubscribe = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
@@ -1827,7 +1827,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 
 // ClusterID returns the STAN Server's ID.
 func (s *StanServer) ClusterID() string {
-	return s.info.ID
+	return s.info.ClusterID
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.

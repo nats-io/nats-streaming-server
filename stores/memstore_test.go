@@ -28,7 +28,7 @@ func TestMSInit(t *testing.T) {
 	defer ms.Close()
 
 	info := spb.ServerInfo{
-		ID:          "id",
+		ClusterID:   "id",
 		Discovery:   "discovery",
 		Publish:     "publish",
 		Subscribe:   "subscribe",
@@ -39,7 +39,7 @@ func TestMSInit(t *testing.T) {
 	if err := ms.Init(&info); err != nil {
 		t.Fatalf("Error during init: %v", err)
 	}
-	info.ID = "newId"
+	info.ClusterID = "newId"
 	// Should not fail
 	if err := ms.Init(&info); err != nil {
 		t.Fatalf("Error during init: %v", err)

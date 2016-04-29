@@ -21,7 +21,7 @@ const (
 )
 
 var testDefaultServerInfo = spb.ServerInfo{
-	ID:          "id",
+	ClusterID:   "id",
 	Discovery:   "discovery",
 	Publish:     "publish",
 	Subscribe:   "subscribe",
@@ -87,7 +87,7 @@ func TestFSInit(t *testing.T) {
 	// Init is done in createDefaultFileStore().
 	// A second call to Init() should not fail, and data should be replaced.
 	newInfo := testDefaultServerInfo
-	newInfo.ID = "newID"
+	newInfo.ClusterID = "newID"
 	if err := fs.Init(&newInfo); err != nil {
 		t.Fatalf("Unexpected failure on store init: %v", err)
 	}
@@ -870,6 +870,27 @@ func TestFSBadServerFile(t *testing.T) {
 	}
 	// Write some extra content
 	if _, err := file.Write([]byte("more data")); err != nil {
+		t.Fatalf("Error writing info: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	// Write a single record but corrupt the protobuf
+	file = resetToValidFile()
+	info = testDefaultServerInfo
+	b, _ = info.Marshal()
+	// Write the size of the proto buf
+	if err := util.WriteInt(file, info.Size()); err != nil {
+		t.Fatalf("Error writing zie: %v", err)
+	}
+	// Alter the content
+	copy(b, []byte("hello"))
+	// Write the corrupted content
+	if _, err := file.Write(b); err != nil {
 		t.Fatalf("Error writing info: %v", err)
 	}
 	// Close the file
