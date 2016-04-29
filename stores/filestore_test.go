@@ -12,12 +12,7 @@ import (
 
 	"github.com/nats-io/stan-server/spb"
 	"github.com/nats-io/stan-server/util"
-)
-
-const (
-	// CAUTION! Tests will remove the directory and all its content,
-	// so pick a directory where there is nothing.
-	defaultDataStore = "../stores_data"
+	"io/ioutil"
 )
 
 var testDefaultServerInfo = spb.ServerInfo{
@@ -27,6 +22,16 @@ var testDefaultServerInfo = spb.ServerInfo{
 	Subscribe:   "subscribe",
 	Unsubscribe: "unsubscribe",
 	Close:       "close",
+}
+
+var defaultDataStore string
+
+func init() {
+	tmpDir, err := ioutil.TempDir(".", "data_stores_")
+	if err != nil {
+		panic("Could not create tmp dir")
+	}
+	defaultDataStore = tmpDir
 }
 
 func cleanupDatastore(t *testing.T, dir string) {

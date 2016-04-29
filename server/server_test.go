@@ -16,13 +16,9 @@ import (
 	"github.com/nats-io/stan-server/stores"
 
 	natsd "github.com/nats-io/gnatsd/server"
+	"io/ioutil"
 	"sync"
-)
-
-const (
-	// CAUTION! Tests will remove the directory and all its content,
-	// so pick a directory where there is nothing.
-	defaultDataStore = "../server_data"
+	"sync/atomic"
 )
 
 const (
@@ -34,6 +30,16 @@ const (
 type tLogger interface {
 	Fatalf(format string, args ...interface{})
 	Errorf(format string, args ...interface{})
+}
+
+var defaultDataStore string
+
+func init() {
+	tmpDir, err := ioutil.TempDir(".", "data_server_")
+	if err != nil {
+		panic("Could not create tmp dir")
+	}
+	defaultDataStore = tmpDir
 }
 
 func stackFatalf(t tLogger, f string, args ...interface{}) {
@@ -52,6 +58,61 @@ func stackFatalf(t tLogger, f string, args ...interface{}) {
 	}
 
 	t.Fatalf("%s", strings.Join(lines, "\n"))
+}
+
+// Helper function that fails if number of clients is not as expected
+func checkClients(t tLogger, s *StanServer, expected int) {
+	clients := s.clients.GetClients()
+	if len(clients) != expected {
+		stackFatalf(t, "Incorrect number of clients, expected %v, got %v", expected, len(clients))
+	}
+}
+
+// Helper function that waits to get the expected number of clients,
+// fail after a certain timeout.
+func waitForNumClients(t tLogger, s *StanServer, expected int) {
+	var clients []*client
+	ok := false
+	timeout := time.Now().Add(5 * time.Second)
+	for !ok && time.Now().Before(timeout) {
+		clients = s.clients.GetClients()
+		if len(clients) != expected {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		ok = true
+	}
+	if !ok {
+		stackFatalf(t, "Timeout waiting to get %v clients, got %v", expected, len(clients))
+	}
+}
+
+// Helper function that fails if number of subscriptions is not as expected
+func checkSubs(t tLogger, s *StanServer, ID string, expected int) []*subState {
+	subs := s.clients.GetSubs(ID)
+	if len(subs) != expected {
+		stackFatalf(t, "Incorrect number of subscriptions, expected %v, got %v", expected, len(subs))
+	}
+	return subs
+}
+
+// Helper function that waits to get the expected number of subscriptions,
+// fail after a certain timeout.
+func waitForNumSubs(t tLogger, s *StanServer, ID string, expected int) {
+	var subs []*subState
+	ok := false
+	timeout := time.Now().Add(5 * time.Second)
+	for !ok && time.Now().Before(timeout) {
+		subs = s.clients.GetSubs(ID)
+		if len(subs) != expected {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		ok = true
+	}
+	if !ok {
+		stackFatalf(t, "Timeout waiting to get %v subscriptions, got %v", expected, len(subs))
+	}
 }
 
 func NewDefaultConnection(t tLogger) stan.Conn {
@@ -367,10 +428,7 @@ func TestInvalidSubRequest(t *testing.T) {
 	}
 
 	// There should be no client created
-	clients := s.clients.GetClients()
-	if len(clients) > 0 {
-		t.Fatalf("Incorrect number of clients, expected 0, got %v", len(clients))
-	}
+	checkClients(t, s, 0)
 
 	// But channel "foo" should have been created though
 	if !s.store.HasChannel() {
@@ -425,10 +483,7 @@ func TestInvalidUnsubRequest(t *testing.T) {
 	if client == nil {
 		t.Fatal("A client should have been created")
 	}
-	subs := s.clients.GetSubs(clientName)
-	if subs == nil || len(subs) != 1 {
-		t.Fatalf("Expected to have 1 sub, got %v", len(subs))
-	}
+	subs := checkSubs(t, s, clientName, 1)
 
 	// Create empty request
 	req := &pb.UnsubscribeRequest{}
@@ -468,10 +523,7 @@ func TestInvalidUnsubRequest(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Check that sub's has been removed.
-	subs = s.clients.GetSubs(clientName)
-	if len(subs) != 0 {
-		t.Fatalf("Expected to have 0 sub, got %v", len(subs))
-	}
+	subs = checkSubs(t, s, clientName, 0)
 }
 
 func TestDuplicateClientIDs(t *testing.T) {
@@ -489,10 +541,7 @@ func TestDuplicateClientIDs(t *testing.T) {
 	}
 
 	// Check that there only one client registered
-	clients := s.clients.GetClients()
-	if len(clients) != 1 {
-		t.Fatalf("Incorrect number of clients: %v", len(clients))
-	}
+	checkClients(t, s, 1)
 }
 
 func TestRedelivery(t *testing.T) {
@@ -530,10 +579,7 @@ func TestRedelivery(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
-	subs := s.clients.GetSubs(clientName)
-	if subs == nil || len(subs) != 1 {
-		t.Fatalf("Expected one subscription, got %v", len(subs))
-	}
+	subs := checkSubs(t, s, clientName, 1)
 	func(sub *subState) {
 		sub.RLock()
 		defer sub.RUnlock()
@@ -620,10 +666,7 @@ func TestQueueRedelivery(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
-	subs := s.clients.GetSubs(clientName)
-	if subs == nil || len(subs) != 1 {
-		t.Fatalf("Expected one subscription, got %v", len(subs))
-	}
+	subs := checkSubs(t, s, clientName, 1)
 	func(sub *subState) {
 		sub.RLock()
 		defer sub.RUnlock()
@@ -815,7 +858,9 @@ func TestRunServerWithFileStore(t *testing.T) {
 	defer s.Shutdown()
 
 	// Create our own NATS connection to control reconnect wait
-	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(500*time.Millisecond))
+	nc, err := nats.Connect(nats.DefaultURL,
+		nats.ReconnectWait(50*time.Millisecond),
+		nats.MaxReconnects(500))
 	if err != nil {
 		t.Fatalf("Unexpected error on connect: %v", err)
 	}
@@ -827,8 +872,16 @@ func TestRunServerWithFileStore(t *testing.T) {
 	defer sc.Close()
 
 	rch := make(chan bool)
+	delivered := int32(0)
+	redelivered := int32(0)
 	cb := func(m *stan.Msg) {
-		rch <- true
+		if m.Redelivered {
+			atomic.AddInt32(&redelivered, 1)
+		} else {
+			if atomic.AddInt32(&delivered, 1) == 3 {
+				rch <- true
+			}
+		}
 	}
 
 	// 2 Queue subscribers on bar
@@ -847,6 +900,9 @@ func TestRunServerWithFileStore(t *testing.T) {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 
+	// Wait for all subscriptions to be processed by the server
+	waitForNumSubs(t, s, clientName, 4)
+
 	// Publish some messages.
 	if err := sc.Publish("bar", []byte("Msg for bar")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
@@ -858,10 +914,13 @@ func TestRunServerWithFileStore(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
-	for i := 0; i < 3; i++ {
-		if err := Wait(rch); err != nil {
-			t.Fatal("Did not receive message")
-		}
+	// Wait for all 3 messages
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not receive our messages")
+	}
+	// There should be no redelivered message
+	if r := atomic.LoadInt32(&redelivered); r != 0 {
+		t.Fatalf("There should be no redelivered message, got %v", r)
 	}
 
 	// Wait a bit for the acks to be processed
@@ -870,21 +929,28 @@ func TestRunServerWithFileStore(t *testing.T) {
 	// Shutdown server
 	s.Shutdown()
 
+	// Reset delivered count
+	atomic.StoreInt32(&delivered, 0)
+
 	// Recover
 	s = RunServerWithOpts(&opts, nil)
 	defer s.Shutdown()
 
 	// Check server recovered state
 	// Should be 1 client
-	clients := s.clients.GetClients()
-	if clients == nil || len(clients) != 1 {
-		t.Fatalf("Unexpected recovered clients: %v", len(clients))
-	}
+	checkClients(t, s, 1)
 
 	// Should be 4 subscriptions
-	subs := s.clients.GetSubs(clientName)
-	if subs == nil || len(subs) != 4 {
-		t.Fatalf("Unexpected recovered subs: %v", len(subs))
+	checkSubs(t, s, clientName, 4)
+
+	// helper to check that there is no ack pending
+	checkNoAckPending := func(sub *subState) {
+		sub.RLock()
+		lap := len(sub.acksPending)
+		sub.RUnlock()
+		if lap != 0 {
+			t.Fatalf("Server shutdown too soon? Unexpected un-ack'ed messages: %v", lap)
+		}
 	}
 
 	// Check details now.
@@ -916,6 +982,10 @@ func TestRunServerWithFileStore(t *testing.T) {
 		if qsubs == nil || len(qsubs) != 2 {
 			t.Fatalf("Unexpected number of queue subscribers of group 'group' for channel bar, got: %v", len(qsubs))
 		}
+		// Check for the two queue subscribers
+		for _, sub := range qsubs {
+			checkNoAckPending(sub)
+		}
 	}()
 
 	// One durable on baz
@@ -937,6 +1007,7 @@ func TestRunServerWithFileStore(t *testing.T) {
 		if len(ss.qsubs) != 0 {
 			t.Fatalf("Unexpected queue groups for baz, got: %v", len(ss.qsubs))
 		}
+		checkNoAckPending(ss.psubs[0])
 	}()
 
 	// One plain subscriber on foo
@@ -957,11 +1028,12 @@ func TestRunServerWithFileStore(t *testing.T) {
 		if len(ss.qsubs) != 0 {
 			t.Fatalf("Unexpected queue subscribers for foo, got: %v", len(ss.qsubs))
 		}
+		checkNoAckPending(ss.psubs[0])
 	}()
 
-	// Wait more than the reconnect wait, to make sure that
-	// the new publisher's new message is delivered
-	time.Sleep(700 * time.Millisecond)
+	// Since we use the same connection to send new messages,
+	// we don't have to explicitly wait that the client has
+	// reconnected (sends are buffered and flushed on reconnect)
 
 	// Send new messages, should be received.
 	if err := sc.Publish("bar", []byte("New Msg for bar")); err != nil {
@@ -974,12 +1046,16 @@ func TestRunServerWithFileStore(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
-	// Wait for the old and new messages
-	for i := 0; i < 6; i++ {
-		if err := Wait(rch); err != nil {
-			t.Fatal("Did not receive the old message")
-		}
+	// Wait for the new messages
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not receive our messages")
 	}
+	// There should be no redelivered message
+	/* Comment out for now until fix ready if later commit
+	if r := atomic.LoadInt32(&redelivered); r != 0 {
+		t.Fatalf("There should be no redelivered message, got %v", r)
+	}
+	*/
 }
 
 func checkDurable(t *testing.T, s *StanServer, channel, durName, durKey string) {
@@ -1604,20 +1680,7 @@ func TestCheckClientHealth(t *testing.T) {
 	nc.Close()
 
 	// Check that the server closes the connection
-	ok := false
-	timeout := time.Now().Add(5 * time.Second)
-	for time.Now().Before(timeout) {
-		clients := s.clients.GetClients()
-		if len(clients) > 0 {
-			time.Sleep(100 * time.Millisecond)
-		} else {
-			ok = true
-			break
-		}
-	}
-	if !ok {
-		t.Fatal("Timeout before client purged")
-	}
+	waitForNumClients(t, s, 0)
 }
 
 func TestConnectsWithDupCID(t *testing.T) {
