@@ -31,7 +31,7 @@ var testDefaultServerInfo = spb.ServerInfo{
 
 func cleanupDatastore(t *testing.T, dir string) {
 	if err := os.RemoveAll(dir); err != nil {
-		stackFatalf(t, "Error cleanup datastore: %v", err)
+		stackFatalf(t, "Error cleaning up datastore: %v", err)
 	}
 }
 

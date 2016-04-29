@@ -646,11 +646,11 @@ func (s *StanServer) initSubscriptions() {
 		panic(fmt.Sprintf("Could not subscribe to close request subject, %v\n", err))
 	}
 
-	Debugf("STAN: discover subject: %s", s.info.Discovery)
-	Debugf("STAN: publish subject:  %s", pubSubject)
-	Debugf("STAN: subcribe subject: %s", s.info.Subscribe)
-	Debugf("STAN: unsub subject:    %s", s.info.Unsubscribe)
-	Debugf("STAN: close subject:    %s", s.info.Close)
+	Debugf("STAN: Discover subject:    %s", s.info.Discovery)
+	Debugf("STAN: Publish subject:     %s", pubSubject)
+	Debugf("STAN: Subscribe subject:   %s", s.info.Subscribe)
+	Debugf("STAN: Unsubscribe subject: %s", s.info.Unsubscribe)
+	Debugf("STAN: Close subject:       %s", s.info.Close)
 
 }
 
