@@ -3,8 +3,9 @@
 package stores
 
 import (
-	"github.com/nats-io/go-stan/pb"
 	"time"
+
+	"github.com/nats-io/go-stan/pb"
 )
 
 // MemoryStore is a factory for message and subscription stores.

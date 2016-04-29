@@ -5,7 +5,6 @@ package server
 import (
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -344,17 +343,6 @@ func stanClosedHandler(nc *nats.Conn) {
 
 func stanErrorHandler(nc *nats.Conn, sub *nats.Subscription, err error) {
 	Errorf("STAN: Asynchronous error on subject %s: %s.", sub.Subject, err)
-}
-
-func useColors() (colors bool) {
-	colors = true
-	// Check to see if stderr is being redirected and if so turn off color
-	// Also turn off colors if we're running on Windows where os.Stderr.Stat() returns an invalid handle-error
-	stat, err := os.Stderr.Stat()
-	if err != nil || (stat.Mode()&os.ModeCharDevice) == 0 {
-		colors = false
-	}
-	return
 }
 
 // RunServer will startup an embedded STAN server and a nats-server to support it.
