@@ -76,15 +76,14 @@ func TestLogging(t *testing.T) {
 	sOpts.Trace = true
 	ConfigureLogger(sOpts, nOpts)
 
-	// test syslog
-	nOpts = &natsd.Options{}
-	nOpts.Syslog = true
-	ConfigureLogger(sOpts, nOpts)
+	// skip syslog until there is support in Travis
+	//nOpts = &natsd.Options{}
+	//nOpts.Syslog = true
+	//ConfigureLogger(sOpts, nOpts)
 
-	// test remote syslog
-	nOpts = &natsd.Options{}
-	nOpts.RemoteSyslog = "udp://localhost:514"
-	ConfigureLogger(sOpts, nOpts)
+	//nOpts = &natsd.Options{}
+	//nOpts.RemoteSyslog = "udp://localhost:514"
+	//ConfigureLogger(sOpts, nOpts)
 
 	// test file
 	tmpDir, err := ioutil.TempDir("", "_stan_server")
