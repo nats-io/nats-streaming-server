@@ -26,7 +26,7 @@ func RunServerWithDebugTrace(ID string, enableSTANDebug, enableSTANTrace, enable
 	sOpts.ID = ID
 
 	// enable logging
-        server.ConfigureLogger(sOpts, &nOpts)
+	server.ConfigureLogger(sOpts, &nOpts)
 
 	return server.RunServerWithOpts(sOpts, &nOpts)
 }

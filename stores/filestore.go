@@ -3,6 +3,7 @@
 package stores
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -24,6 +25,12 @@ const (
 
 	// Name of the subscriptions file.
 	subsFileName = "subs.dat"
+
+	// Name of the clients file.
+	clientsFileName = "clients.dat"
+
+	// Name of the server file.
+	serverFileName = "server.dat"
 
 	// record header size of a subscription:
 	// 4 bytes: 1 byte for type, 3 bytes for buffer size
@@ -51,10 +58,18 @@ const (
 	subRecMsg
 )
 
-// FileStore is a factory for message and subscription stores.
+// Actions for client store
+const (
+	addClient = "A"
+	delClient = "D"
+)
+
+// FileStore is the storage interface for STAN servers, backed by files.
 type FileStore struct {
 	genericStore
-	rootDir string
+	rootDir     string
+	serverFile  *os.File
+	clientsFile *os.File
 }
 
 type recoveredSub struct {
@@ -88,16 +103,27 @@ type FileMsgStore struct {
 	currSliceIdx int
 }
 
-// openFile opens the file (and create it if needed). If the file exists,
-// it checks that the version is supported.
-func openFile(fileName string) (*os.File, error) {
+// openFile opens the file specified by `filename`.
+// If the file exists, it checks that the version is supported.
+// If no file mode is provided, the file is created if not present,
+// opened in Read/Write and Append mode.
+func openFile(fileName string, modes ...int) (*os.File, error) {
 	checkVersion := false
+
+	mode := os.O_RDWR | os.O_CREATE | os.O_APPEND
+	if len(modes) > 0 {
+		// Use the provided modes instead
+		mode = 0
+		for _, m := range modes {
+			mode |= m
+		}
+	}
 
 	// Check if file already exists
 	if s, err := os.Stat(fileName); s != nil && err == nil {
 		checkVersion = true
 	}
-	file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	file, err := os.OpenFile(fileName, mode, 0666)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +170,7 @@ func writeHeader(buf []byte, recType subRecordType, recordSize int) {
 // any state present.
 // If not limits are provided, the store will be created with
 // DefaultChannelLimits.
-func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, RecoveredState, error) {
+func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *RecoveredState, error) {
 	fs := &FileStore{
 		rootDir: rootDir,
 	}
@@ -155,14 +181,55 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, RecoveredS
 	}
 
 	var err error
+	var recoveredState *RecoveredState
+	var serverInfo *spb.ServerInfo
+	var recoveredClients []*RecoveredClient
+	var recoveredSubs = make(RecoveredSubscriptions)
+	var channels []os.FileInfo
 	var msgStore *FileMsgStore
 	var subStore *FileSubStore
 	var subs map[uint64]*recoveredSub
 
-	recoveredState := make(RecoveredState)
+	// Ensure store is closed in case of return with error
+	defer func() {
+		if err != nil {
+			fs.Close()
+		}
+	}()
+
+	// Open/Create the server file (note that this file must not be opened,
+	// in APPEND mode to allow truncate to work).
+	fileName := filepath.Join(fs.rootDir, serverFileName)
+	fs.serverFile, err = openFile(fileName, os.O_RDWR, os.O_CREATE)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Open/Create the client file.
+	fileName = filepath.Join(fs.rootDir, clientsFileName)
+	fs.clientsFile, err = openFile(fileName)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Recover the server file.
+	serverInfo, err = fs.recoverServerInfo()
+	if err != nil {
+		return nil, nil, err
+	}
+	// If the server file is empty, then we are done
+	if serverInfo == nil {
+		// We return the file store instance, but no recovered state.
+		return fs, nil, nil
+	}
+
+	// Recover the clients file
+	recoveredClients, err = fs.recoverClients()
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Get the channels (there are subdirectories of rootDir)
-	var channels []os.FileInfo
 	channels, err = ioutil.ReadDir(rootDir)
 	if err != nil {
 		return nil, nil, err
@@ -218,7 +285,7 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, RecoveredS
 		}
 
 		// This is the recovered subscription state for this channel
-		recoveredState[channel] = rssArray
+		recoveredSubs[channel] = rssArray
 
 		fs.channels[channel] = &ChannelStore{
 			Subs: subStore,
@@ -226,15 +293,123 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, RecoveredS
 		}
 	}
 	if err != nil {
-		// Make sure we close to ensure that all files that have been
-		// successfully opened are properly closed.
-		fs.Close()
-		fs = nil
-		recoveredState = nil
 		return nil, nil, err
 	}
-
+	// Create the recovered state to return
+	recoveredState = &RecoveredState{
+		Info:    serverInfo,
+		Clients: recoveredClients,
+		Subs:    recoveredSubs,
+	}
 	return fs, recoveredState, nil
+}
+
+// Init is used to persist server's information after the first start
+func (fs *FileStore) Init(info *spb.ServerInfo) error {
+	fs.Lock()
+	defer fs.Unlock()
+
+	f := fs.serverFile
+	// Truncate the file (4 is the size of the fileVersion record)
+	err := f.Truncate(4)
+	if err == nil {
+		// Move offset to 4 (truncate does not do that)
+		_, err = f.Seek(4, 0)
+	}
+	if err == nil {
+		// Write the size of the record first
+		err = util.WriteInt(f, info.Size())
+	}
+	if err == nil {
+		b, _ := info.Marshal()
+		// Now the content
+		_, err = f.Write(b)
+	}
+	return err
+}
+
+// recoverClients reads the client files and returns an array of RecoveredClient
+func (fs *FileStore) recoverClients() ([]*RecoveredClient, error) {
+	clientsMap := make(map[string]*RecoveredClient)
+
+	var err error
+	var action, clientID, hbInbox string
+
+	scanner := bufio.NewScanner(fs.clientsFile)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Sscanf(line, "%s %s %s", &action, &clientID, &hbInbox)
+		switch action {
+		case addClient:
+			if clientID == "" {
+				return nil, fmt.Errorf("missing client ID in ADD client instruction")
+			}
+			if hbInbox == "" {
+				return nil, fmt.Errorf("missing client heartbeat inbox in ADD client instruction")
+			}
+			c := &RecoveredClient{ClientID: clientID, HbInbox: hbInbox}
+			// Add to the map. Note that if one already exists, which should
+			// not, just replace with this most recent one.
+			clientsMap[clientID] = c
+		case delClient:
+			if clientID == "" {
+				return nil, fmt.Errorf("missing client ID in DELETE client instruction")
+			}
+			delete(clientsMap, clientID)
+		default:
+			return nil, fmt.Errorf("invalid client action %q", action)
+		}
+	}
+	err = scanner.Err()
+	if err != nil {
+		return nil, err
+	}
+	clients := make([]*RecoveredClient, len(clientsMap))
+	i := 0
+	// Convert the map into an array
+	for _, c := range clientsMap {
+		clients[i] = c
+		i++
+	}
+	return clients, nil
+}
+
+// recoverServerInfo reads the server file and returns a ServerInfo structure
+func (fs *FileStore) recoverServerInfo() (*spb.ServerInfo, error) {
+	file := fs.serverFile
+	info := &spb.ServerInfo{}
+	// Read the message size as an int32
+	size, err := util.ReadInt(file)
+	if err != nil {
+		if err == io.EOF {
+			// We are done, no state recovered
+			return nil, nil
+		}
+		return nil, err
+	}
+	// Check that the size of the file is consistent with the size
+	// of the record we are supposed to recover. Account for the
+	// 8 bytes (4 + 4) corresponding to the fileVersion and record
+	// size.
+	fstat, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	expectedSize := int64(size + 8)
+	if fstat.Size() != expectedSize {
+		return nil, fmt.Errorf("incorrect file size, expected %v bytes, got %v bytes",
+			expectedSize, fstat.Size())
+	}
+	buf := make([]byte, size)
+	// Read fully the expected number of bytes for this record
+	if _, err := io.ReadFull(file, buf); err != nil {
+		return nil, err
+	}
+	// Reconstruct now
+	if err := info.Unmarshal(buf); err != nil {
+		return nil, err
+	}
+	return info, nil
 }
 
 // LookupOrCreateChannel returns a ChannelStore for the given channel,
@@ -291,14 +466,48 @@ func (fs *FileStore) LookupOrCreateChannel(channel string) (*ChannelStore, bool,
 	return channelStore, true, nil
 }
 
-// For STAN tests when RunServer defaults to a filestore
-//func (fs *FileStore) Close() error {
-//	err := fs.genericStore.Close()
-//	if err == nil {
-//		err = os.RemoveAll(fs.rootDir)
-//	}
-//	return err
-//}
+// AddClient stores information about the client identified by `clientID`.
+func (fs *FileStore) AddClient(clientID, hbInbox string) error {
+	line := fmt.Sprintf("%s %s %s\r\n", addClient, clientID, hbInbox)
+	fs.Lock()
+	defer fs.Unlock()
+	if _, err := fs.clientsFile.WriteString(line); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeleteClient invalidates the client identified by `clientID`.
+func (fs *FileStore) DeleteClient(clientID string) {
+	line := fmt.Sprintf("%s %s\r\n", delClient, clientID)
+	fs.Lock()
+	defer fs.Unlock()
+	fs.clientsFile.WriteString(line)
+}
+
+// Close closes all stores.
+func (fs *FileStore) Close() error {
+	fs.Lock()
+	defer fs.Unlock()
+	if fs.closed {
+		return nil
+	}
+	fs.closed = true
+
+	var err error
+	closeFile := func(f *os.File) {
+		if f == nil {
+			return
+		}
+		if lerr := f.Close(); lerr != nil && err == nil {
+			err = lerr
+		}
+	}
+	err = fs.genericStore.close()
+	closeFile(fs.serverFile)
+	closeFile(fs.clientsFile)
+	return err
+}
 
 ////////////////////////////////////////////////////////////////////////////
 // FileMsgStore methods
@@ -438,6 +647,29 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 
 	fslice := ms.files[ms.currSliceIdx]
 
+	// Check if we need to move to next file slice
+	if (ms.currSliceIdx < numFiles-1) &&
+		((fslice.msgsCount >= ms.limits.MaxNumMsgs/(numFiles-1)) ||
+			(fslice.msgsSize >= ms.limits.MaxMsgBytes/(numFiles-1))) {
+
+		// Don't change store variable until success...
+		nextSlice := ms.currSliceIdx + 1
+
+		// Close the file and open the next slice
+		if err := ms.file.Close(); err != nil {
+			return nil, err
+		}
+		file, err := openFile(ms.files[nextSlice].fileName)
+		if err != nil {
+			return nil, err
+		}
+		// Success, update the store's variables
+		ms.file = file
+		ms.currSliceIdx = nextSlice
+
+		fslice = ms.files[ms.currSliceIdx]
+	}
+
 	seq := ms.last + 1
 	m := &pb.MsgProto{
 		Sequence:  seq,
@@ -490,39 +722,76 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	}
 	fslice.lastMsg = m
 
-	// Check to see if we should move to next slice.
-	// FIXME(ik): Need to check total counts first? Not sure about
-	// what to do here.
-	if (fslice.msgsCount >= ms.limits.MaxNumMsgs/(numFiles-1)) ||
-		(fslice.msgsSize >= ms.limits.MaxMsgBytes/(numFiles-1)) {
-
-		nextSlice := ms.currSliceIdx + 1
-
-		if nextSlice == numFiles {
-			// Delete first file and shift remaining. We will
-			// keep currSliceIdx to the current value.
-			Noticef("WARNING: Limit reached, discarding messages for subject %s", ms.subject)
-			if err := ms.removeAndShiftFiles(); err != nil {
-				return nil, err
-			}
-		} else {
-			// Close the file and open the next slice
-			if err := ms.file.Close(); err != nil {
-				return nil, err
-			}
-			file, err := openFile(ms.files[nextSlice].fileName)
-			if err != nil {
-				return nil, err
-			}
-			ms.file = file
-			ms.currSliceIdx = nextSlice
-		}
+	// Enfore limits and update file slice if needed.
+	if err := ms.enforceLimits(); err != nil {
+		return nil, err
 	}
 	return m, nil
 }
 
+// enforceLimits checks total counts with current msg store's limits,
+// removing a file slice and/or updating slices' count as necessary.
+func (ms *FileMsgStore) enforceLimits() error {
+	// We may inspect several slices, start with the first at index 0.
+	idx := 0
+	// Check if we need to remove any (but leave at least the last added).
+	// Note that we may have to remove more than one msg if we are here
+	// after a restart with smaller limits than originally set.
+	for ms.totalCount > 1 &&
+		((ms.totalCount > ms.limits.MaxNumMsgs) ||
+			(ms.totalBytes > ms.limits.MaxMsgBytes)) {
+
+		// slice we are inspecting
+		slice := ms.files[idx]
+		// Size of the first message in this slice
+		firstMsgSize := uint64(len(slice.firstMsg.Data))
+		// Update slice and total counts
+		slice.msgsCount--
+		slice.msgsSize -= firstMsgSize
+		ms.totalCount--
+		ms.totalBytes -= firstMsgSize
+
+		// Remove the first message from our cache
+		Noticef("WARNING: Removing message[%d] from the store for [`%s`]", ms.first, ms.subject)
+		delete(ms.msgs, ms.first)
+
+		// Messages sequence is incremental with no gap on a given msgstore.
+		ms.first++
+		// Is file slice "empty"
+		if slice.msgsCount == 0 {
+			// If we are at the last file slice, remove the first.
+			if ms.currSliceIdx == numFiles-1 {
+				if err := ms.removeAndShiftFiles(); err != nil {
+					return err
+				}
+				// Decrement the current slice. It will be bumped if needed
+				// before storing the next message.
+				ms.currSliceIdx--
+				// The first slice is gone, go back to 0.
+				idx = 0
+			} else {
+				// No more message...
+				slice.firstMsg = nil
+				slice.lastMsg = nil
+
+				// We move the index to check the other slices if needed.
+				idx++
+				// This should not happen, but just in case...
+				if idx > ms.currSliceIdx {
+					break
+				}
+			}
+		} else {
+			// This is the new first message in this slice.
+			slice.firstMsg = ms.msgs[ms.first]
+		}
+	}
+	return nil
+}
+
+// removeAndShiftFiles
 func (ms *FileMsgStore) removeAndShiftFiles() error {
-	// Close the currently opened file (should be the numFile's file)
+	// Close the currently opened file since it is going to be renamed.
 	if err := ms.file.Close(); err != nil {
 		return err
 	}
@@ -559,20 +828,27 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 
 	var err error
 
-	// Reset the last
+	// Create a new file for the last slice.
 	fslice := ms.files[numFiles-1]
-	ms.file, err = openFile(fslice.fileName)
+	file, err := openFile(fslice.fileName)
 	if err != nil {
 		return err
 	}
-	// Move to the end of the file (offset 0 relative to end)
-	if _, err := ms.file.Seek(0, 2); err != nil {
+	if err := file.Close(); err != nil {
 		return err
 	}
+	// Reset the last slice's counts.
 	fslice.firstMsg = nil
 	fslice.lastMsg = nil
 	fslice.msgsCount = 0
 	fslice.msgsSize = uint64(0)
+
+	// Now re-open the file we closed at the beginning, which is the one
+	// before last.
+	ms.file, err = openFile(ms.files[numFiles-2].fileName)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 

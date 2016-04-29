@@ -7,9 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/go-stan/pb"
 	"github.com/nats-io/nuid"
 	"github.com/nats-io/stan-server/spb"
-	"github.com/nats-io/stan/pb"
+	"runtime"
+	"strings"
 )
 
 var testDefaultChannelLimits = ChannelLimits{
@@ -23,6 +25,29 @@ var nuidGen *nuid.NUID
 
 func init() {
 	nuidGen = nuid.New()
+}
+
+type tLogger interface {
+	Fatalf(format string, args ...interface{})
+	Errorf(format string, args ...interface{})
+}
+
+func stackFatalf(t tLogger, f string, args ...interface{}) {
+	lines := make([]string, 0, 32)
+	msg := fmt.Sprintf(f, args...)
+	lines = append(lines, msg)
+
+	// Generate the Stack of callers:
+	for i := 1; true; i++ {
+		_, file, line, ok := runtime.Caller(i)
+		if ok == false {
+			break
+		}
+		msg := fmt.Sprintf("%d - %s:%d", i, file, line)
+		lines = append(lines, msg)
+	}
+
+	t.Fatalf("%s", strings.Join(lines, "\n"))
 }
 
 func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
@@ -257,9 +282,21 @@ func testMsgsState(t *testing.T, s Store) {
 	}
 }
 
-func testMaxMsgs(t *testing.T, s Store, limitCount int) {
+func testMaxMsgs(t *testing.T, s Store) {
 	payload := []byte("hello")
-	for i := 0; i < 2*limitCount; i++ {
+
+	limitCount := 100
+
+	limits := testDefaultChannelLimits
+	limits.MaxNumMsgs = limitCount
+	limits.MaxMsgBytes = uint64(limitCount * len(payload))
+
+	s.SetChannelLimits(limits)
+
+	totalSent := limitCount + 60
+	firstSeqAfterLimitReached := uint64(totalSent - limitCount + 1)
+
+	for i := 0; i < totalSent; i++ {
 		storeMsg(t, s, "foo", payload)
 	}
 
@@ -276,7 +313,7 @@ func testMaxMsgs(t *testing.T, s Store, limitCount int) {
 	}
 
 	// Check that older messages are no longer avail.
-	if cs.Msgs.Lookup(1) != nil || cs.Msgs.Lookup(uint64(limitCount/2)) != nil {
+	if cs.Msgs.Lookup(1) != nil || cs.Msgs.Lookup(uint64(firstSeqAfterLimitReached-1)) != nil {
 		t.Fatal("Older messages still available")
 	}
 
@@ -285,11 +322,22 @@ func testMaxMsgs(t *testing.T, s Store, limitCount int) {
 	lastMsg := cs.Msgs.LastMsg()
 	lastSeq := cs.Msgs.LastSequence()
 
-	if firstMsg == nil || firstMsg.Sequence != firstSeq || firstSeq == 1 {
+	if firstMsg == nil || firstMsg.Sequence != firstSeq || firstSeq != firstSeqAfterLimitReached {
 		t.Fatalf("Incorrect first message: msg=%v seq=%v", firstMsg, firstSeq)
 	}
-	if lastMsg == nil || lastMsg.Sequence != lastSeq || lastSeq != uint64(2*limitCount) {
-		t.Fatalf("Incorrect first message: msg=%v seq=%v", firstMsg, firstSeq)
+	if lastMsg == nil || lastMsg.Sequence != lastSeq || lastSeq != uint64(totalSent) {
+		t.Fatalf("Incorrect last message: msg=%v seq=%v", firstMsg, firstSeq)
+	}
+
+	// Store a message with a payload larger than the limit.
+	// Make sure that the message is stored, but all others should
+	// be removed.
+	bigMsg := make([]byte, limits.MaxMsgBytes+100)
+	storeMsg(t, s, "foo", bigMsg)
+
+	count, bytes, err = s.MsgsState("foo")
+	if count != 1 || bytes != uint64(len(bigMsg)) || err != nil {
+		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, len(bigMsg), err)
 	}
 }
 
@@ -391,4 +439,29 @@ func testGetSeqFromStartTime(t *testing.T, s Store) {
 	if seq != startMsg.Sequence {
 		t.Fatalf("Invalid start sequence. Expected %v got %v", startMsg.Sequence, seq)
 	}
+}
+
+func testAddDeleteClient(t *testing.T, s Store) {
+	// Delete client that does not exist
+	s.DeleteClient("client1")
+
+	// Delete a client before adding it
+	s.DeleteClient("client2")
+
+	// Adding it after the delete
+	if err := s.AddClient("client2", "hbInbox"); err != nil {
+		t.Fatalf("Unexpected error adding client: %v", err)
+	}
+
+	// Add a client
+	if err := s.AddClient("client3", "hbInbox"); err != nil {
+		t.Fatalf("Unexpected error adding client: %v", err)
+	}
+
+	// Add a client then..
+	if err := s.AddClient("client4", "hbInbox"); err != nil {
+		t.Fatalf("Unexpected error adding client: %v", err)
+	}
+	// Delete it.
+	s.DeleteClient("client4")
 }

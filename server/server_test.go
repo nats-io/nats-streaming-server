@@ -16,12 +16,13 @@ import (
 	"github.com/nats-io/stan-server/stores"
 
 	natsd "github.com/nats-io/gnatsd/server"
+	"sync"
 )
 
 const (
 	// CAUTION! Tests will remove the directory and all its content,
 	// so pick a directory where there is nothing.
-	defaultDataStore = "../data"
+	defaultDataStore = "../server_data"
 )
 
 const (
@@ -63,7 +64,7 @@ func NewDefaultConnection(t tLogger) stan.Conn {
 
 func cleanupDatastore(t *testing.T, dir string) {
 	if err := os.RemoveAll(dir); err != nil {
-		t.Fatalf("Error cleanup datastore: %v", err)
+		stackFatalf(t, "Error cleaning up datastore: %v", err)
 	}
 }
 
@@ -136,6 +137,22 @@ func TestDefaultOptions(t *testing.T) {
 	}
 }
 
+func TestDoubleShutdown(t *testing.T) {
+	s := RunServer(clusterName)
+	s.Shutdown()
+
+	ch := make(chan bool)
+
+	go func() {
+		s.Shutdown()
+		ch <- true
+	}()
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Second shutdown blocked")
+	}
+}
+
 type response interface {
 	Unmarshal([]byte) error
 }
@@ -181,27 +198,84 @@ func TestInvalidRequests(t *testing.T) {
 	}
 
 	// Send a dummy message on the STAN publish subject
-	if err := checkServerResponse(nc, s.pubPrefix+".foo", ErrInvalidPubReq,
+	if err := checkServerResponse(nc, s.info.Publish+".foo", ErrInvalidPubReq,
 		&pb.PubAck{}); err != nil {
 		t.Fatalf("%v", err)
 	}
 
 	// Send a dummy message on the STAN subscription init subject
-	if err := checkServerResponse(nc, s.subRequests, ErrInvalidSubReq,
+	if err := checkServerResponse(nc, s.info.Subscribe, ErrInvalidSubReq,
 		&pb.SubscriptionResponse{}); err != nil {
 		t.Fatalf("%v", err)
 	}
 
 	// Send a dummy message on the STAN subscription unsub subject
-	if err := checkServerResponse(nc, s.unsubRequests, ErrInvalidUnsubReq,
+	if err := checkServerResponse(nc, s.info.Unsubscribe, ErrInvalidUnsubReq,
 		&pb.SubscriptionResponse{}); err != nil {
 		t.Fatalf("%v", err)
 	}
 
 	// Send a dummy message on the STAN close subject
-	if err := checkServerResponse(nc, s.closeRequests, ErrInvalidCloseReq,
+	if err := checkServerResponse(nc, s.info.Close, ErrInvalidCloseReq,
 		&pb.CloseResponse{}); err != nil {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestClientIDIsValid(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	// Use a bare NATS connection to send incorrect requests
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	// Get the connect subject
+	connSubj := fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, clusterName)
+
+	invalidClientIDs := []string{"", "id with spaces", "id:with:columns",
+		"id,with,commas", "id.with.dots", "id with spaces, commas and: columns and dots.",
+		"idWithLotsOfNotAllowedCharacters!@#$%^&*()"}
+
+	for _, cID := range invalidClientIDs {
+		req := &pb.ConnectRequest{ClientID: cID, HeartbeatInbox: "hbInbox"}
+		b, _ := req.Marshal()
+
+		resp, err := nc.Request(connSubj, b, time.Second)
+		if err != nil {
+			t.Fatalf("Unexpected error on publishing request: %v", err)
+		}
+		r := &pb.ConnectResponse{}
+		err = r.Unmarshal(resp.Data)
+		if err != nil {
+			t.Fatalf("Unexpected response object: %v", err)
+		}
+		if r.Error == "" {
+			t.Fatal("Expected error, got none")
+		}
+	}
+
+	validClientIDs := []string{"id", "id_with_underscores", "id-with-hypens"}
+
+	for _, cID := range validClientIDs {
+		req := &pb.ConnectRequest{ClientID: cID, HeartbeatInbox: "hbInbox"}
+		b, _ := req.Marshal()
+
+		resp, err := nc.Request(connSubj, b, time.Second)
+		if err != nil {
+			t.Fatalf("Unexpected error on publishing request: %v", err)
+		}
+		r := &pb.ConnectResponse{}
+		err = r.Unmarshal(resp.Data)
+		if err != nil {
+			t.Fatalf("Unexpected response object: %v", err)
+		}
+		if r.Error != "" {
+			t.Fatalf("Unexpected response error: %v", r.Error)
+		}
 	}
 }
 
@@ -210,7 +284,7 @@ func sendInvalidSubRequest(s *StanServer, nc *nats.Conn, req *pb.SubscriptionReq
 	if err != nil {
 		return fmt.Errorf("Error during marshal: %v", err)
 	}
-	rep, err := nc.Request(s.subRequests, b, time.Second)
+	rep, err := nc.Request(s.info.Subscribe, b, time.Second)
 	if err != nil {
 		return fmt.Errorf("Unexpected error: %v", err)
 	}
@@ -329,7 +403,7 @@ func sendInvalidUnsubRequest(s *StanServer, nc *nats.Conn, req *pb.UnsubscribeRe
 	if err != nil {
 		return fmt.Errorf("Error during marshal: %v", err)
 	}
-	rep, err := nc.Request(s.unsubRequests, b, time.Second)
+	rep, err := nc.Request(s.info.Unsubscribe, b, time.Second)
 	if err != nil {
 		return fmt.Errorf("Unexpected error: %v", err)
 	}
@@ -513,6 +587,24 @@ func TestRedelivery(t *testing.T) {
 	}(subs[0])
 }
 
+func TestRedeliveryRace(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.AckWait(time.Second), stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	time.Sleep(time.Second)
+	sub.Unsubscribe()
+}
+
 func TestQueueRedelivery(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
@@ -583,6 +675,71 @@ func TestQueueRedelivery(t *testing.T) {
 			t.Fatalf("Expected timer to be nil")
 		}
 	}(subs[0])
+}
+
+func TestDurableRedelivery(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	ch := make(chan bool)
+	rch := make(chan bool)
+	errors := make(chan error, 5)
+	count := 0
+	cb := func(m *stan.Msg) {
+		count++
+		switch count {
+		case 1:
+			ch <- true
+		case 2:
+			rch <- true
+		default:
+			errors <- fmt.Errorf("Unexpected message %v", m)
+		}
+	}
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	_, err := sc.Subscribe("foo", cb, stan.DurableName("dur"), stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Wait for first message to be received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Failed to receive first message")
+	}
+
+	// Report error if any
+	if len(errors) > 0 {
+		t.Fatalf("%v", <-errors)
+	}
+
+	// Close the client
+	sc.Close()
+
+	// Restart client
+	sc2 := NewDefaultConnection(t)
+	defer sc2.Close()
+
+	sub2, err := sc2.Subscribe("foo", cb, stan.DurableName("dur"), stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub2.Unsubscribe()
+
+	// Wait for redelivered message
+	if err := Wait(rch); err != nil {
+		t.Fatal("Messages were not redelivered to durable")
+	}
+
+	// Report error if any
+	if len(errors) > 0 {
+		t.Fatalf("%v", <-errors)
+	}
 }
 
 func TestTooManyChannelsOnCreateSub(t *testing.T) {
@@ -667,7 +824,7 @@ func TestTooManySubs(t *testing.T) {
 	}()
 }
 
-func TestRunServerWithFileBased(t *testing.T) {
+func TestRunServerWithFileStore(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
@@ -678,7 +835,7 @@ func TestRunServerWithFileBased(t *testing.T) {
 	defer s.Shutdown()
 
 	// Create our own NATS connection to control reconnect wait
-	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
+	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(500*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Unexpected error on connect: %v", err)
 	}
@@ -824,24 +981,16 @@ func TestRunServerWithFileBased(t *testing.T) {
 
 	// Wait more than the reconnect wait, to make sure that
 	// the new publisher's new message is delivered
-	time.Sleep(200 * time.Millisecond)
-
-	// For now, we need to use a new connection for the new message
-	// because on restart PUB inbox is different.
-	sc2, err := stan.Connect(opts.ID, "otherClient")
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
-	defer sc2.Close()
+	time.Sleep(700 * time.Millisecond)
 
 	// Send new messages, should be received.
-	if err := sc2.Publish("bar", []byte("New Msg for bar")); err != nil {
+	if err := sc.Publish("bar", []byte("New Msg for bar")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
-	if err := sc2.Publish("baz", []byte("New Msg for baz")); err != nil {
+	if err := sc.Publish("baz", []byte("New Msg for baz")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
-	if err := sc2.Publish("foo", []byte("New Msg for foo")); err != nil {
+	if err := sc.Publish("foo", []byte("New Msg for foo")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
@@ -984,7 +1133,7 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 	}
 
 	// Verify message is acked.
-	checkDurableNoPendingAck(t, s, ackInbox, ackSub, 1)
+	checkDurableNoPendingAck(t, s, true, ackInbox, ackSub, 1)
 
 	// Close stan connection
 	sc.Close()
@@ -1006,8 +1155,8 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
-	// Verify that we have maintained the same AckInbox and message is acked.
-	checkDurableNoPendingAck(t, s, ackInbox, ackSub, 2)
+	// Verify that we have different AckInbox and ackSub and message is acked.
+	checkDurableNoPendingAck(t, s, false, ackInbox, ackSub, 2)
 
 	// Close stan connection
 	sc.Close()
@@ -1024,8 +1173,8 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 	// Check durable is found
 	checkDurable(t, s, "foo", durName, durKey)
 
-	// Verify that we have maintained the same AckInbox and message is acked.
-	checkDurableNoPendingAck(t, s, ackInbox, ackSub, 2)
+	// Verify that we have different AckInbox and ackSub and message is acked.
+	checkDurableNoPendingAck(t, s, false, ackInbox, ackSub, 2)
 
 	numMsgs := len(msgs)
 	if numMsgs > 2 {
@@ -1042,7 +1191,8 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 	}
 }
 
-func checkDurableNoPendingAck(t *testing.T, s *StanServer, ackInbox string, ackSub *nats.Subscription, expectedSeq uint64) {
+func checkDurableNoPendingAck(t *testing.T, s *StanServer, isSame bool,
+	ackInbox string, ackSub *nats.Subscription, expectedSeq uint64) {
 	// When called, we know that there is 1 sub, and the sub is a durable.
 	subs := s.clients.GetSubs(clientName)
 	durable := subs[0]
@@ -1051,11 +1201,20 @@ func checkDurableNoPendingAck(t *testing.T, s *StanServer, ackInbox string, ackS
 	durAckSub := durable.ackSub
 	durable.RUnlock()
 
-	if durAckInbox != ackInbox {
-		stackFatalf(t, "Expected ackInbox %v, got %v", ackInbox, durAckInbox)
-	}
-	if durAckSub != ackSub {
-		stackFatalf(t, "Expected subscriber on ack to be %p, got %p", ackSub, durAckSub)
+	if isSame {
+		if durAckInbox != ackInbox {
+			stackFatalf(t, "Expected ackInbox %v, got %v", ackInbox, durAckInbox)
+		}
+		if durAckSub != ackSub {
+			stackFatalf(t, "Expected subscriber on ack to be %p, got %p", ackSub, durAckSub)
+		}
+	} else {
+		if durAckInbox == ackInbox {
+			stackFatalf(t, "Expected different ackInbox'es")
+		}
+		if durAckSub == ackSub {
+			stackFatalf(t, "Expected different ackSub")
+		}
 	}
 
 	limit := time.Now().Add(5 * time.Second)
@@ -1100,34 +1259,21 @@ func TestClientCrashAndReconnect(t *testing.T) {
 	// kill the NATS conn
 	nc.Close()
 
-	// should get a duplicate clientID error
-	if sc2, err := stan.Connect(clusterName, clientName); err == nil {
-		sc2.Close()
-		t.Fatal("Expected to be unable to connect")
+	// Since the original client won't respond to a ping, we should
+	// be able to connect, and it should not take too long.
+	start := time.Now()
+
+	// should succeed
+	if sc2, err := stan.Connect(clusterName, clientName); err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	} else {
+		defer sc2.Close()
 	}
 
-	ok := false
-	timeout := time.Now().Add(5 * time.Second)
-	for time.Now().Before(timeout) {
-		clients := s.clients.GetClients()
-		if len(clients) > 0 {
-			time.Sleep(100 * time.Millisecond)
-		} else {
-			ok = true
-			break
-		}
+	duration := time.Now().Sub(start)
+	if duration > 5*time.Second {
+		t.Fatalf("Took too long to be able to connect: %v", duration)
 	}
-
-	if !ok {
-		t.Fatal("Timeout before client purged")
-	}
-
-	// should be able to connect
-	sc, err = stan.Connect(clusterName, clientName)
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v", err)
-	}
-	defer sc.Close()
 }
 
 func TestStartPositionNewOnly(t *testing.T) {
@@ -1403,4 +1549,365 @@ func TestStartPositionTimeDelta(t *testing.T) {
 	if err := Wait(rch); err != nil {
 		t.Fatal("Did not receive our message")
 	}
+}
+
+func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// For delete the client
+	s.clients.Unregister(clientName)
+
+	// Shutdown the server
+	s.Shutdown()
+
+	// Restart the server
+	s = RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	// Check that client does not exist
+	if s.clients.Lookup(clientName) != nil {
+		t.Fatal("Client should not have been recovered")
+	}
+	// Channel would be recovered
+	cs := s.store.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel foo should have been recovered")
+	}
+	// But there should not be any subscription
+	ss := cs.UserData.(*subStore)
+	ss.RLock()
+	numSubs := len(ss.psubs)
+	ss.RUnlock()
+	if numSubs > 0 {
+		t.Fatalf("Should not have restored subscriptions, got %v", numSubs)
+	}
+}
+
+func TestCheckClientHealth(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	// Override HB settings
+	s.Lock()
+	s.hbInterval = 200 * time.Millisecond
+	s.hbTimeout = 10 * time.Millisecond
+	s.maxFailedHB = 10
+	s.Unlock()
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// kill the NATS conn
+	nc.Close()
+
+	// Check that the server closes the connection
+	ok := false
+	timeout := time.Now().Add(5 * time.Second)
+	for time.Now().Before(timeout) {
+		clients := s.clients.GetClients()
+		if len(clients) > 0 {
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		t.Fatal("Timeout before client purged")
+	}
+}
+
+func TestConnectsWithDupCID(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	// Not too small to avoid flapping tests.
+	s.dupCIDTimeout = 1 * time.Second
+	s.dupMaxCIDRoutines = 5
+	total := int(s.dupMaxCIDRoutines)
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	dupCIDName := "dupCID"
+
+	sc, err := stan.Connect(clusterName, dupCIDName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Close the nc connection
+	nc.Close()
+
+	var wg sync.WaitGroup
+
+	// Channel large enough to hold all possible errors.
+	errors := make(chan error, 3*total)
+
+	dupTimeoutMin := time.Duration(float64(s.dupCIDTimeout) * 0.9)
+	dupTimeoutMax := time.Duration(float64(s.dupCIDTimeout) * 1.1)
+
+	wg.Add(1)
+
+	connect := func(cid string, shouldFail bool) (stan.Conn, time.Duration, error) {
+		start := time.Now()
+		c, err := stan.Connect(clusterName, cid, stan.ConnectWait(3*s.dupCIDTimeout))
+		duration := time.Now().Sub(start)
+		if shouldFail {
+			if c != nil {
+				c.Close()
+			}
+			if err == nil || err == stan.ErrConnectReqTimeout {
+				return nil, 0, fmt.Errorf("Connect should have failed")
+			}
+			return nil, duration, nil
+		} else if err != nil {
+			return nil, 0, err
+		}
+		return c, duration, nil
+	}
+
+	getErrors := func() string {
+		errorsStr := ""
+		numErrors := len(errors)
+		for i := 0; i < numErrors; i++ {
+			e := <-errors
+			oneErr := fmt.Sprintf("%d: %s\n", (i + 1), e.Error())
+			if i == 0 {
+				errorsStr = "\n"
+			}
+			errorsStr = errorsStr + oneErr
+		}
+		return errorsStr
+	}
+
+	// Start this go routine that will try to connect 2*total-1
+	// times. These all should fail (quickly) since the one
+	// connecting below should be the one that connects.
+	go func() {
+		defer wg.Done()
+		time.Sleep(s.dupCIDTimeout / 2)
+		for i := 0; i < 2*total-1; i++ {
+			_, duration, err := connect(dupCIDName, true)
+			if err != nil {
+				errors <- err
+				continue
+			}
+			// These should fail "immediately", so consider it a failure if
+			// it is close to the dupCIDTimeout
+			if duration >= dupTimeoutMin {
+				errors <- fmt.Errorf("Connect took too long to fail: %v", duration)
+			}
+		}
+	}()
+
+	// This connection on different client ID should not take long
+	newConn, duration, err := connect("newCID", false)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	defer newConn.Close()
+	if duration >= dupTimeoutMin {
+		t.Fatalf("Connect expected to be fast, took %v", duration)
+	}
+
+	// This one should connect, and it should take close to dupCIDTimeout
+	replaceConn, duration, err := connect(dupCIDName, false)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	defer replaceConn.Close()
+	if duration < dupTimeoutMin || duration > dupTimeoutMax {
+		t.Fatalf("Connect expected in the range [%v-%v], took %v",
+			dupTimeoutMin, dupTimeoutMax, duration)
+	}
+
+	// Wait for all other connects to complete
+	wg.Wait()
+
+	// Report possible errors
+	if errs := getErrors(); errs != "" {
+		t.Fatalf("Test failed: %v", errs)
+	}
+
+	// We don't need those anymore.
+	newConn.Close()
+	replaceConn.Close()
+
+	// Now, let's create (total + 1) connections with different CIDs
+	// and close their NATS connection. Then try to "reconnect".
+	// The first (total) connections should each take about dupCIDTimeout to
+	// complete.
+	// The last (total + 1) connection should be delayed waiting for
+	// a go routine to finish. So the expected duration - assuming that
+	// they all start roughly at the same time - would be 2 * dupCIDTimeout.
+	for i := 0; i < total+1; i++ {
+		nc, err := nats.Connect(nats.DefaultURL)
+		if err != nil {
+			t.Fatalf("Unexpected error on connect: %v", err)
+		}
+		defer nc.Close()
+
+		cid := fmt.Sprintf("%s_%d", dupCIDName, i)
+		sc, err := stan.Connect(clusterName, cid, stan.NatsConn(nc))
+		if err != nil {
+			t.Fatalf("Expected to connect correctly, got err %v", err)
+		}
+		defer sc.Close()
+
+		// Close the nc connection
+		nc.Close()
+	}
+
+	wg.Add(total + 1)
+
+	// Need to close the connections only after the test is done
+	conns := make([]stan.Conn, total+1)
+
+	// Cleanup function
+	cleanupConns := func() {
+		wg.Wait()
+		for _, c := range conns {
+			c.Close()
+		}
+	}
+
+	var delayedGuard sync.Mutex
+	delayed := false
+
+	// Connect 1 more than the max number of allowed go routines.
+	for i := 0; i < total+1; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			cid := fmt.Sprintf("%s_%d", dupCIDName, idx)
+			c, duration, err := connect(cid, false)
+			if err != nil {
+				errors <- err
+				return
+			}
+			conns[idx] = c
+			ok := false
+			if duration >= dupTimeoutMin && duration <= dupTimeoutMax {
+				ok = true
+			}
+			if !ok && duration >= 2*dupTimeoutMin && duration <= 2*dupTimeoutMax {
+				delayedGuard.Lock()
+				if delayed {
+					delayedGuard.Unlock()
+					errors <- fmt.Errorf("Failing %q, only one connection should take that long", cid)
+					return
+				}
+				delayed = true
+				delayedGuard.Unlock()
+				return
+			}
+			if !ok {
+				if duration < dupTimeoutMin || duration > dupTimeoutMax {
+					errors <- fmt.Errorf("Connect with cid %q expected in the range [%v-%v], took %v",
+						cid, dupTimeoutMin, dupTimeoutMax, duration)
+				}
+			}
+		}(i)
+	}
+
+	// Wait for all routines to return
+	wg.Wait()
+
+	// Wait for other connects to complete, and close them.
+	cleanupConns()
+
+	// Report possible errors
+	if errs := getErrors(); errs != "" {
+		t.Fatalf("Test failed: %v", errs)
+	}
+}
+
+func TestStoreTypeUnknown(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = "MyType"
+
+	var failedServer *StanServer
+	defer func() {
+		if r := recover(); r == nil {
+			if failedServer != nil {
+				failedServer.Shutdown()
+			}
+			t.Fatal("Server should have failed with a panic because of unknown store type")
+		}
+	}()
+	failedServer = RunServerWithOpts(opts, nil)
+}
+
+func TestFileStoreMissingDirectory(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = ""
+
+	var failedServer *StanServer
+	defer func() {
+		if r := recover(); r == nil {
+			if failedServer != nil {
+				failedServer.Shutdown()
+			}
+			t.Fatal("Server should have failed with a panic because missing directory")
+		}
+	}()
+	failedServer = RunServerWithOpts(opts, nil)
+}
+
+func TestFileStoreChangedClusterID(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	s.Shutdown()
+
+	var failedServer *StanServer
+	defer func() {
+		if r := recover(); r == nil {
+			if failedServer != nil {
+				failedServer.Shutdown()
+			}
+			t.Fatal("Server should have failed with a panic because of different IDs")
+		}
+	}()
+	// Change cluster ID, running the server should fail with a panic
+	opts.ID = "differentID"
+	failedServer = RunServerWithOpts(opts, nil)
 }

@@ -20,6 +20,7 @@ import (
 	natsd "github.com/nats-io/gnatsd/test"
 
 	stores "github.com/nats-io/stan-server/stores"
+	"regexp"
 )
 
 // A single STAN server
@@ -47,9 +48,16 @@ const (
 	DefaultMsgSizeStoreLimit = DefaultMsgStoreLimit * 1024
 
 	// Heartbeat intervals.
-	DefaultHeartBeatInterval   = 200 * time.Millisecond
-	DefaultClientHBTimeout     = 150 * time.Millisecond
-	DefaultMaxFailedHeartBeats = int((2 * time.Second) / DefaultHeartBeatInterval)
+	DefaultHeartBeatInterval   = 30 * time.Second
+	DefaultClientHBTimeout     = 10 * time.Second
+	DefaultMaxFailedHeartBeats = int((5 * time.Minute) / DefaultHeartBeatInterval)
+
+	// Max number of outstanding go-routines handling connect requests for
+	// duplicate client IDs.
+	defaultMaxDupCIDRoutines = 100
+	// Timeout used to ping the known client when processing a connection
+	// request for a duplicate client ID.
+	defaultCheckDupCIDTimeout = 500 * time.Millisecond
 )
 
 // Errors.
@@ -70,17 +78,43 @@ var (
 	ErrUnknownClient   = errors.New("stan: unkwown clientID")
 )
 
+// Shared regular expression to check clientID validity.
+// No lock required since from doc: https://golang.org/pkg/regexp/
+// A Regexp is safe for concurrent use by multiple goroutines.
+var clientIDRegEx *regexp.Regexp
+
+func init() {
+	if re, err := regexp.Compile("^[a-zA-Z0-9_-]+$"); err != nil {
+		panic("Unable to compile regular expression")
+	} else {
+		clientIDRegEx = re
+	}
+}
+
 // StanServer structure represents the STAN server
 type StanServer struct {
-	clusterID     string
-	serverID      string
-	pubPrefix     string // Subject prefix we received published messages on.
-	subRequests   string // Subject we receive subscription requests on.
-	unsubRequests string // Subject we receive unsubscribe requests on.
-	closeRequests string // Subject we receive close requests on.
-	natsServer    *server.Server
-	opts          *Options
-	nc            *nats.Conn
+	sync.RWMutex
+	shutdown   bool
+	serverID   string
+	info       spb.ServerInfo // Contains cluster ID and subjects
+	natsServer *server.Server
+	opts       *Options
+	nc         *nats.Conn
+	wg         sync.WaitGroup // Wait on go routines during shutdown
+
+	// For now, these will be set to the constants DefaultHeartBeatInterval, etc...
+	// but allow to override in tests.
+	hbInterval  time.Duration
+	hbTimeout   time.Duration
+	maxFailedHB int
+
+	// Used when processing connect requests for client ID already registered
+	dupCIDGuard       sync.RWMutex
+	dupCIDMap         map[string]struct{}
+	dupCIDwg          sync.WaitGroup // To wait for one routine to end when we have reached the max.
+	dupCIDswg         bool           // To instruct one go routine to decrement the wait group.
+	dupCIDTimeout     time.Duration
+	dupMaxCIDRoutines int
 
 	// Clients
 	clients *clientStore
@@ -219,7 +253,10 @@ func (ss *subStore) Remove(sub *subState) {
 	sub.Lock()
 	// Clear the subscriptions clientID
 	sub.ClientID = ""
-	sub.ackSub.Unsubscribe()
+	if sub.ackSub != nil {
+		sub.ackSub.Unsubscribe()
+		sub.ackSub = nil
+	}
 	ackInbox := sub.AckInbox
 	qs := sub.qstate
 	durable := sub.DurableName
@@ -347,7 +384,16 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 
 	Noticef("Starting stan-server[%s] version %s", sOpts.ID, VERSION)
 
-	s := StanServer{clusterID: sOpts.ID, serverID: nuid.Next(), opts: sOpts}
+	s := StanServer{
+		serverID:          nuid.Next(),
+		opts:              sOpts,
+		hbInterval:        DefaultHeartBeatInterval,
+		hbTimeout:         DefaultClientHBTimeout,
+		maxFailedHB:       DefaultMaxFailedHeartBeats,
+		dupCIDMap:         make(map[string]struct{}),
+		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
+		dupCIDTimeout:     defaultCheckDupCIDTimeout,
+	}
 
 	// Create clientStore
 	s.clients = &clientStore{clients: make(map[string]*client)}
@@ -364,7 +410,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	overrideLimits(limits, sOpts)
 
 	var err error
-	var recoveredState stores.RecoveredState
+	var recoveredState *stores.RecoveredState
+	var recoveredSubs []*subState
 
 	// Ensure store type option is in upper-case
 	sOpts.StoreType = strings.ToUpper(sOpts.StoreType)
@@ -387,15 +434,49 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		panic(fmt.Sprintf("%v", err))
 	}
 
-	// Process recovered channels (if any).
-	recoveredSubs := s.processRecoveredChannels(recoveredState)
+	// After this point, if the server panics, and s.store is not closed,
+	// it will prevent tests on Windows to properly cleanup the datastore
+	// because files will still be opened. So we recover from the panic
+	// in order to close the store, then issue the original panic.
+	defer func() {
+		if r := recover(); r != nil {
+			if s.store != nil {
+				s.store.Close()
+			}
+			// Issue the original panic now that the store is closed.
+			panic(r.(error))
+		}
+	}()
 
-	// Generate Subjects
-	// FIXME(dlc) guid needs to be shared in cluster mode
-	s.pubPrefix = fmt.Sprintf("%s.%s", DefaultPubPrefix, nuid.Next())
-	s.subRequests = fmt.Sprintf("%s.%s", DefaultSubPrefix, nuid.Next())
-	s.unsubRequests = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
-	s.closeRequests = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
+	if recoveredState != nil {
+		// Copy content
+		s.info = *recoveredState.Info
+		// Check cluster IDs match
+		if s.opts.ID != s.info.ClusterID {
+			panic(fmt.Errorf("Cluster ID %q does not match recovered value of %q",
+				s.opts.ID, s.info.ClusterID))
+		}
+
+		// Restore clients state
+		s.processRecoveredClients(recoveredState.Clients)
+
+		// Process recovered channels (if any).
+		recoveredSubs = s.processRecoveredChannels(recoveredState.Subs)
+	} else {
+		s.info.ClusterID = s.opts.ID
+		// Generate Subjects
+		// FIXME(dlc) guid needs to be shared in cluster mode
+		s.info.Discovery = fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.info.ClusterID)
+		s.info.Publish = fmt.Sprintf("%s.%s", DefaultPubPrefix, nuid.Next())
+		s.info.Subscribe = fmt.Sprintf("%s.%s", DefaultSubPrefix, nuid.Next())
+		s.info.Unsubscribe = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
+		s.info.Close = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
+
+		// Initialize the store with the server info
+		if err := s.store.Init(&s.info); err != nil {
+			panic(fmt.Errorf("Unable to initialize the store: %v", err))
+		}
+	}
 
 	if nOpts.Host == "" {
 		nOpts.Host = "localhost"
@@ -446,15 +527,26 @@ func overrideLimits(limits *stores.ChannelLimits, opts *Options) {
 	}
 }
 
+// Reconstruct the clients map.
+func (s *StanServer) processRecoveredClients(clients []*stores.RecoveredClient) {
+	for _, c := range clients {
+		// Note that s.clients does not have a reference to a store yet,
+		// so this call cannot fail.
+		if _, isNew, _ := s.clients.Register(c.ClientID, c.HbInbox); !isNew {
+			Errorf("Ignoring duplicate clientID: %v", c.ClientID)
+		}
+	}
+}
+
 // Reconstruct the subscription state on restart.
 // We don't use locking in there because there is no communication
 // with the NATS server and/or clients, so no chance that the state
 // changes while we are doing this.
-func (s *StanServer) processRecoveredChannels(state stores.RecoveredState) []*subState {
+func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubscriptions) []*subState {
 	// We will return the recovered subscriptions
 	allSubs := make([]*subState, 0, 16)
 
-	for channelName, recoveredSubs := range state {
+	for channelName, recoveredSubs := range subscriptions {
 		// Lookup the ChannelStore from the store
 		channel := s.store.LookupChannel(channelName)
 		// Create the subStore for this channel
@@ -475,15 +567,15 @@ func (s *StanServer) processRecoveredChannels(state stores.RecoveredState) []*su
 			}
 			// Copy over fields from SubState protobuf
 			sub.SubState = *recSub.Sub
-			// Update subStore based on the following information.
-			ss.updateState(sub, sub.AckInbox, sub.QGroup, sub.isDurable())
-			// Recreate the client if need be
-			c, _ := s.clients.Register(sub.ClientID, sub.HbInbox)
-			// Add the subscription to the client
-			c.subs = append(c.subs, sub)
-
-			// Add to the array
-			allSubs = append(allSubs, sub)
+			// Add the subscription to the corresponding client
+			if s.clients.AddSub(sub.ClientID, sub) == nil {
+				Errorf("Client %q not found, skipping subscription on ['%s']", sub.ClientID, channelName)
+			} else {
+				// Update subStore based on the following information.
+				ss.updateState(sub, sub.AckInbox, sub.QGroup, sub.isDurable())
+				// Add to the array
+				allSubs = append(allSubs, sub)
+			}
 		}
 	}
 	return allSubs
@@ -518,12 +610,14 @@ func (s *StanServer) postRecoveryProcessing(recoveredSubs []*subState) error {
 		}
 		sub.Unlock()
 	}
+	// Set the store reference so that further Register/Unregister are stored.
+	s.clients.SetStore(s.store)
 	// Go through the list of clients and ensure their Hb timer is set.
 	clients := s.clients.GetClients()
 	for _, c := range clients {
 		c.Lock()
 		if c.hbt == nil {
-			c.hbt = time.AfterFunc(DefaultHeartBeatInterval, func() { s.checkClientHealth(c.clientID) })
+			c.hbt = time.AfterFunc(s.hbInterval, func() { s.checkClientHealth(c.clientID) })
 		}
 		c.Unlock()
 	}
@@ -533,38 +627,37 @@ func (s *StanServer) postRecoveryProcessing(recoveredSubs []*subState) error {
 // initSubscriptions will setup initial subscriptions for discovery etc.
 func (s *StanServer) initSubscriptions() {
 	// Listen for connection requests.
-	discoverSubject := fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.clusterID)
-	_, err := s.nc.Subscribe(discoverSubject, s.connectCB)
+	_, err := s.nc.Subscribe(s.info.Discovery, s.connectCB)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to discover subject, %v\n", err))
 	}
 	// Receive published messages from clients.
-	pubSubject := fmt.Sprintf("%s.>", s.pubPrefix)
+	pubSubject := fmt.Sprintf("%s.>", s.info.Publish)
 	_, err = s.nc.Subscribe(pubSubject, s.processClientPublish)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to publish subject, %v\n", err))
 	}
 	// Receive subscription requests from clients.
-	_, err = s.nc.Subscribe(s.subRequests, s.processSubscriptionRequest)
+	_, err = s.nc.Subscribe(s.info.Subscribe, s.processSubscriptionRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to subscribe request subject, %v\n", err))
 	}
 	// Receive unsubscribe requests from clients.
-	_, err = s.nc.Subscribe(s.unsubRequests, s.processUnSubscribeRequest)
+	_, err = s.nc.Subscribe(s.info.Unsubscribe, s.processUnSubscribeRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to unsubscribe request subject, %v\n", err))
 	}
 	// Receive close requests from clients.
-	_, err = s.nc.Subscribe(s.closeRequests, s.processCloseRequest)
+	_, err = s.nc.Subscribe(s.info.Close, s.processCloseRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to close request subject, %v\n", err))
 	}
 
-	Debugf("STAN: discover subject: %s", discoverSubject)
-	Debugf("STAN: publish subject:  %s", pubSubject)
-	Debugf("STAN: subcribe subject: %s", s.subRequests)
-	Debugf("STAN: unsub subject:    %s", s.unsubRequests)
-	Debugf("STAN: close subject:    %s", s.closeRequests)
+	Debugf("STAN: Discover subject:    %s", s.info.Discovery)
+	Debugf("STAN: Publish subject:     %s", pubSubject)
+	Debugf("STAN: Subscribe subject:   %s", s.info.Subscribe)
+	Debugf("STAN: Unsubscribe subject: %s", s.info.Unsubscribe)
+	Debugf("STAN: Close subject:       %s", s.info.Close)
 
 }
 
@@ -572,41 +665,158 @@ func (s *StanServer) initSubscriptions() {
 func (s *StanServer) connectCB(m *nats.Msg) {
 	req := &pb.ConnectRequest{}
 	err := req.Unmarshal(m.Data)
-	if err != nil || req.ClientID == "" || req.HeartbeatInbox == "" {
-		Debugf("STAN: [Client:?] Invalid conn request: ClientID=%s, HBInbox=%s, err=%v.",
+	if err != nil || !clientIDRegEx.MatchString(req.ClientID) || req.HeartbeatInbox == "" {
+		Debugf("STAN: [Client:?] Invalid conn request: ClientID=%s, Inbox=%s, err=%v",
 			req.ClientID, req.HeartbeatInbox, err)
-		cr := &pb.ConnectResponse{Error: ErrInvalidConnReq.Error()}
-		b, _ := cr.Marshal()
-		s.nc.Publish(m.Reply, b)
+		s.sendConnectErr(m.Reply, ErrInvalidConnReq.Error())
 		return
 	}
 
-	// Register if not already
-	client, isNew := s.clients.Register(req.ClientID, req.HeartbeatInbox)
+	// Try to register
+	client, isNew, err := s.clients.Register(req.ClientID, req.HeartbeatInbox)
+	if err != nil {
+		Debugf("STAN: [Client:%s] Error registering client: %v", req.ClientID, err)
+		s.sendConnectErr(m.Reply, err.Error())
+		return
+	}
+	// Handle duplicate IDs in a dedicated go-routine
 	if !isNew {
-		cr := &pb.ConnectResponse{Error: ErrInvalidClient.Error()}
-		b, _ := cr.Marshal()
-		s.nc.Publish(m.Reply, b)
-		Debugf("STAN: [Client:%s] Connect failed; already connected.", client.clientID)
+		// Do we have a routine in progress for this client ID?
+		s.dupCIDGuard.RLock()
+		_, inProgress := s.dupCIDMap[req.ClientID]
+		s.dupCIDGuard.RUnlock()
+
+		// Yes, fail this request here.
+		if inProgress {
+			Debugf("STAN: [Client:%s] Connect failed; already connected", req.ClientID)
+			s.sendConnectErr(m.Reply, ErrInvalidClient.Error())
+			return
+		}
+
+		// If server has started shutdown, we can't call wg.Add() so we need
+		// to check on shutdown status. Note that s.wg is for all server's
+		// go routines, not specific to duplicate CID handling. Use server's
+		// lock here.
+		s.Lock()
+		shutdown := s.shutdown
+		if !shutdown {
+			// Assume we are going to start a go routine.
+			s.wg.Add(1)
+		}
+		s.Unlock()
+
+		if shutdown {
+			// The client will timeout on connect
+			return
+		}
+
+		// If we have exhausted the max number of go routines, we will have
+		// to wait that one finishes.
+		needToWait := false
+
+		s.dupCIDGuard.Lock()
+		s.dupCIDMap[req.ClientID] = struct{}{}
+		if len(s.dupCIDMap) > s.dupMaxCIDRoutines {
+			s.dupCIDswg = true
+			s.dupCIDwg.Add(1)
+			needToWait = true
+		}
+		s.dupCIDGuard.Unlock()
+
+		// If we need to wait for a go routine to return...
+		if needToWait {
+			s.dupCIDwg.Wait()
+		}
+		// Start a go-routine to handle this connect request
+		go func() {
+			s.processConnectRequestWithDupID(client, req, m.Reply)
+		}()
 		return
 	}
 
-	// Respond with our ConnectResponse
+	// Here, we accept this client's incoming connect request.
+	s.finishConnectRequest(client, m.Reply)
+}
+
+func (s *StanServer) finishConnectRequest(client *client, replyInbox string) {
 	cr := &pb.ConnectResponse{
-		PubPrefix:     s.pubPrefix,
-		SubRequests:   s.subRequests,
-		UnsubRequests: s.unsubRequests,
-		CloseRequests: s.closeRequests,
+		PubPrefix:     s.info.Publish,
+		SubRequests:   s.info.Subscribe,
+		UnsubRequests: s.info.Unsubscribe,
+		CloseRequests: s.info.Close,
 	}
 	b, _ := cr.Marshal()
-	s.nc.Publish(m.Reply, b)
+	s.nc.Publish(replyInbox, b)
+
+	s.RLock()
+	hbInterval := s.hbInterval
+	s.RUnlock()
 
 	// Heartbeat timer.
 	client.Lock()
-	client.hbt = time.AfterFunc(DefaultHeartBeatInterval, func() { s.checkClientHealth(client.clientID) })
+	clientID := client.clientID
+	hbInbox := client.hbInbox
+	client.hbt = time.AfterFunc(hbInterval, func() { s.checkClientHealth(clientID) })
 	client.Unlock()
 
-	Debugf("STAN: [Client:%s] connected.", client.clientID)
+	Debugf("STAN: [Client:%s] Connected (Inbox=%v)", clientID, hbInbox)
+}
+
+func (s *StanServer) processConnectRequestWithDupID(client *client, req *pb.ConnectRequest, replyInbox string) {
+	sendErr := true
+
+	client.RLock()
+	hbInbox := client.hbInbox
+	clientID := client.clientID
+	client.RUnlock()
+
+	defer func() {
+		s.dupCIDGuard.Lock()
+		delete(s.dupCIDMap, clientID)
+		if s.dupCIDswg {
+			s.dupCIDswg = false
+			s.dupCIDwg.Done()
+		}
+		s.dupCIDGuard.Unlock()
+		defer s.wg.Done()
+	}()
+
+	// This is the HbInbox from the "old" client. See if it is up and
+	// running by sending a ping to that inbox.
+	if _, err := s.nc.Request(hbInbox, nil, s.dupCIDTimeout); err != nil {
+		// The old client didn't reply, assume it is dead, close it and continue.
+		s.closeClient(client)
+
+		// Between the close and the new registration below, it is possible
+		// that a connection request came in (in connectCB) and since the
+		// client is now unregistered, the new connection was accepted there.
+		// The registration below will then fail, in which case we will fail
+		// this request.
+
+		// Need to re-register now based on the new request info.
+		var isNew bool
+		client, isNew, err = s.clients.Register(req.ClientID, req.HeartbeatInbox)
+		if err == nil && isNew {
+			// We could register the new client.
+			Debugf("STAN: [Client:%s] Replaced old client (Inbox=%v)", req.ClientID, hbInbox)
+			sendErr = false
+		}
+	}
+	// The currently registered client is responding, or we failed to register,
+	// so fail the request of the incoming client connect request.
+	if sendErr {
+		Debugf("STAN: [Client:%s] Connect failed; already connected", clientID)
+		s.sendConnectErr(replyInbox, ErrInvalidClient.Error())
+		return
+	}
+	// We have replaced the old with the new.
+	s.finishConnectRequest(client, replyInbox)
+}
+
+func (s *StanServer) sendConnectErr(replyInbox, err string) {
+	cr := &pb.ConnectResponse{Error: err}
+	b, _ := cr.Marshal()
+	s.nc.Publish(replyInbox, b)
 }
 
 // Send a heartbeat call to the client.
@@ -615,30 +825,49 @@ func (s *StanServer) checkClientHealth(clientID string) {
 	if client == nil {
 		return
 	}
+	// Capture these under lock (as of now, there are not configurable,
+	// but we tweak them in tests and maybe they will be settable in
+	// the future)
+	s.RLock()
+	hbInterval := s.hbInterval
+	hbTimeout := s.hbTimeout
+	maxFailedHB := s.maxFailedHB
+	s.RUnlock()
+
 	client.Lock()
-	_, err := s.nc.Request(client.hbInbox, nil, DefaultClientHBTimeout)
+	_, err := s.nc.Request(client.hbInbox, nil, hbTimeout)
 	if err != nil {
 		client.fhb++
-		if client.fhb > DefaultMaxFailedHeartBeats {
+		if client.fhb > maxFailedHB {
 			Debugf("STAN: [Client:%s]  Timed out on hearbeats.", client.clientID)
-			defer s.closeClient(client.clientID)
+			client.Unlock()
+			s.closeClient(client)
+			return
 		}
 	} else {
 		client.fhb = 0
 	}
-	client.hbt.Reset(DefaultHeartBeatInterval)
+	client.hbt.Reset(hbInterval)
 	client.Unlock()
 }
 
 // Close a client
-func (s *StanServer) closeClient(clientID string) {
+func (s *StanServer) closeClient(client *client) {
+	client.Lock()
+	if client.hbt != nil {
+		client.hbt.Stop()
+	}
+	clientID := client.clientID
+	hbInbox := client.hbInbox
+	client.Unlock()
+
 	// Remove all non-durable subscribers.
 	s.removeAllNonDurableSubscribers(clientID)
 
 	// Remove from our clientStore
 	s.clients.Unregister(clientID)
 
-	Debugf("STAN: [Client:%s] Closed.", clientID)
+	Debugf("STAN: [Client:%s] Closed (Inbox=%v)", clientID, hbInbox)
 }
 
 // processCloseRequest process inbound messages from clients.
@@ -647,18 +876,29 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	err := req.Unmarshal(m.Data)
 	if err != nil {
 		Errorf("STAN: Received invalid close request, subject=%s.", m.Subject)
-		resp := &pb.CloseResponse{Error: ErrInvalidCloseReq.Error()}
-		if b, err := resp.Marshal(); err == nil {
-			s.nc.Publish(m.Reply, b)
-		}
+		s.sendCloseErr(m.Reply, ErrInvalidCloseReq.Error())
 		return
 	}
 
-	s.closeClient(req.ClientID)
+	client := s.clients.Lookup(req.ClientID)
+	if client == nil {
+		Errorf("STAN: Unknown client %q in close request", req.ClientID)
+		s.sendCloseErr(m.Reply, ErrUnknownClient.Error())
+		return
+	}
+
+	s.closeClient(client)
 
 	resp := &pb.CloseResponse{}
 	b, _ := resp.Marshal()
 	s.nc.Publish(m.Reply, b)
+}
+
+func (s *StanServer) sendCloseErr(subj, err string) {
+	resp := &pb.CloseResponse{Error: err}
+	if b, err := resp.Marshal(); err == nil {
+		s.nc.Publish(subj, b)
+	}
 }
 
 // processClientPublish process inbound messages from clients.
@@ -805,19 +1045,35 @@ func makeSortedMsgs(msgs map[uint64]*pb.MsgProto) []*pb.MsgProto {
 
 // Redeliver all outstanding messages to a durable subscriber, used on resubscribe.
 func (s *StanServer) performDurableRedelivery(sub *subState) {
-	Debugf("STAN:[Client:%s] Redelivering to durable %s.", sub.ClientID, sub.DurableName)
-	s.performRedelivery(sub, false)
+	// Sort our messages outstanding from acksPending, grab some state and unlock.
+	sub.RLock()
+	sortedMsgs := makeSortedMsgs(sub.acksPending)
+	clientID := sub.ClientID
+	durName := sub.DurableName
+	sub.RUnlock()
+
+	Debugf("STAN: [Client:%s] Redelivering to durable %s", clientID, durName)
+
+	// If we don't find the client, we are done.
+	client := s.clients.Lookup(clientID)
+	if client == nil {
+		return
+	}
+	// Go through all messages
+	for _, m := range sortedMsgs {
+		Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", clientID, m.Sequence)
+
+		// Flag as redelivered.
+		m.Redelivered = true
+
+		sub.Lock()
+		s.sendMsgToSub(sub, m)
+		sub.Unlock()
+	}
 }
 
 // Redeliver all outstanding messages that have expired.
 func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
-	Debugf("STAN: [Client:%s] Redelivering on ack expiration. subject=%s, inbox=%s.",
-		sub.ClientID, sub.subject, sub.Inbox)
-	s.performRedelivery(sub, true)
-}
-
-// Performs redelivery, takes a flag on whether to honor expiration.
-func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.RLock()
 	expTime := int64(sub.ackWait)
@@ -826,7 +1082,11 @@ func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 	qs := sub.qstate
 	clientID := sub.ClientID
 	floorTimestamp := sub.ackTimeFloor
+	inbox := sub.Inbox
 	sub.RUnlock()
+
+	Debugf("STAN: [Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
+		clientID, subject, inbox)
 
 	// If we don't find the client, we are done.
 	client := s.clients.Lookup(clientID)
@@ -853,24 +1113,20 @@ func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 
 	// We will move through acksPending(sorted) and see what needs redelivery.
 	for _, m := range sortedMsgs {
-		if checkExpiration {
-			// Ignore messages with a timestamp below our floor
-			if floorTimestamp > 0 && floorTimestamp > m.Timestamp {
-				continue
-			}
-
-			if m.Timestamp+expTime > now {
-				// the messages are ordered by seq so the expiration
-				// times are ascending.  Once we've get here, we've hit an
-				// unexpired message, and we're done. Reset the sub's ack
-				// timer to fire on the next message expiration.
-				Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
-				sub.adjustAckTimer(m.Timestamp)
-				return
-			}
+		// Ignore messages with a timestamp below our floor
+		if floorTimestamp > 0 && floorTimestamp > m.Timestamp {
+			continue
 		}
 
-		Tracef("STAN: [Client:%s] redelivery, sending seqno=%d.", clientID, m.Sequence)
+		if m.Timestamp+expTime > now {
+			// the messages are ordered by seq so the expiration
+			// times are ascending.  Once we've get here, we've hit an
+			// unexpired message, and we're done. Reset the sub's ack
+			// timer to fire on the next message expiration.
+			Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
+			sub.adjustAckTimer(m.Timestamp)
+			return
+		}
 
 		// Flag as redelivered.
 		m.Redelivered = true
@@ -891,7 +1147,7 @@ func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 			ss.Unlock()
 
 			if pick == nil {
-				Errorf("STAN: [Client:%s] Unable to find queue subscriber.", clientID)
+				Errorf("STAN: [Client:%s] Unable to find queue subscriber", clientID)
 				break
 			}
 		} else {
@@ -899,27 +1155,26 @@ func (s *StanServer) performRedelivery(sub *subState, checkExpiration bool) {
 		}
 
 		pick.Lock()
+		Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", pick.ClientID, m.Sequence)
 		s.sendMsgToSub(pick, m)
 		pick.Unlock()
 	}
 
-	if checkExpiration {
-		// The messages from sortedMsgs above may have all been acknowledged
-		// by now, but we are going to set the timer based on the oldest on
-		// that list, which is the sooner the timer should fire anyway.
-		// The timer will correctly be adjusted.
+	// The messages from sortedMsgs above may have all been acknowledged
+	// by now, but we are going to set the timer based on the oldest on
+	// that list, which is the sooner the timer should fire anyway.
+	// The timer will correctly be adjusted.
 
-		firstUnacked := int64(0)
+	firstUnacked := int64(0)
 
-		// Because of locking and timing, it's possible that the sortedMsgs
-		// map was empty even on entry.
-		if len(sortedMsgs) > 0 {
-			firstUnacked = sortedMsgs[0].Timestamp
-		}
-
-		// Adjust the timer
-		sub.adjustAckTimer(firstUnacked)
+	// Because of locking and timing, it's possible that the sortedMsgs
+	// map was empty even on entry.
+	if len(sortedMsgs) > 0 {
+		firstUnacked = sortedMsgs[0].Timestamp
 	}
+
+	// Adjust the timer
+	sub.adjustAckTimer(firstUnacked)
 }
 
 // Sends the message to the subscriber
@@ -1040,19 +1295,34 @@ func (s *StanServer) removeAllNonDurableSubscribers(clientID string) {
 		subject := sub.subject
 		isDurable := sub.isDurable()
 		sub.ClientID = ""
+		ackInbox := sub.AckInbox
+		// Unsubscribe the ackSub, even for a durable: a new one will be
+		// created on durable restart.
+		if sub.ackSub != nil {
+			sub.ackSub.Unsubscribe()
+			sub.ackSub = nil
+		}
 		sub.Unlock()
 
-		// Skip removal if durable.
-		if isDurable {
-			continue
-		}
-
-		// Remove from subStore
 		cs := s.store.LookupChannel(subject)
 		if cs == nil {
 			continue
 		}
-		cs.UserData.(*subStore).Remove(sub)
+
+		// Get the subStore from the ChannelStore
+		ss := cs.UserData.(*subStore)
+
+		// Special handling of durables
+		if isDurable {
+			// Delete from ackInbox lookup. When a durable restarts, a new
+			// ackInbox is created (and stored in ss.acks)
+			ss.Lock()
+			delete(ss.acks, ackInbox)
+			ss.Unlock()
+		} else {
+			// Remove from subStore
+			ss.Remove(sub)
+		}
 	}
 }
 
@@ -1205,12 +1475,6 @@ func (s *StanServer) addSubscription(cs *stores.ChannelStore, sub *subState) err
 
 	// Store in client
 	if client := s.clients.AddSub(sub.ClientID, sub); client != nil {
-
-		// Piggy-back the heartbeat inbox in the subscription, so
-		// that we can re-create the clients map on restart without
-		// the need for a dedicated persistent client store.
-		sub.HbInbox = client.hbInbox
-
 		// Store this subscription
 		ss := cs.UserData.(*subStore)
 		if err := ss.Store(sub); err != nil {
@@ -1272,7 +1536,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	var sub *subState
 
-	createSub := true
+	ackInbox := nats.NewInbox()
 
 	// Check for DurableSubscriber status
 	if sr.DurableName != "" {
@@ -1284,7 +1548,9 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			return
 		}
 
-		if sub = cs.UserData.(*subStore).LookupByDurable(durableKey(sr)); sub != nil {
+		ss := cs.UserData.(*subStore)
+
+		if sub = ss.LookupByDurable(durableKey(sr)); sub != nil {
 			sub.RLock()
 			clientID := sub.ClientID
 			sub.RUnlock()
@@ -1297,8 +1563,8 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			// ok we have a remembered subscription
 			// FIXME(dlc) - Do we error on options? They should be ignored if the new conflicts with old.
 			sub.Lock()
-			// Set new clientID and reset lastSent
-			// Keep the AckInbox from the remembered durable.
+			// Set clientID and new AckInbox, reset lastSent
+			sub.AckInbox = ackInbox
 			sub.ClientID = sr.ClientID
 			sub.Inbox = sr.Inbox
 			sub.Unlock()
@@ -1311,8 +1577,11 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 				return
 			}
 
-			// No need to create the subscriber, since we already have it.
-			createSub = false
+			// Store by ackInbox for ack direct lookup. This was removed
+			// when the previous client went away.
+			ss.Lock()
+			ss.acks[sub.AckInbox] = sub
+			ss.Unlock()
 		}
 	}
 
@@ -1343,7 +1612,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 				ClientID:      sr.ClientID,
 				QGroup:        sr.QGroup,
 				Inbox:         sr.Inbox,
-				AckInbox:      nats.NewInbox(),
+				AckInbox:      ackInbox,
 				MaxInFlight:   sr.MaxInFlight,
 				AckWaitInSecs: sr.AckWaitInSecs,
 				DurableName:   sr.DurableName,
@@ -1365,16 +1634,18 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 	}
 
-	// Subscribe to acks, unless it is already done (restart of a durable)
-	if createSub {
-		sub.ackSub, err = s.nc.Subscribe(sub.AckInbox, s.processAckMsg)
-		if err != nil {
-			panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
-		}
+	// In case this is a durable, sub already exists so we need to protect access
+	sub.Lock()
+	// Subscribe to acks
+	sub.ackSub, err = s.nc.Subscribe(ackInbox, s.processAckMsg)
+	if err != nil {
+		sub.Unlock()
+		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
 	}
+	sub.Unlock()
 
 	// Create a non-error response
-	resp := &pb.SubscriptionResponse{AckInbox: sub.AckInbox}
+	resp := &pb.SubscriptionResponse{AckInbox: ackInbox}
 	b, _ := resp.Marshal()
 	s.nc.Publish(m.Reply, b)
 
@@ -1424,6 +1695,7 @@ func (s *StanServer) processAck(cs *stores.ChannelStore, sub *subState, ack *pb.
 	if err := sub.store.AckSeqPending(sub.ID, ack.Sequence); err != nil {
 		Errorf("STAN: [Client:%s] Unable to persist ack for %s:%v (%v)",
 			sub.ClientID, sub.subject, ack.Sequence, err)
+		sub.Unlock()
 		return
 	}
 
@@ -1554,7 +1826,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 		if firstSeq > 0 {
 			lastSent = firstSeq - 1
 		}
-		Debugf("STAN: [Client:%s] Sending from beginngin, subject=%s seq=%d",
+		Debugf("STAN: [Client:%s] Sending from beginning, subject=%s seq=%d",
 			sub.ClientID, sub.subject, lastSent)
 	}
 	sub.LastSent = lastSent
@@ -1562,20 +1834,44 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 
 // ClusterID returns the STAN Server's ID.
 func (s *StanServer) ClusterID() string {
-	return s.clusterID
+	return s.info.ClusterID
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.
 func (s *StanServer) Shutdown() {
 	Debugf("STAN: Shutting down.")
-	if s.store != nil {
-		s.store.Close()
+
+	s.Lock()
+	if s.shutdown {
+		s.Unlock()
+		return
 	}
-	if s.nc != nil {
-		s.nc.Close()
+
+	// Allows Shutdown() to be idempotent
+	s.shutdown = true
+
+	// Capture under lock
+	store := s.store
+	ns := s.natsServer
+	// Do not set s.nc to nil since it is used in many place without locking.
+	// Once closed, s.nc.xxx() calls will simply fail, but we won't panic.
+	nc := s.nc
+	s.Unlock()
+
+	// Close/Shutdown resources. Note that unless one instantiates StanServer
+	// directly (instead of calling RunServer() and the like), these should
+	// not be nil.
+
+	// Wait for go-routines to return
+	s.wg.Wait()
+
+	if store != nil {
+		store.Close()
 	}
-	if s.natsServer != nil {
-		s.natsServer.Shutdown()
-		s.natsServer = nil
+	if nc != nil {
+		nc.Close()
+	}
+	if ns != nil {
+		ns.Shutdown()
 	}
 }

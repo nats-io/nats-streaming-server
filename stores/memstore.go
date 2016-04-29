@@ -97,8 +97,9 @@ func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error)
 	ms.totalCount++
 	ms.totalBytes += uint64(len(data))
 
-	// Check if we need to remove any.
-	if ms.totalCount > ms.limits.MaxNumMsgs || ms.totalBytes > ms.limits.MaxMsgBytes {
+	// Check if we need to remove any (but leave at least the last added)
+	for ms.totalCount > ms.limits.MaxNumMsgs ||
+		((ms.totalCount > 1) && (ms.totalBytes > ms.limits.MaxMsgBytes)) {
 		firstMsg := ms.msgs[ms.first]
 		ms.totalBytes -= uint64(len(firstMsg.Data))
 		ms.totalCount--

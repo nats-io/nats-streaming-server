@@ -12,6 +12,7 @@
 		SubState
 		SubStateDelete
 		SubStateUpdate
+		ServerInfo
 */
 package spb
 
@@ -27,7 +28,7 @@ var _ = proto.Marshal
 var _ = fmt.Errorf
 var _ = math.Inf
 
-// A Subscription State
+// SubState represents the state of a Subscription
 type SubState struct {
 	ID            uint64 `protobuf:"varint,1,opt,name=ID,proto3" json:"ID,omitempty"`
 	ClientID      string `protobuf:"bytes,2,opt,name=clientID,proto3" json:"clientID,omitempty"`
@@ -38,14 +39,13 @@ type SubState struct {
 	AckWaitInSecs int32  `protobuf:"varint,7,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
 	DurableName   string `protobuf:"bytes,8,opt,name=durableName,proto3" json:"durableName,omitempty"`
 	LastSent      uint64 `protobuf:"varint,9,opt,name=lastSent,proto3" json:"lastSent,omitempty"`
-	HbInbox       string `protobuf:"bytes,10,opt,name=hbInbox,proto3" json:"hbInbox,omitempty"`
 }
 
 func (m *SubState) Reset()         { *m = SubState{} }
 func (m *SubState) String() string { return proto.CompactTextString(m) }
 func (*SubState) ProtoMessage()    {}
 
-// Marks a Subscription Delete
+// SubStateDelete marks a Subscription as deleted
 type SubStateDelete struct {
 	ID uint64 `protobuf:"varint,1,opt,name=ID,proto3" json:"ID,omitempty"`
 }
@@ -54,7 +54,7 @@ func (m *SubStateDelete) Reset()         { *m = SubStateDelete{} }
 func (m *SubStateDelete) String() string { return proto.CompactTextString(m) }
 func (*SubStateDelete) ProtoMessage()    {}
 
-// A subscription update (either Msg or Ack)
+// SubStateUpdate represents a subscription update (either Msg or Ack)
 type SubStateUpdate struct {
 	ID    uint64 `protobuf:"varint,1,opt,name=ID,proto3" json:"ID,omitempty"`
 	Seqno uint64 `protobuf:"varint,2,opt,name=seqno,proto3" json:"seqno,omitempty"`
@@ -64,10 +64,25 @@ func (m *SubStateUpdate) Reset()         { *m = SubStateUpdate{} }
 func (m *SubStateUpdate) String() string { return proto.CompactTextString(m) }
 func (*SubStateUpdate) ProtoMessage()    {}
 
+// ServerInfo contains basic information regarding the Server
+type ServerInfo struct {
+	ClusterID   string `protobuf:"bytes,1,opt,name=ClusterID,proto3" json:"ClusterID,omitempty"`
+	Discovery   string `protobuf:"bytes,2,opt,name=Discovery,proto3" json:"Discovery,omitempty"`
+	Publish     string `protobuf:"bytes,3,opt,name=Publish,proto3" json:"Publish,omitempty"`
+	Subscribe   string `protobuf:"bytes,4,opt,name=Subscribe,proto3" json:"Subscribe,omitempty"`
+	Unsubscribe string `protobuf:"bytes,5,opt,name=Unsubscribe,proto3" json:"Unsubscribe,omitempty"`
+	Close       string `protobuf:"bytes,6,opt,name=Close,proto3" json:"Close,omitempty"`
+}
+
+func (m *ServerInfo) Reset()         { *m = ServerInfo{} }
+func (m *ServerInfo) String() string { return proto.CompactTextString(m) }
+func (*ServerInfo) ProtoMessage()    {}
+
 func init() {
 	proto.RegisterType((*SubState)(nil), "spb.SubState")
 	proto.RegisterType((*SubStateDelete)(nil), "spb.SubStateDelete")
 	proto.RegisterType((*SubStateUpdate)(nil), "spb.SubStateUpdate")
+	proto.RegisterType((*ServerInfo)(nil), "spb.ServerInfo")
 }
 func (m *SubState) Marshal() (data []byte, err error) {
 	size := m.Size()
@@ -134,12 +149,6 @@ func (m *SubState) MarshalTo(data []byte) (int, error) {
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.LastSent))
 	}
-	if len(m.HbInbox) > 0 {
-		data[i] = 0x52
-		i++
-		i = encodeVarintProtocol(data, i, uint64(len(m.HbInbox)))
-		i += copy(data[i:], m.HbInbox)
-	}
 	return i, nil
 }
 
@@ -190,6 +199,60 @@ func (m *SubStateUpdate) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x10
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.Seqno))
+	}
+	return i, nil
+}
+
+func (m *ServerInfo) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *ServerInfo) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if len(m.ClusterID) > 0 {
+		data[i] = 0xa
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.ClusterID)))
+		i += copy(data[i:], m.ClusterID)
+	}
+	if len(m.Discovery) > 0 {
+		data[i] = 0x12
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Discovery)))
+		i += copy(data[i:], m.Discovery)
+	}
+	if len(m.Publish) > 0 {
+		data[i] = 0x1a
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Publish)))
+		i += copy(data[i:], m.Publish)
+	}
+	if len(m.Subscribe) > 0 {
+		data[i] = 0x22
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Subscribe)))
+		i += copy(data[i:], m.Subscribe)
+	}
+	if len(m.Unsubscribe) > 0 {
+		data[i] = 0x2a
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Unsubscribe)))
+		i += copy(data[i:], m.Unsubscribe)
+	}
+	if len(m.Close) > 0 {
+		data[i] = 0x32
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Close)))
+		i += copy(data[i:], m.Close)
 	}
 	return i, nil
 }
@@ -256,10 +319,6 @@ func (m *SubState) Size() (n int) {
 	if m.LastSent != 0 {
 		n += 1 + sovProtocol(uint64(m.LastSent))
 	}
-	l = len(m.HbInbox)
-	if l > 0 {
-		n += 1 + l + sovProtocol(uint64(l))
-	}
 	return n
 }
 
@@ -280,6 +339,36 @@ func (m *SubStateUpdate) Size() (n int) {
 	}
 	if m.Seqno != 0 {
 		n += 1 + sovProtocol(uint64(m.Seqno))
+	}
+	return n
+}
+
+func (m *ServerInfo) Size() (n int) {
+	var l int
+	_ = l
+	l = len(m.ClusterID)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.Discovery)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.Publish)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.Subscribe)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.Unsubscribe)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.Close)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
 	}
 	return n
 }
@@ -547,35 +636,6 @@ func (m *SubState) Unmarshal(data []byte) error {
 					break
 				}
 			}
-		case 10:
-			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field HbInbox", wireType)
-			}
-			var stringLen uint64
-			for shift := uint(0); ; shift += 7 {
-				if shift >= 64 {
-					return ErrIntOverflowProtocol
-				}
-				if iNdEx >= l {
-					return io.ErrUnexpectedEOF
-				}
-				b := data[iNdEx]
-				iNdEx++
-				stringLen |= (uint64(b) & 0x7F) << shift
-				if b < 0x80 {
-					break
-				}
-			}
-			intStringLen := int(stringLen)
-			if intStringLen < 0 {
-				return ErrInvalidLengthProtocol
-			}
-			postIndex := iNdEx + intStringLen
-			if postIndex > l {
-				return io.ErrUnexpectedEOF
-			}
-			m.HbInbox = string(data[iNdEx:postIndex])
-			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipProtocol(data[iNdEx:])
@@ -733,6 +793,230 @@ func (m *SubStateUpdate) Unmarshal(data []byte) error {
 					break
 				}
 			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProtocol(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ServerInfo) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProtocol
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ServerInfo: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ServerInfo: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ClusterID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ClusterID = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Discovery", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Discovery = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Publish", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Publish = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Subscribe", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Subscribe = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Unsubscribe", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Unsubscribe = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 6:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Close", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Close = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipProtocol(data[iNdEx:])
