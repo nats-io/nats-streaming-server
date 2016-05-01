@@ -316,8 +316,7 @@ func TestClientGetSubs(t *testing.T) {
 	cs.Register(clientID, hbInbox)
 
 	// Add a subscription
-	c := cs.AddSub(clientID, &subState{subject: "foo"})
-	if c == nil {
+	if c := cs.AddSub(clientID, &subState{subject: "foo"}); c == nil {
 		t.Fatal("Expected AddSub to return c")
 	}
 
@@ -332,9 +331,28 @@ func TestClientGetSubs(t *testing.T) {
 		t.Fatalf("Expected 2 subs, got: %v", len(subs))
 	}
 
-	for _, s := range subs {
-		if s.subject != "foo" && s.subject != "bar" {
-			t.Fatalf("Unexpected subject: %v", s.subject)
+	// Make sure subs is a copy by switching the 2 subscriptions in the
+	// client's subs array
+	cs.RLock()
+	c := cs.clients[clientID]
+	c.Lock()
+	sub2 := c.subs[1]
+	c.subs[1] = c.subs[0]
+	c.subs[0] = sub2
+	c.Unlock()
+	cs.RUnlock()
+
+	for idx, s := range subs {
+		// The subs copy should still have "foo" first, and "bar" second.
+		switch idx {
+		case 0:
+			if s.subject != "foo" {
+				t.Fatalf("First subject should be \"foo\", got %q", s.subject)
+			}
+		case 1:
+			if s.subject != "bar" {
+				t.Fatalf("Second subject should be \"bar\", got %q", s.subject)
+			}
 		}
 	}
 }

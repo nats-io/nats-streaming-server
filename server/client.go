@@ -125,7 +125,8 @@ func (cs *clientStore) GetSubs(ID string) []*subState {
 		return nil
 	}
 	c.RLock()
-	subs := c.subs
+	subs := make([]*subState, len(c.subs))
+	copy(subs, c.subs)
 	c.RUnlock()
 	return subs
 }
