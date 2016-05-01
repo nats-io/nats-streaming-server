@@ -977,7 +977,14 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 				return nil, err
 			}
 			if subAndPending, exists := recoveredSubs[updateSub.ID]; exists {
-				subAndPending.seqnos[updateSub.Seqno] = struct{}{}
+				seqno := updateSub.Seqno
+				// Protect against possible bug whereby an already delivered
+				// message is persisted again (in such case, seqnos in this
+				// file would not necessarily be incremental).
+				if seqno > subAndPending.sub.LastSent {
+					subAndPending.sub.LastSent = seqno
+				}
+				subAndPending.seqnos[seqno] = struct{}{}
 			}
 			break
 		case subRecAck:

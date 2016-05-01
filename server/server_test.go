@@ -1051,11 +1051,9 @@ func TestRunServerWithFileStore(t *testing.T) {
 		t.Fatal("Did not receive our messages")
 	}
 	// There should be no redelivered message
-	/* Comment out for now until fix ready if later commit
 	if r := atomic.LoadInt32(&redelivered); r != 0 {
 		t.Fatalf("There should be no redelivered message, got %v", r)
 	}
-	*/
 }
 
 func checkDurable(t *testing.T, s *StanServer, channel, durName, durKey string) {

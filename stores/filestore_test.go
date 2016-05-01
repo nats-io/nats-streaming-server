@@ -675,6 +675,43 @@ func TestFSNoSubIdCollisionAfterRecovery(t *testing.T) {
 	}
 }
 
+func TestSubLastSentCorrectOnRecovery(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Store a subscription.
+	subID := storeSub(t, fs, "foo")
+
+	// A message
+	msg := []byte("hello")
+
+	// Store msg seq 1 and 2
+	m1 := storeMsg(t, fs, "foo", msg)
+	m2 := storeMsg(t, fs, "foo", msg)
+
+	// Store m1 and m2 for this subscription, then m1 again.
+	storeSubPending(t, fs, "foo", subID, m1.Sequence, m2.Sequence, m1.Sequence)
+
+	// Restart server
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("State should have been recovered")
+	}
+	subs := state.Subs["foo"]
+	if subs == nil || len(subs) != 1 {
+		t.Fatalf("One subscription should have been recovered, got %v", len(subs))
+	}
+	sub := subs[0]
+	// Check that sub's last seq is m2.Sequence
+	if sub.Sub.LastSent != m2.Sequence {
+		t.Fatalf("Expected LastSent to be %v, got %v", m2.Sequence, sub.Sub.LastSent)
+	}
+}
+
 func TestFSGetSeqFromTimestamp(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)

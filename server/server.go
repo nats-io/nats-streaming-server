@@ -168,6 +168,7 @@ func (s *StanServer) lookupOrCreateChannel(channel string) (*stores.ChannelStore
 	return cs, nil
 }
 
+// addNewSubStoreToChannel binds a new instance of `subStore` to the store's Channel.
 func (s *StanServer) addNewSubStoreToChannel(cs *stores.ChannelStore) *subStore {
 	subs := &subStore{
 		psubs:    make([]*subState, 0, 4),
@@ -180,56 +181,54 @@ func (s *StanServer) addNewSubStoreToChannel(cs *stores.ChannelStore) *subStore 
 	return subs
 }
 
+// Store adds this subscription to the server's `subStore` and also in storage
 func (ss *subStore) Store(sub *subState) error {
 	if sub == nil {
 		return nil
 	}
-	sub.RLock()
-	ackInbox := sub.AckInbox
-	qgroup := sub.QGroup
-	isDurable := sub.isDurable()
+	// `sub`` has just been created and can't be referenced anywhere else in
+	// the code, so we don't need locking.
 	subStateProto := &sub.SubState
 	store := sub.store
-	sub.RUnlock()
 
 	// Adds to storage.
 	err := store.CreateSub(subStateProto)
 	if err != nil {
-		sub.RLock()
-		clientID := sub.ClientID
-		inbox := sub.Inbox
-		subject := sub.subject
-		sub.RUnlock()
-		Errorf("Unable to store subscription [%v:%v] on [%s]: %v", clientID, inbox, subject, err)
+		Errorf("Unable to store subscription [%v:%v] on [%s]: %v", sub.ClientID, sub.Inbox, sub.subject, err)
 		return err
 	}
 
 	ss.Lock()
-	ss.updateState(sub, ackInbox, qgroup, isDurable)
+	ss.updateState(sub)
 	ss.Unlock()
 
 	return nil
 }
 
 // Updates the subStore state with this sub.
-// The fields have been acquired from the sub's under its lock, so as not
-// to require sub's lock in this function.
-// The subStore is locked on entry (or does not need to - during startup -).
-func (ss *subStore) updateState(sub *subState, ackInbox, qgroup string, isDurable bool) {
+// The subStore is locked on entry (or does not need, as during server restart).
+// However, `sub` does not need locking since it has just been created.
+func (ss *subStore) updateState(sub *subState) {
 	// First store by ackInbox for ack direct lookup
-	ss.acks[ackInbox] = sub
+	ss.acks[sub.AckInbox] = sub
 
 	// Store by type
-	if qgroup != "" {
+	if sub.QGroup != "" {
 		// Queue subscriber.
-		qs := ss.qsubs[qgroup]
+		qs := ss.qsubs[sub.QGroup]
 		if qs == nil {
 			qs = &queueState{
 				subs: make([]*subState, 0, 4),
 			}
-			ss.qsubs[qgroup] = qs
+			ss.qsubs[sub.QGroup] = qs
 		}
 		qs.subs = append(qs.subs, sub)
+		// Needed in the case of server restart, where
+		// the queue group's last sent needs to be updated
+		// based on the recovered subscriptions.
+		if sub.LastSent > qs.lastSent {
+			qs.lastSent = sub.LastSent
+		}
 		sub.qstate = qs
 	} else {
 		// Plain subscriber.
@@ -237,7 +236,7 @@ func (ss *subStore) updateState(sub *subState, ackInbox, qgroup string, isDurabl
 	}
 
 	// Hold onto durables in special lookup.
-	if isDurable {
+	if sub.DurableName != "" {
 		ss.durables[sub.durableKey()] = sub
 	}
 }
@@ -564,8 +563,8 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 			if s.clients.AddSub(sub.ClientID, sub) == nil {
 				Errorf("Client %q not found, skipping subscription on ['%s']", sub.ClientID, channelName)
 			} else {
-				// Update subStore based on the following information.
-				ss.updateState(sub, sub.AckInbox, sub.QGroup, sub.isDurable())
+				// Add this subscription to subStore.
+				ss.updateState(sub)
 				// Add to the array
 				allSubs = append(allSubs, sub)
 			}
@@ -1464,6 +1463,7 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 	return fmt.Sprintf("%s-%s-%s", sr.ClientID, sr.Subject, sr.DurableName)
 }
 
+// addSubscription adds `sub` to the client and store.
 func (s *StanServer) addSubscription(cs *stores.ChannelStore, sub *subState) error {
 
 	// Store in client
