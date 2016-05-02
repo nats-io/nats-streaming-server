@@ -1989,3 +1989,105 @@ func TestFileStoreChangedClusterID(t *testing.T) {
 	opts.ID = "differentID"
 	failedServer = RunServerWithOpts(opts, nil)
 }
+
+func TestFileStoreRedeliveredPerSub(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer sc.Close()
+
+	// Send one message on "foo"
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Restart server
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	// Message should not be marked as redelivered
+	cs := s.store.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel foo should have been recovered")
+	}
+	if m := cs.Msgs.FirstMsg(); m == nil || m.Redelivered {
+		t.Fatal("Message should have been recovered as not redelivered")
+	}
+
+	ch := make(chan bool)
+	rch := make(chan bool)
+	errors := make(chan error, 10)
+	delivered := int32(0)
+	redelivered := int32(0)
+
+	var sub1 stan.Subscription
+
+	cb := func(m *stan.Msg) {
+		if m.Redelivered && m.Sub == sub1 {
+			m.Ack()
+			if atomic.AddInt32(&redelivered, 1) == 1 {
+				rch <- true
+			}
+		} else if !m.Redelivered {
+			if atomic.AddInt32(&delivered, 1) == 2 {
+				ch <- true
+			}
+		} else {
+			errors <- fmt.Errorf("Unexpected redelivered message to sub1")
+		}
+	}
+
+	// Start a subscriber that consumes the message but does not ack it.
+	if sub1, err = sc.Subscribe("foo", cb, stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(), stan.AckWait(time.Second)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Restart server
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	// Client should have been recovered
+	checkClients(t, s, 1)
+
+	// There should be 1 subscription
+	checkSubs(t, s, clientName, 1)
+
+	// Now start a second subscriber that will receive the old message
+	if _, err := sc.Subscribe("foo", cb, stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for that message to be received.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+	// Wait for the redelivered message.
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not get our redelivered message")
+	}
+	// Report error if any
+	if len(errors) > 0 {
+		t.Fatalf("%v", <-errors)
+	}
+	// There should be only 1 redelivered message
+	if c := atomic.LoadInt32(&redelivered); c != 1 {
+		t.Fatalf("Expected 1 redelivered message, got %v", c)
+	}
+}

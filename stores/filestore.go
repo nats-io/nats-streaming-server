@@ -600,9 +600,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 			return err
 		}
 
-		// Mark this message as redelivered.
-		msg.Redelivered = true
-
 		if fslice.firstMsg == nil {
 			fslice.firstMsg = msg
 		}
