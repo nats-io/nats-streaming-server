@@ -19,6 +19,11 @@ STAN Options:
         -max_msgs <number>           Max number of messages per channel
         -max_bytes <number>          Max messages total size per channel
 
+STAN Logging Options:
+    -SD, --stan_debug                Enable STAN debugging output
+    -SV, --stan_trace                Trace the raw STAN protocol
+    -SDV                             Debug and trace STAN
+    (See additional NATS logging options below)
 
 Embedded NATS Server Options:
     -a, --addr <host>                Bind to host address (default: 0.0.0.0)
