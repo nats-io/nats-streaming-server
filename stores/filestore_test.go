@@ -12,12 +12,7 @@ import (
 
 	"github.com/nats-io/stan-server/spb"
 	"github.com/nats-io/stan-server/util"
-)
-
-const (
-	// CAUTION! Tests will remove the directory and all its content,
-	// so pick a directory where there is nothing.
-	defaultDataStore = "../stores_data"
+	"io/ioutil"
 )
 
 var testDefaultServerInfo = spb.ServerInfo{
@@ -27,6 +22,16 @@ var testDefaultServerInfo = spb.ServerInfo{
 	Subscribe:   "subscribe",
 	Unsubscribe: "unsubscribe",
 	Close:       "close",
+}
+
+var defaultDataStore string
+
+func init() {
+	tmpDir, err := ioutil.TempDir(".", "data_stores_")
+	if err != nil {
+		panic("Could not create tmp dir")
+	}
+	defaultDataStore = tmpDir
 }
 
 func cleanupDatastore(t *testing.T, dir string) {
@@ -667,6 +672,43 @@ func TestFSNoSubIdCollisionAfterRecovery(t *testing.T) {
 
 	if sub3 <= sub1 || sub3 <= delSub {
 		t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", delSub+1, sub3)
+	}
+}
+
+func TestSubLastSentCorrectOnRecovery(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Store a subscription.
+	subID := storeSub(t, fs, "foo")
+
+	// A message
+	msg := []byte("hello")
+
+	// Store msg seq 1 and 2
+	m1 := storeMsg(t, fs, "foo", msg)
+	m2 := storeMsg(t, fs, "foo", msg)
+
+	// Store m1 and m2 for this subscription, then m1 again.
+	storeSubPending(t, fs, "foo", subID, m1.Sequence, m2.Sequence, m1.Sequence)
+
+	// Restart server
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("State should have been recovered")
+	}
+	subs := state.Subs["foo"]
+	if subs == nil || len(subs) != 1 {
+		t.Fatalf("One subscription should have been recovered, got %v", len(subs))
+	}
+	sub := subs[0]
+	// Check that sub's last seq is m2.Sequence
+	if sub.Sub.LastSent != m2.Sequence {
+		t.Fatalf("Expected LastSent to be %v, got %v", m2.Sequence, sub.Sub.LastSent)
 	}
 }
 
