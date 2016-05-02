@@ -1994,10 +1994,10 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := DefaultOptions
+	opts := GetDefaultOptions()
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
-	s := RunServerWithOpts(&opts, nil)
+	s := RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
 	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
@@ -2018,7 +2018,7 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 
 	// Restart server
 	s.Shutdown()
-	s = RunServerWithOpts(&opts, nil)
+	s = RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
 	// Message should not be marked as redelivered
@@ -2061,7 +2061,7 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 
 	// Restart server
 	s.Shutdown()
-	s = RunServerWithOpts(&opts, nil)
+	s = RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
 	// Client should have been recovered
