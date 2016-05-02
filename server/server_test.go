@@ -2060,6 +2060,7 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 		t.Fatal("Message should have been recovered as not redelivered")
 	}
 
+	first := make(chan bool)
 	ch := make(chan bool)
 	rch := make(chan bool)
 	errors := make(chan error, 10)
@@ -2075,7 +2076,11 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 				rch <- true
 			}
 		} else if !m.Redelivered {
-			if atomic.AddInt32(&delivered, 1) == 2 {
+			d := atomic.AddInt32(&delivered, 1)
+			switch d {
+			case 1:
+				first <- true
+			case 2:
 				ch <- true
 			}
 		} else {
@@ -2088,7 +2093,10 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 		stan.SetManualAckMode(), stan.AckWait(time.Second)); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
-
+	// Wait for 1st msg to be received
+	if err := Wait(first); err != nil {
+		t.Fatal("Did not get our first message")
+	}
 	// Restart server
 	s.Shutdown()
 	s = RunServerWithOpts(opts, nil)
@@ -2543,4 +2551,67 @@ func TestFileStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 	// Explicitly close client connection to avoid reconnect attempts
 	sc.Close()
 	nc.Close()
+}
+
+func TestFileStoreAutomaticDeliveryOnRestart(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	toSend := int32(10)
+	msg := []byte("msg")
+
+	// Get our STAN connection
+	sc := NewDefaultConnection(t)
+
+	// Send messages
+	for i := int32(0); i < toSend; i++ {
+		if err := sc.Publish("foo", msg); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+
+	blocked := make(chan bool)
+	ready := make(chan bool)
+	done := make(chan bool)
+	received := int32(0)
+
+	// Message callback
+	cb := func(m *stan.Msg) {
+		count := atomic.AddInt32(&received, 1)
+		if count == 2 {
+			// Notify we are ready
+			ready <- true
+			// Wait to be unblocked
+			<-blocked
+		} else if count == toSend {
+			done <- true
+		}
+	}
+	// Create a subscriber that will block after receiving 2 messages.
+	if _, err := sc.Subscribe("foo", cb, stan.DeliverAllAvailable(),
+		stan.MaxInflight(2)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for callback to block
+	if err := Wait(ready); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+
+	// Restart server
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	// Release 	the consumer
+	close(blocked)
+	// Wait for messages to be delivered
+	if err := Wait(done); err != nil {
+		t.Fatal("Messages were not automatically delivered")
+	}
 }
