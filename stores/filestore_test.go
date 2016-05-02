@@ -307,18 +307,19 @@ func TestFSBasicRecovery(t *testing.T) {
 	if m == nil || m.Sequence != foo1.Sequence {
 		t.Fatalf("Unexpected message for foo channel: %v", m)
 	}
-	// Check all recovered messages are marked as Redelivered
+	// Check that messages recovered from MsgStore are never
+	// marked as redelivered.
 	checkRedelivered := func(ms MsgStore) bool {
 		start, end := ms.FirstAndLastSequence()
 		for i := start; i <= end; i++ {
-			if m := ms.Lookup(i); m != nil && !m.Redelivered {
-				return false
+			if m := ms.Lookup(i); m != nil && m.Redelivered {
+				return true
 			}
 		}
-		return true
+		return false
 	}
-	if !checkRedelivered(cs.Msgs) {
-		t.Fatalf("Not all messages have been marked as redelivered")
+	if checkRedelivered(cs.Msgs) {
+		t.Fatalf("Messages in MsgStore should not be marked as redelivered")
 	}
 
 	cs = fs.LookupChannel("bar")
@@ -331,8 +332,8 @@ func TestFSBasicRecovery(t *testing.T) {
 	if m == nil || m.Sequence != bar1.Sequence {
 		t.Fatalf("Unexpected message for bar channel: %v", m)
 	}
-	if !checkRedelivered(cs.Msgs) {
-		t.Fatalf("Not all messages have been marked as redelivered")
+	if checkRedelivered(cs.Msgs) {
+		t.Fatalf("Messages in MsgStore should not be marked as redelivered")
 	}
 
 	cs = fs.LookupChannel("baz")
