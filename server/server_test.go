@@ -60,59 +60,76 @@ func stackFatalf(t tLogger, f string, args ...interface{}) {
 	t.Fatalf("%s", strings.Join(lines, "\n"))
 }
 
-// Helper function that fails if number of clients is not as expected
-func checkClients(t tLogger, s *StanServer, expected int) {
-	clients := s.clients.GetClients()
-	if len(clients) != expected {
-		stackFatalf(t, "Incorrect number of clients, expected %v, got %v", expected, len(clients))
+// Helper function that checks that the number returned by function `f`
+// is equal to `expected`, otherwise fails.
+func checkCount(t tLogger, expected int, f func() (string, int)) {
+	if label, count := f(); count != expected {
+		stackFatalf(t, "Incorrect number of %s, expected %v got %v", label, expected, count)
 	}
 }
 
-// Helper function that waits to get the expected number of clients,
-// fail after a certain timeout.
-func waitForNumClients(t tLogger, s *StanServer, expected int) {
-	var clients []*client
+// Helper function that waits that the number returned by function `f`
+// is equal to `expected` for a certain period of time, otherwise fails.
+func waitForCount(t tLogger, expected int, f func() (string, int)) {
 	ok := false
+	label := ""
+	count := 0
 	timeout := time.Now().Add(5 * time.Second)
 	for !ok && time.Now().Before(timeout) {
-		clients = s.clients.GetClients()
-		if len(clients) != expected {
+		label, count = f()
+		if count != expected {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 		ok = true
 	}
 	if !ok {
-		stackFatalf(t, "Timeout waiting to get %v clients, got %v", expected, len(clients))
+		stackFatalf(t, "Timeout waiting to get %v %s, got %v", expected, label, count)
 	}
+}
+
+// Helper function that fails if number of clients is not as expected
+func checkClients(t tLogger, s *StanServer, expected int) {
+	checkCount(t, expected, func() (string, int) { return getClientsCountFunc(s) })
+}
+
+// Helper function that waits for a while to get the expected number of clients,
+// otherwise fails.
+func waitForNumClients(t tLogger, s *StanServer, expected int) {
+	waitForCount(t, expected, func() (string, int) { return getClientsCountFunc(s) })
+}
+
+// Helper function that returns the number of clients
+func getClientsCountFunc(s *StanServer) (string, int) {
+	// We avoid getting a copy of the clients map here by directly
+	// returning the length of the array.
+	s.clients.RLock()
+	defer s.clients.RUnlock()
+	return "clients", len(s.clients.clients)
 }
 
 // Helper function that fails if number of subscriptions is not as expected
 func checkSubs(t tLogger, s *StanServer, ID string, expected int) []*subState {
+	// Since we need to return the array and we want the array to match
+	// the expected value, use the "public" API here.
 	subs := s.clients.GetSubs(ID)
-	if len(subs) != expected {
-		stackFatalf(t, "Incorrect number of subscriptions, expected %v, got %v", expected, len(subs))
-	}
+	checkCount(t, expected, func() (string, int) { return "subscriptions", len(subs) })
 	return subs
 }
 
-// Helper function that waits to get the expected number of subscriptions,
-// fail after a certain timeout.
+// Helper function that waits for a while to get the expected number of subscriptions,
+// otherwise fails.
 func waitForNumSubs(t tLogger, s *StanServer, ID string, expected int) {
-	var subs []*subState
-	ok := false
-	timeout := time.Now().Add(5 * time.Second)
-	for !ok && time.Now().Before(timeout) {
-		subs = s.clients.GetSubs(ID)
-		if len(subs) != expected {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		ok = true
-	}
-	if !ok {
-		stackFatalf(t, "Timeout waiting to get %v subscriptions, got %v", expected, len(subs))
-	}
+	waitForCount(t, expected, func() (string, int) {
+		// We avoid getting a copy of the subscriptions array here
+		// by directly returning the length of the array.
+		s.clients.RLock()
+		defer s.clients.RUnlock()
+		c := s.clients.clients[ID]
+		c.RLock()
+		defer c.RUnlock()
+		return "subscriptions", len(c.subs)
+	})
 }
 
 func NewDefaultConnection(t tLogger) stan.Conn {
