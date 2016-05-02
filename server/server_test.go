@@ -162,15 +162,23 @@ func WaitTime(ch chan bool, timeout time.Duration) error {
 
 // RunServerWithDebugTrace is a helper to assist debugging
 func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) *StanServer {
-	natsdOpts := &natsd.Options{}
+	var sOpts *Options
 
-	natsdOpts.Debug = enableDebug
-	natsdOpts.Trace = enableTrace
-	natsdOpts.NoLog = false
+	if opts == nil {
+		sOpts = GetDefaultOptions()
+	} else {
+		sOpts = opts
+	}
 
-	EnableDefaultLogger(natsdOpts)
+	nOpts := natsd.Options{}
 
-	return RunServerWithOpts(opts, natsdOpts)
+	sOpts.Debug = enableDebug
+	sOpts.Trace = enableTrace
+	nOpts.NoLog = false
+
+	ConfigureLogger(sOpts, &nOpts)
+
+	return RunServerWithOpts(sOpts, nil)
 }
 
 func TestRunServer(t *testing.T) {
@@ -179,8 +187,8 @@ func TestRunServer(t *testing.T) {
 	s.Shutdown()
 
 	// Test passing stan options, nil nats options
-	opts := DefaultOptions
-	s = RunServerWithOpts(&opts, nil)
+	opts := GetDefaultOptions()
+	s = RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 	clusterID := s.ClusterID()
 
@@ -191,8 +199,20 @@ func TestRunServer(t *testing.T) {
 
 	// Test passing nil stan options, some nats options
 	nOpts := &natsd.Options{}
+	nOpts.NoLog = true
 	s = RunServerWithOpts(nil, nOpts)
 	defer s.Shutdown()
+}
+
+func TestDefaultOptions(t *testing.T) {
+
+	opts := GetDefaultOptions()
+	opts.Debug = !defaultOptions.Debug
+
+	opts2 := GetDefaultOptions()
+	if opts2.Debug == opts.Debug {
+		t.Fatal("Modified original default options.")
+	}
 }
 
 func TestDoubleShutdown(t *testing.T) {
@@ -868,10 +888,10 @@ func TestRunServerWithFileStore(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := DefaultOptions
+	opts := GetDefaultOptions()
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
-	s := RunServerWithOpts(&opts, nil)
+	s := RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
 	// Create our own NATS connection to control reconnect wait
@@ -950,7 +970,7 @@ func TestRunServerWithFileStore(t *testing.T) {
 	atomic.StoreInt32(&delivered, 0)
 
 	// Recover
-	s = RunServerWithOpts(&opts, nil)
+	s = RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
 	// Check server recovered state
@@ -1626,10 +1646,10 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := DefaultOptions
+	opts := GetDefaultOptions()
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
-	s := RunServerWithOpts(&opts, nil)
+	s := RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -1646,7 +1666,7 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	s.Shutdown()
 
 	// Restart the server
-	s = RunServerWithOpts(&opts, nil)
+	s = RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
 	// Check that client does not exist
@@ -1911,7 +1931,7 @@ func TestStoreTypeUnknown(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := DefaultOptions
+	opts := GetDefaultOptions()
 	opts.StoreType = "MyType"
 
 	var failedServer *StanServer
@@ -1923,14 +1943,14 @@ func TestStoreTypeUnknown(t *testing.T) {
 			t.Fatal("Server should have failed with a panic because of unknown store type")
 		}
 	}()
-	failedServer = RunServerWithOpts(&opts, nil)
+	failedServer = RunServerWithOpts(opts, nil)
 }
 
 func TestFileStoreMissingDirectory(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := DefaultOptions
+	opts := GetDefaultOptions()
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = ""
 
@@ -1943,17 +1963,17 @@ func TestFileStoreMissingDirectory(t *testing.T) {
 			t.Fatal("Server should have failed with a panic because missing directory")
 		}
 	}()
-	failedServer = RunServerWithOpts(&opts, nil)
+	failedServer = RunServerWithOpts(opts, nil)
 }
 
 func TestFileStoreChangedClusterID(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := DefaultOptions
+	opts := GetDefaultOptions()
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
-	s := RunServerWithOpts(&opts, nil)
+	s := RunServerWithOpts(opts, nil)
 	s.Shutdown()
 
 	var failedServer *StanServer
@@ -1967,5 +1987,5 @@ func TestFileStoreChangedClusterID(t *testing.T) {
 	}()
 	// Change cluster ID, running the server should fail with a panic
 	opts.ID = "differentID"
-	failedServer = RunServerWithOpts(&opts, nil)
+	failedServer = RunServerWithOpts(opts, nil)
 }
