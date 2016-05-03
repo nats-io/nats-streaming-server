@@ -31,6 +31,9 @@ func init() {
 	if err != nil {
 		panic("Could not create tmp dir")
 	}
+	if err := os.Remove(tmpDir); err != nil {
+		panic(fmt.Errorf("Error removing temp directory: %v", err))
+	}
 	defaultDataStore = tmpDir
 }
 
@@ -676,7 +679,7 @@ func TestFSNoSubIdCollisionAfterRecovery(t *testing.T) {
 	}
 }
 
-func TestSubLastSentCorrectOnRecovery(t *testing.T) {
+func TestFSSubLastSentCorrectOnRecovery(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
@@ -710,6 +713,90 @@ func TestSubLastSentCorrectOnRecovery(t *testing.T) {
 	// Check that sub's last seq is m2.Sequence
 	if sub.Sub.LastSent != m2.Sequence {
 		t.Fatalf("Expected LastSent to be %v, got %v", m2.Sequence, sub.Sub.LastSent)
+	}
+}
+
+func TestFSUpdatedSub(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Creeate a subscription.
+	subID := storeSub(t, fs, "foo")
+
+	// A message
+	msg := []byte("hello")
+
+	// Store msg seq 1 and 2
+	m1 := storeMsg(t, fs, "foo", msg)
+	m2 := storeMsg(t, fs, "foo", msg)
+	m3 := storeMsg(t, fs, "foo", msg)
+
+	// Store m1 and m2 for this subscription
+	storeSubPending(t, fs, "foo", subID, m1.Sequence, m2.Sequence)
+
+	// Update the subscription
+	cs, _, _ := fs.LookupOrCreateChannel("foo")
+	ss := cs.Subs
+	updatedSub := &spb.SubState{
+		ID:            subID,
+		ClientID:      "me",
+		Inbox:         nuidGen.Next(),
+		AckInbox:      "newAckInbox",
+		AckWaitInSecs: 10,
+	}
+	if err := ss.UpdateSub(updatedSub); err != nil {
+		t.Fatalf("Error updating subscription: %v", err)
+	}
+	// Store m3 for this subscription
+	storeSubPending(t, fs, "foo", subID, m3.Sequence)
+
+	// Store a subscription with update only, should be recovered
+	subWithoutNew := &spb.SubState{
+		ID:            subID + 1,
+		ClientID:      "me",
+		Inbox:         nuidGen.Next(),
+		AckInbox:      nuidGen.Next(),
+		AckWaitInSecs: 10,
+	}
+	if err := ss.UpdateSub(subWithoutNew); err != nil {
+		t.Fatalf("Error updating subscription: %v", err)
+	}
+
+	// Restart server
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("State should have been recovered")
+	}
+	subs := state.Subs["foo"]
+	if subs == nil || len(subs) != 2 {
+		t.Fatalf("Two subscriptions should have been recovered, got %v", len(subs))
+	}
+	// Subscriptions are recovered from a map, and then returned as an array.
+	// There is no guarantee that we get them in the order they were persisted.
+	for _, s := range subs {
+		if s.Sub.ID == subID {
+			// Check that sub's last seq is m3.Sequence
+			if s.Sub.LastSent != m3.Sequence {
+				t.Fatalf("Expected LastSent to be %v, got %v", m3.Sequence, s.Sub.LastSent)
+			}
+			// Update lastSent since we know it is correct.
+			updatedSub.LastSent = m3.Sequence
+			// Now compare that what we recovered is same that we used to update.
+			if !reflect.DeepEqual(*s.Sub, *updatedSub) {
+				t.Fatalf("Expected subscription to be %v, got %v", updatedSub, s.Sub)
+			}
+		} else if s.Sub.ID == subID+1 {
+			// Compare that what we recovered is same that we used to update.
+			if !reflect.DeepEqual(*s.Sub, *subWithoutNew) {
+				t.Fatalf("Expected subscription to be %v, got %v", subWithoutNew, s.Sub)
+			}
+		} else {
+			t.Fatalf("Unexpected subscription ID: %v", s.Sub.ID)
+		}
 	}
 }
 

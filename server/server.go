@@ -243,12 +243,13 @@ func (ss *subStore) updateState(sub *subState) {
 }
 
 // Remove
-func (ss *subStore) Remove(sub *subState) {
+func (ss *subStore) Remove(sub *subState, force bool) {
 	if sub == nil {
 		return
 	}
 
 	sub.Lock()
+	sub.clearAckTimer()
 	// Clear the subscriptions clientID
 	sub.ClientID = ""
 	if sub.ackSub != nil {
@@ -257,13 +258,18 @@ func (ss *subStore) Remove(sub *subState) {
 	}
 	ackInbox := sub.AckInbox
 	qs := sub.qstate
-	durable := sub.DurableName
+	durableKey := ""
+	if sub.DurableName != "" {
+		durableKey = sub.durableKey()
+	}
 	subid := sub.ID
 	store := sub.store
 	sub.Unlock()
 
-	// Delete from storage
-	store.DeleteSub(subid)
+	if force {
+		// Delete from storage
+		store.DeleteSub(subid)
+	}
 
 	ss.Lock()
 	defer ss.Unlock()
@@ -272,8 +278,8 @@ func (ss *subStore) Remove(sub *subState) {
 	delete(ss.acks, ackInbox)
 
 	// Delete from durable if needed
-	if durable != "" {
-		delete(ss.durables, durable)
+	if force && durableKey != "" {
+		delete(ss.durables, durableKey)
 	}
 
 	// Delete ourselves from the list
@@ -1278,39 +1284,18 @@ func shrinkSubListIfNeeded(sl []*subState) []*subState {
 func (s *StanServer) removeAllNonDurableSubscribers(clientID string) {
 	subs := s.clients.GetSubs(clientID)
 	for _, sub := range subs {
-		sub.Lock()
-		sub.clearAckTimer()
+		sub.RLock()
 		subject := sub.subject
-		isDurable := sub.isDurable()
-		sub.ClientID = ""
-		ackInbox := sub.AckInbox
-		// Unsubscribe the ackSub, even for a durable: a new one will be
-		// created on durable restart.
-		if sub.ackSub != nil {
-			sub.ackSub.Unsubscribe()
-			sub.ackSub = nil
-		}
-		sub.Unlock()
-
+		sub.RUnlock()
+		// Get the ChannelStore
 		cs := s.store.LookupChannel(subject)
 		if cs == nil {
 			continue
 		}
-
 		// Get the subStore from the ChannelStore
 		ss := cs.UserData.(*subStore)
-
-		// Special handling of durables
-		if isDurable {
-			// Delete from ackInbox lookup. When a durable restarts, a new
-			// ackInbox is created (and stored in ss.acks)
-			ss.Lock()
-			delete(ss.acks, ackInbox)
-			ss.Unlock()
-		} else {
-			// Remove from subStore
-			ss.Remove(sub)
-		}
+		// Don't remove durables
+		ss.Remove(sub, false)
 	}
 }
 
@@ -1350,8 +1335,8 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 		return
 	}
 
-	// Remove the subscription.
-	ss.Remove(sub)
+	// Remove the subscription, force removal if durable.
+	ss.Remove(sub, true)
 
 	Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", req.ClientID, sub.subject)
 
@@ -1381,7 +1366,8 @@ func isValidSubject(subject string) bool {
 	return true
 }
 
-// Clear the ackTimer
+// Clear the ackTimer.
+// sub Lock held in entry.
 func (sub *subState) clearAckTimer() {
 	if sub.ackTimer != nil {
 		sub.ackTimer.Stop()
@@ -1398,6 +1384,11 @@ func (sub *subState) clearAckTimer() {
 func (sub *subState) adjustAckTimer(firstUnackedTimestamp int64) {
 	sub.Lock()
 	defer sub.Unlock()
+
+	// Possible that the subscriber has been destroyed, and timer cleared
+	if sub.ackTimer == nil {
+		return
+	}
 
 	// Reset the floor (it will be set if needed)
 	sub.ackTimeFloor = 0
@@ -1460,21 +1451,39 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 }
 
 // addSubscription adds `sub` to the client and store.
-func (s *StanServer) addSubscription(cs *stores.ChannelStore, sub *subState) error {
-
+func (s *StanServer) addSubscription(ss *subStore, sub *subState) error {
 	// Store in client
-	if client := s.clients.AddSub(sub.ClientID, sub); client != nil {
-		// Store this subscription
-		ss := cs.UserData.(*subStore)
-		if err := ss.Store(sub); err != nil {
-			return err
-		}
-	} else {
+	if s.clients.AddSub(sub.ClientID, sub) == nil {
 		return fmt.Errorf("can't find clientID: %v", sub.ClientID)
 	}
+	// Store this subscription in subStore
+	if err := ss.Store(sub); err != nil {
+		return err
+	}
+	return nil
+}
 
-	Debugf("STAN: [Client:%s] Subscribed. subject=%s, inbox=%s.",
-		sub.ClientID, sub.subject, sub.Inbox)
+// updateDurable adds back `sub` to the client and updates the store.
+func (s *StanServer) updateDurable(cs *stores.ChannelStore, ss *subStore, sub *subState) error {
+	sub.RLock()
+	// Make a copy
+	subUpdate := sub.SubState
+	sub.RUnlock()
+
+	// Store in the client
+	if s.clients.AddSub(subUpdate.ClientID, sub) == nil {
+		return fmt.Errorf("can't find clientID: %v", subUpdate.ClientID)
+	}
+	// Update this subscription in the store
+	if err := cs.Subs.UpdateSub(&subUpdate); err != nil {
+		return err
+	}
+	ss.Lock()
+	// Add back into plain subscribers
+	ss.psubs = append(ss.psubs, sub)
+	// And in ackInbox lookup map.
+	ss.acks[subUpdate.AckInbox] = sub
+	ss.Unlock()
 
 	return nil
 }
@@ -1522,6 +1531,8 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
 	}
+	// Get the subStore
+	ss := cs.UserData.(*subStore)
 
 	var sub *subState
 
@@ -1536,8 +1547,6 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			s.sendSubscriptionResponseErr(m.Reply, ErrDurableQueue)
 			return
 		}
-
-		ss := cs.UserData.(*subStore)
 
 		if sub = ss.LookupByDurable(durableKey(sr)); sub != nil {
 			sub.RLock()
@@ -1557,20 +1566,6 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			sub.ClientID = sr.ClientID
 			sub.Inbox = sr.Inbox
 			sub.Unlock()
-
-			// We need to add the subscription to the client's state here.
-			if s.clients.AddSub(sr.ClientID, sub) == nil {
-				Debugf("STAN: [Client:%s] Couldn't add durable %s",
-					sr.ClientID, sr.DurableName)
-				s.sendSubscriptionResponseErr(m.Reply, ErrUnknownClient)
-				return
-			}
-
-			// Store by ackInbox for ack direct lookup. This was removed
-			// when the previous client went away.
-			ss.Lock()
-			ss.acks[sub.AckInbox] = sub
-			ss.Unlock()
 		}
 	}
 
@@ -1616,12 +1611,18 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		s.setSubStartSequence(cs, sub, sr)
 
 		// add the subscription to stan
-		if err := s.addSubscription(cs, sub); err != nil {
-			Errorf("STAN: Unable to persist subscription for %s: %v", sr.Subject, err)
-			s.sendSubscriptionResponseErr(m.Reply, err)
-			return
-		}
+		err = s.addSubscription(ss, sub)
+	} else {
+		// Case of restarted durable subscriber
+		err = s.updateDurable(cs, ss, sub)
 	}
+	if err != nil {
+		Errorf("STAN: Unable to add subscription for %s: %v", sr.Subject, err)
+		s.sendSubscriptionResponseErr(m.Reply, err)
+		return
+	}
+	Debugf("STAN: [Client:%s] Added subscription on subject=%s, inbox=%s",
+		sr.ClientID, sr.Subject, sr.Inbox)
 
 	// In case this is a durable, sub already exists so we need to protect access
 	sub.Lock()

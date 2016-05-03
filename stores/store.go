@@ -160,6 +160,9 @@ type SubStore interface {
 	// by the other SubStore methods.
 	CreateSub(*spb.SubState) error
 
+	// UpdateSub updates a given subscription represented by SubState.
+	UpdateSub(*spb.SubState) error
+
 	// DeleteSub invalidates the subscription 'subid'.
 	DeleteSub(subid uint64)
 

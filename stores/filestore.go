@@ -53,6 +53,7 @@ type subRecord interface {
 // Various record types
 const (
 	subRecNew = subRecordType(iota)
+	subRecUpdate
 	subRecDel
 	subRecAck
 	subRecMsg
@@ -901,6 +902,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 	var err error
 	var recType subRecordType
 	var newSub *spb.SubState
+	var modifiedSub *spb.SubState
 	var delSub *spb.SubStateDelete
 	var updateSub *spb.SubStateUpdate
 
@@ -951,6 +953,27 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 			// Keep track of max subscription ID found.
 			if newSub.ID > ss.maxSubID {
 				ss.maxSubID = newSub.ID
+			}
+			break
+		case subRecUpdate:
+			modifiedSub = &spb.SubState{}
+			if err := modifiedSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
+				return nil, err
+			}
+			// Search if the create has been recovered.
+			subAndPending, exists := recoveredSubs[modifiedSub.ID]
+			if exists {
+				subAndPending.sub = modifiedSub
+			} else {
+				subAndPending := &recoveredSub{
+					sub:    modifiedSub,
+					seqnos: make(map[uint64]struct{}),
+				}
+				recoveredSubs[modifiedSub.ID] = subAndPending
+			}
+			// Keep track of max subscription ID found.
+			if modifiedSub.ID > ss.maxSubID {
+				ss.maxSubID = modifiedSub.ID
 			}
 			break
 		case subRecDel:
@@ -1011,6 +1034,16 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 		return err
 	}
 	if err := ss.writeRecord(subRecNew, sub); err != nil {
+		return err
+	}
+	return nil
+}
+
+// UpdateSub updates a given subscription represented by SubState.
+func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
+	ss.Lock()
+	defer ss.Unlock()
+	if err := ss.writeRecord(subRecUpdate, sub); err != nil {
 		return err
 	}
 	return nil
