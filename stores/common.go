@@ -280,6 +280,11 @@ func (gss *genericSubStore) CreateSub(sub *spb.SubState) error {
 	return gss.createSub(sub)
 }
 
+// UpdateSub updates a given subscription represented by SubState.
+func (gss *genericSubStore) UpdateSub(sub *spb.SubState) error {
+	return nil
+}
+
 // createSub is the unlocked version of CreateSub that can be used by
 // non-generic implementations.
 func (gss *genericSubStore) createSub(sub *spb.SubState) error {

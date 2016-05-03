@@ -39,6 +39,9 @@ func init() {
 	if err != nil {
 		panic("Could not create tmp dir")
 	}
+	if err := os.Remove(tmpDir); err != nil {
+		panic(fmt.Errorf("Error removing temp directory: %v", err))
+	}
 	defaultDataStore = tmpDir
 }
 
@@ -1091,6 +1094,10 @@ func TestRunServerWithFileStore(t *testing.T) {
 	if r := atomic.LoadInt32(&redelivered); r != 0 {
 		t.Fatalf("There should be no redelivered message, got %v", r)
 	}
+
+	// Explicitly close client connection to avoid reconnect attempts
+	sc.Close()
+	nc.Close()
 }
 
 func checkDurable(t *testing.T, s *StanServer, channel, durName, durKey string) {
@@ -1686,6 +1693,9 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	if numSubs > 0 {
 		t.Fatalf("Should not have restored subscriptions, got %v", numSubs)
 	}
+
+	// Explicitly close client connection to avoid reconnect attempts
+	sc.Close()
 }
 
 func TestCheckClientHealth(t *testing.T) {
@@ -2090,4 +2100,69 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	if c := atomic.LoadInt32(&redelivered); c != 1 {
 		t.Fatalf("Expected 1 redelivered message, got %v", c)
 	}
+	// Explicitly close client connection to avoid reconnect attempts
+	sc.Close()
+	nc.Close()
+}
+
+func TestFileStoreDurableCanReceiveAfterRestart(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	ch := make(chan bool)
+	cb := func(m *stan.Msg) {
+		ch <- true
+	}
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	// Create our durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName("dur")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Make sure this is registered
+	waitForNumSubs(t, s, clientName, 1)
+	// Close the connection
+	sc.Close()
+
+	// Restart durable
+	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+	sc, err = stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer sc.Close()
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName("dur")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Make sure it is registered
+	waitForNumSubs(t, s, clientName, 1)
+
+	// Restart server
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	// Send 1 message
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Wait for message to be received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+
+	// Explicitly close client connection to avoid reconnect attempts
+	sc.Close()
+	nc.Close()
 }

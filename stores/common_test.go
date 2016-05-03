@@ -394,6 +394,7 @@ func testBasicSubStore(t *testing.T, s Store) {
 
 	ss := cs.Subs
 	sub := &spb.SubState{}
+	sub.AckInbox = "AckInbox"
 
 	err = ss.CreateSub(sub)
 	if err != nil {
@@ -407,6 +408,11 @@ func testBasicSubStore(t *testing.T, s Store) {
 	}
 	if err := ss.AckSeqPending(sub.ID, 1); err != nil {
 		t.Fatalf("Unexpected error on AckSeqPending: %v", err)
+	}
+	// Update the subscription
+	sub.AckInbox = "newAckInbox"
+	if err := ss.UpdateSub(sub); err != nil {
+		t.Fatalf("Unexpected error on update sub: %v", err)
 	}
 	ss.DeleteSub(sub.ID)
 
