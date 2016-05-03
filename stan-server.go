@@ -97,7 +97,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.StringVar(&natsOpts.TLSKey, "tlskey", "", "Private key for server certificate.")
 	flag.StringVar(&natsOpts.TLSCaCert, "tlscacert", "", "Client certificate CA for verification.")
 
-	flag.Usage = stand.Usage
+	flag.Usage = Usage
 	flag.Parse()
 
 	// Show version and exit
