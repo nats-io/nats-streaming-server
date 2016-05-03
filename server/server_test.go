@@ -806,12 +806,11 @@ func TestDurableRedelivery(t *testing.T) {
 }
 
 func TestTooManyChannelsOnCreateSub(t *testing.T) {
-	s := RunServer(clusterName)
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+	sOpts.MaxChannels = 1
+	s := RunServerWithOpts(sOpts, nil)
 	defer s.Shutdown()
-
-	newLimits := stores.DefaultChannelLimits
-	newLimits.MaxChannels = 1
-	s.store.SetChannelLimits(newLimits)
 
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
@@ -828,12 +827,11 @@ func TestTooManyChannelsOnCreateSub(t *testing.T) {
 }
 
 func TestTooManyChannelsOnPublish(t *testing.T) {
-	s := RunServer(clusterName)
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+	sOpts.MaxChannels = 1
+	s := RunServerWithOpts(sOpts, nil)
 	defer s.Shutdown()
-
-	newLimits := stores.DefaultChannelLimits
-	newLimits.MaxChannels = 1
-	s.store.SetChannelLimits(newLimits)
 
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
@@ -855,12 +853,11 @@ func TestTooManyChannelsOnPublish(t *testing.T) {
 }
 
 func TestTooManySubs(t *testing.T) {
-	s := RunServer(clusterName)
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+	sOpts.MaxSubscriptions = 1
+	s := RunServerWithOpts(sOpts, nil)
 	defer s.Shutdown()
-
-	newLimits := stores.DefaultChannelLimits
-	newLimits.MaxSubs = 1
-	s.store.SetChannelLimits(newLimits)
 
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
