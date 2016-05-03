@@ -1561,7 +1561,8 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			// ok we have a remembered subscription
 			// FIXME(dlc) - Do we error on options? They should be ignored if the new conflicts with old.
 			sub.Lock()
-			// Set clientID and new AckInbox, reset lastSent
+			// Set ClientID and new AckInbox but leave LastSent to the
+			// remembered value.
 			sub.AckInbox = ackInbox
 			sub.ClientID = sr.ClientID
 			sub.Inbox = sr.Inbox
