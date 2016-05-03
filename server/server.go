@@ -478,13 +478,12 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	s.natsServer = natsd.RunServer(nOpts)
 
 	natsURL := fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port)
-	if s.nc, err = nats.Connect(natsURL); err != nil {
+	if s.nc, err = nats.Connect(natsURL,
+		nats.DisconnectHandler(stanDisconnectedHandler),
+		nats.ErrorHandler(stanErrorHandler),
+		nats.ClosedHandler(stanClosedHandler)); err != nil {
 		panic(fmt.Sprintf("Can't connect to NATS server: %v\n", err))
 	}
-
-	nats.DisconnectHandler(stanDisconnectedHandler)
-	nats.ErrorHandler(stanErrorHandler)
-	nats.ClosedHandler(stanClosedHandler)
 
 	s.initSubscriptions()
 
