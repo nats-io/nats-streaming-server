@@ -334,46 +334,46 @@ func GetDefaultOptions() (o *Options) {
 
 // DefaultNatsServerOptions are default options for the NATS server
 var DefaultNatsServerOptions = server.Options{
-	Host:  "localhost",
-	Port:  4222,
-	NoLog: true,
+	Host:   "localhost",
+	Port:   4222,
+	NoLog:  true,
+	NoSigs: true,
 }
 
 func stanDisconnectedHandler(nc *nats.Conn) {
-	Errorf("STAN: connection has been disconnected: %s.", nc.LastError())
+	if nc.LastError() != nil {
+		Errorf("STAN: connection has been disconnected: %v", nc.LastError())
+	}
 }
 
-func stanClosedHandler(nc *nats.Conn) {
-	Debugf("STAN: connection has been closed.")
+func stanClosedHandler(_ *nats.Conn) {
+	Debugf("STAN: connection has been closed")
 }
 
-func stanErrorHandler(nc *nats.Conn, sub *nats.Subscription, err error) {
-	Errorf("STAN: Asynchronous error on subject %s: %s.", sub.Subject, err)
+func stanErrorHandler(_ *nats.Conn, sub *nats.Subscription, err error) {
+	Errorf("STAN: Asynchronous error on subject %s: %s", sub.Subject, err)
 }
 
 // RunServer will startup an embedded STAN server and a nats-server to support it.
 func RunServer(ID string) *StanServer {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = ID
-	return RunServerWithOpts(sOpts, &DefaultNatsServerOptions)
+	nOpts := DefaultNatsServerOptions
+	return RunServerWithOpts(sOpts, &nOpts)
 }
 
 // RunServerWithOpts will startup an embedded STAN server and a nats-server to support it.
 func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer {
 	// Run a nats server by default
-	var sOpts *Options
-	var nOpts *server.Options
+	sOpts := stanOpts
+	nOpts := natsOpts
 
 	if stanOpts == nil {
 		sOpts = GetDefaultOptions()
-	} else {
-		sOpts = stanOpts
 	}
-
 	if natsOpts == nil {
-		nOpts = &DefaultNatsServerOptions
-	} else {
-		nOpts = natsOpts
+		no := DefaultNatsServerOptions
+		nOpts = &no
 	}
 
 	Noticef("Starting stan-server[%s] version %s", sOpts.ID, VERSION)
