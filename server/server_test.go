@@ -2163,3 +2163,166 @@ func TestFileStoreDurableCanReceiveAfterRestart(t *testing.T) {
 	sc.Close()
 	nc.Close()
 }
+
+func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	// Create 2 clients
+	nc1, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(10*time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc1.Close()
+	sc1, err := stan.Connect(clusterName, "c1", stan.NatsConn(nc1))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer sc1.Close()
+	nc2, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(10*time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc2.Close()
+	sc2, err := stan.Connect(clusterName, "c2", stan.NatsConn(nc2))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer sc2.Close()
+
+	// Make sure they are registered
+	waitForNumClients(t, s, 2)
+	// Restart
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+	// Check that there are 2 clients
+	checkClients(t, s, 2)
+	// Change server's hb settings
+	s.hbInterval = 100 * time.Millisecond
+	s.hbTimeout = 10 * time.Millisecond
+	s.maxFailedHB = 2
+	// Tweak their hbTimer interval to make the test short
+	clients := s.clients.GetClients()
+	for _, c := range clients {
+		c.Lock()
+		if c.hbt == nil {
+			cID := c.clientID
+			c.Unlock()
+			t.Fatalf("HeartBeat Timer of client %q should have been set", cID)
+		}
+		c.hbt.Reset(s.hbInterval)
+		c.Unlock()
+	}
+	// Both clients should quickly timed-out
+	waitForNumClients(t, s, 0)
+
+	// Explicitly close client connections to avoid reconnect attempts
+	sc1.Close()
+	nc1.Close()
+	sc2.Close()
+	nc2.Close()
+}
+
+func TestFileStoreRedeliveryCbPerSub(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer sc.Close()
+
+	// Send one message on "foo"
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	rch := make(chan bool)
+	errors := make(chan error, 10)
+	sub1Redel := int32(0)
+	sub2Redel := int32(0)
+
+	var sub1 stan.Subscription
+	var sub2 stan.Subscription
+
+	cb := func(m *stan.Msg) {
+		if m.Redelivered {
+			m.Ack()
+		}
+		if m.Redelivered {
+			if m.Sub == sub1 {
+				if atomic.AddInt32(&sub1Redel, 1) > 1 {
+					errors <- fmt.Errorf("More than one redeliverd msg for sub1")
+					return
+				}
+			} else if m.Sub == sub2 {
+				if atomic.AddInt32(&sub2Redel, 1) > 1 {
+					errors <- fmt.Errorf("More than one redeliverd msg for sub1")
+					return
+				}
+			} else {
+				errors <- fmt.Errorf("Redelivered msg for unknown subscription")
+			}
+		}
+		s1 := atomic.LoadInt32(&sub1Redel)
+		s2 := atomic.LoadInt32(&sub2Redel)
+		total := s1 + s2
+		if total == 2 {
+			rch <- true
+		}
+	}
+
+	// Start 2 subscribers that consume the message but do not ack it.
+	if sub1, err = sc.Subscribe("foo", cb, stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(), stan.AckWait(time.Second)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if sub2, err = sc.Subscribe("foo", cb, stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(), stan.AckWait(time.Second)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Restart server
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	// Client should have been recovered
+	checkClients(t, s, 1)
+
+	// There should be 2 subscriptions
+	checkSubs(t, s, clientName, 2)
+
+	// Wait for all redelivered messages.
+	select {
+	case e := <-errors:
+		t.Fatalf("%v", e)
+		break
+	case <-rch:
+		break
+	case <-time.After(5 * time.Second):
+		t.Fatal("Did not get our redelivered messages")
+	}
+	// Explicitly close client connection to avoid reconnect attempts
+	sc.Close()
+	nc.Close()
+}
