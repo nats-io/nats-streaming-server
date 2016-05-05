@@ -594,6 +594,8 @@ func (s *StanServer) postRecoveryProcessing(recoveredSubs []*subState) error {
 			// Setup the redelivery timer. The callback will figure out
 			// if there are messages to redeliver or not and adjust the
 			// timer for us.
+			// Since we are in a loop, this is required for closure to work.
+			sub := sub
 			sub.ackTimer = time.AfterFunc(sub.ackWait, func() {
 				s.performAckExpirationRedelivery(sub)
 			})
@@ -610,7 +612,12 @@ func (s *StanServer) postRecoveryProcessing(recoveredSubs []*subState) error {
 	for _, c := range clients {
 		c.Lock()
 		if c.hbt == nil {
-			c.hbt = time.AfterFunc(s.hbInterval, func() { s.checkClientHealth(c.clientID) })
+			// Because of the loop, we need to make copy for the closure
+			// to time.AfterFunc
+			cID := c.clientID
+			c.hbt = time.AfterFunc(s.hbInterval, func() {
+				s.checkClientHealth(cID)
+			})
 		}
 		c.Unlock()
 	}
