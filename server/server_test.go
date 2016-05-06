@@ -63,6 +63,12 @@ func stackFatalf(t tLogger, f string, args ...interface{}) {
 	t.Fatalf("%s", strings.Join(lines, "\n"))
 }
 
+// Helper function to shutdown last, a server that is being restarted in a test.
+func shutdownRestartedServerOnTestExit(s **StanServer) {
+	srv := *s
+	srv.Shutdown()
+}
+
 // Helper function that checks that the number returned by function `f`
 // is equal to `expected`, otherwise fails.
 func checkCount(t tLogger, expected int, f func() (string, int)) {
@@ -915,7 +921,7 @@ func TestRunServerWithFileStore(t *testing.T) {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
 	s := RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
+	defer shutdownRestartedServerOnTestExit(&s)
 
 	// Create our own NATS connection to control reconnect wait
 	nc, err := nats.Connect(nats.DefaultURL,
@@ -994,7 +1000,6 @@ func TestRunServerWithFileStore(t *testing.T) {
 
 	// Recover
 	s = RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
 
 	// Check server recovered state
 	// Should be 1 client
@@ -1114,10 +1119,6 @@ func TestRunServerWithFileStore(t *testing.T) {
 	if r := atomic.LoadInt32(&redelivered); r != 0 {
 		t.Fatalf("There should be no redelivered message, got %v", r)
 	}
-
-	// Explicitly close client connection to avoid reconnect attempts
-	sc.Close()
-	nc.Close()
 }
 
 func checkDurable(t *testing.T, s *StanServer, channel, durName, durKey string) {
@@ -1677,7 +1678,7 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
 	s := RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
+	defer shutdownRestartedServerOnTestExit(&s)
 
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
@@ -1694,7 +1695,6 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 
 	// Restart the server
 	s = RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
 
 	// Check that client does not exist
 	if s.clients.Lookup(clientName) != nil {
@@ -1713,9 +1713,6 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	if numSubs > 0 {
 		t.Fatalf("Should not have restored subscriptions, got %v", numSubs)
 	}
-
-	// Explicitly close client connection to avoid reconnect attempts
-	sc.Close()
 }
 
 func TestCheckClientHealth(t *testing.T) {
@@ -2028,7 +2025,7 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
 	s := RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
+	defer shutdownRestartedServerOnTestExit(&s)
 
 	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
 	if err != nil {
@@ -2049,7 +2046,6 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	// Restart server
 	s.Shutdown()
 	s = RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
 
 	// Message should not be marked as redelivered
 	cs := s.store.LookupChannel("foo")
@@ -2092,7 +2088,6 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	// Restart server
 	s.Shutdown()
 	s = RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
 
 	// Client should have been recovered
 	checkClients(t, s, 1)
@@ -2120,9 +2115,6 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	if c := atomic.LoadInt32(&redelivered); c != 1 {
 		t.Fatalf("Expected 1 redelivered message, got %v", c)
 	}
-	// Explicitly close client connection to avoid reconnect attempts
-	sc.Close()
-	nc.Close()
 }
 
 func TestFileStoreDurableCanReceiveAfterRestart(t *testing.T) {
@@ -2133,7 +2125,7 @@ func TestFileStoreDurableCanReceiveAfterRestart(t *testing.T) {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
 	s := RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
+	defer shutdownRestartedServerOnTestExit(&s)
 
 	ch := make(chan bool)
 	cb := func(m *stan.Msg) {
@@ -2171,7 +2163,6 @@ func TestFileStoreDurableCanReceiveAfterRestart(t *testing.T) {
 	// Restart server
 	s.Shutdown()
 	s = RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
 
 	// Send 1 message
 	if err := sc.Publish("foo", []byte("msg")); err != nil {
@@ -2181,10 +2172,6 @@ func TestFileStoreDurableCanReceiveAfterRestart(t *testing.T) {
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our message")
 	}
-
-	// Explicitly close client connection to avoid reconnect attempts
-	sc.Close()
-	nc.Close()
 }
 
 func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
@@ -2195,7 +2182,7 @@ func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
 	s := RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
+	defer shutdownRestartedServerOnTestExit(&s)
 
 	// Create 2 clients
 	nc1, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(10*time.Second))
@@ -2224,7 +2211,6 @@ func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
 	// Restart
 	s.Shutdown()
 	s = RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
 	// Check that there are 2 clients
 	checkClients(t, s, 2)
 	// Change server's hb settings
@@ -2245,12 +2231,6 @@ func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
 	}
 	// Both clients should quickly timed-out
 	waitForNumClients(t, s, 0)
-
-	// Explicitly close client connections to avoid reconnect attempts
-	sc1.Close()
-	nc1.Close()
-	sc2.Close()
-	nc2.Close()
 }
 
 func TestFileStoreRedeliveryCbPerSub(t *testing.T) {
@@ -2261,7 +2241,7 @@ func TestFileStoreRedeliveryCbPerSub(t *testing.T) {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
 	s := RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
+	defer shutdownRestartedServerOnTestExit(&s)
 
 	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
 	if err != nil {
@@ -2327,7 +2307,6 @@ func TestFileStoreRedeliveryCbPerSub(t *testing.T) {
 	// Restart server
 	s.Shutdown()
 	s = RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
 
 	// Client should have been recovered
 	checkClients(t, s, 1)
@@ -2345,9 +2324,6 @@ func TestFileStoreRedeliveryCbPerSub(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Did not get our redelivered messages")
 	}
-	// Explicitly close client connection to avoid reconnect attempts
-	sc.Close()
-	nc.Close()
 }
 
 func TestFileStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
@@ -2358,7 +2334,7 @@ func TestFileStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
 	s := RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
+	defer shutdownRestartedServerOnTestExit(&s)
 
 	var err error
 	var sub2 stan.Subscription
@@ -2409,7 +2385,6 @@ func TestFileStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
 	// Stop server
 	s.Shutdown()
 	s = RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
 
 	// Get subs
 	subs := s.clients.GetSubs(clientName)
@@ -2428,9 +2403,6 @@ func TestFileStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
 			t.Fatal("Unacknowledged message should have been recovered for sub2")
 		}
 	}
-
-	// Explicitly close client connection to avoid reconnect attempts
-	sc.Close()
 }
 
 func TestFileStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
@@ -2441,7 +2413,7 @@ func TestFileStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
 	s := RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
+	defer shutdownRestartedServerOnTestExit(&s)
 
 	var err error
 	var sub2 stan.Subscription
@@ -2515,7 +2487,6 @@ func TestFileStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 	atomic.StoreInt32(&trackDelivered, 1)
 	// Restart server
 	s = RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
 
 	// Get subs
 	subs := s.clients.GetSubs(clientName)
@@ -2539,8 +2510,4 @@ func TestFileStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 	case <-time.After(1500 * time.Millisecond):
 		break
 	}
-
-	// Explicitly close client connection to avoid reconnect attempts
-	sc.Close()
-	nc.Close()
 }
