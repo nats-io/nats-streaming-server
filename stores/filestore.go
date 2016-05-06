@@ -998,9 +998,8 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 			}
 			if subAndPending, exists := recoveredSubs[updateSub.ID]; exists {
 				seqno := updateSub.Seqno
-				// Protect against possible bug whereby an already delivered
-				// message is persisted again (in such case, seqnos in this
-				// file would not necessarily be incremental).
+				// Same seqno/ack can appear several times for the same sub.
+				// See queue subscribers redelivery.
 				if seqno > subAndPending.sub.LastSent {
 					subAndPending.sub.LastSent = seqno
 				}

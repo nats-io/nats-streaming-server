@@ -1108,6 +1108,13 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	}
 
 	var pick *subState
+	var ss *subStore
+
+	// If we are dealing with a queue subscriber, get the subStore here.
+	if qs != nil {
+		cs := s.store.LookupChannel(subject)
+		ss = cs.UserData.(*subStore)
+	}
 
 	now := time.Now().UnixNano()
 
@@ -1134,14 +1141,6 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 		// Handle QueueSubscribers differently, since we will choose best subscriber
 		// to redeliver to, not necessarily the same one.
 		if qs != nil {
-			// Remove from current subs acksPending.
-			sub.Lock()
-			delete(sub.acksPending, m.Sequence)
-			sub.Unlock()
-
-			cs := s.store.LookupChannel(subject)
-			ss := cs.UserData.(*subStore)
-
 			ss.Lock()
 			pick = findBestQueueSub(qs.subs)
 			ss.Unlock()
@@ -1156,8 +1155,18 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 
 		pick.Lock()
 		Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", pick.ClientID, m.Sequence)
-		s.sendMsgToSub(pick, m)
+		didSend := s.sendMsgToSub(pick, m)
 		pick.Unlock()
+
+		// If the message is redelivered to a different queue subscriber,
+		// we need to process an implicit ack for the original subscriber.
+		// We do this only after confirmation that it was successfully added
+		// as pending on the other queue subscriber.
+		if pick != sub && didSend {
+			if _, _, err := s.performAck(sub, m.Sequence); err != nil {
+				break
+			}
+		}
 	}
 
 	// The messages from sortedMsgs above may have all been acknowledged
@@ -1202,13 +1211,15 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 		return false
 	}
 
-	// Store in storage (only if not a redelivery)
-	if !m.Redelivered {
-		if err := sub.store.AddSeqPending(sub.ID, m.Sequence); err != nil {
-			Errorf("STAN: [Client:%s] Unable to update subscription for %s:%v (%v)",
-				sub.ClientID, m.Subject, m.Sequence, err)
-			return false
-		}
+	// If this message is already pending, nothing else to do.
+	if sub.acksPending[m.Sequence] != nil {
+		return true
+	}
+	// Store in storage
+	if err := sub.store.AddSeqPending(sub.ID, m.Sequence); err != nil {
+		Errorf("STAN: [Client:%s] Unable to update subscription for %s:%v (%v)",
+			sub.ClientID, m.Subject, m.Sequence, err)
+		return false
 	}
 
 	// Store in ackPending.
@@ -1683,29 +1694,10 @@ func (s *StanServer) processAck(cs *stores.ChannelStore, sub *subState, ack *pb.
 		return
 	}
 
-	sub.Lock()
-
-	// Clear the ack
-	Tracef("STAN: [Client:%s] removing pending ack, subj=%s, seq=%d.",
-		sub.ClientID, sub.subject, ack.Sequence)
-
-	if err := sub.store.AckSeqPending(sub.ID, ack.Sequence); err != nil {
-		Errorf("STAN: [Client:%s] Unable to persist ack for %s:%v (%v)",
-			sub.ClientID, sub.subject, ack.Sequence, err)
-		sub.Unlock()
+	qs, stalled, err := s.performAck(sub, ack.Sequence)
+	if err != nil {
 		return
 	}
-
-	delete(sub.acksPending, ack.Sequence)
-	stalled := sub.stalled
-	if int32(len(sub.acksPending)) < sub.MaxInFlight {
-		sub.stalled = false
-	}
-
-	// Leave the reset/cancel of the ackTimer to the redelivery cb.
-
-	qs := sub.qstate
-	sub.Unlock()
 
 	if qs != nil {
 		qs.Lock()
@@ -1723,6 +1715,33 @@ func (s *StanServer) processAck(cs *stores.ChannelStore, sub *subState, ack *pb.
 	} else {
 		s.sendAvailableMessages(cs, sub)
 	}
+}
+
+// performAck stores the ack for message `sequence` and removes the message
+// the acksPending map. Returns possible queue state and stalled boolean
+// or error if unable to store the ack.
+func (s *StanServer) performAck(sub *subState, sequence uint64) (*queueState, bool, error) {
+	sub.Lock()
+	defer sub.Unlock()
+
+	Tracef("STAN: [Client:%s] removing pending ack, subj=%s, seq=%d",
+		sub.ClientID, sub.subject, sequence)
+
+	if err := sub.store.AckSeqPending(sub.ID, sequence); err != nil {
+		Errorf("STAN: [Client:%s] Unable to persist ack for %s:%v (%v)",
+			sub.ClientID, sub.subject, sequence, err)
+		return nil, false, err
+	}
+
+	delete(sub.acksPending, sequence)
+	stalled := sub.stalled
+	if int32(len(sub.acksPending)) < sub.MaxInFlight {
+		sub.stalled = false
+	}
+
+	// Leave the reset/cancel of the ackTimer to the redelivery cb.
+
+	return sub.qstate, stalled, nil
 }
 
 // Send any messages that are ready to be sent that have been queued to the group.
