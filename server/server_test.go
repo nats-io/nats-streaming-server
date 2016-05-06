@@ -135,6 +135,29 @@ func waitForNumSubs(t tLogger, s *StanServer, ID string, expected int) {
 	})
 }
 
+func waitForAcks(t tLogger, s *StanServer, ID string, subID uint64, expected int) {
+	subs := s.clients.GetSubs(clientName)
+	var sub *subState
+	for _, s := range subs {
+		s.RLock()
+		sID := s.ID
+		s.RUnlock()
+		if sID == subID {
+			sub = s
+			break
+		}
+	}
+	if sub == nil {
+		stackFatalf(t, "Subscription %v not found", subID)
+	}
+	waitForCount(t, 0, func() (string, int) {
+		sub.RLock()
+		count := len(sub.acksPending)
+		sub.RUnlock()
+		return "ack pending", count
+	})
+}
+
 func NewDefaultConnection(t tLogger) stan.Conn {
 	sc, err := stan.Connect(clusterName, clientName)
 	if err != nil {
@@ -2322,6 +2345,201 @@ func TestFileStoreRedeliveryCbPerSub(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Did not get our redelivered messages")
 	}
+	// Explicitly close client connection to avoid reconnect attempts
+	sc.Close()
+	nc.Close()
+}
+
+func TestFileStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	var err error
+	var sub2 stan.Subscription
+
+	errs := make(chan error, 10)
+	sub2Recv := make(chan bool)
+	cb := func(m *stan.Msg) {
+		if m.Redelivered {
+			if m.Sub != sub2 {
+				errs <- fmt.Errorf("Expected redelivered msg to be sent to sub2")
+				return
+			}
+			sub2Recv <- true
+		}
+	}
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Create two queue subscribers with manual ackMode that will
+	// not ack the message.
+	if _, err := sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(time.Second),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Create this subscriber that will receive and ack the message
+	sub2, err = sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(time.Second),
+		stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Make sure these are registered.
+	waitForNumSubs(t, s, clientName, 2)
+	// Send a message
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Wait for sub2 to receive the message.
+	select {
+	case <-sub2Recv:
+		break
+	case e := <-errs:
+		t.Fatalf("%v", e)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Did not get out message")
+	}
+
+	// Stop server
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	// Get subs
+	subs := s.clients.GetSubs(clientName)
+	if len(subs) != 2 {
+		t.Fatalf("Expected 2 subscriptions to be recovered, got %v", len(subs))
+	}
+	// Message should be in sub2's ackPending
+	for _, s := range subs {
+		s.RLock()
+		na := len(s.acksPending)
+		sID := s.ID
+		s.RUnlock()
+		if sID == 1 && na != 0 {
+			t.Fatal("Unexpected un-acknowledged message for sub1")
+		} else if sID == 2 && na != 1 {
+			t.Fatal("Unacknowledged message should have been recovered for sub2")
+		}
+	}
+
+	// Explicitly close client connection to avoid reconnect attempts
+	sc.Close()
+}
+
+func TestFileStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	var err error
+	var sub2 stan.Subscription
+
+	errs := make(chan error, 10)
+	sub2Recv := make(chan bool)
+	redelivered := int32(0)
+	trackDelivered := int32(0)
+	cb := func(m *stan.Msg) {
+		if m.Redelivered {
+			if m.Sub != sub2 {
+				errs <- fmt.Errorf("Expected redelivered msg to be sent to sub2")
+				return
+			}
+			if atomic.AddInt32(&redelivered, 1) != 1 {
+				errs <- fmt.Errorf("Message redelivered after restart")
+				return
+			}
+			sub2Recv <- true
+		} else {
+			if atomic.LoadInt32(&trackDelivered) == 1 {
+				errs <- fmt.Errorf("Unexpected non redelivered message: %v", m)
+				return
+			}
+		}
+	}
+
+	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer sc.Close()
+
+	// Create a queue subscriber with manual ackMode that will
+	// not ack the message.
+	if _, err := sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(time.Second),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Create this subscriber that will receive and ack the message
+	sub2, err = sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Make sure these are registered.
+	waitForNumSubs(t, s, clientName, 2)
+	// Send a message
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Wait for sub2 to receive the message.
+	select {
+	case <-sub2Recv:
+		break
+	case e := <-errs:
+		t.Fatalf("%v", e)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Did not get out message")
+	}
+	// Wait for msg sent to sub2 to be ack'ed
+	waitForAcks(t, s, clientName, 2, 0)
+
+	// Stop server
+	s.Shutdown()
+	// Track unexpected delivery of non redelivered message
+	atomic.StoreInt32(&trackDelivered, 1)
+	// Restart server
+	s = RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	// Get subs
+	subs := s.clients.GetSubs(clientName)
+	if len(subs) != 2 {
+		t.Fatalf("Expected 2 subscriptions to be recovered, got %v", len(subs))
+	}
+	// No ackPending should be recovered
+	for _, s := range subs {
+		s.RLock()
+		na := len(s.acksPending)
+		sID := s.ID
+		s.RUnlock()
+		if na != 0 {
+			t.Fatalf("Unexpected un-acknowledged message for sub: %v", sID)
+		}
+	}
+	// Wait for possible redelivery
+	select {
+	case e := <-errs:
+		t.Fatalf("%v", e)
+	case <-time.After(1500 * time.Millisecond):
+		break
+	}
+
 	// Explicitly close client connection to avoid reconnect attempts
 	sc.Close()
 	nc.Close()
