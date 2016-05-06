@@ -438,7 +438,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 				s.store.Close()
 			}
 			// Issue the original panic now that the store is closed.
-			panic(r.(error))
+			panic(r)
 		}
 	}()
 
