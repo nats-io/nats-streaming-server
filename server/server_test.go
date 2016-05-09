@@ -164,6 +164,27 @@ func waitForAcks(t tLogger, s *StanServer, ID string, subID uint64, expected int
 	})
 }
 
+func createConnectionWithNatsOpts(t tLogger, clientName string,
+	natsOpts ...nats.Option) (stan.Conn, *nats.Conn) {
+	opts := nats.DefaultOptions
+	opts.Servers = []string{nats.DefaultURL}
+	for _, opt := range natsOpts {
+		if err := opt(&opts); err != nil {
+			stackFatalf(t, "Unexpected error on setting options: %v", err)
+		}
+	}
+	nc, err := opts.Connect()
+	if err != nil {
+		stackFatalf(t, "Unexpected error on connect: %v", err)
+	}
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		nc.Close()
+		stackFatalf(t, "Unexpected error on connect: %v", err)
+	}
+	return sc, nc
+}
+
 func NewDefaultConnection(t tLogger) stan.Conn {
 	sc, err := stan.Connect(clusterName, clientName)
 	if err != nil {
@@ -924,17 +945,9 @@ func TestRunServerWithFileStore(t *testing.T) {
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	// Create our own NATS connection to control reconnect wait
-	nc, err := nats.Connect(nats.DefaultURL,
-		nats.ReconnectWait(50*time.Millisecond),
-		nats.MaxReconnects(500))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
-
-	sc, err := stan.Connect(opts.ID, clientName, stan.NatsConn(nc))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
+	sc, nc := createConnectionWithNatsOpts(t, clientName,
+		nats.ReconnectWait(50*time.Millisecond), nats.MaxReconnects(500))
+	defer nc.Close()
 	defer sc.Close()
 
 	rch := make(chan bool)
@@ -2027,15 +2040,9 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
-	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
+	sc, nc := createConnectionWithNatsOpts(t, clientName,
+		nats.ReconnectWait(100*time.Millisecond))
 	defer nc.Close()
-	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
 	defer sc.Close()
 
 	// Send one message on "foo"
@@ -2080,6 +2087,7 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	}
 
 	// Start a subscriber that consumes the message but does not ack it.
+	var err error
 	if sub1, err = sc.Subscribe("foo", cb, stan.DeliverAllAvailable(),
 		stan.SetManualAckMode(), stan.AckWait(time.Second)); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
@@ -2144,15 +2152,9 @@ func TestFileStoreDurableCanReceiveAfterRestart(t *testing.T) {
 	sc.Close()
 
 	// Restart durable
-	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
+	sc, nc := createConnectionWithNatsOpts(t, clientName,
+		nats.ReconnectWait(100*time.Millisecond))
 	defer nc.Close()
-	sc, err = stan.Connect(clusterName, clientName, stan.NatsConn(nc))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
 	defer sc.Close()
 	if _, err := sc.Subscribe("foo", cb, stan.DurableName("dur")); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
@@ -2185,25 +2187,14 @@ func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	// Create 2 clients
-	nc1, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(10*time.Second))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
+	sc1, nc1 := createConnectionWithNatsOpts(t, "c1",
+		nats.ReconnectWait(10*time.Second))
 	defer nc1.Close()
-	sc1, err := stan.Connect(clusterName, "c1", stan.NatsConn(nc1))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
 	defer sc1.Close()
-	nc2, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(10*time.Second))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
+
+	sc2, nc2 := createConnectionWithNatsOpts(t, "c2",
+		nats.ReconnectWait(10*time.Second))
 	defer nc2.Close()
-	sc2, err := stan.Connect(clusterName, "c2", stan.NatsConn(nc2))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
 	defer sc2.Close()
 
 	// Make sure they are registered
@@ -2243,15 +2234,9 @@ func TestFileStoreRedeliveryCbPerSub(t *testing.T) {
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
-	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
+	sc, nc := createConnectionWithNatsOpts(t, clientName,
+		nats.ReconnectWait(100*time.Millisecond))
 	defer nc.Close()
-	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
 	defer sc.Close()
 
 	// Send one message on "foo"
@@ -2295,6 +2280,7 @@ func TestFileStoreRedeliveryCbPerSub(t *testing.T) {
 	}
 
 	// Start 2 subscribers that consume the message but do not ack it.
+	var err error
 	if sub1, err = sc.Subscribe("foo", cb, stan.DeliverAllAvailable(),
 		stan.SetManualAckMode(), stan.AckWait(time.Second)); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
@@ -2441,15 +2427,9 @@ func TestFileStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 		}
 	}
 
-	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
+	sc, nc := createConnectionWithNatsOpts(t, clientName,
+		nats.ReconnectWait(100*time.Millisecond))
 	defer nc.Close()
-	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	}
 	defer sc.Close()
 
 	// Create a queue subscriber with manual ackMode that will
