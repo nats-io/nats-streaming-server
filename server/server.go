@@ -146,14 +146,13 @@ type subState struct {
 	spb.SubState // Embedded protobuf. Used for storage.
 	subject      string
 	qstate       *queueState
-	// ackWait expressed as a duration so that we don't need
-	// to multiply by time.Second anytime we use this.
-	ackWait      time.Duration
+	ackWait      time.Duration // SubState.AckWaitInSecs expressed as a time.Duration
 	ackTimer     *time.Timer
 	ackTimeFloor int64
 	ackSub       *nats.Subscription
 	acksPending  map[uint64]*pb.MsgProto
 	stalled      bool
+	newOnHold    bool            // Prevents delivery of new msgs until old are redelivered (on restart)
 	store        stores.SubStore // for easy access to the store interface
 }
 
@@ -502,6 +501,11 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	Noticef("STAN: Message store is %s", s.store.Name())
 	Noticef("STAN: Maximum of %d will be stored", DefaultMsgStoreLimit)
 
+	// Execute (in a go routine) redelivery of unacknowledged messages,
+	// and release newOnHold
+	s.wg.Add(1)
+	go s.performRedeliveryOnStartup(recoveredSubs)
+
 	return &s
 }
 
@@ -557,6 +561,9 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 			if sub.acksPending == nil {
 				// Create an empty map
 				sub.acksPending = make(map[uint64]*pb.MsgProto)
+			} else if len(sub.acksPending) > 0 {
+				// Prevent delivery of new messages until resent of old ones
+				sub.newOnHold = true
 			}
 			// Copy over fields from SubState protobuf
 			sub.SubState = *recSub.Sub
@@ -590,19 +597,6 @@ func (s *StanServer) postRecoveryProcessing(recoveredSubs []*subState) error {
 				return err
 			}
 		}
-		if sub.ackTimer == nil {
-			// Setup the redelivery timer. The callback will figure out
-			// if there are messages to redeliver or not and adjust the
-			// timer for us.
-			// Since we are in a loop, this is required for closure to work.
-			sub := sub
-			sub.ackTimer = time.AfterFunc(sub.ackWait, func() {
-				s.performAckExpirationRedelivery(sub)
-			})
-			// Set the floor to 0 since we don't know (or want to find
-			// out) the lowest msg's timestamp for this subscription.
-			sub.ackTimeFloor = 0
-		}
 		sub.Unlock()
 	}
 	// Set the store reference so that further Register/Unregister are stored.
@@ -622,6 +616,45 @@ func (s *StanServer) postRecoveryProcessing(recoveredSubs []*subState) error {
 		c.Unlock()
 	}
 	return nil
+}
+
+// Redelivers unacknowledged messages and release the hold for new messages delivery
+func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
+	defer s.wg.Done()
+
+	for _, sub := range recoveredSubs {
+		// Ignore subs that did not have any ack pendings on startup.
+		sub.Lock()
+		if !sub.newOnHold {
+			sub.Unlock()
+			continue
+		}
+		// Create the delivery timer since performAckExpirationRedelivery
+		// may need to reset the timer (which would not work if timer is nil).
+		// Set it to a high value, it will be correctly reset or cleared.
+		s.setupAckTimer(sub, time.Hour)
+		// Unlock in order to call function below
+		sub.Unlock()
+		// Send old messages (lock is acquired in that function)
+		s.performAckExpirationRedelivery(sub)
+		// Regrab lock
+		sub.Lock()
+		// Allow new messages to be delivered
+		sub.newOnHold = false
+		subject := sub.subject
+		qs := sub.qstate
+		sub.Unlock()
+		cs := s.store.LookupChannel(subject)
+		if cs == nil {
+			continue
+		}
+		// Kick delivery of (possible) new messages
+		if qs != nil {
+			s.sendAvailableMessagesToQueue(cs, qs)
+		} else {
+			s.sendAvailableMessages(cs, sub)
+		}
+	}
 }
 
 // initSubscriptions will setup initial subscriptions for discovery etc.
@@ -778,7 +811,7 @@ func (s *StanServer) processConnectRequestWithDupID(client *client, req *pb.Conn
 			s.dupCIDwg.Done()
 		}
 		s.dupCIDGuard.Unlock()
-		defer s.wg.Done()
+		s.wg.Done()
 	}()
 
 	// This is the HbInbox from the "old" client. See if it is up and
@@ -1189,7 +1222,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 // Sends the message to the subscriber
 // Sub lock should be held before calling.
 func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
-	if sub == nil || m == nil {
+	if sub == nil || m == nil || (sub.newOnHold && !m.Redelivered) {
 		return false
 	}
 
@@ -1227,13 +1260,19 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto) bool {
 
 	// Setup the ackTimer as needed.
 	if sub.ackTimer == nil {
-		sub.ackTimer = time.AfterFunc(sub.ackWait, func() {
-			s.performAckExpirationRedelivery(sub)
-		})
+		s.setupAckTimer(sub, sub.ackWait)
 		sub.ackTimeFloor = m.Timestamp
 	}
 
 	return true
+}
+
+// Sets up the ackTimer to fire at the given duration.
+// sub's lock held on entry.
+func (s *StanServer) setupAckTimer(sub *subState, d time.Duration) {
+	sub.ackTimer = time.AfterFunc(d, func() {
+		s.performAckExpirationRedelivery(sub)
+	})
 }
 
 // Sends the message to the subscriber and updates the subscriber's lastSent field
@@ -1877,10 +1916,6 @@ func (s *StanServer) Shutdown() {
 	// Close/Shutdown resources. Note that unless one instantiates StanServer
 	// directly (instead of calling RunServer() and the like), these should
 	// not be nil.
-
-	// Wait for go-routines to return
-	s.wg.Wait()
-
 	if store != nil {
 		store.Close()
 	}
@@ -1890,4 +1925,7 @@ func (s *StanServer) Shutdown() {
 	if ns != nil {
 		ns.Shutdown()
 	}
+
+	// Wait for go-routines to return
+	s.wg.Wait()
 }
