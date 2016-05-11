@@ -2911,7 +2911,7 @@ func TestSubscribeShrink(t *testing.T) {
 }
 
 func TestGetSubStoreRace(t *testing.T) {
-	numChans := 100
+	numChans := 10000
 
 	opts := GetDefaultOptions()
 	opts.MaxChannels = numChans + 1
