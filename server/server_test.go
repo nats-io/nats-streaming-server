@@ -2909,3 +2909,48 @@ func TestSubscribeShrink(t *testing.T) {
 		t.Fatalf("Expected array capacity to have gone down, got %v", len(client.subs))
 	}
 }
+
+func TestGetSubStoreRace(t *testing.T) {
+	numChans := 100
+
+	opts := GetDefaultOptions()
+	opts.MaxChannels = numChans + 1
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	errs := make(chan error, 2)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	chanNames := make([]string, numChans)
+	// Create the channel names in advance to increase concurrency
+	// of critical code in the function below.
+	for i := 0; i < numChans; i++ {
+		chanNames[i] = fmt.Sprintf("channel_%v", i)
+	}
+	// Perform lookup of channel and access subStore
+	f := func() {
+		defer wg.Done()
+		for i := 0; i < numChans; i++ {
+			cs, err := s.lookupOrCreateChannel(chanNames[i])
+			if err != nil {
+				errs <- err
+				return
+			}
+			if cs.UserData == nil {
+				errs <- fmt.Errorf("subStore is nil")
+				return
+			}
+		}
+	}
+	// Run two go routines to cause parallel execution
+	go f()
+	go f()
+	// Wait for them to return
+	wg.Wait()
+	// Report possible errors
+	if len(errs) > 0 {
+		t.Fatalf("%v", <-errs)
+	}
+}

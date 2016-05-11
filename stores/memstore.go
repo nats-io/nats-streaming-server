@@ -36,26 +36,18 @@ func NewMemoryStore(limits *ChannelLimits) (*MemoryStore, error) {
 	return ms, nil
 }
 
-// LookupOrCreateChannel returns a ChannelStore for the given channel,
-// creates one if no such channel exists. In this case, the returned
-// boolean will be true.
-func (ms *MemoryStore) LookupOrCreateChannel(channel string) (*ChannelStore, bool, error) {
-	channelStore := ms.LookupChannel(channel)
-	if channelStore != nil {
-		return channelStore, false, nil
-	}
-
-	// Two "threads" could make this call and end-up deciding to create the
-	// channel. So we need to test again, this time under the write lock.
+// CreateChannel creates a ChannelStore for the given channel, or returns
+// an error if one already exists.
+func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, error) {
 	ms.Lock()
 	defer ms.Unlock()
-	channelStore = ms.channels[channel]
+	channelStore := ms.channels[channel]
 	if channelStore != nil {
-		return channelStore, false, nil
+		return nil, ErrAlreadyExists
 	}
 
 	if err := ms.canAddChannel(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	msgStore := &MemoryMsgStore{}
@@ -65,13 +57,14 @@ func (ms *MemoryStore) LookupOrCreateChannel(channel string) (*ChannelStore, boo
 	subStore.init(channel, ms.limits)
 
 	channelStore = &ChannelStore{
-		Subs: subStore,
-		Msgs: msgStore,
+		Subs:     subStore,
+		Msgs:     msgStore,
+		UserData: userData,
 	}
 
 	ms.channels[channel] = channelStore
 
-	return channelStore, true, nil
+	return channelStore, nil
 }
 
 ////////////////////////////////////////////////////////////////////////////

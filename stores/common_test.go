@@ -51,22 +51,30 @@ func stackFatalf(t tLogger, f string, args ...interface{}) {
 }
 
 func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
-	cs, _, err := s.LookupOrCreateChannel(channel)
-	if err != nil {
-		t.Fatalf("Error looking up channel [%v]: %v", channel, err)
+	cs := s.LookupChannel(channel)
+	if cs == nil {
+		var err error
+		cs, err = s.CreateChannel(channel, nil)
+		if err != nil {
+			stackFatalf(t, "Error creating channel [%v]: %v", channel, err)
+		}
 	}
 	ms := cs.Msgs
 	m, err := ms.Store("", data)
 	if err != nil {
-		t.Fatalf("Error storing message into channel [%v]: %v", channel, err)
+		stackFatalf(t, "Error storing message into channel [%v]: %v", channel, err)
 	}
 	return m
 }
 
 func storeSub(t *testing.T, s Store, channel string) uint64 {
-	cs, _, err := s.LookupOrCreateChannel(channel)
-	if err != nil {
-		t.Fatalf("Error looking up channel [%v]: %v", channel, err)
+	cs := s.LookupChannel(channel)
+	if cs == nil {
+		var err error
+		cs, err = s.CreateChannel(channel, nil)
+		if err != nil {
+			stackFatalf(t, "Error creating channel [%v]: %v", channel, err)
+		}
 	}
 	ss := cs.Subs
 	sub := &spb.SubState{
@@ -75,9 +83,8 @@ func storeSub(t *testing.T, s Store, channel string) uint64 {
 		AckInbox:      nuidGen.Next(),
 		AckWaitInSecs: 10,
 	}
-	err = ss.CreateSub(sub)
-	if err != nil {
-		t.Fatalf("Error storing subscription into channel [%v]: %v", channel, err)
+	if err := ss.CreateSub(sub); err != nil {
+		stackFatalf(t, "Error storing subscription into channel [%v]: %v", channel, err)
 	}
 	return sub.ID
 }
@@ -132,26 +139,36 @@ func testNothingRecoveredOnFreshStart(t *testing.T, s Store) {
 }
 
 func testNewChannel(t *testing.T, s Store) {
-	cs, isNew, err := s.LookupOrCreateChannel("foo")
+	myUserData := "test"
+	cs, err := s.CreateChannel("foo", myUserData)
 	if err != nil {
 		t.Fatalf("Unexpected error creating new channel: %v", err)
-	}
-	if !isNew {
-		t.Fatal("isNew should be true")
 	}
 	if !s.HasChannel() {
 		t.Fatal("HasChannel should return true")
 	}
 	if cs.Subs == nil {
-		t.Fatalf("SubStore should not be nil")
+		t.Fatal("SubStore should not be nil")
 	}
 	if cs.Msgs == nil {
-		t.Fatalf("MsgStore should not be nil")
+		t.Fatal("MsgStore should not be nil")
+	}
+	// Lookup the channel and make sure UserData is properly set
+	cs = s.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel should exist")
+	}
+	if cs.UserData != myUserData {
+		t.Fatalf("UserData not properly set, got %v", cs.UserData)
+	}
+	// Creating the same channel should fail
+	if _, err := s.CreateChannel("foo", nil); err == nil || err != ErrAlreadyExists {
+		t.Fatalf("Expected error %v, got %v", ErrAlreadyExists, err)
 	}
 }
 
 func testCloseIdempotent(t *testing.T, s Store) {
-	cs, _, err := s.LookupOrCreateChannel("foo")
+	cs, err := s.CreateChannel("foo", nil)
 	if err != nil {
 		t.Fatalf("Unexpected error creating new channel: %v", err)
 	}
@@ -181,9 +198,9 @@ func testCloseIdempotent(t *testing.T, s Store) {
 }
 
 func testBasicMsgStore(t *testing.T, s Store) {
-	cs, isNew, err := s.LookupOrCreateChannel("foo")
-	if err != nil || !isNew {
-		t.Fatalf("Failed to create channel foo: %v (isNew=%v)", err, isNew)
+	cs, err := s.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Failed to create channel foo: %v", err)
 	}
 	ms := cs.Msgs
 
@@ -345,7 +362,7 @@ func testMaxChannels(t *testing.T, s Store, maxChannels int) {
 	var err error
 	numCh := 0
 	for i := 0; i < maxChannels+1; i++ {
-		_, _, err = s.LookupOrCreateChannel(fmt.Sprintf("foo.%d", i))
+		_, err = s.CreateChannel(fmt.Sprintf("foo.%d", i), nil)
 		if err != nil {
 			break
 		}
@@ -360,12 +377,10 @@ func testMaxChannels(t *testing.T, s Store, maxChannels int) {
 }
 
 func testMaxSubs(t *testing.T, s Store, maxSubs int) {
-	cs, _, err := s.LookupOrCreateChannel("foo")
+	cs, err := s.CreateChannel("foo", nil)
 	if err != nil {
 		t.Fatalf("Unexpected error creating channel: %v", err)
 	}
-
-	err = nil
 	sub := &spb.SubState{}
 	numSubs := 0
 	for i := 0; i < maxSubs+1; i++ {
@@ -384,12 +399,9 @@ func testMaxSubs(t *testing.T, s Store, maxSubs int) {
 }
 
 func testBasicSubStore(t *testing.T, s Store) {
-	cs, isNew, err := s.LookupOrCreateChannel("foo")
+	cs, err := s.CreateChannel("foo", nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
-	}
-	if !isNew {
-		t.Fatal("Channel should be new")
 	}
 
 	ss := cs.Subs

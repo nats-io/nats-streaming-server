@@ -25,6 +25,7 @@ const (
 
 // Errors.
 var (
+	ErrAlreadyExists   = errors.New("already exists")
 	ErrTooManyChannels = errors.New("too many channels")
 	ErrTooManySubs     = errors.New("too many subscriptions per channel")
 )
@@ -101,17 +102,6 @@ type ChannelStore struct {
 // noted that the limits don't apply to any state being recovered, for Store
 // implementations supporting recovery.
 //
-// When calling the method LookupOrCreateChannel(), if the channel does not exist,
-// the implementation should create an instance of SubStore and MsgStore, passing
-// the Store's channel limits. Then, it should create a ChannelStore structure,
-// which holds reference to those two stores, and return it, along with a boolean
-// indicating if the channel has been created during this call. If the channel
-// does exist, then LookupOrCreateChannel() behaves like LookupChannel() and
-// the boolean returned is false.
-//
-// The LookupChannel() method should only return a ChannelStore that has been
-// previously created, and nil if it does not exist.
-//
 type Store interface {
 	// Init can be used to initialize the store with server's information.
 	Init(info *spb.ServerInfo) error
@@ -123,10 +113,9 @@ type Store interface {
 	// to be retroactive.
 	SetChannelLimits(limits ChannelLimits)
 
-	// LookupOrCreateChannel returns a ChannelStore for the given channel,
-	// or creates one if the channel doesn't exist. In this case, the returned
-	// boolean will be true.
-	LookupOrCreateChannel(channel string) (*ChannelStore, bool, error)
+	// CreateChannel creates a ChannelStore for the given channel, or returns
+	// an error if one already exists.
+	CreateChannel(channel string, userData interface{}) (*ChannelStore, error)
 
 	// LookupChannel returns a ChannelStore for the given channel, nil if channel
 	// does not exist.
