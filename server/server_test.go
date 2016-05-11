@@ -855,6 +855,243 @@ func TestDurableRedelivery(t *testing.T) {
 	}
 }
 
+func testStalledDelivery(t *testing.T, typeSub string) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	lastMsgSentTime := int64(0)
+	ackDelay := 700 * time.Millisecond
+	toSend := int32(2)
+	numSubs := 1
+
+	ch := make(chan bool)
+	errors := make(chan error)
+	acked := int32(0)
+
+	cb := func(m *stan.Msg) {
+		// No message should be redelivered because of MaxInFlight==1
+		if m.Redelivered {
+			errors <- fmt.Errorf("Unexpected message redelivered")
+			return
+		}
+		go func() {
+			time.Sleep(ackDelay)
+			m.Ack()
+			if atomic.AddInt32(&acked, 1) == toSend {
+				ch <- true
+			}
+		}()
+		if int32(m.Sequence) == toSend {
+			now := time.Now().UnixNano()
+			sent := atomic.LoadInt64(&lastMsgSentTime)
+			elapsed := time.Duration(now - sent)
+			if elapsed < ackDelay {
+				errors <- fmt.Errorf("Second message received too soon: %v", elapsed)
+				return
+			}
+		}
+	}
+	if typeSub == "queue" {
+		// Create 2 queue subs with manual ack mode and maxInFlight of 1.
+		if _, err := sc.QueueSubscribe("foo", "group", cb,
+			stan.SetManualAckMode(), stan.MaxInflight(1)); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		if _, err := sc.QueueSubscribe("foo", "group", cb,
+			stan.SetManualAckMode(), stan.MaxInflight(1)); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		numSubs = 2
+		toSend = 3
+	} else if typeSub == "durable" {
+		// Create a durable with manual ack mode and maxInFlight of 1.
+		if _, err := sc.Subscribe("foo", cb, stan.DurableName("dur"),
+			stan.SetManualAckMode(), stan.MaxInflight(1)); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+	} else {
+		// Create a sub with manual ack mode and maxInFlight of 1.
+		if _, err := sc.Subscribe("foo", cb, stan.SetManualAckMode(),
+			stan.MaxInflight(1)); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+	}
+	// Wait for subscriber to be registered before starting publish
+	waitForNumSubs(t, s, clientName, numSubs)
+	// Send our messages
+	for i := int32(0); i < toSend; i++ {
+		if i == toSend-1 {
+			atomic.AddInt64(&lastMsgSentTime, time.Now().UnixNano())
+		}
+		msg := fmt.Sprintf("msg_%d", (i + 1))
+		if err := sc.Publish("foo", []byte(msg)); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Wait for completion or error
+	select {
+	case <-ch:
+		break
+	case e := <-errors:
+		t.Fatalf("%v", e)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Did not get our messages")
+	}
+}
+
+func TestStalledDelivery(t *testing.T) {
+	testStalledDelivery(t, "sub")
+}
+
+func TestStalledQueueDelivery(t *testing.T) {
+	testStalledDelivery(t, "queue")
+}
+
+func TestStalledDurableDelivery(t *testing.T) {
+	testStalledDelivery(t, "durable")
+}
+
+func testStalledRedelivery(t *testing.T, typeSub string) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// Override maxStalledRedelivery
+	setMaxStalledRedeliveries(1)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc, nc := createConnectionWithNatsOpts(t, clientName,
+		nats.ReconnectWait(100*time.Millisecond))
+	defer nc.Close()
+	defer sc.Close()
+
+	recv := int32(0)
+	rdlv := int32(0)
+	toSend := int32(1)
+	numSubs := 1
+
+	ch := make(chan bool)
+	rch := make(chan bool, 2)
+	errors := make(chan error)
+
+	cb := func(m *stan.Msg) {
+		if !m.Redelivered {
+			r := atomic.AddInt32(&recv, 1)
+			if r > toSend {
+				errors <- fmt.Errorf("Should have received only 1 message, got %v", r)
+				return
+			} else if r == toSend {
+				ch <- true
+			}
+		} else {
+			m.Ack()
+			// We have received our redelivered message(s), we're done
+			if atomic.AddInt32(&rdlv, 1) == toSend {
+				rch <- true
+			}
+		}
+	}
+	if typeSub == "queue" {
+		// Create 2 queue subs with manual ack mode and maxInFlight of 1,
+		// and redelivery delay of 1 sec.
+		if _, err := sc.QueueSubscribe("foo", "group", cb,
+			stan.SetManualAckMode(), stan.MaxInflight(1),
+			stan.AckWait(time.Second)); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		if _, err := sc.QueueSubscribe("foo", "group", cb,
+			stan.SetManualAckMode(), stan.MaxInflight(1),
+			stan.AckWait(time.Second)); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		numSubs = 2
+		toSend = 2
+	} else if typeSub == "durable" {
+		// Create a durable with manual ack mode and maxInFlight of 1,
+		// and redelivery delay of 1 sec.
+		if _, err := sc.Subscribe("foo", cb, stan.DurableName("dur"),
+			stan.SetManualAckMode(), stan.MaxInflight(1),
+			stan.AckWait(time.Second)); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+	} else {
+		// Create a sub with manual ack mode and maxInFlight of 1,
+		// and redelivery delay of 1 sec.
+		if _, err := sc.Subscribe("foo", cb, stan.SetManualAckMode(),
+			stan.MaxInflight(1), stan.AckWait(time.Second),
+			stan.AckWait(time.Second)); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+	}
+	// Wait for subscriber to be registered before starting publish
+	waitForNumSubs(t, s, clientName, numSubs)
+	// Send
+	for i := int32(0); i < toSend; i++ {
+		msg := fmt.Sprintf("msg_%d", (i + 1))
+		if err := sc.Publish("foo", []byte(msg)); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Make sure the message is received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Wait for completion or error
+	select {
+	case <-rch:
+		break
+	case e := <-errors:
+		t.Fatalf("%v", e)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Did not get our redelivered message")
+	}
+	// Same test but with server restart.
+	atomic.StoreInt32(&recv, 0)
+	atomic.StoreInt32(&rdlv, 0)
+	// Send
+	for i := int32(0); i < toSend; i++ {
+		msg := fmt.Sprintf("msg_%d", (i + 1))
+		if err := sc.Publish("foo", []byte(msg)); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Make sure the message is received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Restart server
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+	// Wait for completion or error
+	select {
+	case <-rch:
+		break
+	case e := <-errors:
+		t.Fatalf("%v", e)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Did not get our redelivered message")
+	}
+}
+
+func TestStalledRedelivery(t *testing.T) {
+	testStalledRedelivery(t, "sub")
+}
+
+func TestStalledQueueRedelivery(t *testing.T) {
+	testStalledRedelivery(t, "queue")
+}
+
+func TestStalledDurableRedelivery(t *testing.T) {
+	testStalledRedelivery(t, "durable")
+}
+
 func TestTooManyChannelsOnCreateSub(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
