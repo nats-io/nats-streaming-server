@@ -1517,16 +1517,6 @@ func (sub *subState) adjustAckTimer(firstUnackedTimestamp int64) {
 	}
 }
 
-// Test if a subscription is a queue subscriber.
-func (sub *subState) isQueueSubscriber() bool {
-	return sub != nil && sub.QGroup != ""
-}
-
-// Test if a subscription is durable.
-func (sub *subState) isDurable() bool {
-	return sub != nil && sub.DurableName != ""
-}
-
 // Used to generate durable key. This should not be called on non-durables.
 func (sub *subState) durableKey() string {
 	if sub.DurableName == "" {

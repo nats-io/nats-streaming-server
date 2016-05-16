@@ -580,10 +580,8 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 			if err == io.EOF {
 				// We are done, reset err
 				err = nil
-				break
-			} else {
-				return err
 			}
+			break
 		}
 
 		// Expand buffer if necessary
@@ -592,13 +590,13 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 		// Read fully the expected number of bytes for this message
 		_, err = io.ReadFull(file, ms.tmpMsgBuf[:msgSize])
 		if err != nil {
-			return err
+			break
 		}
 		// Recover this message
 		msg = &pb.MsgProto{}
 		err = msg.Unmarshal(ms.tmpMsgBuf[:msgSize])
 		if err != nil {
-			return err
+			break
 		}
 
 		if fslice.firstMsg == nil {
@@ -616,7 +614,7 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 
 	// Do more accounting and bump the current slice index if we recovered
 	// at least one message on that file.
-	if fslice.msgsCount > 0 {
+	if err == nil && fslice.msgsCount > 0 {
 		ms.last = fslice.lastMsg.Sequence
 		ms.totalCount += fslice.msgsCount
 		ms.totalBytes += fslice.msgsSize
@@ -633,7 +631,11 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 		ms.file = file
 	} else {
 		// Close otherwise...
-		err = file.Close()
+		if lerr := file.Close(); lerr != nil {
+			if err == nil {
+				err = lerr
+			}
+		}
 	}
 	return err
 }

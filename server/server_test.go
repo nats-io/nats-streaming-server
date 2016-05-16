@@ -1171,6 +1171,64 @@ func TestTooManySubs(t *testing.T) {
 	}()
 }
 
+func TestMaxMsgs(t *testing.T) {
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+	sOpts.MaxMsgs = 10
+	s := RunServerWithOpts(sOpts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	for i := 0; i < 2*sOpts.MaxMsgs; i++ {
+		sc.Publish("foo", []byte("msg"))
+	}
+
+	// We should not have more than MaxMsgs
+	cs := s.store.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel foo should exist")
+	}
+	n, _, err := cs.Msgs.State()
+	if err != nil {
+		t.Fatalf("Unexpected error getting state: %v", err)
+	}
+	if n != sOpts.MaxMsgs {
+		t.Fatalf("Expected msgs count to be %v, got %v", sOpts.MaxMsgs, n)
+	}
+}
+
+func TestMaxBytes(t *testing.T) {
+	payload := []byte("hello")
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+	sOpts.MaxBytes = uint64(len(payload) * 10)
+	s := RunServerWithOpts(sOpts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	count := 2 * (int(sOpts.MaxBytes) / len(payload))
+	for i := 0; i < count; i++ {
+		sc.Publish("foo", payload)
+	}
+
+	// We should not have more than MaxMsgs
+	cs := s.store.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel foo should exist")
+	}
+	_, b, err := cs.Msgs.State()
+	if err != nil {
+		t.Fatalf("Unexpected error getting state: %v", err)
+	}
+	if b != sOpts.MaxBytes {
+		t.Fatalf("Expected msgs size to be %v, got %v", sOpts.MaxBytes, b)
+	}
+}
+
 func TestRunServerWithFileStore(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
@@ -1424,6 +1482,11 @@ func TestDurableCanReconnect(t *testing.T) {
 
 	// Check durable is created
 	checkDurable(t, s, "foo", durName, durKey)
+
+	// We should not be able to create a second durable on same subject
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err == nil {
+		t.Fatal("Expected to fail to create a second durable with same name")
+	}
 
 	// Close stan connection
 	sc.Close()
@@ -1971,9 +2034,9 @@ func TestCheckClientHealth(t *testing.T) {
 
 	// Override HB settings
 	s.Lock()
-	s.hbInterval = 200 * time.Millisecond
+	s.hbInterval = 50 * time.Millisecond
 	s.hbTimeout = 10 * time.Millisecond
-	s.maxFailedHB = 10
+	s.maxFailedHB = 5
 	s.Unlock()
 
 	nc, err := nats.Connect(nats.DefaultURL)
@@ -1987,6 +2050,14 @@ func TestCheckClientHealth(t *testing.T) {
 		t.Fatalf("Expected to connect correctly, got err %v", err)
 	}
 	defer sc.Close()
+
+	// Wait for client to be registered
+	waitForNumClients(t, s, 1)
+
+	// Check that client is not incorrectly purged
+	time.Sleep(time.Duration(s.maxFailedHB)*(s.hbInterval+s.hbTimeout) + 100*time.Millisecond)
+	// Client should still be there
+	waitForNumClients(t, s, 1)
 
 	// kill the NATS conn
 	nc.Close()
@@ -2797,5 +2868,44 @@ func TestFileStoreAutomaticDeliveryOnRestart(t *testing.T) {
 	// Wait for messages to be delivered
 	if err := Wait(done); err != nil {
 		t.Fatal("Messages were not automatically delivered")
+	}
+}
+
+func TestSubscribeShrink(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	nsubs := 1000
+	subs := make([]stan.Subscription, 0, nsubs)
+	for i := 1; i <= nsubs; i++ {
+		sub, err := sc.Subscribe("foo", nil)
+		if err != nil {
+			t.Fatalf("Got an error on subscribe: %v\n", err)
+		}
+		subs = append(subs, sub)
+	}
+	// Check number of subs
+	waitForNumSubs(t, s, clientName, nsubs)
+	// Now unsubsribe them all
+	for _, sub := range subs {
+		err := sub.Unsubscribe()
+		if err != nil {
+			t.Fatalf("Got an error on unsubscribe: %v\n", err)
+		}
+	}
+	// Check number of subs
+	waitForNumSubs(t, s, clientName, 0)
+	// Make sure that array size reduced
+	client := s.clients.Lookup(clientName)
+	if client == nil {
+		t.Fatal("Client should exist")
+	}
+	client.RLock()
+	defer client.RUnlock()
+	if cap(client.subs) >= nsubs {
+		t.Fatalf("Expected array capacity to have gone down, got %v", len(client.subs))
 	}
 }
