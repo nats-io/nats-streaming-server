@@ -415,7 +415,7 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	}
 
 	// Now check that any new addition would be rejected
-	if _, _, err := fs.LookupOrCreateChannel("new.channel"); err == nil {
+	if _, err := fs.CreateChannel("new.channel", nil); err == nil {
 		t.Fatal("Expected trying to create a new channel to fail")
 	}
 	channelOne := fs.LookupChannel("channel.1")
@@ -779,7 +779,10 @@ func TestFSUpdatedSub(t *testing.T) {
 	storeSubPending(t, fs, "foo", subID, m1.Sequence, m2.Sequence)
 
 	// Update the subscription
-	cs, _, _ := fs.LookupOrCreateChannel("foo")
+	cs := fs.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel foo should exist")
+	}
 	ss := cs.Subs
 	updatedSub := &spb.SubState{
 		ID:            subID,

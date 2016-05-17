@@ -176,26 +176,31 @@ type subState struct {
 
 // Looks up, or create a new channel if it does not exist
 func (s *StanServer) lookupOrCreateChannel(channel string) (*stores.ChannelStore, error) {
-	cs, isNew, err := s.store.LookupOrCreateChannel(channel)
-	if err != nil {
-		return nil, err
-	}
-	if isNew {
-		s.addNewSubStoreToChannel(cs)
+	cs := s.store.LookupChannel(channel)
+	if cs == nil {
+		var err error
+		ss := createSubStore()
+		cs, err = s.store.CreateChannel(channel, ss)
+		if err != nil {
+			if err == stores.ErrAlreadyExists {
+				// Another go-routine got there first and created the channel.
+				// This is ok, return the existing one.
+				return s.store.LookupChannel(channel), nil
+			}
+			return nil, err
+		}
 	}
 	return cs, nil
 }
 
-// addNewSubStoreToChannel binds a new instance of `subStore` to the store's Channel.
-func (s *StanServer) addNewSubStoreToChannel(cs *stores.ChannelStore) *subStore {
+// createSubStore creates a new instance of `subStore`.
+func createSubStore() *subStore {
 	subs := &subStore{
 		psubs:    make([]*subState, 0, 4),
 		qsubs:    make(map[string]*queueState),
 		durables: make(map[string]*subState),
 		acks:     make(map[string]*subState),
 	}
-	// Keep a reference to the subStore in the ChannelStore.
-	cs.UserData = subs
 	return subs
 }
 
@@ -567,7 +572,9 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 		// Lookup the ChannelStore from the store
 		channel := s.store.LookupChannel(channelName)
 		// Create the subStore for this channel
-		ss := s.addNewSubStoreToChannel(channel)
+		ss := createSubStore()
+		// Set it into the channel store
+		channel.UserData = ss
 		// Get the recovered subscriptions for this channel.
 		for _, recSub := range recoveredSubs {
 			// Create a subState

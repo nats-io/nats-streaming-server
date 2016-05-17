@@ -413,34 +413,26 @@ func (fs *FileStore) recoverServerInfo() (*spb.ServerInfo, error) {
 	return info, nil
 }
 
-// LookupOrCreateChannel returns a ChannelStore for the given channel,
-// creates one if no such channel exists. In this case, the returned
-// boolean will be true.
-func (fs *FileStore) LookupOrCreateChannel(channel string) (*ChannelStore, bool, error) {
-	channelStore := fs.LookupChannel(channel)
-	if channelStore != nil {
-		return channelStore, false, nil
-	}
-
-	// Two "threads" could make this call and end-up deciding to create the
-	// channel. So we need to test again, this time under the write lock.
+// CreateChannel creates a ChannelStore for the given channel, or returns
+// an error if one already exists.
+func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, error) {
 	fs.Lock()
 	defer fs.Unlock()
-	channelStore = fs.channels[channel]
+	channelStore := fs.channels[channel]
 	if channelStore != nil {
-		return channelStore, false, nil
+		return nil, ErrAlreadyExists
 	}
 
 	// Check for limits
 	if err := fs.canAddChannel(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	// We create the channel here...
 
 	channelDirName := filepath.Join(fs.rootDir, channel)
 	if err := os.MkdirAll(channelDirName, os.ModeDir+os.ModePerm); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	var err error
@@ -449,22 +441,23 @@ func (fs *FileStore) LookupOrCreateChannel(channel string) (*ChannelStore, bool,
 
 	msgStore, err = newFileMsgStore(channelDirName, channel, fs.limits, false)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	subStore, _, err = newFileSubStore(channelDirName, channel, fs.limits, false)
 	if err != nil {
 		msgStore.Close()
-		return nil, false, err
+		return nil, err
 	}
 
 	channelStore = &ChannelStore{
-		Subs: subStore,
-		Msgs: msgStore,
+		Subs:     subStore,
+		Msgs:     msgStore,
+		UserData: userData,
 	}
 
 	fs.channels[channel] = channelStore
 
-	return channelStore, true, nil
+	return channelStore, nil
 }
 
 // AddClient stores information about the client identified by `clientID`.
