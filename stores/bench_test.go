@@ -63,7 +63,6 @@ func BenchmarkRecoverMsgs(b *testing.B) {
 
 	// Measure recovery
 	b.N = count
-	b.ReportAllocs()
 	b.StartTimer()
 	s = benchCreateDefaultFileStore(b)
 	b.StopTimer()
@@ -125,7 +124,6 @@ func BenchmarkRecoverSubs(b *testing.B) {
 
 	// Measure recovery
 	b.N = count * numSubs
-	b.ReportAllocs()
 	b.StartTimer()
 	s, state, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
 	b.StopTimer()

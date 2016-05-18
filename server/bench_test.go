@@ -46,7 +46,6 @@ func BenchmarkPublish(b *testing.B) {
 	hw := []byte("Hello World")
 
 	b.StartTimer()
-	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
 		if err := sc.Publish("foo", hw); err != nil {
@@ -83,7 +82,6 @@ func BenchmarkPublishAsync(b *testing.B) {
 		}
 	}
 	b.StartTimer()
-	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
 		if _, err := sc.PublishAsync("foo", hw, ah); err != nil {
@@ -140,7 +138,6 @@ func BenchmarkSubscribe(b *testing.B) {
 	received := int32(0)
 
 	b.StartTimer()
-	b.ReportAllocs()
 
 	sc.Subscribe("foo", func(m *stan.Msg) {
 		if nr := atomic.AddInt32(&received, 1); nr >= int32(b.N) {
@@ -198,7 +195,6 @@ func BenchmarkQueueSubscribe(b *testing.B) {
 	received := int32(0)
 
 	b.StartTimer()
-	b.ReportAllocs()
 
 	mcb := func(m *stan.Msg) {
 		if nr := atomic.AddInt32(&received, 1); nr >= int32(b.N) {
@@ -251,7 +247,6 @@ func BenchmarkPublishSubscribe(b *testing.B) {
 	}
 
 	b.StartTimer()
-	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
 		_, err := sc.PublishAsync("foo", hw, func(guid string, err error) {
