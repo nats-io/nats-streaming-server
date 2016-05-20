@@ -296,8 +296,6 @@ func (ss *subStore) Remove(sub *subState, force bool) {
 	}
 
 	ss.Lock()
-	defer ss.Unlock()
-
 	// Delete from ackInbox lookup.
 	delete(ss.acks, ackInbox)
 
@@ -312,21 +310,23 @@ func (ss *subStore) Remove(sub *subState, force bool) {
 	} else {
 		ss.psubs, _ = sub.deleteFromList(ss.psubs)
 	}
+	ss.Unlock()
 }
 
 // Lookup by durable name.
 func (ss *subStore) LookupByDurable(durableName string) *subState {
 	ss.RLock()
-	defer ss.RUnlock()
 	sub := ss.durables[durableName]
+	ss.RUnlock()
 	return sub
 }
 
 // Lookup by ackInbox name.
 func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 	ss.RLock()
-	defer ss.RUnlock()
-	return ss.acks[ackInbox]
+	sub := ss.acks[ackInbox]
+	ss.RUnlock()
+	return sub
 }
 
 // Options for STAN Server
@@ -1075,8 +1075,6 @@ func (s *StanServer) processMsg(cs *stores.ChannelStore) {
 
 	// Since we iterate through them all.
 	ss.RLock()
-	defer ss.RUnlock()
-
 	// Walk the plain subscribers and deliver to each one
 	for _, sub := range ss.psubs {
 		s.sendAvailableMessages(cs, sub)
@@ -1086,6 +1084,7 @@ func (s *StanServer) processMsg(cs *stores.ChannelStore) {
 	for _, qs := range ss.qsubs {
 		s.sendAvailableMessagesToQueue(cs, qs)
 	}
+	ss.RUnlock()
 }
 
 // Used for sorting by sequence
@@ -1815,8 +1814,6 @@ func (s *StanServer) sendAvailableMessagesToQueue(cs *stores.ChannelStore, qs *q
 	}
 
 	qs.Lock()
-	defer qs.Unlock()
-
 	for nextSeq := qs.lastSent + 1; ; nextSeq++ {
 		nextMsg := cs.Msgs.Lookup(nextSeq)
 		if nextMsg == nil {
@@ -1826,19 +1823,19 @@ func (s *StanServer) sendAvailableMessagesToQueue(cs *stores.ChannelStore, qs *q
 			break
 		}
 	}
+	qs.Unlock()
 }
 
 // Send any messages that are ready to be sent that have been queued.
 func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subState) {
 	sub.Lock()
-	defer sub.Unlock()
-
 	for nextSeq := sub.LastSent + 1; ; nextSeq++ {
 		nextMsg := cs.Msgs.Lookup(nextSeq)
 		if nextMsg == nil || s.sendMsgToSub(sub, nextMsg, honorMaxInFlight) == false {
 			break
 		}
 	}
+	sub.Unlock()
 }
 
 // Check if a startTime is valid.
@@ -1871,7 +1868,6 @@ func (s *StanServer) getSequenceFromStartTime(cs *stores.ChannelStore, startTime
 // Setup the start position for the subscriber.
 func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState, sr *pb.SubscriptionRequest) {
 	sub.Lock()
-	defer sub.Unlock()
 
 	lastSent := uint64(0)
 
@@ -1913,6 +1909,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 			sub.ClientID, sub.subject, lastSent)
 	}
 	sub.LastSent = lastSent
+	sub.Unlock()
 }
 
 // ClusterID returns the STAN Server's ID.

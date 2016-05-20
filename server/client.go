@@ -28,17 +28,16 @@ type client struct {
 // Track subscriptions
 func (c *client) addSub(sub *subState) {
 	c.Lock()
-	defer c.Unlock()
 	c.subs = append(c.subs, sub)
+	c.Unlock()
 }
 
 // Remove a subscription
 func (c *client) removeSub(sub *subState) bool {
 	c.Lock()
-	defer c.Unlock()
-
 	removed := false
 	c.subs, removed = sub.deleteFromList(c.subs)
+	c.Unlock()
 	return removed
 }
 
@@ -78,7 +77,6 @@ func (cs *clientStore) Register(ID, hbInbox string) (c *client, isNew bool, err 
 // Unregister a client
 func (cs *clientStore) Unregister(ID string) {
 	cs.Lock()
-	defer cs.Unlock()
 	client := cs.clients[ID]
 	if client != nil {
 		client.subs = nil
@@ -87,7 +85,7 @@ func (cs *clientStore) Unregister(ID string) {
 			cs.store.DeleteClient(ID)
 		}
 	}
-
+	cs.Unlock()
 }
 
 // Check validity of a client.
@@ -98,19 +96,19 @@ func (s *StanServer) isValidClient(ID string) bool {
 // Lookup a client
 func (cs *clientStore) Lookup(ID string) *client {
 	cs.RLock()
-	defer cs.RUnlock()
-	return cs.clients[ID]
+	c := cs.clients[ID]
+	cs.RUnlock()
+	return c
 }
 
 // GetClients returns the list of clients
 func (cs *clientStore) GetClients() []*client {
 	cs.RLock()
-	defer cs.RUnlock()
-
 	clients := make([]*client, 0, len(cs.clients))
 	for _, c := range cs.clients {
 		clients = append(clients, c)
 	}
+	cs.RUnlock()
 	return clients
 }
 
@@ -136,11 +134,12 @@ func (cs *clientStore) GetSubs(ID string) []*subState {
 // added and nil is returned.
 func (cs *clientStore) AddSub(ID string, sub *subState) *client {
 	cs.RLock()
-	defer cs.RUnlock()
 	if c := cs.clients[ID]; c != nil {
 		c.addSub(sub)
+		cs.RUnlock()
 		return c
 	}
+	cs.RUnlock()
 	return nil
 }
 
@@ -149,13 +148,15 @@ func (cs *clientStore) AddSub(ID string, sub *subState) *client {
 // not removed and nil is returned.
 func (cs *clientStore) RemoveSub(ID string, sub *subState) *client {
 	cs.RLock()
-	defer cs.RUnlock()
 	if c := cs.clients[ID]; c != nil {
 		if !c.removeSub(sub) {
+			cs.RUnlock()
 			return nil
 		}
+		cs.RUnlock()
 		return c
 	}
+	cs.RUnlock()
 	return nil
 }
 
