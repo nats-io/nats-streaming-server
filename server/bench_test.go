@@ -90,13 +90,14 @@ func BenchmarkPublishAsync(b *testing.B) {
 	}
 
 	err := WaitTime(ch, 10*time.Second)
+
+	b.StopTimer()
+
 	if err != nil {
 		b.Fatal("Timed out waiting for ack messages")
 	} else if atomic.LoadInt32(&received) != int32(b.N) {
 		b.Fatalf("Received: %d", received)
 	}
-
-	b.StopTimer()
 }
 
 func BenchmarkSubscribe(b *testing.B) {
@@ -146,14 +147,15 @@ func BenchmarkSubscribe(b *testing.B) {
 	}, stan.DeliverAllAvailable())
 
 	err := WaitTime(ch, 10*time.Second)
+
+	b.StopTimer()
+
 	nr := atomic.LoadInt32(&received)
 	if err != nil {
 		b.Fatalf("Timed out waiting for messages, received only %d of %d\n", nr, b.N)
 	} else if nr != int32(b.N) {
 		b.Fatalf("Only Received: %d of %d", received, b.N)
 	}
-
-	b.StopTimer()
 }
 
 func BenchmarkQueueSubscribe(b *testing.B) {
@@ -194,13 +196,13 @@ func BenchmarkQueueSubscribe(b *testing.B) {
 	ch := make(chan bool)
 	received := int32(0)
 
-	b.StartTimer()
-
 	mcb := func(m *stan.Msg) {
 		if nr := atomic.AddInt32(&received, 1); nr >= int32(b.N) {
 			ch <- true
 		}
 	}
+
+	b.StartTimer()
 
 	sc.QueueSubscribe("foo", "bar", mcb, stan.DeliverAllAvailable())
 	sc.QueueSubscribe("foo", "bar", mcb, stan.DeliverAllAvailable())
@@ -208,14 +210,15 @@ func BenchmarkQueueSubscribe(b *testing.B) {
 	sc.QueueSubscribe("foo", "bar", mcb, stan.DeliverAllAvailable())
 
 	err := WaitTime(ch, 20*time.Second)
+
+	b.StopTimer()
+
 	nr := atomic.LoadInt32(&received)
 	if err != nil {
 		b.Fatalf("Timed out waiting for messages, received only %d of %d\n", nr, b.N)
 	} else if nr != int32(b.N) {
 		b.Fatalf("Only Received: %d of %d", received, b.N)
 	}
-
-	b.StopTimer()
 }
 
 func BenchmarkPublishSubscribe(b *testing.B) {
@@ -260,14 +263,15 @@ func BenchmarkPublishSubscribe(b *testing.B) {
 	}
 
 	err = WaitTime(ch, 30*time.Second)
+
+	b.StopTimer()
+
 	nr := atomic.LoadInt32(&received)
 	if err != nil {
 		b.Fatalf("Timed out waiting for messages, received only %d of %d\n", nr, b.N)
 	} else if nr != int32(b.N) {
 		b.Fatalf("Only Received: %d of %d", received, b.N)
 	}
-
-	b.StopTimer()
 }
 
 func TestMain(m *testing.M) {
