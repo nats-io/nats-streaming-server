@@ -74,24 +74,24 @@ func (gs *genericStore) Name() string {
 // SetChannelLimits sets the limit for the messages and subscriptions stores.
 func (gs *genericStore) SetChannelLimits(limits ChannelLimits) {
 	gs.Lock()
-	defer gs.Unlock()
 	gs.limits = limits
+	gs.Unlock()
 }
 
 // LookupChannel returns a ChannelStore for the given channel.
 func (gs *genericStore) LookupChannel(channel string) *ChannelStore {
 	gs.RLock()
-	defer gs.RUnlock()
-
-	return gs.channels[channel]
+	cs := gs.channels[channel]
+	gs.RUnlock()
+	return cs
 }
 
 // HasChannel returns true if this store has any channel
 func (gs *genericStore) HasChannel() bool {
 	gs.RLock()
-	defer gs.RUnlock()
-
-	return len(gs.channels) > 0
+	l := len(gs.channels)
+	gs.RUnlock()
+	return l > 0
 }
 
 // State returns message store statistics for a given channel ('*' for all)
@@ -191,51 +191,57 @@ func (gms *genericMsgStore) init(subject string, limits ChannelLimits) {
 // State returns some statistics related to this store
 func (gms *genericMsgStore) State() (numMessages int, byteSize uint64, err error) {
 	gms.RLock()
-	defer gms.RUnlock()
-
-	return gms.totalCount, gms.totalBytes, nil
+	c, b := gms.totalCount, gms.totalBytes
+	gms.RUnlock()
+	return c, b, nil
 }
 
 // FirstSequence returns sequence for first message stored.
 func (gms *genericMsgStore) FirstSequence() uint64 {
 	gms.RLock()
-	defer gms.RUnlock()
-	return gms.first
+	first := gms.first
+	gms.RUnlock()
+	return first
 }
 
 // LastSequence returns sequence for last message stored.
 func (gms *genericMsgStore) LastSequence() uint64 {
 	gms.RLock()
-	defer gms.RUnlock()
-	return gms.last
+	last := gms.last
+	gms.RUnlock()
+	return last
 }
 
 // FirstAndLastSequence returns sequences for the first and last messages stored.
 func (gms *genericMsgStore) FirstAndLastSequence() (uint64, uint64) {
 	gms.RLock()
-	defer gms.RUnlock()
-	return gms.first, gms.last
+	first, last := gms.first, gms.last
+	gms.RUnlock()
+	return first, last
 }
 
 // Lookup returns the stored message with given sequence number.
 func (gms *genericMsgStore) Lookup(seq uint64) *pb.MsgProto {
 	gms.RLock()
-	defer gms.RUnlock()
-	return gms.msgs[seq]
+	m := gms.msgs[seq]
+	gms.RUnlock()
+	return m
 }
 
 // FirstMsg returns the first message stored.
 func (gms *genericMsgStore) FirstMsg() *pb.MsgProto {
 	gms.RLock()
-	defer gms.RUnlock()
-	return gms.msgs[gms.first]
+	m := gms.msgs[gms.first]
+	gms.RUnlock()
+	return m
 }
 
 // LastMsg returns the last message stored.
 func (gms *genericMsgStore) LastMsg() *pb.MsgProto {
 	gms.RLock()
-	defer gms.RUnlock()
-	return gms.msgs[gms.last]
+	m := gms.msgs[gms.last]
+	gms.RUnlock()
+	return m
 }
 
 // GetSequenceFromTimestamp returns the sequence of the first message whose
@@ -275,9 +281,9 @@ func (gss *genericSubStore) init(channel string, limits ChannelLimits) {
 // by the other SubStore methods.
 func (gss *genericSubStore) CreateSub(sub *spb.SubState) error {
 	gss.Lock()
-	defer gss.Unlock()
-
-	return gss.createSub(sub)
+	err := gss.createSub(sub)
+	gss.Unlock()
+	return err
 }
 
 // UpdateSub updates a given subscription represented by SubState.
@@ -305,9 +311,8 @@ func (gss *genericSubStore) createSub(sub *spb.SubState) error {
 // DeleteSub invalidates this subscription.
 func (gss *genericSubStore) DeleteSub(subid uint64) {
 	gss.Lock()
-	defer gss.Unlock()
-
 	gss.subsCount--
+	gss.Unlock()
 }
 
 // AddSeqPending adds the given message seqno to the given subscription.

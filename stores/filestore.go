@@ -83,6 +83,8 @@ type FileSubStore struct {
 	genericSubStore
 	tmpSubBuf []byte
 	file      *os.File
+	delSub    spb.SubStateDelete
+	updateSub spb.SubStateUpdate
 }
 
 // fileSlice represents one of the message store file (there are a number
@@ -896,10 +898,6 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 
 	var err error
 	var recType subRecordType
-	var newSub *spb.SubState
-	var modifiedSub *spb.SubState
-	var delSub *spb.SubStateDelete
-	var updateSub *spb.SubStateUpdate
 
 	recHeader := 0
 	recSize := 0
@@ -934,7 +932,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 		// Based on record type...
 		switch recType {
 		case subRecNew:
-			newSub = &spb.SubState{}
+			newSub := &spb.SubState{}
 			if err := newSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
 				return nil, err
 			}
@@ -951,7 +949,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 			}
 			break
 		case subRecUpdate:
-			modifiedSub = &spb.SubState{}
+			modifiedSub := &spb.SubState{}
 			if err := modifiedSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
 				return nil, err
 			}
@@ -972,7 +970,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 			}
 			break
 		case subRecDel:
-			delSub = &spb.SubStateDelete{}
+			delSub := spb.SubStateDelete{}
 			if err := delSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
 				return nil, err
 			}
@@ -987,7 +985,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 			}
 			break
 		case subRecMsg:
-			updateSub = &spb.SubStateUpdate{}
+			updateSub := spb.SubStateUpdate{}
 			if err := updateSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
 				return nil, err
 			}
@@ -1002,7 +1000,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 			}
 			break
 		case subRecAck:
-			updateSub = &spb.SubStateUpdate{}
+			updateSub := spb.SubStateUpdate{}
 			if err := updateSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
 				return nil, err
 			}
@@ -1046,21 +1044,16 @@ func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 // DeleteSub invalidates this subscription.
 func (ss *FileSubStore) DeleteSub(subid uint64) {
 	ss.Lock()
-	del := &spb.SubStateDelete{
-		ID: subid,
-	}
-	ss.writeRecord(subRecDel, del)
+	ss.delSub.ID = subid
+	ss.writeRecord(subRecDel, &ss.delSub)
 	ss.Unlock()
 }
 
 // AddSeqPending adds the given message seqno to the given subscription.
 func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 	ss.Lock()
-	update := &spb.SubStateUpdate{
-		ID:    subid,
-		Seqno: seqno,
-	}
-	err := ss.writeRecord(subRecMsg, update)
+	ss.updateSub.ID, ss.updateSub.Seqno = subid, seqno
+	err := ss.writeRecord(subRecMsg, &ss.updateSub)
 	ss.Unlock()
 	return err
 }
@@ -1069,11 +1062,8 @@ func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 // by the given subscription.
 func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
 	ss.Lock()
-	update := &spb.SubStateUpdate{
-		ID:    subid,
-		Seqno: seqno,
-	}
-	err := ss.writeRecord(subRecAck, update)
+	ss.updateSub.ID, ss.updateSub.Seqno = subid, seqno
+	err := ss.writeRecord(subRecAck, &ss.updateSub)
 	ss.Unlock()
 	return err
 }
