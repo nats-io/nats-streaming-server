@@ -186,7 +186,7 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 	var err error
 	var recoveredState *RecoveredState
 	var serverInfo *spb.ServerInfo
-	var recoveredClients []*RecoveredClient
+	var recoveredClients []*Client
 	var recoveredSubs = make(RecoveredSubscriptions)
 	var channels []os.FileInfo
 	var msgStore *FileMsgStore
@@ -332,9 +332,7 @@ func (fs *FileStore) Init(info *spb.ServerInfo) error {
 }
 
 // recoverClients reads the client files and returns an array of RecoveredClient
-func (fs *FileStore) recoverClients() ([]*RecoveredClient, error) {
-	clientsMap := make(map[string]*RecoveredClient)
-
+func (fs *FileStore) recoverClients() ([]*Client, error) {
 	var err error
 	var action, clientID, hbInbox string
 
@@ -350,15 +348,15 @@ func (fs *FileStore) recoverClients() ([]*RecoveredClient, error) {
 			if hbInbox == "" {
 				return nil, fmt.Errorf("missing client heartbeat inbox in ADD client instruction")
 			}
-			c := &RecoveredClient{ClientID: clientID, HbInbox: hbInbox}
+			c := &Client{ClientID: clientID, HbInbox: hbInbox}
 			// Add to the map. Note that if one already exists, which should
 			// not, just replace with this most recent one.
-			clientsMap[clientID] = c
+			fs.clients[clientID] = c
 		case delClient:
 			if clientID == "" {
 				return nil, fmt.Errorf("missing client ID in DELETE client instruction")
 			}
-			delete(clientsMap, clientID)
+			delete(fs.clients, clientID)
 		default:
 			return nil, fmt.Errorf("invalid client action %q", action)
 		}
@@ -367,10 +365,10 @@ func (fs *FileStore) recoverClients() ([]*RecoveredClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	clients := make([]*RecoveredClient, len(clientsMap))
+	clients := make([]*Client, len(fs.clients))
 	i := 0
 	// Convert the map into an array
-	for _, c := range clientsMap {
+	for _, c := range fs.clients {
 		clients[i] = c
 		i++
 	}
@@ -463,22 +461,31 @@ func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*Chann
 }
 
 // AddClient stores information about the client identified by `clientID`.
-func (fs *FileStore) AddClient(clientID, hbInbox string) error {
+func (fs *FileStore) AddClient(clientID, hbInbox string, userData interface{}) (*Client, error) {
+	sc, err := fs.genericStore.AddClient(clientID, hbInbox, userData)
+	if err != nil {
+		return sc, err
+	}
 	line := fmt.Sprintf("%s %s %s\r\n", addClient, clientID, hbInbox)
 	fs.Lock()
-	defer fs.Unlock()
 	if _, err := fs.clientsFile.WriteString(line); err != nil {
-		return err
+		fs.Unlock()
+		return nil, err
 	}
-	return nil
+	fs.Unlock()
+	return sc, nil
 }
 
 // DeleteClient invalidates the client identified by `clientID`.
-func (fs *FileStore) DeleteClient(clientID string) {
-	line := fmt.Sprintf("%s %s\r\n", delClient, clientID)
-	fs.Lock()
-	defer fs.Unlock()
-	fs.clientsFile.WriteString(line)
+func (fs *FileStore) DeleteClient(clientID string) *Client {
+	sc := fs.genericStore.DeleteClient(clientID)
+	if sc != nil {
+		line := fmt.Sprintf("%s %s\r\n", delClient, clientID)
+		fs.Lock()
+		fs.clientsFile.WriteString(line)
+		fs.Unlock()
+	}
+	return sc
 }
 
 // Close closes all stores.

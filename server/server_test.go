@@ -110,11 +110,7 @@ func waitForNumClients(t tLogger, s *StanServer, expected int) {
 
 // Helper function that returns the number of clients
 func getClientsCountFunc(s *StanServer) (string, int) {
-	// We avoid getting a copy of the clients map here by directly
-	// returning the length of the array.
-	s.clients.RLock()
-	defer s.clients.RUnlock()
-	return "clients", len(s.clients.clients)
+	return "clients", s.store.GetClientsCount()
 }
 
 // Helper function that fails if number of subscriptions is not as expected
@@ -132,9 +128,7 @@ func waitForNumSubs(t tLogger, s *StanServer, ID string, expected int) {
 	waitForCount(t, expected, func() (string, int) {
 		// We avoid getting a copy of the subscriptions array here
 		// by directly returning the length of the array.
-		s.clients.RLock()
-		defer s.clients.RUnlock()
-		c := s.clients.clients[ID]
+		c := s.clients.Lookup(ID)
 		c.RLock()
 		defer c.RUnlock()
 		return "subscriptions", len(c.subs)
@@ -2525,11 +2519,11 @@ func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
 	s.hbTimeout = 10 * time.Millisecond
 	s.maxFailedHB = 2
 	// Tweak their hbTimer interval to make the test short
-	clients := s.clients.GetClients()
-	for _, c := range clients {
+	clients := s.store.GetClients()
+	for cID, sc := range clients {
+		c := sc.UserData.(*client)
 		c.Lock()
 		if c.hbt == nil {
-			cID := c.clientID
 			c.Unlock()
 			t.Fatalf("HeartBeat Timer of client %q should have been set", cID)
 		}

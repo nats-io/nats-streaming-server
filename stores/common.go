@@ -22,6 +22,7 @@ type genericStore struct {
 	commonStore
 	name     string
 	channels map[string]*ChannelStore
+	clients  map[string]*Client
 }
 
 // genericSubStore is the generic store implementation that manages subscriptions
@@ -58,7 +59,8 @@ func (gs *genericStore) init(name string, limits *ChannelLimits) {
 		gs.limits = *limits
 	}
 	// Do not use limits values to create the map.
-	gs.channels = make(map[string]*ChannelStore, 16)
+	gs.channels = make(map[string]*ChannelStore)
+	gs.clients = make(map[string]*Client)
 }
 
 // Init can be used to initialize the store with server's information.
@@ -133,14 +135,55 @@ func (gs *genericStore) canAddChannel() error {
 }
 
 // AddClient stores information about the client identified by `clientID`.
-func (gs *genericStore) AddClient(clientID, hbInbox string) error {
-	// no-op
-	return nil
+func (gs *genericStore) AddClient(clientID, hbInbox string, userData interface{}) (*Client, error) {
+	c := &Client{ClientID: clientID, HbInbox: hbInbox, UserData: userData}
+	gs.Lock()
+	oldClient := gs.clients[clientID]
+	if oldClient != nil {
+		gs.Unlock()
+		return oldClient, ErrAlreadyExists
+	}
+	gs.clients[c.ClientID] = c
+	gs.Unlock()
+	return c, nil
+}
+
+// GetClient returns the stored Client, or nil if it does not exist.
+func (gs *genericStore) GetClient(clientID string) *Client {
+	gs.RLock()
+	c := gs.clients[clientID]
+	gs.RUnlock()
+	return c
+}
+
+// GetClients returns all stored Client objects, as a map keyed by client IDs.
+func (gs *genericStore) GetClients() map[string]*Client {
+	gs.RLock()
+	clients := make(map[string]*Client, len(gs.clients))
+	for k, v := range gs.clients {
+		clients[k] = v
+	}
+	gs.RUnlock()
+	return clients
+}
+
+// GetClientsCount returns the number of registered clients
+func (gs *genericStore) GetClientsCount() int {
+	gs.RLock()
+	count := len(gs.clients)
+	gs.RUnlock()
+	return count
 }
 
 // DeleteClient deletes the client identified by `clientID`.
-func (gs *genericStore) DeleteClient(clientID string) {
-	// no-op
+func (gs *genericStore) DeleteClient(clientID string) *Client {
+	gs.Lock()
+	c := gs.clients[clientID]
+	if c != nil {
+		delete(gs.clients, clientID)
+	}
+	gs.Unlock()
+	return c
 }
 
 // Close closes all stores
