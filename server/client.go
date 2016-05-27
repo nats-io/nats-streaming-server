@@ -24,11 +24,11 @@ type client struct {
 }
 
 // Register a client if new, otherwise returns the client already registered
-// and 'isNew' is set to false.
-func (cs *clientStore) Register(ID, hbInbox string) (sc *stores.Client, isNew bool, err error) {
+// and `false` to indicate that the client is not new.
+func (cs *clientStore) Register(ID, hbInbox string) (*stores.Client, bool, error) {
 	// Will be gc'ed if we fail to register, that's ok.
 	c := &client{subs: make([]*subState, 0, 4)}
-	sc, err = cs.store.AddClient(ID, hbInbox, c)
+	sc, err := cs.store.AddClient(ID, hbInbox, c)
 	if err != nil {
 		// If already exists, return the old client and isNew as false.
 		if err == stores.ErrAlreadyExists {
