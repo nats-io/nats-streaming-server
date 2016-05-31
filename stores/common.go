@@ -135,17 +135,17 @@ func (gs *genericStore) canAddChannel() error {
 }
 
 // AddClient stores information about the client identified by `clientID`.
-func (gs *genericStore) AddClient(clientID, hbInbox string, userData interface{}) (*Client, error) {
+func (gs *genericStore) AddClient(clientID, hbInbox string, userData interface{}) (*Client, bool, error) {
 	c := &Client{ClientID: clientID, HbInbox: hbInbox, UserData: userData}
 	gs.Lock()
 	oldClient := gs.clients[clientID]
 	if oldClient != nil {
 		gs.Unlock()
-		return oldClient, ErrAlreadyExists
+		return oldClient, false, nil
 	}
 	gs.clients[c.ClientID] = c
 	gs.Unlock()
-	return c, nil
+	return c, true, nil
 }
 
 // GetClient returns the stored Client, or nil if it does not exist.

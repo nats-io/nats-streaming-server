@@ -132,8 +132,9 @@ type Store interface {
 
 	// AddClient stores information about the client identified by `clientID`.
 	// If a Client is already registered, this call returns the currently
-	// registered Client object, along with the ErrAlreadyExists error.
-	AddClient(clientID, hbInbox string, userData interface{}) (*Client, error)
+	// registered Client object, and the boolean set to false to indicate
+	// that the client is not new.
+	AddClient(clientID, hbInbox string, userData interface{}) (*Client, bool, error)
 
 	// GetClient returns the stored Client, or nil if it does not exist.
 	GetClient(clientID string) *Client

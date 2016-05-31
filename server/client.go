@@ -28,15 +28,11 @@ type client struct {
 func (cs *clientStore) Register(ID, hbInbox string) (*stores.Client, bool, error) {
 	// Will be gc'ed if we fail to register, that's ok.
 	c := &client{subs: make([]*subState, 0, 4)}
-	sc, err := cs.store.AddClient(ID, hbInbox, c)
+	sc, isNew, err := cs.store.AddClient(ID, hbInbox, c)
 	if err != nil {
-		// If already exists, return the old client and isNew as false.
-		if err == stores.ErrAlreadyExists {
-			return sc, false, nil
-		}
 		return nil, false, err
 	}
-	return sc, true, nil
+	return sc, isNew, nil
 }
 
 // Unregister a client.

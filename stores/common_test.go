@@ -467,26 +467,28 @@ func testClientAPIs(t *testing.T, s Store) {
 	s.DeleteClient("client2")
 
 	// Adding it after the delete
-	sc, err := s.AddClient("client2", "hbInbox", nil)
+	sc, _, err := s.AddClient("client2", "hbInbox", nil)
 	if err != nil {
 		t.Fatalf("Unexpected error adding client: %v", err)
 	}
-	// Adding it another time should return the first and ErrAlreadyExists
-	if sc2, err := s.AddClient("client2", "hbInbox", nil); err != ErrAlreadyExists {
-		t.Fatalf("Should have gotten %v, got %v", ErrAlreadyExists, err)
+	// Adding it another time should return the first and isNew false
+	if sc2, isNew, err := s.AddClient("client2", "hbInbox", nil); err != nil {
+		t.Fatalf("Unexpected error on add client: %v", err)
+	} else if isNew {
+		t.Fatal("isNew should be false")
 	} else if sc2 != sc {
 		t.Fatalf("Old client should be %v, got %v", sc, sc2)
 	}
 
 	// Add a client
 	userData := "test"
-	sc3, err := s.AddClient("client3", "hbInbox", userData)
+	sc3, _, err := s.AddClient("client3", "hbInbox", userData)
 	if err != nil {
 		t.Fatalf("Unexpected error adding client: %v", err)
 	}
 
 	// Add a client then..
-	sc, err = s.AddClient("client4", "hbInbox", nil)
+	sc, _, err = s.AddClient("client4", "hbInbox", nil)
 	if err != nil {
 		t.Fatalf("Unexpected error adding client: %v", err)
 	}

@@ -461,19 +461,22 @@ func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*Chann
 }
 
 // AddClient stores information about the client identified by `clientID`.
-func (fs *FileStore) AddClient(clientID, hbInbox string, userData interface{}) (*Client, error) {
-	sc, err := fs.genericStore.AddClient(clientID, hbInbox, userData)
+func (fs *FileStore) AddClient(clientID, hbInbox string, userData interface{}) (*Client, bool, error) {
+	sc, isNew, err := fs.genericStore.AddClient(clientID, hbInbox, userData)
 	if err != nil {
-		return sc, err
+		return nil, false, err
+	}
+	if !isNew {
+		return sc, false, nil
 	}
 	line := fmt.Sprintf("%s %s %s\r\n", addClient, clientID, hbInbox)
 	fs.Lock()
 	if _, err := fs.clientsFile.WriteString(line); err != nil {
 		fs.Unlock()
-		return nil, err
+		return nil, false, err
 	}
 	fs.Unlock()
-	return sc, nil
+	return sc, true, nil
 }
 
 // DeleteClient invalidates the client identified by `clientID`.
