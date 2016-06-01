@@ -904,14 +904,14 @@ func TestFSBadClientFile(t *testing.T) {
 	}
 }
 
-func TestFSAddDeleteClient(t *testing.T) {
+func TestFSClientAPIs(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
-	testAddDeleteClient(t, fs)
+	testClientAPIs(t, fs)
 
 	// Restart the store
 	fs.Close()

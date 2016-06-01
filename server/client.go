@@ -8,117 +8,63 @@ import (
 	"time"
 )
 
-// Hold current clients.
+// This is a proxy to the store interface.
 type clientStore struct {
-	sync.RWMutex
-	clients map[string]*client
-	store   stores.Store
+	store stores.Store
 }
 
-// Hold for client
+// client has information needed by the server. A client is also
+// stored in a stores.Client object (which contains ID and HbInbox).
 type client struct {
 	sync.RWMutex
-	clientID string
-	hbInbox  string
-	hbt      *time.Timer
-	fhb      int
-	subs     []*subState
-}
-
-// Track subscriptions
-func (c *client) addSub(sub *subState) {
-	c.Lock()
-	c.subs = append(c.subs, sub)
-	c.Unlock()
-}
-
-// Remove a subscription
-func (c *client) removeSub(sub *subState) bool {
-	c.Lock()
-	removed := false
-	c.subs, removed = sub.deleteFromList(c.subs)
-	c.Unlock()
-	return removed
+	unregistered bool
+	hbt          *time.Timer
+	fhb          int
+	subs         []*subState
 }
 
 // Register a client if new, otherwise returns the client already registered
-// and 'isNew' is set to false.
-func (cs *clientStore) Register(ID, hbInbox string) (c *client, isNew bool, err error) {
-	c = cs.Lookup(ID)
-	if c != nil {
-		return c, false, nil
+// and `false` to indicate that the client is not new.
+func (cs *clientStore) Register(ID, hbInbox string) (*stores.Client, bool, error) {
+	// Will be gc'ed if we fail to register, that's ok.
+	c := &client{subs: make([]*subState, 0, 4)}
+	sc, isNew, err := cs.store.AddClient(ID, hbInbox, c)
+	if err != nil {
+		return nil, false, err
 	}
-
-	cs.Lock()
-	defer cs.Unlock()
-	c = cs.clients[ID]
-	if c != nil {
-		return c, false, nil
-	}
-	// Create a new client here...
-	// Store the client first.
-	if cs.store != nil {
-		if err := cs.store.AddClient(ID, hbInbox); err != nil {
-			return nil, false, err
-		}
-	}
-	// Add to the map
-	c = &client{
-		clientID: ID,
-		hbInbox:  hbInbox,
-		subs:     make([]*subState, 0, 4),
-	}
-	cs.clients[c.clientID] = c
-
-	// Return the client and 'true' to indicate that the client is new.
-	return c, true, nil
+	return sc, isNew, nil
 }
 
-// Unregister a client
-func (cs *clientStore) Unregister(ID string) {
-	cs.Lock()
-	client := cs.clients[ID]
-	if client != nil {
-		client.subs = nil
-		delete(cs.clients, ID)
-		if cs.store != nil {
-			cs.store.DeleteClient(ID)
-		}
+// Unregister a client.
+func (cs *clientStore) Unregister(ID string) *stores.Client {
+	sc := cs.store.DeleteClient(ID)
+	if sc != nil {
+		c := sc.UserData.(*client)
+		c.Lock()
+		c.unregistered = true
+		c.Unlock()
 	}
-	cs.Unlock()
+	return sc
 }
 
-// Check validity of a client.
-func (s *StanServer) isValidClient(ID string) bool {
-	return s.clients.Lookup(ID) != nil
+// IsValid returns true if the client is registered, false otherwise.
+func (cs *clientStore) IsValid(ID string) bool {
+	return cs.store.GetClient(ID) != nil
 }
 
 // Lookup a client
 func (cs *clientStore) Lookup(ID string) *client {
-	cs.RLock()
-	c := cs.clients[ID]
-	cs.RUnlock()
-	return c
-}
-
-// GetClients returns the list of clients
-func (cs *clientStore) GetClients() []*client {
-	cs.RLock()
-	clients := make([]*client, 0, len(cs.clients))
-	for _, c := range cs.clients {
-		clients = append(clients, c)
+	sc := cs.store.GetClient(ID)
+	if sc != nil {
+		return sc.UserData.(*client)
 	}
-	cs.RUnlock()
-	return clients
+	return nil
 }
 
 // GetSubs returns the list of subscriptions for the client identified by ID,
 // or nil if such client is not found.
 func (cs *clientStore) GetSubs(ID string) []*subState {
-	cs.RLock()
-	defer cs.RUnlock()
-
-	c := cs.clients[ID]
+	c := cs.Lookup(ID)
 	if c == nil {
 		return nil
 	}
@@ -129,40 +75,41 @@ func (cs *clientStore) GetSubs(ID string) []*subState {
 	return subs
 }
 
-// AddSub atomically adds the subscription to the client identified by
-// clientID. If the client is not found in the list, the subscription is not
-// added and nil is returned.
-func (cs *clientStore) AddSub(ID string, sub *subState) *client {
-	cs.RLock()
-	if c := cs.clients[ID]; c != nil {
-		c.addSub(sub)
-		cs.RUnlock()
-		return c
+// AddSub adds the subscription to the client identified by clientID
+// and returns true only if the client has not been unregistered,
+// otherwise returns false.
+func (cs *clientStore) AddSub(ID string, sub *subState) bool {
+	sc := cs.store.GetClient(ID)
+	if sc == nil {
+		return false
 	}
-	cs.RUnlock()
-	return nil
+	c := sc.UserData.(*client)
+	c.Lock()
+	if c.unregistered {
+		c.Unlock()
+		return false
+	}
+	c.subs = append(c.subs, sub)
+	c.Unlock()
+	return true
 }
 
-// RemoveSub atomically removes the subscription from the client identified
-// by clientID. If the client is not found in the list, the subscription is
-// not removed and nil is returned.
-func (cs *clientStore) RemoveSub(ID string, sub *subState) *client {
-	cs.RLock()
-	if c := cs.clients[ID]; c != nil {
-		if !c.removeSub(sub) {
-			cs.RUnlock()
-			return nil
-		}
-		cs.RUnlock()
-		return c
+// RemoveSub removes the subscription from the client identified by clientID
+// and returns true only if the client has not been unregistered and that
+// the subscription was found, otherwise returns false.
+func (cs *clientStore) RemoveSub(ID string, sub *subState) bool {
+	sc := cs.store.GetClient(ID)
+	if sc == nil {
+		return false
 	}
-	cs.RUnlock()
-	return nil
-}
-
-// SetStore sets the store to be used when registering/unregistering clients.
-func (cs *clientStore) SetStore(store stores.Store) {
-	cs.Lock()
-	cs.store = store
-	cs.Unlock()
+	c := sc.UserData.(*client)
+	c.Lock()
+	if c.unregistered {
+		c.Unlock()
+		return false
+	}
+	removed := false
+	c.subs, removed = sub.deleteFromList(c.subs)
+	c.Unlock()
+	return removed
 }

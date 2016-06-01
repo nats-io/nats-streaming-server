@@ -466,7 +466,7 @@ func testGetSeqFromStartTime(t *testing.T, s Store) {
 	}
 }
 
-func testAddDeleteClient(t *testing.T, s Store) {
+func testClientAPIs(t *testing.T, s Store) {
 	// Delete client that does not exist
 	s.DeleteClient("client1")
 
@@ -474,19 +474,56 @@ func testAddDeleteClient(t *testing.T, s Store) {
 	s.DeleteClient("client2")
 
 	// Adding it after the delete
-	if err := s.AddClient("client2", "hbInbox"); err != nil {
+	sc, _, err := s.AddClient("client2", "hbInbox", nil)
+	if err != nil {
 		t.Fatalf("Unexpected error adding client: %v", err)
+	}
+	// Adding it another time should return the first and isNew false
+	if sc2, isNew, err := s.AddClient("client2", "hbInbox", nil); err != nil {
+		t.Fatalf("Unexpected error on add client: %v", err)
+	} else if isNew {
+		t.Fatal("isNew should be false")
+	} else if sc2 != sc {
+		t.Fatalf("Old client should be %v, got %v", sc, sc2)
 	}
 
 	// Add a client
-	if err := s.AddClient("client3", "hbInbox"); err != nil {
+	userData := "test"
+	sc3, _, err := s.AddClient("client3", "hbInbox", userData)
+	if err != nil {
 		t.Fatalf("Unexpected error adding client: %v", err)
 	}
 
 	// Add a client then..
-	if err := s.AddClient("client4", "hbInbox"); err != nil {
+	sc, _, err = s.AddClient("client4", "hbInbox", nil)
+	if err != nil {
 		t.Fatalf("Unexpected error adding client: %v", err)
 	}
 	// Delete it.
-	s.DeleteClient("client4")
+	if dsc := s.DeleteClient("client4"); dsc != sc {
+		t.Fatalf("Expected delete to return %v, got %v", sc, dsc)
+	}
+
+	// Try to retrieve client3
+	if gc := s.GetClient("client3"); gc != sc3 {
+		t.Fatalf("Expected %v, got %v", sc3, gc)
+	}
+	if count := s.GetClientsCount(); count != 2 {
+		t.Fatalf("Expected 2 clients, got %v", count)
+	}
+	clients := s.GetClients()
+	if len(clients) != 2 {
+		t.Fatalf("Expected 2 client, got %v", len(clients))
+	}
+	for cID, sc := range clients {
+		if cID != "client2" && cID != "client3" {
+			t.Fatalf("Unexpected CID: %v", cID)
+		}
+		if sc.HbInbox != "hbInbox" {
+			t.Fatalf("Invalid hbInbox: %v", sc.HbInbox)
+		}
+		if cID == "client3" && sc.UserData != userData {
+			t.Fatalf("Expected user data to be %v, got %v", userData, sc.UserData)
+		}
+	}
 }

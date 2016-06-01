@@ -61,14 +61,16 @@ var DefaultChannelLimits = ChannelLimits{
 // RecoveredState allows the server to reconstruct its state after a restart.
 type RecoveredState struct {
 	Info    *spb.ServerInfo
-	Clients []*RecoveredClient
+	Clients []*Client
 	Subs    RecoveredSubscriptions
 }
 
-// RecoveredClient represents a recovered Client with ID and Heartbeat Inbox
-type RecoveredClient struct {
+// Client represents a client with ID, Heartbeat Inbox and user data sets
+// when adding it to the store.
+type Client struct {
 	ClientID string
 	HbInbox  string
+	UserData interface{}
 }
 
 // RecoveredSubscriptions is a map of recovered subscriptions, keyed by channel name.
@@ -128,10 +130,26 @@ type Store interface {
 	MsgsState(channel string) (numMessages int, byteSize uint64, err error)
 
 	// AddClient stores information about the client identified by `clientID`.
-	AddClient(clientID, hbInbox string) error
+	// If a Client is already registered, this call returns the currently
+	// registered Client object, and the boolean set to false to indicate
+	// that the client is not new.
+	AddClient(clientID, hbInbox string, userData interface{}) (*Client, bool, error)
 
-	// DeleteClient invalidates the client identified by `clientID`.
-	DeleteClient(clientID string)
+	// GetClient returns the stored Client, or nil if it does not exist.
+	GetClient(clientID string) *Client
+
+	// GetClients returns a map of all stored Client objects, keyed by client IDs.
+	// The returned map is a copy of the state maintained by the store so that
+	// it is safe for the caller to walk through the map while clients may be
+	// added/deleted from the store.
+	GetClients() map[string]*Client
+
+	// GetClientsCount returns the number of registered clients.
+	GetClientsCount() int
+
+	// DeleteClient removes the client identified by `clientID` from the store
+	// and returns it to the caller.
+	DeleteClient(clientID string) *Client
 
 	// Close closes all stores.
 	Close() error
