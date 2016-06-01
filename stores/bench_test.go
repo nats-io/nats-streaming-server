@@ -48,7 +48,7 @@ func BenchmarkRecoverMsgs(b *testing.B) {
 	s := benchCreateDefaultFileStore(b)
 	defer s.Close()
 
-	cs, err := s.CreateChannel("foo", nil)
+	cs, _, err := s.CreateChannel("foo", nil)
 	if err != nil {
 		b.Fatalf("Error creating channel foo: %v", err)
 	}
@@ -90,7 +90,7 @@ func BenchmarkRecoverSubs(b *testing.B) {
 	s := benchCreateDefaultFileStore(b)
 	defer s.Close()
 
-	cs, err := s.CreateChannel("foo", nil)
+	cs, _, err := s.CreateChannel("foo", nil)
 	if err != nil {
 		b.Fatalf("Error creating channel foo: %v", err)
 	}

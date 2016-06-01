@@ -36,18 +36,18 @@ func NewMemoryStore(limits *ChannelLimits) (*MemoryStore, error) {
 	return ms, nil
 }
 
-// CreateChannel creates a ChannelStore for the given channel, or returns
-// an error if one already exists.
-func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, error) {
+// CreateChannel creates a ChannelStore for the given channel, and returns
+// `true` to indicate that the channel is new, false if it already exists.
+func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, bool, error) {
 	ms.Lock()
 	defer ms.Unlock()
 	channelStore := ms.channels[channel]
 	if channelStore != nil {
-		return nil, ErrAlreadyExists
+		return channelStore, false, nil
 	}
 
 	if err := ms.canAddChannel(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	msgStore := &MemoryMsgStore{}
@@ -64,7 +64,7 @@ func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*Cha
 
 	ms.channels[channel] = channelStore
 
-	return channelStore, nil
+	return channelStore, true, nil
 }
 
 ////////////////////////////////////////////////////////////////////////////

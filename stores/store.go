@@ -25,7 +25,6 @@ const (
 
 // Errors.
 var (
-	ErrAlreadyExists   = errors.New("already exists")
 	ErrTooManyChannels = errors.New("too many channels")
 	ErrTooManySubs     = errors.New("too many subscriptions per channel")
 )
@@ -113,9 +112,9 @@ type Store interface {
 	// to be retroactive.
 	SetChannelLimits(limits ChannelLimits)
 
-	// CreateChannel creates a ChannelStore for the given channel, or returns
-	// an error if one already exists.
-	CreateChannel(channel string, userData interface{}) (*ChannelStore, error)
+	// CreateChannel creates a ChannelStore for the given channel, and returns
+	// `true` to indicate that the channel is new, false if it already exists.
+	CreateChannel(channel string, userData interface{}) (*ChannelStore, bool, error)
 
 	// LookupChannel returns a ChannelStore for the given channel, nil if channel
 	// does not exist.

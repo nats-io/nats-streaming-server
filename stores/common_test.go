@@ -54,7 +54,7 @@ func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
 	cs := s.LookupChannel(channel)
 	if cs == nil {
 		var err error
-		cs, err = s.CreateChannel(channel, nil)
+		cs, _, err = s.CreateChannel(channel, nil)
 		if err != nil {
 			stackFatalf(t, "Error creating channel [%v]: %v", channel, err)
 		}
@@ -71,7 +71,7 @@ func storeSub(t *testing.T, s Store, channel string) uint64 {
 	cs := s.LookupChannel(channel)
 	if cs == nil {
 		var err error
-		cs, err = s.CreateChannel(channel, nil)
+		cs, _, err = s.CreateChannel(channel, nil)
 		if err != nil {
 			stackFatalf(t, "Error creating channel [%v]: %v", channel, err)
 		}
@@ -140,7 +140,7 @@ func testNothingRecoveredOnFreshStart(t *testing.T, s Store) {
 
 func testNewChannel(t *testing.T, s Store) {
 	myUserData := "test"
-	cs, err := s.CreateChannel("foo", myUserData)
+	cs, _, err := s.CreateChannel("foo", myUserData)
 	if err != nil {
 		t.Fatalf("Unexpected error creating new channel: %v", err)
 	}
@@ -162,13 +162,20 @@ func testNewChannel(t *testing.T, s Store) {
 		t.Fatalf("UserData not properly set, got %v", cs.UserData)
 	}
 	// Creating the same channel should fail
-	if _, err := s.CreateChannel("foo", nil); err == nil || err != ErrAlreadyExists {
-		t.Fatalf("Expected error %v, got %v", ErrAlreadyExists, err)
+	ncs, isNew, err := s.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if isNew {
+		t.Fatal("isNew should be false")
+	}
+	if cs != ncs {
+		t.Fatalf("Channel should exist: %v", ncs)
 	}
 }
 
 func testCloseIdempotent(t *testing.T, s Store) {
-	cs, err := s.CreateChannel("foo", nil)
+	cs, _, err := s.CreateChannel("foo", nil)
 	if err != nil {
 		t.Fatalf("Unexpected error creating new channel: %v", err)
 	}
@@ -198,7 +205,7 @@ func testCloseIdempotent(t *testing.T, s Store) {
 }
 
 func testBasicMsgStore(t *testing.T, s Store) {
-	cs, err := s.CreateChannel("foo", nil)
+	cs, _, err := s.CreateChannel("foo", nil)
 	if err != nil {
 		t.Fatalf("Failed to create channel foo: %v", err)
 	}
@@ -362,7 +369,7 @@ func testMaxChannels(t *testing.T, s Store, maxChannels int) {
 	var err error
 	numCh := 0
 	for i := 0; i < maxChannels+1; i++ {
-		_, err = s.CreateChannel(fmt.Sprintf("foo.%d", i), nil)
+		_, _, err = s.CreateChannel(fmt.Sprintf("foo.%d", i), nil)
 		if err != nil {
 			break
 		}
@@ -377,7 +384,7 @@ func testMaxChannels(t *testing.T, s Store, maxChannels int) {
 }
 
 func testMaxSubs(t *testing.T, s Store, maxSubs int) {
-	cs, err := s.CreateChannel("foo", nil)
+	cs, _, err := s.CreateChannel("foo", nil)
 	if err != nil {
 		t.Fatalf("Unexpected error creating channel: %v", err)
 	}
@@ -399,7 +406,7 @@ func testMaxSubs(t *testing.T, s Store, maxSubs int) {
 }
 
 func testBasicSubStore(t *testing.T, s Store) {
-	cs, err := s.CreateChannel("foo", nil)
+	cs, _, err := s.CreateChannel("foo", nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
