@@ -415,26 +415,26 @@ func (fs *FileStore) recoverServerInfo() (*spb.ServerInfo, error) {
 	return info, nil
 }
 
-// CreateChannel creates a ChannelStore for the given channel, or returns
-// an error if one already exists.
-func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, error) {
+// CreateChannel creates a ChannelStore for the given channel, and returns
+// `true` to indicate that the channel is new, false if it already exists.
+func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, bool, error) {
 	fs.Lock()
 	defer fs.Unlock()
 	channelStore := fs.channels[channel]
 	if channelStore != nil {
-		return nil, ErrAlreadyExists
+		return channelStore, false, nil
 	}
 
 	// Check for limits
 	if err := fs.canAddChannel(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// We create the channel here...
 
 	channelDirName := filepath.Join(fs.rootDir, channel)
 	if err := os.MkdirAll(channelDirName, os.ModeDir+os.ModePerm); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	var err error
@@ -443,12 +443,12 @@ func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*Chann
 
 	msgStore, err = newFileMsgStore(channelDirName, channel, fs.limits, false)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	subStore, _, err = newFileSubStore(channelDirName, channel, fs.limits, false)
 	if err != nil {
 		msgStore.Close()
-		return nil, err
+		return nil, false, err
 	}
 
 	channelStore = &ChannelStore{
@@ -459,7 +459,7 @@ func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*Chann
 
 	fs.channels[channel] = channelStore
 
-	return channelStore, nil
+	return channelStore, true, nil
 }
 
 // AddClient stores information about the client identified by `clientID`.

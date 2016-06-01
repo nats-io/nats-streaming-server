@@ -415,7 +415,7 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	}
 
 	// Now check that any new addition would be rejected
-	if _, err := fs.CreateChannel("new.channel", nil); err == nil {
+	if _, _, err := fs.CreateChannel("new.channel", nil); err == nil {
 		t.Fatal("Expected trying to create a new channel to fail")
 	}
 	channelOne := fs.LookupChannel("channel.1")

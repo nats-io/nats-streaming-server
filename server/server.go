@@ -176,19 +176,15 @@ type subState struct {
 
 // Looks up, or create a new channel if it does not exist
 func (s *StanServer) lookupOrCreateChannel(channel string) (*stores.ChannelStore, error) {
-	cs := s.store.LookupChannel(channel)
-	if cs == nil {
-		var err error
-		ss := createSubStore()
-		cs, err = s.store.CreateChannel(channel, ss)
-		if err != nil {
-			if err == stores.ErrAlreadyExists {
-				// Another go-routine got there first and created the channel.
-				// This is ok, return the existing one.
-				return s.store.LookupChannel(channel), nil
-			}
-			return nil, err
-		}
+	if cs := s.store.LookupChannel(channel); cs != nil {
+		return cs, nil
+	}
+	// It's possible that more than one go routine comes here at the same
+	// time. `ss` will then be simply gc'ed.
+	ss := createSubStore()
+	cs, _, err := s.store.CreateChannel(channel, ss)
+	if err != nil {
+		return nil, err
 	}
 	return cs, nil
 }
