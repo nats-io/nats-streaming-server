@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nats-io/gnatsd/server"
+	"github.com/nats-io/go-stan"
 	"github.com/nats-io/go-stan/pb"
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nuid"
@@ -19,8 +20,9 @@ import (
 
 	natsd "github.com/nats-io/gnatsd/test"
 
-	stores "github.com/nats-io/stan-server/stores"
 	"regexp"
+
+	stores "github.com/nats-io/stan-server/stores"
 )
 
 // A single STAN server
@@ -505,6 +507,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		panic(fmt.Sprintf("Can't connect to NATS server: %v\n", err))
 	}
 
+	s.ensureRunningStandAlone()
+
 	s.initSubscriptions()
 
 	if recoveredState != nil {
@@ -544,6 +548,26 @@ func overrideLimits(limits *stores.ChannelLimits, opts *Options) {
 	}
 	if opts.MaxSubscriptions != 0 {
 		limits.MaxSubs = opts.MaxSubscriptions
+	}
+}
+
+// ensureRunningStandAlone prevents this streaming server from starting
+// if another is found using the same cluster ID - a possibility when
+// routing is enabled.
+// TODO:  Add authorization/TLS when implemented.
+func (s *StanServer) ensureRunningStandAlone() {
+	// make an effort, but don't block for too long.
+	clusterID := s.ClusterID()
+	sc, err := stan.Connect(clusterID, s.serverID, stan.ConnectWait(250*time.Millisecond))
+	if err == nil {
+		sc.Close()
+		panic(fmt.Sprintf("Discovered another streaming server with cluster ID %q.", clusterID))
+	} else {
+		if err == stan.ErrConnectReqTimeout {
+			Debugf("No servers with cluster ID %q detected.", clusterID)
+		} else {
+			Errorf("Error checking stand alone status: %v", err)
+		}
 	}
 }
 
