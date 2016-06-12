@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/go-stan/pb"
-	"github.com/nats-io/stan-server/spb"
+	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/spb"
 )
 
 const (

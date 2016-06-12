@@ -3,7 +3,7 @@
 package server
 
 import (
-	"github.com/nats-io/stan-server/stores"
+	"github.com/nats-io/nats-streaming-server/stores"
 	"sync"
 	"time"
 )

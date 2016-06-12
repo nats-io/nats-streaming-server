@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nats-io/go-stan/pb"
-	"github.com/nats-io/stan-server/spb"
-	"github.com/nats-io/stan-server/util"
+	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/spb"
+	"github.com/nats-io/nats-streaming-server/util"
 	"io/ioutil"
 )
 
