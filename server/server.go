@@ -5,6 +5,8 @@ package server
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -12,17 +14,15 @@ import (
 	"time"
 
 	"github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/go-stan"
 	"github.com/nats-io/go-stan/pb"
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nuid"
 	"github.com/nats-io/stan-server/spb"
 
 	natsd "github.com/nats-io/gnatsd/test"
+	stores "github.com/nats-io/stan-server/stores"
 
 	"regexp"
-
-	stores "github.com/nats-io/stan-server/stores"
 )
 
 // A single STAN server
@@ -497,6 +497,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	if nOpts.Host == "" {
 		nOpts.Host = "localhost"
 	}
+
+	s.configureClusterOpts(nOpts)
 	s.natsServer = natsd.RunServer(nOpts)
 
 	natsURL := fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port)
@@ -551,24 +553,81 @@ func overrideLimits(limits *stores.ChannelLimits, opts *Options) {
 	}
 }
 
+// TODO:  Explore parameter passing in gnatsd.  Keep seperate for now.
+func (s *StanServer) configureClusterOpts(opts *server.Options) error {
+	if opts.ClusterListenStr == "" {
+		if opts.RoutesStr != "" {
+			Fatalf("Solicited routes require cluster capabilities, e.g. --cluster.")
+		}
+		return nil
+	}
+
+	clusterURL, err := url.Parse(opts.ClusterListenStr)
+	h, p, err := net.SplitHostPort(clusterURL.Host)
+	if err != nil {
+		return err
+	}
+	opts.ClusterHost = h
+	_, err = fmt.Sscan(p, &opts.ClusterPort)
+	if err != nil {
+		return err
+	}
+
+	if clusterURL.User != nil {
+		pass, hasPassword := clusterURL.User.Password()
+		if !hasPassword {
+			return fmt.Errorf("Expected cluster password to be set.")
+		}
+		opts.ClusterPassword = pass
+
+		user := clusterURL.User.Username()
+		opts.ClusterUsername = user
+	}
+
+	// If we have routes but no config file, fill in here.
+	if opts.RoutesStr != "" && opts.Routes == nil {
+		opts.Routes = server.RoutesFromStr(opts.RoutesStr)
+	}
+
+	return nil
+}
+
 // ensureRunningStandAlone prevents this streaming server from starting
 // if another is found using the same cluster ID - a possibility when
 // routing is enabled.
-// TODO:  Add authorization/TLS when implemented.
 func (s *StanServer) ensureRunningStandAlone() {
-	// make an effort, but don't block for too long.
 	clusterID := s.ClusterID()
-	sc, err := stan.Connect(clusterID, s.serverID, stan.ConnectWait(250*time.Millisecond))
-	if err == nil {
-		sc.Close()
-		panic(fmt.Sprintf("Discovered another streaming server with cluster ID %q.", clusterID))
-	} else {
-		if err == stan.ErrConnectReqTimeout {
-			Debugf("No servers with cluster ID %q detected.", clusterID)
-		} else {
-			Errorf("Error checking stand alone status: %v", err)
-		}
+	hbInbox := nats.NewInbox()
+	timeout := time.Millisecond * 250
+
+	// We cannot use the client's API here as it will create a dependency
+	// cycle in the streaming client, so build our request and see if we
+	// get a response.
+	req := &pb.ConnectRequest{ClientID: clusterID, HeartbeatInbox: hbInbox}
+	b, _ := req.Marshal()
+	reply, err := s.nc.Request(s.info.Discovery, b, timeout)
+	if err == nats.ErrTimeout {
+		Debugf("Did not detect another server instance.")
+		return
 	}
+	if err != nil {
+		Errorf("Request error detecting another server instance: %v", err)
+		return
+	}
+	// See if the response is valid and can be unmarshalled.
+	cr := &pb.ConnectResponse{}
+	err = cr.Unmarshal(reply.Data)
+	if err != nil {
+		// something other than a compatible streaming server responded
+		// so continue.
+		Errorf("Unmarshall error while detecting another server instance: %v", err)
+		return
+	}
+	// Another streaming server was found, cleanup then panic.
+	clreq := &pb.CloseRequest{ClientID: clusterID}
+	b, _ = clreq.Marshal()
+	s.nc.Request(cr.CloseRequests, b, timeout)
+	panic(fmt.Errorf("discovered another streaming server with cluster ID %q", clusterID))
 }
 
 // Binds server's view of a client with stored Client objects.
