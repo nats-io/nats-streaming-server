@@ -39,6 +39,9 @@ const (
 	// Minimum number of clients on file before checking
 	// if file should be compacted.
 	defaultMinClientsOnFile = 1000
+
+	// Minimum interval for compaction
+	defaultMinCompactInterval = 30 * time.Second
 )
 
 // Type for the records in the subscriptions file
@@ -72,11 +75,13 @@ const (
 // FileStore is the storage interface for STAN servers, backed by files.
 type FileStore struct {
 	genericStore
-	rootDir      string
-	serverFile   *os.File
-	clientsFile  *os.File
-	minCliOnFile int // Threshold below which we don't bother trying to compact.
-	cliOnFile    int // Number of "add" client records on file (used for compact).
+	rootDir       string
+	serverFile    *os.File
+	clientsFile   *os.File
+	minCliOnFile  int // Threshold below which we don't bother trying to compact.
+	cliOnFile     int // Number of "add" client records on file (used for compact).
+	compactItvl   time.Duration
+	nextCompactTS time.Time
 }
 
 type recoveredSub struct {
@@ -183,6 +188,7 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 	fs := &FileStore{
 		rootDir:      rootDir,
 		minCliOnFile: defaultMinClientsOnFile,
+		compactItvl:  defaultMinCompactInterval,
 	}
 	fs.init(TypeFile, limits)
 
@@ -470,8 +476,10 @@ func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*Chann
 
 // AddClient stores information about the client identified by `clientID`.
 func (fs *FileStore) AddClient(clientID, hbInbox string, userData interface{}) (*Client, bool, error) {
-	// The generic implementation cannot return a failure...
-	sc, isNew, _ := fs.genericStore.AddClient(clientID, hbInbox, userData)
+	sc, isNew, err := fs.genericStore.AddClient(clientID, hbInbox, userData)
+	if err != nil {
+		return nil, false, err
+	}
 	if !isNew {
 		return sc, false, nil
 	}
@@ -496,8 +504,9 @@ func (fs *FileStore) DeleteClient(clientID string) *Client {
 		writeDel := true
 		// Don't bother if file is too small. When the threshold is reached,
 		// compact if the number of live clients falls below half the total
-		// number on file.
-		if fs.cliOnFile > fs.minCliOnFile && len(fs.clients) <= fs.cliOnFile/2 {
+		// number on file. Also, make sure we don't compact too often.
+		if fs.cliOnFile > fs.minCliOnFile && len(fs.clients) <= fs.cliOnFile/2 &&
+			time.Now().After(fs.nextCompactTS) {
 			writeDel = (fs.compactClientFile() != nil)
 		}
 		if writeDel {
@@ -511,16 +520,15 @@ func (fs *FileStore) DeleteClient(clientID string) *Client {
 // Rewrite the content of the clients map into a temporary file,
 // then swap back to active file.
 func (fs *FileStore) compactClientFile() error {
-	clientFileName := fs.clientsFile.Name()
-	// Open a temporary file, based on the client file name.
-	tmpFile, err := getTempFile(clientFileName)
+	// Open a temporary file
+	tmpFile, err := getTempFile(fs.rootDir, clientsFileName)
 	if err != nil {
 		return err
 	}
 	// Dump the content of active clients into the temporary file.
 	for _, c := range fs.clients {
 		line := fmt.Sprintf("%s %s %s\r\n", addClient, c.ClientID, c.HbInbox)
-		if _, err := fs.clientsFile.WriteString(line); err != nil {
+		if _, err := tmpFile.WriteString(line); err != nil {
 			tmpFile.Close()
 			os.Remove(tmpFile.Name())
 			return err
@@ -532,14 +540,20 @@ func (fs *FileStore) compactClientFile() error {
 		return err
 	}
 	fs.cliOnFile = len(fs.clients)
+	fs.nextCompactTS = time.Now().Add(fs.compactItvl)
 	return nil
 }
 
-// Return a temporary file based on the name of the active file.
-func getTempFile(activeFileName string) (*os.File, error) {
-	tmpFileName := fmt.Sprintf("%s.tmp", activeFileName)
-	// Open the file, make sure it does not exist.
-	return openFile(tmpFileName, os.O_EXCL, os.O_RDWR, os.O_CREATE, os.O_APPEND)
+// Return a temporary file (including file version)
+func getTempFile(rootDir, prefix string) (*os.File, error) {
+	tmpFile, err := ioutil.TempFile(rootDir, prefix)
+	if err != nil {
+		return nil, err
+	}
+	if err := util.WriteInt(tmpFile, fileVersion); err != nil {
+		return nil, err
+	}
+	return tmpFile, nil
 }
 
 // When a store file is compacted, the content is rewritten into a
