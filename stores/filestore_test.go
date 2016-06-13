@@ -179,6 +179,93 @@ func writeVersion(t *testing.T, fileName string, version int) {
 	}
 }
 
+func TestFSOptions(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Check that default options are used
+	fs.RLock()
+	opts := fs.opts
+	fs.RUnlock()
+
+	checkOpts := func(expected, actual FileStoreOptions) {
+		if !reflect.DeepEqual(actual, expected) {
+			stackFatalf(t, "Expected options to be %v, got %v", expected, actual)
+		}
+	}
+	expected := DefaultFileStoreOptions
+	checkOpts(expected, opts)
+
+	fs.CreateChannel("foo", nil)
+	cs := fs.LookupChannel("foo")
+	ss := cs.Subs.(*FileSubStore)
+
+	ss.RLock()
+	opts = *ss.opts
+	ss.RUnlock()
+	checkOpts(expected, opts)
+
+	// Now try to set the options in the constructor
+	fs.Close()
+	cleanupDatastore(t, defaultDataStore)
+
+	// Prepare the golden options with custom values
+	expected = FileStoreOptions{
+		CompactEnabled:       false,
+		CompactFragmentation: 60,
+		CompactInterval:      60,
+		CompactMinFileSize:   1024 * 1024,
+	}
+	// Create the file with custom options
+	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits,
+		CompactEnabled(expected.CompactEnabled),
+		CompactFragmentation(expected.CompactFragmentation),
+		CompactInterval(expected.CompactInterval),
+		CompactMinFileSize(expected.CompactMinFileSize))
+	if err != nil {
+		t.Fatalf("Unexpected error on file store create: %v", err)
+	}
+	defer fs.Close()
+	fs.RLock()
+	opts = fs.opts
+	fs.RUnlock()
+	checkOpts(expected, opts)
+
+	fs.CreateChannel("foo", nil)
+	cs = fs.LookupChannel("foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	ss.RLock()
+	opts = *ss.opts
+	ss.RUnlock()
+	checkOpts(expected, opts)
+
+	fs.Close()
+	cleanupDatastore(t, defaultDataStore)
+	// Create the file with custom options, pass all of them at once
+	fs, _, err = NewFileStore(defaultDataStore, &testDefaultChannelLimits, AllOptions(&expected))
+	if err != nil {
+		t.Fatalf("Unexpected error on file store create: %v", err)
+	}
+	defer fs.Close()
+	fs.RLock()
+	opts = fs.opts
+	fs.RUnlock()
+	checkOpts(expected, opts)
+
+	fs.CreateChannel("foo", nil)
+	cs = fs.LookupChannel("foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	ss.RLock()
+	opts = *ss.opts
+	ss.RUnlock()
+	checkOpts(expected, opts)
+}
+
 func TestFSNothingRecoveredOnFreshStart(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
@@ -1338,187 +1425,554 @@ func TestFSCompactClientFile(t *testing.T) {
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
-	// Change threshold to low value for tests
+	total := 10
+	threshold := total / 2
+
+	// Override options for test purposes
 	fs.Lock()
-	fs.minCliOnFile = 10
-	threshold := fs.minCliOnFile
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = threshold * 100 / total
+	fs.opts.CompactMinFileSize = -1
 	fs.Unlock()
+
+	check := func(fs *FileStore, expectedClients, expectedDelRecs int) {
+		fs.RLock()
+		numClients := len(fs.clients)
+		delRecs := fs.cliDeleteRecs
+		fs.RUnlock()
+		if numClients != expectedClients {
+			stackFatalf(t, "Expected %v clients, got %v", expectedClients, numClients)
+		}
+		if delRecs != expectedDelRecs {
+			stackFatalf(t, "Expected %v delete records, got %v", expectedDelRecs, delRecs)
+		}
+	}
 
 	// Create clients below threshold
-	for i := 0; i < threshold; i++ {
+	for i := 0; i < total; i++ {
 		cid := fmt.Sprintf("cid_%d", (i + 1))
 		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
 			t.Fatalf("Unexpected error adding clients: %v", err)
 		}
 	}
+	// Should be `total` clients, and 0 delete records
+	check(fs, total, 0)
 	// Delete half.
-	for i := 0; i < threshold/2; i++ {
+	for i := 0; i < threshold-1; i++ {
 		cid := fmt.Sprintf("cid_%d", (i + 1))
 		fs.DeleteClient(cid)
 	}
+	check(fs, threshold+1, threshold-1)
+
 	// Recover
 	fs.Close()
 	fs, _ = openDefaultFileStore(t)
 	defer fs.Close()
-
-	// Change threshold to low value for tests
+	// Override options for test purposes
 	fs.Lock()
-	fs.minCliOnFile = 10
-	threshold = fs.minCliOnFile
-	fs.Unlock()
-
-	// Check number of clients
-	fs.RLock()
-	numClients := len(fs.clients)
-	cliOnFile := fs.cliOnFile
-	fs.RUnlock()
-	if numClients != threshold/2 {
-		t.Fatalf("Expected to recover %v clients, got %v", threshold/2, numClients)
-	}
-	if cliOnFile != threshold {
-		t.Fatalf("Number of clients in the file should be %v, got %v", threshold, cliOnFile)
-	}
-
-	// Add more clients
-	for i := 0; i < 3*threshold; i++ {
-		cid := fmt.Sprintf("cid_%d", (threshold + i + 1))
-		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
-			t.Fatalf("Unexpected error adding clients: %v", err)
-		}
-	}
-	// Recover
-	fs.Close()
-	fs, _ = openDefaultFileStore(t)
-	defer fs.Close()
-
-	// Change threshold to low value for tests
-	fs.Lock()
-	fs.minCliOnFile = 10
-	threshold = fs.minCliOnFile
-	// Check number of clients
-	numClients = len(fs.clients)
-	cliOnFile = fs.cliOnFile
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = threshold * 100 / total
+	// since we set things manually, we need to compute this here
 	fs.compactItvl = time.Second
-	interval := fs.compactItvl
+	fs.opts.CompactMinFileSize = -1
 	fs.Unlock()
+	// Verify our numbers are same after recovery
+	check(fs, threshold+1, threshold-1)
 
-	// total active clients should be 3*threshold+1/2threshold at this point
-	expected := int(3.5 * float32(threshold))
-	if numClients != expected {
-		t.Fatalf("Expected to recover %v clients, got %v", expected, numClients)
-	}
-	// But on file, there should be 3*threshold "add client" records.
-	if cliOnFile != 4*threshold {
-		t.Fatalf("Number of clients in the file should be %v, got %v", 4*threshold, cliOnFile)
-	}
+	// Delete one more, this should trigger compaction
+	cid := fmt.Sprintf("cid_%d", threshold)
+	fs.DeleteClient(cid)
+	// One client less, 0 del records after a compaction
+	check(fs, threshold, 0)
 
-	// Now check compaction by removing a total of more than cliOnFile / 2.
-	// Delete below the half point should not cause the compact:
-	fs.DeleteClient(fmt.Sprintf("cid_%v", threshold/2+1))
-	fs.RLock()
-	cliOnFile = fs.cliOnFile
-	fs.RUnlock()
-	if cliOnFile != 4*threshold {
-		t.Fatalf("Expected cliOnFile to be %v, got %v", 4*threshold, cliOnFile)
-	}
-	// Now delete more to cause compact
-	for i := 0; i < 2*threshold-1; i++ {
-		cid := fmt.Sprintf("cid_%d", (threshold/2 + 1 + i + 1))
-		fs.DeleteClient(cid)
-	}
-	// Check that the file has compacted
-	fs.RLock()
-	numClients = len(fs.clients)
-	cliOnFile = fs.cliOnFile
-	fs.RUnlock()
-	expected = int(1.5 * float32(threshold))
-	if numClients != expected {
-		t.Fatalf("Expected to recover %v clients, got %v", expected, numClients)
-	}
-	if cliOnFile != 2*threshold {
-		t.Fatalf("Number of clients in the file should be %v, got %v", 2*threshold, cliOnFile)
-	}
-	// Add few more clients and make sure that the compaction is not happening
-	// all the times after that.
-	for i := 0; i < 3; i++ {
-		cid := fmt.Sprintf("cid_%d", (4*threshold + i + 1))
+	// Make sure we don't compact too often
+	for i := 0; i < total; i++ {
+		cid := fmt.Sprintf("cid_%d", total+i+1)
 		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
 			t.Fatalf("Unexpected error adding clients: %v", err)
 		}
 	}
-	// Check numbers
-	fs.RLock()
-	numClients = len(fs.clients)
-	cliOnFile = fs.cliOnFile
-	fs.RUnlock()
-	expected += 3
-	if numClients != expected {
-		t.Fatalf("Expected to recover %v clients, got %v", expected, numClients)
-	}
-	if cliOnFile != 2*threshold+3 {
-		t.Fatalf("Number of clients in the file should be %v, got %v", threshold/2, cliOnFile)
-	}
-
-	// Make sure that we don't compact too often:
-	beforeCliOnFile := cliOnFile
-	beforeNumClients := numClients
-	// Add some clients
-	for i := 0; i < 2*threshold; i++ {
-		cid := fmt.Sprintf("nocompact_%d", (i + 1))
-		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
-			t.Fatalf("Unexpected error adding clients: %v", err)
-		}
-	}
-	// Remove them all
-	for i := 0; i < 2*threshold; i++ {
-		cid := fmt.Sprintf("nocompact_%d", (i + 1))
+	// Delete almost all of them
+	for i := 0; i < total-1; i++ {
+		cid := fmt.Sprintf("cid_%d", total+i+1)
 		fs.DeleteClient(cid)
 	}
-	// Check numbers
-	fs.RLock()
-	numClients = len(fs.clients)
-	cliOnFile = fs.cliOnFile
-	fs.RUnlock()
-	expected = beforeCliOnFile + 2*threshold
-	if cliOnFile != expected {
-		t.Fatalf("Number of clients in the file should be %v, got %v", expected, cliOnFile)
-	}
-	if numClients != beforeNumClients {
-		t.Fatalf("Number of clients should be %v, got %v", beforeNumClients, numClients)
-	}
-	// Wait the compact interval and a bit more
-	time.Sleep(interval + 500*time.Millisecond)
-	// Check that we now can compact
-	if _, _, err := fs.AddClient("willcompact", "hbInbox", nil); err != nil {
-		t.Fatalf("Unexpected error adding clients: %v", err)
-	}
-	fs.DeleteClient("willcompact")
-	// Check numbers
-	fs.RLock()
-	numClients = len(fs.clients)
-	cliOnFile = fs.cliOnFile
-	fs.RUnlock()
-	if cliOnFile != beforeNumClients {
-		t.Fatalf("Number of clients in the file should be %v, got %v", beforeNumClients, cliOnFile)
-	}
-	if numClients != beforeNumClients {
-		t.Fatalf("Number of clients should be %v, got %v", beforeNumClients, numClients)
-	}
+	// The number of clients should be same than before + 1,
+	// and lots of delete
+	check(fs, threshold+1, total-1)
+	// Now wait for the interval and a bit more
+	time.Sleep(1500 * time.Millisecond)
+	// Delete one more, compaction should occur
+	cid = fmt.Sprintf("cid_%d", 2*total)
+	fs.DeleteClient(cid)
+	// One less client, 0 delete records after compaction
+	check(fs, threshold, 0)
 
-	// Verify that the compacted file is as expected by doing a recovery.
 	fs.Close()
-	fs, _ = openDefaultFileStore(t)
+	// Wipe out
+	cleanupDatastore(t, defaultDataStore)
+	fs = createDefaultFileStore(t)
+	defer fs.Close()
+	// Override options for test purposes: disable compaction
+	fs.Lock()
+	fs.opts.CompactEnabled = false
+	fs.opts.CompactFragmentation = threshold * 100 / total
+	fs.opts.CompactMinFileSize = -1
+	fs.Unlock()
+	for i := 0; i < total; i++ {
+		cid := fmt.Sprintf("cid_%d", (i + 1))
+		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
+			t.Fatalf("Unexpected error adding clients: %v", err)
+		}
+	}
+	// Should be `total` clients, and 0 delete records
+	check(fs, total, 0)
+	// Delete all
+	for i := 0; i < total; i++ {
+		cid := fmt.Sprintf("cid_%d", (i + 1))
+		fs.DeleteClient(cid)
+	}
+	// No client, but no reduction in number of delete records since no compaction
+	check(fs, 0, total)
+
+	fs.Close()
+	// Wipe out
+	cleanupDatastore(t, defaultDataStore)
+	fs = createDefaultFileStore(t)
+	defer fs.Close()
+	// Override options for test purposes: have a big min file size
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = threshold * 100 / total
+	fs.opts.CompactMinFileSize = 10 * 1024 * 1024
+	fs.Unlock()
+	for i := 0; i < total; i++ {
+		cid := fmt.Sprintf("cid_%d", (i + 1))
+		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
+			t.Fatalf("Unexpected error adding clients: %v", err)
+		}
+	}
+	// Should be `total` clients, and 0 delete records
+	check(fs, total, 0)
+	// Delete all
+	for i := 0; i < total; i++ {
+		cid := fmt.Sprintf("cid_%d", (i + 1))
+		fs.DeleteClient(cid)
+	}
+	// No client, but no reduction in number of delete records since no compaction
+	check(fs, 0, total)
+}
+
+func checkSubStoreRecCounts(t *testing.T, s *FileSubStore, expectedSubs, expectedRecs, expectedDelRecs int) {
+	s.RLock()
+	numSubs := len(s.subs)
+	numRecs := s.numRecs
+	numDel := s.delRecs
+	s.RUnlock()
+	if numSubs != expectedSubs {
+		stackFatalf(t, "Expected %v subs, got %v", expectedSubs, numSubs)
+	}
+	if numRecs != expectedRecs {
+		stackFatalf(t, "Expected %v recs, got %v", expectedRecs, numRecs)
+	}
+	if numDel != expectedDelRecs {
+		stackFatalf(t, "Expected %v free recs, got %v", expectedDelRecs, numDel)
+	}
+}
+
+func TestFSCompactSubsFileOnDelete(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
-	// Check numbers
-	fs.RLock()
-	numClients = len(fs.clients)
-	cliOnFile = fs.cliOnFile
-	fs.RUnlock()
-	if cliOnFile != beforeNumClients {
-		t.Fatalf("Number of clients in the file should be %v, got %v", beforeNumClients, cliOnFile)
+	total := 6
+	threshold := 3
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	// since we set things manually, we need to compute this here
+	fs.compactItvl = time.Second
+	fs.opts.CompactMinFileSize = -1
+	fs.Unlock()
+
+	cs, _, err := fs.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error creating channel: %v", err)
 	}
-	if numClients != beforeNumClients {
-		t.Fatalf("Number of clients should be %v, got %v", beforeNumClients, numClients)
+	ss := cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.compactItvl = time.Second
+	ss.Unlock()
+
+	// Create an empty sub, we don't care about the content
+	sub := &spb.SubState{}
+	subIDs := make([]uint64, 0, total)
+	for i := 0; i < total; i++ {
+		if err := ss.CreateSub(sub); err != nil {
+			t.Fatalf("Unexpected error creating subscription: %v", err)
+		}
+		subIDs = append(subIDs, sub.ID)
 	}
+	checkSubStoreRecCounts(t, ss, total, total, 0)
+	// Delete not enough records to cause compaction
+	for i := 0; i < threshold-1; i++ {
+		subID := subIDs[i]
+		ss.DeleteSub(subID)
+	}
+	checkSubStoreRecCounts(t, ss, total-threshold+1, total, threshold-1)
+
+	// Recover
+	fs.Close()
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	// since we set things manually, we need to compute this here
+	fs.compactItvl = time.Second
+	fs.opts.CompactMinFileSize = -1
+	fs.Unlock()
+
+	cs = fs.LookupChannel("foo")
+	ss = cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.compactItvl = time.Second
+	ss.Unlock()
+
+	// Make sure our numbers are correct on recovery
+	checkSubStoreRecCounts(t, ss, total-threshold+1, total, threshold-1)
+
+	// Delete more to cause compaction
+	ss.DeleteSub(subIDs[threshold-1])
+
+	// Since we compact, we now have the same number of recs and subs,
+	// and no delete records.
+	checkSubStoreRecCounts(t, ss, total-threshold, total-threshold, 0)
+
+	// Make sure we don't compact too often
+	count := total - threshold - 1
+	for i := 0; i < count; i++ {
+		subID := subIDs[threshold+i]
+		ss.DeleteSub(subID)
+	}
+	checkSubStoreRecCounts(t, ss, 1, total-threshold, count)
+
+	// Wait for longer than compact interval
+	time.Sleep(1500 * time.Millisecond)
+	// Cause a compact by adding and then removing a subscription
+	ss.DeleteSub(subIDs[total-1])
+	// Check stats
+	checkSubStoreRecCounts(t, ss, 0, 0, 0)
+
+	// Check that compacted file is as expected
+	fs.Close()
+	fs, state = openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	cs = fs.LookupChannel("foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	checkSubStoreRecCounts(t, ss, 0, 0, 0)
+
+	fs.Close()
+	// Wipe-out everything
+	cleanupDatastore(t, defaultDataStore)
+
+	fs = createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = false
+	fs.Unlock()
+
+	cs, _, err = fs.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error creating channel: %v", err)
+	}
+	ss = cs.Subs.(*FileSubStore)
+
+	// Make sure we can't compact
+	subIDs = subIDs[:0]
+	for i := 0; i < total; i++ {
+		if err := ss.CreateSub(sub); err != nil {
+			t.Fatalf("Unexpected error creating subscription: %v", err)
+		}
+		subIDs = append(subIDs, sub.ID)
+	}
+	checkSubStoreRecCounts(t, ss, total, total, 0)
+	for _, subID := range subIDs {
+		ss.DeleteSub(subID)
+	}
+	checkSubStoreRecCounts(t, ss, 0, total, total)
+
+	fs.Close()
+	// Wipe-out everything
+	cleanupDatastore(t, defaultDataStore)
+
+	fs = createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	fs.opts.CompactMinFileSize = 10 * 1024 * 1024
+	fs.Unlock()
+
+	cs, _, err = fs.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error creating channel: %v", err)
+	}
+	ss = cs.Subs.(*FileSubStore)
+
+	// Make sure we can't compact
+	subIDs = subIDs[:0]
+	for i := 0; i < total; i++ {
+		if err := ss.CreateSub(sub); err != nil {
+			t.Fatalf("Unexpected error creating subscription: %v", err)
+		}
+		subIDs = append(subIDs, sub.ID)
+	}
+	checkSubStoreRecCounts(t, ss, total, total, 0)
+	for _, subID := range subIDs {
+		ss.DeleteSub(subID)
+	}
+	checkSubStoreRecCounts(t, ss, 0, total, total)
+}
+
+func TestFSCompactSubsFileOnAck(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	// since we set things manually, we need to compute this here
+	fs.compactItvl = time.Second
+	fs.opts.CompactMinFileSize = -1
+	fs.Unlock()
+
+	cs, _, err := fs.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error creating channel: %v", err)
+	}
+	ss := cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.compactItvl = time.Second
+	ss.Unlock()
+
+	totalSeqs := 10
+	threshold := 1 + 5 // 1 for the sub, 5 for acks
+
+	// Create an empty sub, we don't care about the content
+	sub := &spb.SubState{}
+	if err := ss.CreateSub(sub); err != nil {
+		t.Fatalf("Unexpected error creating subscription: %v", err)
+	}
+
+	// Add sequences
+	for i := 0; i < totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, 0)
+	// Delete not enough records to cause compaction
+	for i := 0; i < threshold-1; i++ {
+		if err := ss.AckSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding ack: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, threshold-1)
+
+	// Recover
+	fs.Close()
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	// since we set things manually, we need to compute this here
+	fs.compactItvl = time.Second
+	fs.opts.CompactMinFileSize = -1
+	fs.Unlock()
+
+	cs = fs.LookupChannel("foo")
+	ss = cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.compactItvl = time.Second
+	ss.Unlock()
+
+	// Make sure our numbers are correct on recovery
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, threshold-1)
+
+	// Add 1 more ack to cause compaction
+	if err := ss.AckSeqPending(sub.ID, uint64(threshold)); err != nil {
+		t.Fatalf("Unexpected error adding ack: %v", err)
+	}
+	// Now the number of acks should be 0.
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs-threshold, 0)
+	startCount := 1 + totalSeqs - threshold
+
+	// Make sure we don't compact too often
+	start := 10000
+	// Add some
+	for i := 0; i < 2*totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(start+i)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, startCount+2*totalSeqs, 0)
+	// Then remove them all. Total gain/loss is 0.
+	for i := 0; i < 2*totalSeqs; i++ {
+		if err := ss.AckSeqPending(sub.ID, uint64(start+i)); err != nil {
+			t.Fatalf("Unexpected error adding ack: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, startCount+2*totalSeqs, 2*totalSeqs)
+
+	// Wait for longer than compact interval
+	time.Sleep(1500 * time.Millisecond)
+	// Cause a compact
+	willCompactID := uint64(20000)
+	if err := ss.AddSeqPending(sub.ID, willCompactID); err != nil {
+		t.Fatalf("Unexpected error adding seq: %v", err)
+	}
+	if err := ss.AckSeqPending(sub.ID, willCompactID); err != nil {
+		t.Fatalf("Unexpected error adding ack: %v", err)
+	}
+	// Check stats
+	checkSubStoreRecCounts(t, ss, 1, startCount, 0)
+
+	// Check that compacted file is as expected
+	fs.Close()
+	fs, state = openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	// since we set things manually, we need to compute this here
+	fs.compactItvl = time.Second
+	fs.opts.CompactMinFileSize = -1
+	fs.Unlock()
+
+	cs = fs.LookupChannel("foo")
+	ss = cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.compactItvl = time.Second
+	ss.Unlock()
+
+	checkSubStoreRecCounts(t, ss, 1, startCount, 0)
+
+	// Add more sequences
+	start = 30000
+	// Add some
+	for i := 0; i < 2*totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(start+i)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, startCount+2*totalSeqs, 0)
+	// Remove the subscription, this should cause a compact
+	ss.DeleteSub(sub.ID)
+	checkSubStoreRecCounts(t, ss, 0, 0, 0)
+
+	fs.Close()
+	// Wipe-out everything
+	cleanupDatastore(t, defaultDataStore)
+
+	fs = createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = false
+	fs.Unlock()
+
+	cs, _, err = fs.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error creating channel: %v", err)
+	}
+	ss = cs.Subs.(*FileSubStore)
+
+	// Create an empty sub, we don't care about the content
+	if err := ss.CreateSub(sub); err != nil {
+		t.Fatalf("Unexpected error creating subscription: %v", err)
+	}
+	// Add sequences
+	for i := 0; i < totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	// Remove all
+	for i := 0; i < totalSeqs; i++ {
+		if err := ss.AckSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, totalSeqs)
+
+	fs.Close()
+	// Wipe-out everything
+	cleanupDatastore(t, defaultDataStore)
+
+	fs = createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	fs.opts.CompactMinFileSize = 10 * 1024 * 1024
+	fs.Unlock()
+
+	cs, _, err = fs.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error creating channel: %v", err)
+	}
+	ss = cs.Subs.(*FileSubStore)
+
+	// Create an empty sub, we don't care about the content
+	if err := ss.CreateSub(sub); err != nil {
+		t.Fatalf("Unexpected error creating subscription: %v", err)
+	}
+	// Add sequences
+	for i := 0; i < totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	// Remove all
+	for i := 0; i < totalSeqs; i++ {
+		if err := ss.AckSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, totalSeqs)
 }

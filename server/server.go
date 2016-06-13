@@ -334,6 +334,7 @@ type Options struct {
 	DiscoverPrefix   string
 	StoreType        string
 	FilestoreDir     string
+	FileStoreOpts    stores.FileStoreOptions
 	MaxChannels      int
 	MaxMsgs          int    // Maximum number of messages per channel
 	MaxBytes         uint64 // Maximum number of bytes used by messages per channel
@@ -351,6 +352,7 @@ var defaultOptions = Options{
 	ID:             DefaultClusterID,
 	DiscoverPrefix: DefaultDiscoverPrefix,
 	StoreType:      DefaultStoreType,
+	FileStoreOpts:  stores.DefaultFileStoreOptions,
 }
 
 // GetDefaultOptions returns default options for the STAN server
@@ -489,7 +491,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 			err = fmt.Errorf("for %v stores, root directory must be specified", stores.TypeFile)
 			break
 		}
-		s.store, recoveredState, err = stores.NewFileStore(sOpts.FilestoreDir, limits)
+		s.store, recoveredState, err = stores.NewFileStore(sOpts.FilestoreDir, limits,
+			stores.AllOptions(&sOpts.FileStoreOpts))
 	case stores.TypeMemory:
 		s.store, err = stores.NewMemoryStore(limits)
 	default:

@@ -35,14 +35,85 @@ const (
 	// record header size of a subscription:
 	// 4 bytes: 1 byte for type, 3 bytes for buffer size
 	subRecordHeaderSize = 4
-
-	// Minimum number of clients on file before checking
-	// if file should be compacted.
-	defaultMinClientsOnFile = 1000
-
-	// Minimum interval for compaction
-	defaultMinCompactInterval = 30 * time.Second
 )
+
+// FileStoreOption is a function on the options for a File Store
+type FileStoreOption func(*FileStoreOptions) error
+
+// FileStoreOptions can be used to customize a File Store
+type FileStoreOptions struct {
+	// CompactEnabled allows to enable/disable files compaction.
+	CompactEnabled bool
+
+	// CompactInterval indicates the minimum interval (in seconds) between compactions.
+	CompactInterval int
+
+	// CompactFragmentation indicates the minimum ratio of fragmentation
+	// to trigger compaction. For instance, 50 means that compaction
+	// would not happen until fragmentation is more than 50%.
+	CompactFragmentation int
+
+	// CompactMinFileSize indicates the minimum file size before compaction
+	// can be performed, regardless of the current file fragmentation.
+	CompactMinFileSize int64
+}
+
+// DefaultFileStoreOptions defines the default options for a File Store.
+var DefaultFileStoreOptions = FileStoreOptions{
+	CompactEnabled:       true,
+	CompactInterval:      30,
+	CompactFragmentation: 50,
+	CompactMinFileSize:   1024 * 1024,
+}
+
+// CompactEnabled is a FileStore option that enables or disables file compaction.
+// The value false will disable compaction.
+func CompactEnabled(enabled bool) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.CompactEnabled = enabled
+		return nil
+	}
+}
+
+// CompactInterval is a FileStore option that defines the minimum compaction interval.
+// Compaction is not timer based, but instead when things get "deleted". This value
+// prevents compaction to happen too often.
+func CompactInterval(seconds int) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.CompactInterval = seconds
+		return nil
+	}
+}
+
+// CompactFragmentation is a FileStore option that defines the fragmentation ratio
+// below which compaction would not occur. For instance, specifying 50 means that
+// if other variables would allow for compaction, the compaction would occur only
+// after 50% of the file has data that is no longer valid.
+func CompactFragmentation(fragmentation int) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.CompactFragmentation = fragmentation
+		return nil
+	}
+}
+
+// CompactMinFileSize is a FileStore option that defines the minimum file size below
+// which compaction would not occur. Specify `-1` if you don't want any minimum.
+func CompactMinFileSize(fileSize int64) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.CompactMinFileSize = fileSize
+		return nil
+	}
+}
+
+// AllOptions is a convenient option to pass all options from a FileStoreOptions
+// structure to the constructor.
+func AllOptions(opts *FileStoreOptions) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		// Make a copy
+		*o = *opts
+		return nil
+	}
+}
 
 // Type for the records in the subscriptions file
 type subRecordType byte
@@ -78,13 +149,14 @@ type FileStore struct {
 	rootDir       string
 	serverFile    *os.File
 	clientsFile   *os.File
-	minCliOnFile  int // Threshold below which we don't bother trying to compact.
-	cliOnFile     int // Number of "add" client records on file (used for compact).
+	opts          FileStoreOptions
 	compactItvl   time.Duration
-	nextCompactTS time.Time
+	cliFileSize   int64
+	cliDeleteRecs int // Number of deleted client records
+	cliCompactTS  time.Time
 }
 
-type recoveredSub struct {
+type subscription struct {
 	sub    *spb.SubState
 	seqnos map[uint64]struct{}
 }
@@ -92,10 +164,18 @@ type recoveredSub struct {
 // FileSubStore is a subscription store in files.
 type FileSubStore struct {
 	genericSubStore
-	tmpSubBuf []byte
-	file      *os.File
-	delSub    spb.SubStateDelete
-	updateSub spb.SubStateUpdate
+	tmpSubBuf   []byte
+	file        *os.File
+	delSub      spb.SubStateDelete
+	updateSub   spb.SubStateUpdate
+	subs        map[uint64]*subscription
+	opts        *FileStoreOptions // points to options from FileStore
+	compactItvl time.Duration
+	fileSize    int64
+	numRecs     int // Number of records (sub and msgs)
+	delRecs     int // Number of delete (or ack) records
+	rootDir     string
+	compactTS   time.Time
 }
 
 // fileSlice represents one of the message store file (there are a number
@@ -184,13 +264,20 @@ func writeHeader(buf []byte, recType subRecordType, recordSize int) {
 // any state present.
 // If not limits are provided, the store will be created with
 // DefaultChannelLimits.
-func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *RecoveredState, error) {
+func NewFileStore(rootDir string, limits *ChannelLimits, options ...FileStoreOption) (*FileStore, *RecoveredState, error) {
 	fs := &FileStore{
-		rootDir:      rootDir,
-		minCliOnFile: defaultMinClientsOnFile,
-		compactItvl:  defaultMinCompactInterval,
+		rootDir: rootDir,
+		opts:    DefaultFileStoreOptions,
 	}
 	fs.init(TypeFile, limits)
+
+	for _, opt := range options {
+		if err := opt(&fs.opts); err != nil {
+			return nil, nil, err
+		}
+	}
+	// Convert the compact interval in time.Duration
+	fs.compactItvl = time.Duration(fs.opts.CompactInterval) * time.Second
 
 	if err := os.MkdirAll(rootDir, os.ModeDir+os.ModePerm); err != nil && !os.IsExist(err) {
 		return nil, nil, fmt.Errorf("unable to create the root directory [%s]: %v", rootDir, err)
@@ -204,7 +291,6 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 	var channels []os.FileInfo
 	var msgStore *FileMsgStore
 	var subStore *FileSubStore
-	var subs map[uint64]*recoveredSub
 
 	// Ensure store is closed in case of return with error
 	defer func() {
@@ -261,21 +347,21 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 		channelDirName := filepath.Join(rootDir, channel)
 
 		// Recover messages for this channel
-		msgStore, err = newFileMsgStore(channelDirName, channel, fs.limits, true)
+		msgStore, err = fs.newFileMsgStore(channelDirName, channel, true)
 		if err != nil {
 			break
 		}
-		subStore, subs, err = newFileSubStore(channelDirName, channel, fs.limits, true)
+		subStore, err = fs.newFileSubStore(channelDirName, channel, true)
 		if err != nil {
 			msgStore.Close()
 			break
 		}
 
 		// For this channel, construct an array of RecoveredSubState
-		rssArray := make([]*RecoveredSubState, 0, len(subs))
+		rssArray := make([]*RecoveredSubState, 0, len(subStore.subs))
 
 		// Fill that array with what we got from newFileSubStore.
-		for _, sub := range subs {
+		for _, sub := range subStore.subs {
 			rss := &RecoveredSubState{
 				Sub:     sub.sub,
 				Pending: make(PendingAcks),
@@ -353,6 +439,7 @@ func (fs *FileStore) recoverClients() ([]*Client, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		fmt.Sscanf(line, "%s %s %s", &action, &clientID, &hbInbox)
+		fs.cliFileSize += int64(len(line))
 		switch action {
 		case addClient:
 			if clientID == "" {
@@ -365,12 +452,12 @@ func (fs *FileStore) recoverClients() ([]*Client, error) {
 			// Add to the map. Note that if one already exists, which should
 			// not, just replace with this most recent one.
 			fs.clients[clientID] = c
-			fs.cliOnFile++
 		case delClient:
 			if clientID == "" {
 				return nil, fmt.Errorf("missing client ID in DELETE client instruction")
 			}
 			delete(fs.clients, clientID)
+			fs.cliDeleteRecs++
 		default:
 			return nil, fmt.Errorf("invalid client action %q", action)
 		}
@@ -453,11 +540,11 @@ func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*Chann
 	var msgStore MsgStore
 	var subStore SubStore
 
-	msgStore, err = newFileMsgStore(channelDirName, channel, fs.limits, false)
+	msgStore, err = fs.newFileMsgStore(channelDirName, channel, false)
 	if err != nil {
 		return nil, false, err
 	}
-	subStore, _, err = newFileSubStore(channelDirName, channel, fs.limits, false)
+	subStore, err = fs.newFileSubStore(channelDirName, channel, false)
 	if err != nil {
 		msgStore.Close()
 		return nil, false, err
@@ -490,7 +577,7 @@ func (fs *FileStore) AddClient(clientID, hbInbox string, userData interface{}) (
 		fs.Unlock()
 		return nil, false, err
 	}
-	fs.cliOnFile++
+	fs.cliFileSize += int64(len(line))
 	fs.Unlock()
 	return sc, true, nil
 }
@@ -502,11 +589,12 @@ func (fs *FileStore) DeleteClient(clientID string) *Client {
 		line := fmt.Sprintf("%s %s\r\n", delClient, clientID)
 		fs.Lock()
 		writeDel := true
-		// Don't bother if file is too small. When the threshold is reached,
-		// compact if the number of live clients falls below half the total
-		// number on file. Also, make sure we don't compact too often.
-		if fs.cliOnFile > fs.minCliOnFile && len(fs.clients) <= fs.cliOnFile/2 &&
-			time.Now().After(fs.nextCompactTS) {
+		// For compact accounting purposes, assume that we are writing the record
+		fs.cliDeleteRecs++
+		fs.cliFileSize += int64(len(line))
+		// Check if this triggers a need for compaction
+		if fs.shouldCompactClientFile() {
+			// If we could not compact, then write the delete record
 			writeDel = (fs.compactClientFile() != nil)
 		}
 		if writeDel {
@@ -517,6 +605,28 @@ func (fs *FileStore) DeleteClient(clientID string) *Client {
 	return sc
 }
 
+func (fs *FileStore) shouldCompactClientFile() bool {
+	// Global switch
+	if !fs.opts.CompactEnabled {
+		return false
+	}
+	// Check that if minimum file size is set, the client file
+	// is at least at the minimum.
+	if fs.opts.CompactMinFileSize > 0 && fs.cliFileSize < fs.opts.CompactMinFileSize {
+		return false
+	}
+	// Check fragmentation
+	frag := fs.cliDeleteRecs * 100 / (fs.cliDeleteRecs + len(fs.clients))
+	if frag < fs.opts.CompactFragmentation {
+		return false
+	}
+	// Check that we don't do too often
+	if time.Now().Sub(fs.cliCompactTS) < fs.compactItvl {
+		return false
+	}
+	return true
+}
+
 // Rewrite the content of the clients map into a temporary file,
 // then swap back to active file.
 func (fs *FileStore) compactClientFile() error {
@@ -525,6 +635,7 @@ func (fs *FileStore) compactClientFile() error {
 	if err != nil {
 		return err
 	}
+	fileSize := int64(0)
 	// Dump the content of active clients into the temporary file.
 	for _, c := range fs.clients {
 		line := fmt.Sprintf("%s %s %s\r\n", addClient, c.ClientID, c.HbInbox)
@@ -533,14 +644,16 @@ func (fs *FileStore) compactClientFile() error {
 			os.Remove(tmpFile.Name())
 			return err
 		}
+		fileSize += int64(len(line))
 	}
 	// Switch the temporary file with the original one.
 	fs.clientsFile, err = swapFiles(tmpFile, fs.clientsFile)
 	if err != nil {
 		return err
 	}
-	fs.cliOnFile = len(fs.clients)
-	fs.nextCompactTS = time.Now().Add(fs.compactItvl)
+	fs.cliDeleteRecs = 0
+	fs.cliFileSize = fileSize
+	fs.cliCompactTS = time.Now()
 	return nil
 }
 
@@ -617,13 +730,13 @@ func (fs *FileStore) Close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // newFileMsgStore returns a new instace of a file MsgStore.
-func newFileMsgStore(channelDirName, channel string, limits ChannelLimits, doRecover bool) (*FileMsgStore, error) {
+func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover bool) (*FileMsgStore, error) {
 	var err error
 	var file *os.File
 
 	// Create an instance and initialize
 	ms := &FileMsgStore{}
-	ms.init(channel, limits)
+	ms.init(channel, fs.limits)
 
 	// Open/create all the files
 	for i := 0; i < numFiles; i++ {
@@ -977,32 +1090,34 @@ func (ms *FileMsgStore) Close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // newFileSubStore returns a new instace of a file SubStore.
-func newFileSubStore(channelDirName, channel string, limits ChannelLimits, doRecover bool) (*FileSubStore, map[uint64]*recoveredSub, error) {
-	ss := &FileSubStore{}
-	ss.init(channel, limits)
+func (fs *FileStore) newFileSubStore(channelDirName, channel string, doRecover bool) (*FileSubStore, error) {
+	ss := &FileSubStore{
+		rootDir: channelDirName,
+		subs:    make(map[uint64]*subscription),
+		opts:    &fs.opts,
+	}
+	ss.init(channel, fs.limits)
+	// Convert the CompactInterval in time.Duration
+	ss.compactItvl = time.Duration(ss.opts.CompactInterval) * time.Second
 
 	var err error
-	var subs map[uint64]*recoveredSub
 
 	fileName := filepath.Join(channelDirName, subsFileName)
 	ss.file, err = openFile(fileName)
-	if err == nil && doRecover {
-		subs, err = ss.recoverSubscriptions()
-	}
 	if err != nil {
-		ss.Close()
-		ss = nil
-		subs = nil
-		return nil, nil, fmt.Errorf("unable to create subscription store for [%s]: %v", channel, err)
+		return nil, err
 	}
-	return ss, subs, nil
+	if doRecover {
+		if err := ss.recoverSubscriptions(); err != nil {
+			ss.Close()
+			return nil, fmt.Errorf("unable to create subscription store for [%s]: %v", channel, err)
+		}
+	}
+	return ss, nil
 }
 
 // recoverSubscriptions recovers subscriptions state for this store.
-func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error) {
-	// We will store the recovered subscriptions in there.
-	recoveredSubs := make(map[uint64]*recoveredSub)
-
+func (ss *FileSubStore) recoverSubscriptions() error {
 	var err error
 	var recType subRecordType
 
@@ -1019,7 +1134,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 				err = nil
 				break
 			} else {
-				return nil, err
+				return err
 			}
 		}
 		// Get type and size from the header:
@@ -1033,7 +1148,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 
 		// Read fully the expected number of bytes for this record
 		if _, err := io.ReadFull(file, ss.tmpSubBuf[:recSize]); err != nil {
-			return nil, err
+			return err
 		}
 
 		// Based on record type...
@@ -1041,50 +1156,57 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 		case subRecNew:
 			newSub := &spb.SubState{}
 			if err := newSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
-				return nil, err
+				return err
 			}
-			subAndPending := &recoveredSub{
+			sub := &subscription{
 				sub:    newSub,
 				seqnos: make(map[uint64]struct{}),
 			}
-			recoveredSubs[newSub.ID] = subAndPending
+			ss.subs[newSub.ID] = sub
 			// Keep track of the subscriptions count
 			ss.subsCount++
 			// Keep track of max subscription ID found.
 			if newSub.ID > ss.maxSubID {
 				ss.maxSubID = newSub.ID
 			}
+			ss.numRecs++
 			break
 		case subRecUpdate:
 			modifiedSub := &spb.SubState{}
 			if err := modifiedSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
-				return nil, err
+				return err
 			}
 			// Search if the create has been recovered.
-			subAndPending, exists := recoveredSubs[modifiedSub.ID]
+			sub, exists := ss.subs[modifiedSub.ID]
 			if exists {
-				subAndPending.sub = modifiedSub
+				sub.sub = modifiedSub
+				// An update means that the previous version is free space.
+				ss.delRecs++
 			} else {
-				subAndPending := &recoveredSub{
+				sub := &subscription{
 					sub:    modifiedSub,
 					seqnos: make(map[uint64]struct{}),
 				}
-				recoveredSubs[modifiedSub.ID] = subAndPending
+				ss.subs[modifiedSub.ID] = sub
 			}
 			// Keep track of max subscription ID found.
 			if modifiedSub.ID > ss.maxSubID {
 				ss.maxSubID = modifiedSub.ID
 			}
+			ss.numRecs++
 			break
 		case subRecDel:
 			delSub := spb.SubStateDelete{}
 			if err := delSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
-				return nil, err
+				return err
 			}
-			if _, exists := recoveredSubs[delSub.ID]; exists {
-				delete(recoveredSubs, delSub.ID)
+			if s, exists := ss.subs[delSub.ID]; exists {
+				delete(ss.subs, delSub.ID)
 				// Keep track of the subscriptions count
 				ss.subsCount--
+				// Delete and count all non-ack'ed messages free space.
+				ss.delRecs++
+				ss.delRecs += len(s.seqnos)
 			}
 			// Keep track of max subscription ID found.
 			if delSub.ID > ss.maxSubID {
@@ -1094,32 +1216,35 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 		case subRecMsg:
 			updateSub := spb.SubStateUpdate{}
 			if err := updateSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
-				return nil, err
+				return err
 			}
-			if subAndPending, exists := recoveredSubs[updateSub.ID]; exists {
+			if sub, exists := ss.subs[updateSub.ID]; exists {
 				seqno := updateSub.Seqno
 				// Same seqno/ack can appear several times for the same sub.
 				// See queue subscribers redelivery.
-				if seqno > subAndPending.sub.LastSent {
-					subAndPending.sub.LastSent = seqno
+				if seqno > sub.sub.LastSent {
+					sub.sub.LastSent = seqno
 				}
-				subAndPending.seqnos[seqno] = struct{}{}
+				sub.seqnos[seqno] = struct{}{}
+				ss.numRecs++
 			}
 			break
 		case subRecAck:
 			updateSub := spb.SubStateUpdate{}
 			if err := updateSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
-				return nil, err
+				return err
 			}
-			if subAndPending, exists := recoveredSubs[updateSub.ID]; exists {
-				delete(subAndPending.seqnos, updateSub.Seqno)
+			if sub, exists := ss.subs[updateSub.ID]; exists {
+				delete(sub.seqnos, updateSub.Seqno)
+				// A message is ack'ed
+				ss.delRecs++
 			}
 			break
 		default:
-			return nil, fmt.Errorf("unexpected record type: %v", recType)
+			return fmt.Errorf("unexpected record type: %v", recType)
 		}
 	}
-	return recoveredSubs, nil
+	return nil
 }
 
 // CreateSub records a new subscription represented by SubState. On success,
@@ -1132,9 +1257,11 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 	if err := ss.createSub(sub); err != nil {
 		return err
 	}
-	if err := ss.writeRecord(subRecNew, sub); err != nil {
+	if err := ss.writeRecord(ss.file, subRecNew, sub); err != nil {
 		return err
 	}
+	s := &subscription{sub: sub, seqnos: make(map[uint64]struct{})}
+	ss.subs[sub.ID] = s
 	return nil
 }
 
@@ -1142,8 +1269,15 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 	ss.Lock()
 	defer ss.Unlock()
-	if err := ss.writeRecord(subRecUpdate, sub); err != nil {
+	if err := ss.writeRecord(ss.file, subRecUpdate, sub); err != nil {
 		return err
+	}
+	s := ss.subs[sub.ID]
+	if s != nil {
+		s.sub = sub
+	} else {
+		s := &subscription{sub: sub, seqnos: make(map[uint64]struct{})}
+		ss.subs[sub.ID] = s
 	}
 	return nil
 }
@@ -1152,17 +1286,62 @@ func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 func (ss *FileSubStore) DeleteSub(subid uint64) {
 	ss.Lock()
 	ss.delSub.ID = subid
-	ss.writeRecord(subRecDel, &ss.delSub)
+	ss.writeRecord(ss.file, subRecDel, &ss.delSub)
+	if s, exists := ss.subs[subid]; exists {
+		delete(ss.subs, subid)
+		// writeRecord has already accounted for the count of the
+		// delete record. We add to this the number of pending messages
+		ss.delRecs += len(s.seqnos)
+		// Check if this triggers a need for compaction
+		if ss.shouldCompact() {
+			ss.compact()
+		}
+	}
 	ss.Unlock()
+}
+
+// shouldCompact returns a boolean indicating if we should compact
+func (ss *FileSubStore) shouldCompact() bool {
+	// Gobal switch
+	if !ss.opts.CompactEnabled {
+		return false
+	}
+	// Check that if minimum file size is set, the client file
+	// is at least at the minimum.
+	if ss.opts.CompactMinFileSize > 0 && ss.fileSize < ss.opts.CompactMinFileSize {
+		return false
+	}
+	// Check fragmentation
+	frag := 0
+	if ss.numRecs == 0 {
+		frag = 100
+	} else {
+		frag = ss.delRecs * 100 / ss.numRecs
+	}
+	if frag < ss.opts.CompactFragmentation {
+		return false
+	}
+	// Check that we don't compact too often
+	if time.Now().Sub(ss.compactTS) < ss.compactItvl {
+		return false
+	}
+	return true
 }
 
 // AddSeqPending adds the given message seqno to the given subscription.
 func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 	ss.Lock()
 	ss.updateSub.ID, ss.updateSub.Seqno = subid, seqno
-	err := ss.writeRecord(subRecMsg, &ss.updateSub)
+	if err := ss.writeRecord(ss.file, subRecMsg, &ss.updateSub); err != nil {
+		ss.Unlock()
+		return err
+	}
+	s := ss.subs[subid]
+	if s != nil {
+		s.seqnos[seqno] = struct{}{}
+	}
 	ss.Unlock()
-	return err
+	return nil
 }
 
 // AckSeqPending records that the given message seqno has been acknowledged
@@ -1170,14 +1349,78 @@ func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
 	ss.Lock()
 	ss.updateSub.ID, ss.updateSub.Seqno = subid, seqno
-	err := ss.writeRecord(subRecAck, &ss.updateSub)
+	if err := ss.writeRecord(ss.file, subRecAck, &ss.updateSub); err != nil {
+		ss.Unlock()
+		return err
+	}
+	s := ss.subs[subid]
+	if s != nil {
+		delete(s.seqnos, seqno)
+		// Test if we should compact
+		if ss.shouldCompact() {
+			ss.compact()
+		}
+	}
 	ss.Unlock()
-	return err
+	return nil
+}
+
+// compact rewrites all subscriptions on a temporary file, reducing the size
+// since we get rid of deleted subscriptions and message sequences that have
+// been acknowledged. On success, the subscriptions file is replaced by this
+// temporary file.
+// Lock is held by caller
+func (ss *FileSubStore) compact() error {
+	tmpFile, err := getTempFile(ss.rootDir, "subs")
+	if err != nil {
+		return err
+	}
+	// Save values in case of failed compaction
+	savedNumRecs := ss.numRecs
+	savedDelRecs := ss.delRecs
+	savedFileSize := ss.fileSize
+	// Use err for all errors below so that we can cleanup using a defer
+	defer func() {
+		if err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+			// Since we failed compaction, restore values
+			ss.numRecs = savedNumRecs
+			ss.delRecs = savedDelRecs
+			ss.fileSize = savedFileSize
+		}
+	}()
+	// Reset to 0 since writeRecord() is updating the values.
+	ss.numRecs = 0
+	ss.delRecs = 0
+	ss.fileSize = 0
+	for _, sub := range ss.subs {
+		err = ss.writeRecord(tmpFile, subRecNew, sub.sub)
+		if err != nil {
+			return err
+		}
+		ss.updateSub.ID = sub.sub.ID
+		for seqno := range sub.seqnos {
+			ss.updateSub.Seqno = seqno
+			err = ss.writeRecord(tmpFile, subRecMsg, &ss.updateSub)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	// Switch the temporary file with the original one.
+	ss.file, err = swapFiles(tmpFile, ss.file)
+	if err != nil {
+		return err
+	}
+	// Update the timestamp of this last successful compact
+	ss.compactTS = time.Now()
+	return nil
 }
 
 // writes a record in the subscriptions file.
 // store's lock is held on entry.
-func (ss *FileSubStore) writeRecord(recType subRecordType, rec subRecord) error {
+func (ss *FileSubStore) writeRecord(w io.Writer, recType subRecordType, rec subRecord) error {
 
 	bufSize := rec.Size()
 
@@ -1191,12 +1434,30 @@ func (ss *FileSubStore) writeRecord(recType subRecordType, rec subRecord) error 
 	writeHeader(ss.tmpSubBuf[0:subRecordHeaderSize], recType, bufSize)
 
 	// Marshal into the given buffer (offset with header size)
-	_, err := rec.MarshalTo(ss.tmpSubBuf[subRecordHeaderSize:totalSize])
-	if err == nil {
-		// Write the header and record
-		_, err = ss.file.Write(ss.tmpSubBuf[:totalSize])
+	if _, err := rec.MarshalTo(ss.tmpSubBuf[subRecordHeaderSize:totalSize]); err != nil {
+		return err
 	}
-	return err
+	// Write the header and record
+	if _, err := w.Write(ss.tmpSubBuf[:totalSize]); err != nil {
+		return err
+	}
+	switch recType {
+	case subRecNew:
+		ss.numRecs++
+	case subRecMsg:
+		ss.numRecs++
+	case subRecAck:
+		// An ack makes the message record free space
+		ss.delRecs++
+	case subRecUpdate:
+		ss.numRecs++
+		// An update makes the old record free space
+		ss.delRecs++
+	case subRecDel:
+		ss.delRecs++
+	}
+	ss.fileSize += int64(totalSize)
+	return nil
 }
 
 // Close closes this store
