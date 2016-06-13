@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"bufio"
+
 	"github.com/nats-io/go-stan/pb"
 	"github.com/nats-io/stan-server/spb"
 	"github.com/nats-io/stan-server/util"
@@ -35,6 +36,17 @@ const (
 	// record header size of a subscription:
 	// 4 bytes: 1 byte for type, 3 bytes for buffer size
 	subRecordHeaderSize = 4
+
+	// Minimum interval for compaction
+	defaultMinCompactInterval = 30 * time.Second
+
+	// Minimum number of deleted subscriptions in a subscription file to
+	// trigger compaction.
+	defaultMinDelSubsOnFile = 100
+
+	// Minimum number of ack records on file before checking if file should
+	// be compacted.
+	defaultMinAcksOnFile = 10000
 )
 
 // Type for the records in the subscriptions file
@@ -73,7 +85,7 @@ type FileStore struct {
 	clientsFile *os.File
 }
 
-type recoveredSub struct {
+type subscription struct {
 	sub    *spb.SubState
 	seqnos map[uint64]struct{}
 }
@@ -81,10 +93,19 @@ type recoveredSub struct {
 // FileSubStore is a subscription store in files.
 type FileSubStore struct {
 	genericSubStore
-	tmpSubBuf []byte
-	file      *os.File
-	delSub    spb.SubStateDelete
-	updateSub spb.SubStateUpdate
+	tmpSubBuf     []byte
+	file          *os.File
+	delSub        spb.SubStateDelete
+	updateSub     spb.SubStateUpdate
+	subs          map[uint64]*subscription
+	minDelsOnFile int // Threshold below we don't even bother to compact
+	delsOnFile    int // Number of delete records
+	minAcksOnFile int // Minimum number of acks before we check for compaction
+	acksOnFile    int // Number of ack records
+	totalSeqs     int // Total number of non ack'ed messages
+	rootDir       string
+	compactItvl   time.Duration
+	nextCompactTS time.Time
 }
 
 // fileSlice represents one of the message store file (there are a number
@@ -191,7 +212,6 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 	var channels []os.FileInfo
 	var msgStore *FileMsgStore
 	var subStore *FileSubStore
-	var subs map[uint64]*recoveredSub
 
 	// Ensure store is closed in case of return with error
 	defer func() {
@@ -252,17 +272,17 @@ func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *Recovered
 		if err != nil {
 			break
 		}
-		subStore, subs, err = newFileSubStore(channelDirName, channel, fs.limits, true)
+		subStore, err = newFileSubStore(channelDirName, channel, fs.limits, true)
 		if err != nil {
 			msgStore.Close()
 			break
 		}
 
 		// For this channel, construct an array of RecoveredSubState
-		rssArray := make([]*RecoveredSubState, 0, len(subs))
+		rssArray := make([]*RecoveredSubState, 0, len(subStore.subs))
 
 		// Fill that array with what we got from newFileSubStore.
-		for _, sub := range subs {
+		for _, sub := range subStore.subs {
 			rss := &RecoveredSubState{
 				Sub:     sub.sub,
 				Pending: make(PendingAcks),
@@ -443,7 +463,7 @@ func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*Chann
 	if err != nil {
 		return nil, false, err
 	}
-	subStore, _, err = newFileSubStore(channelDirName, channel, fs.limits, false)
+	subStore, err = newFileSubStore(channelDirName, channel, fs.limits, false)
 	if err != nil {
 		msgStore.Close()
 		return nil, false, err
@@ -489,6 +509,50 @@ func (fs *FileStore) DeleteClient(clientID string) *Client {
 		fs.Unlock()
 	}
 	return sc
+}
+
+// Return a temporary file (including file version)
+func getTempFile(rootDir, prefix string) (*os.File, error) {
+	tmpFile, err := ioutil.TempFile(rootDir, prefix)
+	if err != nil {
+		return nil, err
+	}
+	if err := util.WriteInt(tmpFile, fileVersion); err != nil {
+		return nil, err
+	}
+	return tmpFile, nil
+}
+
+// When a store file is compacted, the content is rewritten into a
+// temporary file. When this is done, the temporary file replaces
+// the original file.
+func swapFiles(tempFile *os.File, activeFile *os.File) (*os.File, error) {
+	activeFileName := activeFile.Name()
+	tempFileName := tempFile.Name()
+
+	// Lots of things we do here is because Windows would not accept working
+	// on files that are currently opened.
+
+	// On exit, ensure temporary file is removed.
+	defer func() {
+		os.Remove(tempFileName)
+	}()
+	// Start by closing the temporary file.
+	if err := tempFile.Close(); err != nil {
+		return activeFile, err
+	}
+	// Close original file before trying to rename it.
+	if err := activeFile.Close(); err != nil {
+		return activeFile, err
+	}
+	// Rename the tmp file to original file name
+	err := os.Rename(tempFileName, activeFileName)
+	// Need to re-open the active file anyway
+	file, lerr := openFile(activeFileName)
+	if lerr != nil && err == nil {
+		err = lerr
+	}
+	return file, err
 }
 
 // Close closes all stores.
@@ -880,32 +944,34 @@ func (ms *FileMsgStore) Close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // newFileSubStore returns a new instace of a file SubStore.
-func newFileSubStore(channelDirName, channel string, limits ChannelLimits, doRecover bool) (*FileSubStore, map[uint64]*recoveredSub, error) {
-	ss := &FileSubStore{}
+func newFileSubStore(channelDirName, channel string, limits ChannelLimits, doRecover bool) (*FileSubStore, error) {
+	ss := &FileSubStore{
+		rootDir:       channelDirName,
+		subs:          make(map[uint64]*subscription),
+		minDelsOnFile: defaultMinDelSubsOnFile,
+		minAcksOnFile: defaultMinAcksOnFile,
+		compactItvl:   defaultMinCompactInterval,
+	}
 	ss.init(channel, limits)
 
 	var err error
-	var subs map[uint64]*recoveredSub
 
 	fileName := filepath.Join(channelDirName, subsFileName)
 	ss.file, err = openFile(fileName)
-	if err == nil && doRecover {
-		subs, err = ss.recoverSubscriptions()
-	}
 	if err != nil {
-		ss.Close()
-		ss = nil
-		subs = nil
-		return nil, nil, fmt.Errorf("unable to create subscription store for [%s]: %v", channel, err)
+		return nil, err
 	}
-	return ss, subs, nil
+	if doRecover {
+		if err := ss.recoverSubscriptions(); err != nil {
+			ss.Close()
+			return nil, fmt.Errorf("unable to create subscription store for [%s]: %v", channel, err)
+		}
+	}
+	return ss, nil
 }
 
 // recoverSubscriptions recovers subscriptions state for this store.
-func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error) {
-	// We will store the recovered subscriptions in there.
-	recoveredSubs := make(map[uint64]*recoveredSub)
-
+func (ss *FileSubStore) recoverSubscriptions() error {
 	var err error
 	var recType subRecordType
 
@@ -922,7 +988,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 				err = nil
 				break
 			} else {
-				return nil, err
+				return err
 			}
 		}
 		// Get type and size from the header:
@@ -936,7 +1002,7 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 
 		// Read fully the expected number of bytes for this record
 		if _, err := io.ReadFull(file, ss.tmpSubBuf[:recSize]); err != nil {
-			return nil, err
+			return err
 		}
 
 		// Based on record type...
@@ -944,13 +1010,13 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 		case subRecNew:
 			newSub := &spb.SubState{}
 			if err := newSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
-				return nil, err
+				return err
 			}
-			subAndPending := &recoveredSub{
+			sub := &subscription{
 				sub:    newSub,
 				seqnos: make(map[uint64]struct{}),
 			}
-			recoveredSubs[newSub.ID] = subAndPending
+			ss.subs[newSub.ID] = sub
 			// Keep track of the subscriptions count
 			ss.subsCount++
 			// Keep track of max subscription ID found.
@@ -961,18 +1027,18 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 		case subRecUpdate:
 			modifiedSub := &spb.SubState{}
 			if err := modifiedSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
-				return nil, err
+				return err
 			}
 			// Search if the create has been recovered.
-			subAndPending, exists := recoveredSubs[modifiedSub.ID]
+			sub, exists := ss.subs[modifiedSub.ID]
 			if exists {
-				subAndPending.sub = modifiedSub
+				sub.sub = modifiedSub
 			} else {
-				subAndPending := &recoveredSub{
+				sub := &subscription{
 					sub:    modifiedSub,
 					seqnos: make(map[uint64]struct{}),
 				}
-				recoveredSubs[modifiedSub.ID] = subAndPending
+				ss.subs[modifiedSub.ID] = sub
 			}
 			// Keep track of max subscription ID found.
 			if modifiedSub.ID > ss.maxSubID {
@@ -980,12 +1046,13 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 			}
 			break
 		case subRecDel:
+			ss.delsOnFile++
 			delSub := spb.SubStateDelete{}
 			if err := delSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
-				return nil, err
+				return err
 			}
-			if _, exists := recoveredSubs[delSub.ID]; exists {
-				delete(recoveredSubs, delSub.ID)
+			if _, exists := ss.subs[delSub.ID]; exists {
+				delete(ss.subs, delSub.ID)
 				// Keep track of the subscriptions count
 				ss.subsCount--
 			}
@@ -997,32 +1064,35 @@ func (ss *FileSubStore) recoverSubscriptions() (map[uint64]*recoveredSub, error)
 		case subRecMsg:
 			updateSub := spb.SubStateUpdate{}
 			if err := updateSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
-				return nil, err
+				return err
 			}
-			if subAndPending, exists := recoveredSubs[updateSub.ID]; exists {
+			if sub, exists := ss.subs[updateSub.ID]; exists {
 				seqno := updateSub.Seqno
 				// Same seqno/ack can appear several times for the same sub.
 				// See queue subscribers redelivery.
-				if seqno > subAndPending.sub.LastSent {
-					subAndPending.sub.LastSent = seqno
+				if seqno > sub.sub.LastSent {
+					sub.sub.LastSent = seqno
 				}
-				subAndPending.seqnos[seqno] = struct{}{}
+				sub.seqnos[seqno] = struct{}{}
+				ss.totalSeqs++
 			}
 			break
 		case subRecAck:
+			ss.totalSeqs--
+			ss.acksOnFile++
 			updateSub := spb.SubStateUpdate{}
 			if err := updateSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
-				return nil, err
+				return err
 			}
-			if subAndPending, exists := recoveredSubs[updateSub.ID]; exists {
-				delete(subAndPending.seqnos, updateSub.Seqno)
+			if sub, exists := ss.subs[updateSub.ID]; exists {
+				delete(sub.seqnos, updateSub.Seqno)
 			}
 			break
 		default:
-			return nil, fmt.Errorf("unexpected record type: %v", recType)
+			return fmt.Errorf("unexpected record type: %v", recType)
 		}
 	}
-	return recoveredSubs, nil
+	return nil
 }
 
 // CreateSub records a new subscription represented by SubState. On success,
@@ -1035,9 +1105,11 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 	if err := ss.createSub(sub); err != nil {
 		return err
 	}
-	if err := ss.writeRecord(subRecNew, sub); err != nil {
+	if err := ss.writeRecord(ss.file, subRecNew, sub); err != nil {
 		return err
 	}
+	s := &subscription{sub: sub, seqnos: make(map[uint64]struct{})}
+	ss.subs[sub.ID] = s
 	return nil
 }
 
@@ -1045,8 +1117,15 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 	ss.Lock()
 	defer ss.Unlock()
-	if err := ss.writeRecord(subRecUpdate, sub); err != nil {
+	if err := ss.writeRecord(ss.file, subRecUpdate, sub); err != nil {
 		return err
+	}
+	s := ss.subs[sub.ID]
+	if s != nil {
+		s.sub = sub
+	} else {
+		s := &subscription{sub: sub, seqnos: make(map[uint64]struct{})}
+		ss.subs[sub.ID] = s
 	}
 	return nil
 }
@@ -1055,7 +1134,12 @@ func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 func (ss *FileSubStore) DeleteSub(subid uint64) {
 	ss.Lock()
 	ss.delSub.ID = subid
-	ss.writeRecord(subRecDel, &ss.delSub)
+	ss.writeRecord(ss.file, subRecDel, &ss.delSub)
+	delete(ss.subs, subid)
+	ss.delsOnFile++
+	if ss.delsOnFile > ss.minDelsOnFile && time.Now().After(ss.nextCompactTS) {
+		ss.compact()
+	}
 	ss.Unlock()
 }
 
@@ -1063,9 +1147,17 @@ func (ss *FileSubStore) DeleteSub(subid uint64) {
 func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 	ss.Lock()
 	ss.updateSub.ID, ss.updateSub.Seqno = subid, seqno
-	err := ss.writeRecord(subRecMsg, &ss.updateSub)
+	if err := ss.writeRecord(ss.file, subRecMsg, &ss.updateSub); err != nil {
+		ss.Unlock()
+		return err
+	}
+	s := ss.subs[subid]
+	if s != nil {
+		s.seqnos[seqno] = struct{}{}
+		ss.totalSeqs++
+	}
 	ss.Unlock()
-	return err
+	return nil
 }
 
 // AckSeqPending records that the given message seqno has been acknowledged
@@ -1073,14 +1165,73 @@ func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
 	ss.Lock()
 	ss.updateSub.ID, ss.updateSub.Seqno = subid, seqno
-	err := ss.writeRecord(subRecAck, &ss.updateSub)
+	if err := ss.writeRecord(ss.file, subRecAck, &ss.updateSub); err != nil {
+		ss.Unlock()
+		return err
+	}
+	ss.acksOnFile++
+	s := ss.subs[subid]
+	if s != nil {
+		delete(s.seqnos, seqno)
+		ss.totalSeqs--
+	}
+	// Wait for a minimum of acks, and then compact if we get twice more
+	// acks than we have msg sequences.
+	if ss.acksOnFile > ss.minAcksOnFile && ss.acksOnFile > 2*ss.totalSeqs &&
+		time.Now().After(ss.nextCompactTS) {
+		ss.compact()
+	}
 	ss.Unlock()
-	return err
+	return nil
+}
+
+// compact rewrites all subscriptions on a temporary file, reducing the size
+// since we get rid of deleted subscriptions and message sequences that have
+// been acknowledged. On success, the subscriptions file is replaced by this
+// temporary file.
+// Lock is held by caller
+func (ss *FileSubStore) compact() error {
+	tmpFile, err := getTempFile(ss.rootDir, "subs")
+	if err != nil {
+		return err
+	}
+	// Use err for all errors below so that we can cleanup using a defer
+	defer func() {
+		if err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+		}
+	}()
+	ss.delsOnFile = 0
+	ss.acksOnFile = 0
+	ss.totalSeqs = 0
+	for _, sub := range ss.subs {
+		err = ss.writeRecord(tmpFile, subRecNew, sub.sub)
+		if err != nil {
+			return err
+		}
+		ss.updateSub.ID = sub.sub.ID
+		for seqno := range sub.seqnos {
+			ss.totalSeqs++
+			ss.updateSub.Seqno = seqno
+			err = ss.writeRecord(tmpFile, subRecMsg, &ss.updateSub)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	// Switch the temporary file with the original one.
+	ss.file, err = swapFiles(tmpFile, ss.file)
+	if err != nil {
+		return err
+	}
+	ss.nextCompactTS = time.Now().Add(ss.compactItvl)
+	return nil
 }
 
 // writes a record in the subscriptions file.
 // store's lock is held on entry.
-func (ss *FileSubStore) writeRecord(recType subRecordType, rec subRecord) error {
+func (ss *FileSubStore) writeRecord(w io.Writer, recType subRecordType, rec subRecord) error {
 
 	bufSize := rec.Size()
 
@@ -1097,7 +1248,7 @@ func (ss *FileSubStore) writeRecord(recType subRecordType, rec subRecord) error 
 	_, err := rec.MarshalTo(ss.tmpSubBuf[subRecordHeaderSize:totalSize])
 	if err == nil {
 		// Write the header and record
-		_, err = ss.file.Write(ss.tmpSubBuf[:totalSize])
+		_, err = w.Write(ss.tmpSubBuf[:totalSize])
 	}
 	return err
 }
