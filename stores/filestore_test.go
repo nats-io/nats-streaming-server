@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/stan-server/spb"
 	"github.com/nats-io/stan-server/util"
 	"io/ioutil"
+	"time"
 )
 
 var testDefaultServerInfo = spb.ServerInfo{
@@ -1242,4 +1243,246 @@ func TestFSBadSubFile(t *testing.T) {
 		// We should fail to create the filestore
 		expectedErrorOpeningDefaultFileStore(t)
 	}
+}
+
+func TestFSCompactSubsFileOnDelete(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	cs, _, err := fs.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error creating channel: %v", err)
+	}
+	ss := cs.Subs.(*FileSubStore)
+
+	checkStats := func(s *FileSubStore, expectedSubs, expectedDels int) {
+		s.RLock()
+		numSubs := len(s.subs)
+		numDels := s.delsOnFile
+		s.RUnlock()
+		if numSubs != expectedSubs {
+			stackFatalf(t, "Expected %v subs, got %v", expectedSubs, numSubs)
+		}
+		if numDels != expectedDels {
+			stackFatalf(t, "Expected %v dels, got %v", expectedDels, numDels)
+		}
+	}
+
+	// Change threshold to low value for tests
+	ss.Lock()
+	totalSubs := 10
+	delCompact := 5
+	ss.minDelsOnFile = delCompact
+	ss.Unlock()
+
+	// Create an empty sub, we don't care about the content
+	sub := &spb.SubState{}
+	subIDs := make([]uint64, 0, totalSubs)
+	for i := 0; i < totalSubs; i++ {
+		if err := ss.CreateSub(sub); err != nil {
+			t.Fatalf("Unexpected error creating subscription: %v", err)
+		}
+		subIDs = append(subIDs, sub.ID)
+	}
+	checkStats(ss, totalSubs, 0)
+	// Delete not enough records to cause compaction
+	for i := 0; i < delCompact-1; i++ {
+		subID := subIDs[i]
+		ss.DeleteSub(subID)
+	}
+	checkStats(ss, totalSubs-delCompact+1, delCompact-1)
+	// Recover
+	fs.Close()
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	cs = fs.LookupChannel("foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	// Change threshold to low value for tests
+	ss.Lock()
+	ss.minDelsOnFile = delCompact
+	ss.compactItvl = time.Second
+	interval := ss.compactItvl
+	ss.Unlock()
+
+	// Make sure our numbers are correct on recovery
+	checkStats(ss, totalSubs-delCompact+1, delCompact-1)
+
+	// Delete more to cause compaction
+	ss.DeleteSub(subIDs[delCompact-1])
+	ss.DeleteSub(subIDs[delCompact])
+
+	// Now the number of dels should be 0.
+	checkStats(ss, totalSubs-delCompact-1, 0)
+
+	subIDs = subIDs[:0]
+	// Make sure we don't compact too often
+	// Add some
+	for i := 0; i < 2*delCompact; i++ {
+		if err := ss.CreateSub(sub); err != nil {
+			t.Fatalf("Unexpected error creating subscription: %v", err)
+		}
+		subIDs = append(subIDs, sub.ID)
+	}
+	checkStats(ss, totalSubs-delCompact-1+2*delCompact, 0)
+	// Then remove them all. Total gain/loss is 0.
+	for _, subID := range subIDs {
+		ss.DeleteSub(subID)
+	}
+	checkStats(ss, totalSubs-delCompact-1, 2*delCompact)
+	subIDs = subIDs[:0]
+
+	// Wait for longer than compact interval
+	time.Sleep(interval + 500*time.Millisecond)
+	// Cause a compact by adding and then removing a subscription
+	if err := ss.CreateSub(sub); err != nil {
+		t.Fatalf("Unexpected error creating subscription: %v", err)
+	}
+	ss.DeleteSub(sub.ID)
+	// Check stats
+	checkStats(ss, totalSubs-delCompact-1, 0)
+
+	// Check that compacted file is as expected
+	fs.Close()
+	fs, state = openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	cs = fs.LookupChannel("foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	checkStats(ss, totalSubs-delCompact-1, 0)
+}
+
+func TestFSCompactSubsFileOnAck(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	cs, _, err := fs.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error creating channel: %v", err)
+	}
+	ss := cs.Subs.(*FileSubStore)
+
+	checkStats := func(s *FileSubStore, expectedSeqs, expectedAcks int) {
+		s.RLock()
+		numSeqs := s.totalSeqs
+		numAcks := s.acksOnFile
+		s.RUnlock()
+		if numSeqs != expectedSeqs {
+			stackFatalf(t, "Expected %v seqs, got %v", expectedSeqs, numSeqs)
+		}
+		if numAcks != expectedAcks {
+			stackFatalf(t, "Expected %v acks, got %v", expectedAcks, numAcks)
+		}
+	}
+
+	// Change threshold to low value for tests
+	ss.Lock()
+	ss.minAcksOnFile = 1
+	ss.Unlock()
+
+	// We compact when number of acks on file is > 2 * total of active seqs
+	totalSeqs := 10
+
+	// Create an empty sub, we don't care about the content
+	sub := &spb.SubState{}
+	if err := ss.CreateSub(sub); err != nil {
+		t.Fatalf("Unexpected error creating subscription: %v", err)
+	}
+
+	// Add sequences
+	for i := 0; i < totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkStats(ss, totalSeqs, 0)
+	// Delete not enough records to cause compaction
+	for i := 0; i < totalSeqs/2-1; i++ {
+		if err := ss.AckSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding ack: %v", err)
+		}
+	}
+	checkStats(ss, totalSeqs/2+1, totalSeqs/2-1)
+	// Recover
+	fs.Close()
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	cs = fs.LookupChannel("foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	// Change threshold to low value for tests
+	ss.Lock()
+	ss.minAcksOnFile = 1
+	ss.compactItvl = time.Second
+	interval := ss.compactItvl
+	ss.Unlock()
+
+	// Make sure our numbers are correct on recovery
+	checkStats(ss, totalSeqs/2+1, totalSeqs/2-1)
+
+	// Add more acks to cause compaction
+	for i := totalSeqs / 2; i < totalSeqs-2; i++ {
+		if err := ss.AckSeqPending(sub.ID, uint64(i)); err != nil {
+			t.Fatalf("Unexpected error adding ack: %v", err)
+		}
+	}
+	// Now the number of acks should be 0.
+	checkStats(ss, 3, 0)
+
+	// Make sure we don't compact too often
+	start := 10000
+	// Add some
+	for i := 0; i < 2*totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(start+i)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkStats(ss, 3+2*totalSeqs, 0)
+	// Then remove them all. Total gain/loss is 0.
+	for i := 0; i < 2*totalSeqs; i++ {
+		if err := ss.AckSeqPending(sub.ID, uint64(start+i)); err != nil {
+			t.Fatalf("Unexpected error adding ack: %v", err)
+		}
+	}
+	checkStats(ss, 3, 2*totalSeqs)
+
+	// Wait for longer than compact interval
+	time.Sleep(interval + 500*time.Millisecond)
+	// Cause a compact
+	willCompactID := uint64(20000)
+	if err := ss.AddSeqPending(sub.ID, willCompactID); err != nil {
+		t.Fatalf("Unexpected error adding seq: %v", err)
+	}
+	if err := ss.AckSeqPending(sub.ID, willCompactID); err != nil {
+		t.Fatalf("Unexpected error adding ack: %v", err)
+	}
+	// Check stats
+	checkStats(ss, 3, 0)
+
+	// Check that compacted file is as expected
+	fs.Close()
+	fs, state = openDefaultFileStore(t)
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("Expected state to be recovered")
+	}
+	cs = fs.LookupChannel("foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	checkStats(ss, 3, 0)
 }
