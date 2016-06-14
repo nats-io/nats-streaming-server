@@ -35,6 +35,13 @@ const (
 	// record header size of a subscription:
 	// 4 bytes: 1 byte for type, 3 bytes for buffer size
 	subRecordHeaderSize = 4
+
+	// Minimum number of clients on file before checking
+	// if file should be compacted.
+	defaultMinClientsOnFile = 1000
+
+	// Minimum interval for compaction
+	defaultMinCompactInterval = 30 * time.Second
 )
 
 // Type for the records in the subscriptions file
@@ -68,9 +75,13 @@ const (
 // FileStore is the storage interface for STAN servers, backed by files.
 type FileStore struct {
 	genericStore
-	rootDir     string
-	serverFile  *os.File
-	clientsFile *os.File
+	rootDir       string
+	serverFile    *os.File
+	clientsFile   *os.File
+	minCliOnFile  int // Threshold below which we don't bother trying to compact.
+	cliOnFile     int // Number of "add" client records on file (used for compact).
+	compactItvl   time.Duration
+	nextCompactTS time.Time
 }
 
 type recoveredSub struct {
@@ -175,7 +186,9 @@ func writeHeader(buf []byte, recType subRecordType, recordSize int) {
 // DefaultChannelLimits.
 func NewFileStore(rootDir string, limits *ChannelLimits) (*FileStore, *RecoveredState, error) {
 	fs := &FileStore{
-		rootDir: rootDir,
+		rootDir:      rootDir,
+		minCliOnFile: defaultMinClientsOnFile,
+		compactItvl:  defaultMinCompactInterval,
 	}
 	fs.init(TypeFile, limits)
 
@@ -352,6 +365,7 @@ func (fs *FileStore) recoverClients() ([]*Client, error) {
 			// Add to the map. Note that if one already exists, which should
 			// not, just replace with this most recent one.
 			fs.clients[clientID] = c
+			fs.cliOnFile++
 		case delClient:
 			if clientID == "" {
 				return nil, fmt.Errorf("missing client ID in DELETE client instruction")
@@ -472,9 +486,11 @@ func (fs *FileStore) AddClient(clientID, hbInbox string, userData interface{}) (
 	line := fmt.Sprintf("%s %s %s\r\n", addClient, clientID, hbInbox)
 	fs.Lock()
 	if _, err := fs.clientsFile.WriteString(line); err != nil {
+		delete(fs.clients, clientID)
 		fs.Unlock()
 		return nil, false, err
 	}
+	fs.cliOnFile++
 	fs.Unlock()
 	return sc, true, nil
 }
@@ -485,10 +501,91 @@ func (fs *FileStore) DeleteClient(clientID string) *Client {
 	if sc != nil {
 		line := fmt.Sprintf("%s %s\r\n", delClient, clientID)
 		fs.Lock()
-		fs.clientsFile.WriteString(line)
+		writeDel := true
+		// Don't bother if file is too small. When the threshold is reached,
+		// compact if the number of live clients falls below half the total
+		// number on file. Also, make sure we don't compact too often.
+		if fs.cliOnFile > fs.minCliOnFile && len(fs.clients) <= fs.cliOnFile/2 &&
+			time.Now().After(fs.nextCompactTS) {
+			writeDel = (fs.compactClientFile() != nil)
+		}
+		if writeDel {
+			fs.clientsFile.WriteString(line)
+		}
 		fs.Unlock()
 	}
 	return sc
+}
+
+// Rewrite the content of the clients map into a temporary file,
+// then swap back to active file.
+func (fs *FileStore) compactClientFile() error {
+	// Open a temporary file
+	tmpFile, err := getTempFile(fs.rootDir, clientsFileName)
+	if err != nil {
+		return err
+	}
+	// Dump the content of active clients into the temporary file.
+	for _, c := range fs.clients {
+		line := fmt.Sprintf("%s %s %s\r\n", addClient, c.ClientID, c.HbInbox)
+		if _, err := tmpFile.WriteString(line); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+			return err
+		}
+	}
+	// Switch the temporary file with the original one.
+	fs.clientsFile, err = swapFiles(tmpFile, fs.clientsFile)
+	if err != nil {
+		return err
+	}
+	fs.cliOnFile = len(fs.clients)
+	fs.nextCompactTS = time.Now().Add(fs.compactItvl)
+	return nil
+}
+
+// Return a temporary file (including file version)
+func getTempFile(rootDir, prefix string) (*os.File, error) {
+	tmpFile, err := ioutil.TempFile(rootDir, prefix)
+	if err != nil {
+		return nil, err
+	}
+	if err := util.WriteInt(tmpFile, fileVersion); err != nil {
+		return nil, err
+	}
+	return tmpFile, nil
+}
+
+// When a store file is compacted, the content is rewritten into a
+// temporary file. When this is done, the temporary file replaces
+// the original file.
+func swapFiles(tempFile *os.File, activeFile *os.File) (*os.File, error) {
+	activeFileName := activeFile.Name()
+	tempFileName := tempFile.Name()
+
+	// Lots of things we do here is because Windows would not accept working
+	// on files that are currently opened.
+
+	// On exit, ensure temporary file is removed.
+	defer func() {
+		os.Remove(tempFileName)
+	}()
+	// Start by closing the temporary file.
+	if err := tempFile.Close(); err != nil {
+		return activeFile, err
+	}
+	// Close original file before trying to rename it.
+	if err := activeFile.Close(); err != nil {
+		return activeFile, err
+	}
+	// Rename the tmp file to original file name
+	err := os.Rename(tempFileName, activeFileName)
+	// Need to re-open the active file anyway
+	file, lerr := openFile(activeFileName)
+	if lerr != nil && err == nil {
+		err = lerr
+	}
+	return file, err
 }
 
 // Close closes all stores.
