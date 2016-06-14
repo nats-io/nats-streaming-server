@@ -11,10 +11,10 @@ import (
 	"time"
 
 	natsd "github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/go-stan"
-	"github.com/nats-io/go-stan/pb"
+	"github.com/nats-io/go-nats-streaming"
+	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats"
-	"github.com/nats-io/stan-server/stores"
+	"github.com/nats-io/nats-streaming-server/stores"
 
 	"io/ioutil"
 	"sync"

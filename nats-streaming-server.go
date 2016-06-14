@@ -11,12 +11,12 @@ import (
 	"fmt"
 
 	natsd "github.com/nats-io/gnatsd/server"
-	stand "github.com/nats-io/stan-server/server"
-	"github.com/nats-io/stan-server/stores"
+	stand "github.com/nats-io/nats-streaming-server/server"
+	"github.com/nats-io/nats-streaming-server/stores"
 )
 
 var usageStr = `
-Usage: stan-server [options]
+Usage: nats-streaming-server [options]
 
 STAN Options:
         -cluster_id  <cluster ID>    Cluster ID (default: test-cluster)
@@ -165,7 +165,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 
 	// Show version and exit
 	if showVersion {
-		fmt.Printf("stan-server version %s, ", stand.VERSION)
+		fmt.Printf("nats-streaming-server version %s, ", stand.VERSION)
 		natsd.PrintServerAndExit()
 	}
 

@@ -4,8 +4,8 @@ package server
 
 import (
 	"flag"
-	"github.com/nats-io/go-stan"
-	"github.com/nats-io/stan-server/stores"
+	"github.com/nats-io/go-nats-streaming"
+	"github.com/nats-io/nats-streaming-server/stores"
 	"os"
 	"strings"
 	"sync/atomic"
