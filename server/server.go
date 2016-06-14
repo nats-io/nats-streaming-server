@@ -12,14 +12,14 @@ import (
 	"time"
 
 	"github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/go-stan/pb"
+	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nuid"
-	"github.com/nats-io/stan-server/spb"
+	"github.com/nats-io/nats-streaming-server/spb"
 
 	natsd "github.com/nats-io/gnatsd/test"
 
-	stores "github.com/nats-io/stan-server/stores"
+	stores "github.com/nats-io/nats-streaming-server/stores"
 	"regexp"
 )
 
@@ -27,7 +27,7 @@ import (
 
 // Server defaults.
 const (
-	// VERSION is the current version for the stan server.
+	// VERSION is the current version for the NATS Streaming server.
 	VERSION = "0.0.1.alpha"
 
 	DefaultClusterID      = "test-cluster"
@@ -396,7 +396,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		nOpts = &no
 	}
 
-	Noticef("Starting stan-server[%s] version %s", sOpts.ID, VERSION)
+	Noticef("Starting nats-streaming-server[%s] version %s", sOpts.ID, VERSION)
 
 	s := StanServer{
 		serverID:          nuid.Next(),
