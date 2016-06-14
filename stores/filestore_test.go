@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
 	"io/ioutil"
+	"time"
 )
 
 var testDefaultServerInfo = spb.ServerInfo{
@@ -1241,5 +1242,283 @@ func TestFSBadSubFile(t *testing.T) {
 		}
 		// We should fail to create the filestore
 		expectedErrorOpeningDefaultFileStore(t)
+	}
+}
+
+func TestFSSwapFiles(t *testing.T) {
+	var tmpFile, activeFile *os.File
+	defer func() {
+		if tmpFile != nil {
+			tmpFile.Close()
+		}
+		if activeFile != nil {
+			activeFile.Close()
+		}
+		os.Remove("file.dat.tmp")
+		os.Remove("file.dat")
+	}()
+	resetFiles := func() {
+		if tmpFile != nil {
+			tmpFile.Close()
+		}
+		if activeFile != nil {
+			activeFile.Close()
+		}
+		tmpFileName := "file.dat.tmp"
+		os.Remove(tmpFileName)
+		activeFileName := "file.dat"
+		os.Remove(activeFileName)
+
+		var err error
+		tmpFile, err = openFile(tmpFileName)
+		if err != nil {
+			stackFatalf(t, "Unexpected error creating file: %v", tmpFile)
+		}
+		activeFile, err = openFile(activeFileName)
+		if err != nil {
+			stackFatalf(t, "Unexpected error creating file: %v", activeFile)
+		}
+	}
+	doSwapWithError := func() {
+		f, err := swapFiles(tmpFile, activeFile)
+		if err == nil {
+			stackFatalf(t, "Expected error swapping files, got none")
+		}
+		if f != activeFile {
+			stackFatalf(t, "Expected returned file to be the active file")
+		}
+	}
+
+	resetFiles()
+	// Invoke with a closed tmpFile
+	tmpFile.Close()
+	doSwapWithError()
+
+	resetFiles()
+	// Invoke with a closed active file
+	activeFile.Close()
+	doSwapWithError()
+
+	resetFiles()
+	// Success test
+	activeFile, err := swapFiles(tmpFile, activeFile)
+	if err != nil {
+		t.Fatalf("Unexpected error on swap: %v", err)
+	}
+	if _, err := os.Stat("file.dat"); err != nil {
+		t.Fatalf("Active file should exist")
+	}
+	if _, err := os.Stat("file.dat.tmp"); err == nil {
+		t.Fatalf("Temp file should no longer exist")
+	}
+}
+
+func TestFSAddClientError(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Test failure of AddClient (generic tested in common_test.go)
+	// Close the client file to cause error
+	fs.clientsFile.Close()
+	// Should fail
+	if c, _, err := fs.AddClient("c1", "hbInbox", "test"); err == nil {
+		t.Fatal("Expected error, got none")
+	} else if c != nil {
+		t.Fatalf("Should not have gotten a client back, got %v", c)
+	}
+}
+
+func TestFSCompactClientFile(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Change threshold to low value for tests
+	fs.Lock()
+	fs.minCliOnFile = 10
+	threshold := fs.minCliOnFile
+	fs.Unlock()
+
+	// Create clients below threshold
+	for i := 0; i < threshold; i++ {
+		cid := fmt.Sprintf("cid_%d", (i + 1))
+		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
+			t.Fatalf("Unexpected error adding clients: %v", err)
+		}
+	}
+	// Delete half.
+	for i := 0; i < threshold/2; i++ {
+		cid := fmt.Sprintf("cid_%d", (i + 1))
+		fs.DeleteClient(cid)
+	}
+	// Recover
+	fs.Close()
+	fs, _ = openDefaultFileStore(t)
+	defer fs.Close()
+
+	// Change threshold to low value for tests
+	fs.Lock()
+	fs.minCliOnFile = 10
+	threshold = fs.minCliOnFile
+	fs.Unlock()
+
+	// Check number of clients
+	fs.RLock()
+	numClients := len(fs.clients)
+	cliOnFile := fs.cliOnFile
+	fs.RUnlock()
+	if numClients != threshold/2 {
+		t.Fatalf("Expected to recover %v clients, got %v", threshold/2, numClients)
+	}
+	if cliOnFile != threshold {
+		t.Fatalf("Number of clients in the file should be %v, got %v", threshold, cliOnFile)
+	}
+
+	// Add more clients
+	for i := 0; i < 3*threshold; i++ {
+		cid := fmt.Sprintf("cid_%d", (threshold + i + 1))
+		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
+			t.Fatalf("Unexpected error adding clients: %v", err)
+		}
+	}
+	// Recover
+	fs.Close()
+	fs, _ = openDefaultFileStore(t)
+	defer fs.Close()
+
+	// Change threshold to low value for tests
+	fs.Lock()
+	fs.minCliOnFile = 10
+	threshold = fs.minCliOnFile
+	// Check number of clients
+	numClients = len(fs.clients)
+	cliOnFile = fs.cliOnFile
+	fs.compactItvl = time.Second
+	interval := fs.compactItvl
+	fs.Unlock()
+
+	// total active clients should be 3*threshold+1/2threshold at this point
+	expected := int(3.5 * float32(threshold))
+	if numClients != expected {
+		t.Fatalf("Expected to recover %v clients, got %v", expected, numClients)
+	}
+	// But on file, there should be 3*threshold "add client" records.
+	if cliOnFile != 4*threshold {
+		t.Fatalf("Number of clients in the file should be %v, got %v", 4*threshold, cliOnFile)
+	}
+
+	// Now check compaction by removing a total of more than cliOnFile / 2.
+	// Delete below the half point should not cause the compact:
+	fs.DeleteClient(fmt.Sprintf("cid_%v", threshold/2+1))
+	fs.RLock()
+	cliOnFile = fs.cliOnFile
+	fs.RUnlock()
+	if cliOnFile != 4*threshold {
+		t.Fatalf("Expected cliOnFile to be %v, got %v", 4*threshold, cliOnFile)
+	}
+	// Now delete more to cause compact
+	for i := 0; i < 2*threshold-1; i++ {
+		cid := fmt.Sprintf("cid_%d", (threshold/2 + 1 + i + 1))
+		fs.DeleteClient(cid)
+	}
+	// Check that the file has compacted
+	fs.RLock()
+	numClients = len(fs.clients)
+	cliOnFile = fs.cliOnFile
+	fs.RUnlock()
+	expected = int(1.5 * float32(threshold))
+	if numClients != expected {
+		t.Fatalf("Expected to recover %v clients, got %v", expected, numClients)
+	}
+	if cliOnFile != 2*threshold {
+		t.Fatalf("Number of clients in the file should be %v, got %v", 2*threshold, cliOnFile)
+	}
+	// Add few more clients and make sure that the compaction is not happening
+	// all the times after that.
+	for i := 0; i < 3; i++ {
+		cid := fmt.Sprintf("cid_%d", (4*threshold + i + 1))
+		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
+			t.Fatalf("Unexpected error adding clients: %v", err)
+		}
+	}
+	// Check numbers
+	fs.RLock()
+	numClients = len(fs.clients)
+	cliOnFile = fs.cliOnFile
+	fs.RUnlock()
+	expected += 3
+	if numClients != expected {
+		t.Fatalf("Expected to recover %v clients, got %v", expected, numClients)
+	}
+	if cliOnFile != 2*threshold+3 {
+		t.Fatalf("Number of clients in the file should be %v, got %v", threshold/2, cliOnFile)
+	}
+
+	// Make sure that we don't compact too often:
+	beforeCliOnFile := cliOnFile
+	beforeNumClients := numClients
+	// Add some clients
+	for i := 0; i < 2*threshold; i++ {
+		cid := fmt.Sprintf("nocompact_%d", (i + 1))
+		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
+			t.Fatalf("Unexpected error adding clients: %v", err)
+		}
+	}
+	// Remove them all
+	for i := 0; i < 2*threshold; i++ {
+		cid := fmt.Sprintf("nocompact_%d", (i + 1))
+		fs.DeleteClient(cid)
+	}
+	// Check numbers
+	fs.RLock()
+	numClients = len(fs.clients)
+	cliOnFile = fs.cliOnFile
+	fs.RUnlock()
+	expected = beforeCliOnFile + 2*threshold
+	if cliOnFile != expected {
+		t.Fatalf("Number of clients in the file should be %v, got %v", expected, cliOnFile)
+	}
+	if numClients != beforeNumClients {
+		t.Fatalf("Number of clients should be %v, got %v", beforeNumClients, numClients)
+	}
+	// Wait the compact interval and a bit more
+	time.Sleep(interval + 500*time.Millisecond)
+	// Check that we now can compact
+	if _, _, err := fs.AddClient("willcompact", "hbInbox", nil); err != nil {
+		t.Fatalf("Unexpected error adding clients: %v", err)
+	}
+	fs.DeleteClient("willcompact")
+	// Check numbers
+	fs.RLock()
+	numClients = len(fs.clients)
+	cliOnFile = fs.cliOnFile
+	fs.RUnlock()
+	if cliOnFile != beforeNumClients {
+		t.Fatalf("Number of clients in the file should be %v, got %v", beforeNumClients, cliOnFile)
+	}
+	if numClients != beforeNumClients {
+		t.Fatalf("Number of clients should be %v, got %v", beforeNumClients, numClients)
+	}
+
+	// Verify that the compacted file is as expected by doing a recovery.
+	fs.Close()
+	fs, _ = openDefaultFileStore(t)
+	defer fs.Close()
+
+	// Check numbers
+	fs.RLock()
+	numClients = len(fs.clients)
+	cliOnFile = fs.cliOnFile
+	fs.RUnlock()
+	if cliOnFile != beforeNumClients {
+		t.Fatalf("Number of clients in the file should be %v, got %v", beforeNumClients, cliOnFile)
+	}
+	if numClients != beforeNumClients {
+		t.Fatalf("Number of clients should be %v, got %v", beforeNumClients, numClients)
 	}
 }
