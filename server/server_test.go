@@ -2965,8 +2965,6 @@ func TestEnsureStandAlone(t *testing.T) {
 	s := RunServerWithOpts(sOpts, &nOpts)
 	defer s.Shutdown()
 
-	time.Sleep(10000)
-
 	// Start a second streaming server and route to the first, while using the
 	// same cluster ID.  It should panic.
 	var failedServer *StanServer
