@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
+	natsd "github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nats-streaming-server/stores"
 
-	natsd "github.com/nats-io/gnatsd/server"
 	"io/ioutil"
 	"sync"
 	"sync/atomic"
@@ -2947,4 +2947,40 @@ func TestGetSubStoreRace(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("%v", <-errs)
 	}
+}
+
+// TestEnsureStandAlone tests to ensure the server
+// panics if it detects another instance running in
+// a cluster.
+func TestEnsureStandAlone(t *testing.T) {
+
+	// Start a streaming server, and setup a route
+	nOpts := DefaultNatsServerOptions
+	nOpts.ClusterListenStr = "nats://127.0.0.1:5550"
+	nOpts.RoutesStr = "nats://127.0.0.1:5551"
+
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+
+	s := RunServerWithOpts(sOpts, &nOpts)
+	defer s.Shutdown()
+
+	// Start a second streaming server and route to the first, while using the
+	// same cluster ID.  It should panic.
+	var failedServer *StanServer
+
+	defer func() {
+		if r := recover(); r == nil {
+			if failedServer != nil {
+				failedServer.Shutdown()
+			}
+			t.Fatal("Server did not detect a duplicate instance.")
+		}
+	}()
+
+	nOpts2 := DefaultNatsServerOptions
+	nOpts2.Port = 4333
+	nOpts2.ClusterListenStr = "nats://127.0.0.1:5551"
+	nOpts2.RoutesStr = "nats://127.0.0.1:5550"
+	failedServer = RunServerWithOpts(sOpts, &nOpts2)
 }
