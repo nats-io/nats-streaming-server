@@ -18,19 +18,26 @@ import (
 var usageStr = `
 Usage: nats-streaming-server [options]
 
-STAN Options:
-        -cluster_id  <cluster ID>    Cluster ID (default: test-cluster)
-        -store <type>                Store type: MEMORY|FILE (default: MEMORY)
-        -dir <directory>             For FILE store type, this is the root directory
-        -max_channels <number>       Max number of channels
-        -max_subs <number>           Max number of subscriptions per channel
-        -max_msgs <number>           Max number of messages per channel
-        -max_bytes <number>          Max messages total size per channel
+Streaming Server Options:
+    -cluster_id  <cluster ID>    Cluster ID (default: test-cluster)
+    -store <type>                Store type: MEMORY|FILE (default: MEMORY)
+    -dir <directory>             For FILE store type, this is the root directory
+    -max_channels <number>       Max number of channels
+    -max_subs <number>           Max number of subscriptions per channel
+    -max_msgs <number>           Max number of messages per channel
+    -max_bytes <number>          Max messages total size per channel
 
-STAN Logging Options:
-    -SD, --stan_debug                Enable STAN debugging output
-    -SV, --stan_trace                Trace the raw STAN protocol
-    -SDV                             Debug and trace STAN
+Streaming Server TLS Options:
+    -secure                      Use a TLS connection to the NATS server without
+	                             verification; weaker than specifying certificates.
+    -tls_client_key              Client key for the streaming server
+    -tls_client_cert             Client certificate for the streaming server
+    -tls_client_cacert           Client certificate CA for the streaming server
+
+Streaming Server Logging Options:
+    -SD, --stan_debug            Enable STAN debugging output
+    -SV, --stan_trace            Trace the raw STAN protocol
+    -SDV                         Debug and trace STAN
     (See additional NATS logging options below)
 
 Embedded NATS Server Options:
@@ -106,6 +113,10 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.BoolVar(&stanOpts.Trace, "SV", false, "Enable STAN Trace logging.")
 	flag.BoolVar(&stanOpts.Trace, "stan_trace", false, "Enable STAN Trace logging.")
 	flag.BoolVar(&stanDebugAndTrace, "SDV", false, "Enable STAN Debug and Trace logging.")
+	flag.BoolVar(&stanOpts.Secure, "secure", false, "Enables TLS secure connection that skips server verification.")
+	flag.StringVar(&stanOpts.ClientCert, "tls_client_cert", "", "Path to a client certificate file")
+	flag.StringVar(&stanOpts.ClientKey, "tls_client_key", "", "Path to a client key file")
+	flag.StringVar(&stanOpts.ClientCA, "tls_client_cacert", "", "Path to a client CA file")
 
 	// NATS options
 	var showVersion bool

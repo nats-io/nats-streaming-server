@@ -16,8 +16,8 @@ import (
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats"
-	"github.com/nats-io/nuid"
 	"github.com/nats-io/nats-streaming-server/spb"
+	"github.com/nats-io/nuid"
 
 	natsd "github.com/nats-io/gnatsd/test"
 
@@ -338,8 +338,12 @@ type Options struct {
 	MaxMsgs          int    // Maximum number of messages per channel
 	MaxBytes         uint64 // Maximum number of bytes used by messages per channel
 	MaxSubscriptions int    // Maximum number of subscriptions per channel
-	Trace            bool
-	Debug            bool
+	Trace            bool   // Verbose trace
+	Debug            bool   // Debug trace
+	Secure           bool   // Create a TLS enabled connection w/o server verification
+	ClientCert       string // Client Certificate for TLS
+	ClientKey        string // Client Key for TLS
+	ClientCA         string // Client CAs for TLS
 }
 
 // DefaultOptions are default options for the STAN server
@@ -375,6 +379,51 @@ func stanClosedHandler(_ *nats.Conn) {
 
 func stanErrorHandler(_ *nats.Conn, sub *nats.Subscription, err error) {
 	Errorf("STAN: Asynchronous error on subject %s: %s", sub.Subject, err)
+}
+
+// creates a connection to the NATS server, using TLS if configured.
+func createNatsClientConn(sOpts *Options, nOpts *server.Options) (*nats.Conn, error) {
+	var err error
+	var ncOpts = nats.Options{}
+
+	ncOpts.Url = fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port)
+	ncOpts.Name = fmt.Sprintf("NATS-Streaming-Server-%s", sOpts.ID)
+
+	if err = nats.ErrorHandler(stanErrorHandler)(&ncOpts); err != nil {
+		return nil, err
+	}
+	if err = nats.ErrorHandler(stanErrorHandler)(&ncOpts); err != nil {
+		return nil, err
+	}
+	if err = nats.ClosedHandler(stanClosedHandler)(&ncOpts); err != nil {
+		return nil, err
+	}
+	if err = nats.DisconnectHandler(stanDisconnectedHandler)(&ncOpts); err != nil {
+		return nil, err
+	}
+	if sOpts.Secure {
+		if err = nats.Secure()(&ncOpts); err != nil {
+			return nil, err
+		}
+	}
+	if sOpts.ClientCA != "" {
+		if err = nats.RootCAs(sOpts.ClientCA)(&ncOpts); err != nil {
+			return nil, err
+		}
+	}
+	if sOpts.ClientCert != "" {
+		if err = nats.ClientCert(sOpts.ClientCert, sOpts.ClientKey)(&ncOpts); err != nil {
+			return nil, err
+		}
+	}
+
+	Tracef("STAN:  NATS conn opts: %v", ncOpts)
+
+	var nc *nats.Conn
+	if nc, err = ncOpts.Connect(); err != nil {
+		return nil, err
+	}
+	return nc, err
 }
 
 // RunServer will startup an embedded STAN server and a nats-server to support it.
@@ -500,13 +549,10 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	}
 
 	s.configureClusterOpts(nOpts)
+	s.configureNATSServerTLS(nOpts)
 	s.natsServer = natsd.RunServer(nOpts)
 
-	natsURL := fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port)
-	if s.nc, err = nats.Connect(natsURL,
-		nats.DisconnectHandler(stanDisconnectedHandler),
-		nats.ErrorHandler(stanErrorHandler),
-		nats.ClosedHandler(stanClosedHandler)); err != nil {
+	if s.nc, err = createNatsClientConn(sOpts, nOpts); err != nil {
 		panic(fmt.Sprintf("Can't connect to NATS server: %v\n", err))
 	}
 
@@ -591,6 +637,50 @@ func (s *StanServer) configureClusterOpts(opts *server.Options) error {
 	}
 
 	return nil
+}
+
+// configureNATSServerTLS sets up TLS for the NATS Server.
+// Additional TLS parameters (e.g. cipher suites) will need to be placed
+// in a configuration file specified through the -config parameter.
+func (s *StanServer) configureNATSServerTLS(opts *server.Options) {
+	tlsSet := false
+	tc := server.TLSConfigOpts{}
+	if opts.TLSCert != "" {
+		tc.CertFile = opts.TLSCert
+		tlsSet = true
+	}
+	if opts.TLSKey != "" {
+		tc.KeyFile = opts.TLSKey
+		tlsSet = true
+	}
+	if opts.TLSCaCert != "" {
+		tc.CaFile = opts.TLSCaCert
+		tlsSet = true
+	}
+
+	if opts.TLSVerify {
+		tc.Verify = true
+		tlsSet = true
+	}
+
+	var err error
+	if tlsSet {
+		if opts.TLSConfig, err = server.GenTLSConfig(&tc); err != nil {
+			// The connection will fail later if the problem is severe enough.
+			Errorf("STAN:  Unable to setup NATS Server TLS:  %v", err)
+		}
+	}
+}
+
+// startNATSServer massages options as necessary, and starts the embedded
+// NATS server.  No errors, only panics upon error conditions.
+func (s *StanServer) startNATSServer(opts *server.Options) {
+	if opts.Host == "" {
+		opts.Host = "localhost"
+	}
+	s.configureClusterOpts(opts)
+	s.configureNATSServerTLS(opts)
+	s.natsServer = natsd.RunServer(opts)
 }
 
 // ensureRunningStandAlone prevents this streaming server from starting
