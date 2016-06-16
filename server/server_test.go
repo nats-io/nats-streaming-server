@@ -2984,3 +2984,80 @@ func TestEnsureStandAlone(t *testing.T) {
 	nOpts2.RoutesStr = "nats://127.0.0.1:5550"
 	failedServer = RunServerWithOpts(sOpts, &nOpts2)
 }
+
+func TestTLSSuccess(t *testing.T) {
+	nOpts := DefaultNatsServerOptions
+
+	nOpts.TLSCert = "../test/certs/server-cert.pem"
+	nOpts.TLSKey = "../test/certs/server-key.pem"
+	nOpts.TLSCaCert = "../test/certs/ca.pem"
+
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+	sOpts.ClientCert = "../test/certs/client-cert.pem"
+	sOpts.ClientCA = "../test/certs/ca.pem"
+	sOpts.ClientKey = "../test/certs/client-key.pem"
+
+	s := RunServerWithOpts(sOpts, &nOpts)
+	defer s.Shutdown()
+}
+
+func TestTLSSuccessSecure(t *testing.T) {
+	nOpts := DefaultNatsServerOptions
+
+	nOpts.TLSCert = "../test/certs/server-cert.pem"
+	nOpts.TLSKey = "../test/certs/server-key.pem"
+	nOpts.TLSCaCert = "../test/certs/ca.pem"
+
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+	sOpts.Secure = true
+
+	s := RunServerWithOpts(sOpts, &nOpts)
+	defer s.Shutdown()
+}
+
+func TestTLSFailServerTLSClientPlain(t *testing.T) {
+	nOpts := DefaultNatsServerOptions
+
+	nOpts.TLSCert = "../test/certs/server-cert.pem"
+	nOpts.TLSKey = "../test/certs/server-key.pem"
+	nOpts.TLSCaCert = "../test/certs/ca.pem"
+
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+
+	var failedServer *StanServer
+	defer func() {
+		if r := recover(); r == nil {
+			if failedServer != nil {
+				failedServer.Shutdown()
+			}
+			t.Fatal("Server did not fail with invalid TLS configuration.")
+		}
+	}()
+	failedServer = RunServerWithOpts(sOpts, &nOpts)
+	defer failedServer.Shutdown()
+}
+
+func TestTLSFailClientTLSServerPlain(t *testing.T) {
+	nOpts := DefaultNatsServerOptions
+
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+	sOpts.ClientCert = "../test/certs/client-cert.pem"
+	sOpts.ClientCA = "../test/certs/ca.pem"
+	sOpts.ClientKey = "../test/certs/client-key.pem"
+
+	var failedServer *StanServer
+	defer func() {
+		if r := recover(); r == nil {
+			if failedServer != nil {
+				failedServer.Shutdown()
+			}
+			t.Fatal("Server did not fail with invalid TLS configuration.")
+		}
+	}()
+	failedServer = RunServerWithOpts(sOpts, &nOpts)
+	defer failedServer.Shutdown()
+}
