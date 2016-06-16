@@ -2985,6 +2985,78 @@ func TestEnsureStandAlone(t *testing.T) {
 	failedServer = RunServerWithOpts(sOpts, &nOpts2)
 }
 
+func TestAuthenticationUserPass(t *testing.T) {
+	nOpts := DefaultNatsServerOptions
+	nOpts.Username = "colin"
+	nOpts.Password = "alpine"
+
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+
+	s := RunServerWithOpts(sOpts, &nOpts)
+	defer s.Shutdown()
+
+	_, err := nats.Connect(fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port))
+	if err == nil {
+		t.Fatalf("Server allowed a plain connection")
+	}
+
+	_, err = nats.Connect(fmt.Sprintf("nats://%s:badpass@%s:%d", nOpts.Username, nOpts.Host, nOpts.Port))
+	if err == nil {
+		t.Fatalf("Server allowed invalid credentials")
+	}
+
+	nc, err := nats.Connect(fmt.Sprintf("nats://%s:%s@%s:%d", nOpts.Username, nOpts.Password, nOpts.Host, nOpts.Port))
+	if err != nil {
+		t.Fatalf("Authentication did not succeed when expected to: %v", err)
+	}
+	nc.Close()
+}
+
+func TestAuthenticationUserOnly(t *testing.T) {
+	nOpts := DefaultNatsServerOptions
+	nOpts.Username = "colin"
+
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+
+	s := RunServerWithOpts(sOpts, &nOpts)
+	defer s.Shutdown()
+
+	_, err := nats.Connect(fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port))
+	if err == nil {
+		t.Fatalf("Server allowed a plain connection")
+	}
+
+	nc, err := nats.Connect(fmt.Sprintf("nats://%s:@%s:%d", nOpts.Username, nOpts.Host, nOpts.Port))
+	if err != nil {
+		t.Fatalf("Authentication did not succeed when expected to: %v", err)
+	}
+	nc.Close()
+}
+
+func TestAuthenticationToken(t *testing.T) {
+	nOpts := DefaultNatsServerOptions
+	nOpts.Authorization = "0ffw1dth"
+
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+
+	s := RunServerWithOpts(sOpts, &nOpts)
+	defer s.Shutdown()
+
+	_, err := nats.Connect(fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port))
+	if err == nil {
+		t.Fatalf("Authentcation allowed a plain connection")
+	}
+
+	nc, err := nats.Connect(fmt.Sprintf("nats://%s@%s:%d", nOpts.Authorization, nOpts.Host, nOpts.Port))
+	if err != nil {
+		t.Fatalf("Authentication did not succeed when expected to: %v", err)
+	}
+	nc.Close()
+}
+
 func TestTLSSuccess(t *testing.T) {
 	nOpts := DefaultNatsServerOptions
 
@@ -3033,7 +3105,7 @@ func TestTLSFailServerTLSClientPlain(t *testing.T) {
 			if failedServer != nil {
 				failedServer.Shutdown()
 			}
-			t.Fatal("Server did not fail with invalid TLS configuration.")
+			t.Fatal("Server did not fail with invalid TLS configuration")
 		}
 	}()
 	failedServer = RunServerWithOpts(sOpts, &nOpts)
@@ -3055,7 +3127,7 @@ func TestTLSFailClientTLSServerPlain(t *testing.T) {
 			if failedServer != nil {
 				failedServer.Shutdown()
 			}
-			t.Fatal("Server did not fail with invalid TLS configuration.")
+			t.Fatal("Server did not fail with invalid TLS configuration")
 		}
 	}()
 	failedServer = RunServerWithOpts(sOpts, &nOpts)
