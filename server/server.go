@@ -381,7 +381,9 @@ func stanErrorHandler(_ *nats.Conn, sub *nats.Subscription, err error) {
 	Errorf("STAN: Asynchronous error on subject %s: %s", sub.Subject, err)
 }
 
-// creates a connection to the NATS server, using TLS if configured.
+// createNatsClientConn creates a connection to the NATS server, using
+// TLS if configured.  Pass in the NATS server options to derive a
+// connection url, and for other future items (e.g. auth)
 func createNatsClientConn(sOpts *Options, nOpts *server.Options) (*nats.Conn, error) {
 	var err error
 	var ncOpts = nats.Options{}
@@ -544,13 +546,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		}
 	}
 
-	if nOpts.Host == "" {
-		nOpts.Host = "localhost"
-	}
-
-	s.configureClusterOpts(nOpts)
-	s.configureNATSServerTLS(nOpts)
-	s.natsServer = natsd.RunServer(nOpts)
+	s.startNATSServer(nOpts)
 
 	if s.nc, err = createNatsClientConn(sOpts, nOpts); err != nil {
 		panic(fmt.Sprintf("Can't connect to NATS server: %v\n", err))
