@@ -3,7 +3,7 @@
 NATS Streaming is an extremely performant, lightweight reliable streaming platform built on [NATS](https://nats.io).
 
 [![License MIT](https://img.shields.io/npm/l/express.svg)](http://opensource.org/licenses/MIT) 
-[![Build Status](https://travis-ci.com/nats-io/nats-streaming-server.svg?token=UGjrGa8sFWGQcHSJeAvp&branch=master)](http://travis-ci.com/nats-io/nat-streaming-server)
+[![Build Status](https://travis-ci.com/nats-io/nats-streaming-server.svg?token=UGjrGa8sFWGQcHSJeAvp&branch=master)](http://travis-ci.com/nats-io/nats-streaming-server)
 [![Coverage Status](https://coveralls.io/repos/github/nats-io/stan-server/badge.svg?branch=master&t=7dcKvx)](https://coveralls.io/github/nats-io/stan-server?branch=master)
 
 [Project Design Document](https://docs.google.com/document/d/1keDwK35YQnOXXKKy2HVV2oOnvEUPFyypT-Tplh8F89c/edit)
