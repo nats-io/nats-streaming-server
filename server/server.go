@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nats-io/gnatsd/auth"
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats"
@@ -381,6 +382,20 @@ func stanErrorHandler(_ *nats.Conn, sub *nats.Subscription, err error) {
 	Errorf("STAN: Asynchronous error on subject %s: %s", sub.Subject, err)
 }
 
+func buildConnectURL(opts *server.Options) string {
+	var userpart string
+	if opts.Authorization != "" {
+		userpart = opts.Authorization
+	} else if opts.Username != "" {
+		userpart = fmt.Sprintf("%s:%s", opts.Username, opts.Password)
+	}
+	hostport := fmt.Sprintf("%s:%d", opts.Host, opts.Port)
+	if userpart != "" {
+		return fmt.Sprintf("nats://%s@%s", userpart, hostport)
+	}
+	return fmt.Sprintf("nats://%s", hostport)
+}
+
 // createNatsClientConn creates a connection to the NATS server, using
 // TLS if configured.  Pass in the NATS server options to derive a
 // connection url, and for other future items (e.g. auth)
@@ -388,7 +403,7 @@ func createNatsClientConn(sOpts *Options, nOpts *server.Options) (*nats.Conn, er
 	var err error
 	var ncOpts = nats.Options{}
 
-	ncOpts.Url = fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port)
+	ncOpts.Url = buildConnectURL(nOpts)
 	ncOpts.Name = fmt.Sprintf("NATS-Streaming-Server-%s", sOpts.ID)
 
 	if err = nats.ErrorHandler(stanErrorHandler)(&ncOpts); err != nil {
@@ -668,6 +683,22 @@ func (s *StanServer) configureNATSServerTLS(opts *server.Options) {
 	}
 }
 
+// configureNATSServerAuth sets up user authentication for the NATS Server.
+func (s *StanServer) configureNATSServerAuth(opts *server.Options) server.Auth {
+	// setup authorization
+	var a server.Auth
+	if opts.Authorization != "" {
+		a = &auth.Token{Token: opts.Authorization}
+	}
+	if opts.Username != "" {
+		a = &auth.Plain{Username: opts.Username, Password: opts.Password}
+	}
+	if opts.Users != nil {
+		a = auth.NewMultiUser(opts.Users)
+	}
+	return a
+}
+
 // startNATSServer massages options as necessary, and starts the embedded
 // NATS server.  No errors, only panics upon error conditions.
 func (s *StanServer) startNATSServer(opts *server.Options) {
@@ -676,7 +707,8 @@ func (s *StanServer) startNATSServer(opts *server.Options) {
 	}
 	s.configureClusterOpts(opts)
 	s.configureNATSServerTLS(opts)
-	s.natsServer = natsd.RunServer(opts)
+	a := s.configureNATSServerAuth(opts)
+	s.natsServer = natsd.RunServerWithAuth(opts, a)
 }
 
 // ensureRunningStandAlone prevents this streaming server from starting
