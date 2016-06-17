@@ -683,9 +683,7 @@ func (s *StanServer) configureNATSServerTLS(opts *server.Options) {
 	}
 }
 
-// configureNATSServerTLS sets up TLS for the NATS Server.
-// Additional TLS parameters (e.g. cipher suites) will need to be placed
-// in a configuration file specified through the -config parameter.
+// configureNATSServerAuth sets up user authentication for the NATS Server.
 func (s *StanServer) configureNATSServerAuth(opts *server.Options) server.Auth {
 	// setup authorization
 	var a server.Auth

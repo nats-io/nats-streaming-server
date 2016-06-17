@@ -3047,7 +3047,7 @@ func TestAuthenticationToken(t *testing.T) {
 
 	_, err := nats.Connect(fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port))
 	if err == nil {
-		t.Fatalf("Authentcation allowed a plain connection")
+		t.Fatalf("Authentication allowed a plain connection")
 	}
 
 	nc, err := nats.Connect(fmt.Sprintf("nats://%s@%s:%d", nOpts.Authorization, nOpts.Host, nOpts.Port))
