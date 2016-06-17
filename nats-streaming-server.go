@@ -187,6 +187,22 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 		natsd.PrintTLSHelpAndDie()
 	}
 
+	// Parse config if given
+	if configFile != "" {
+		fileOpts, err := natsd.ProcessConfigFile(configFile)
+		if err != nil {
+			natsd.PrintAndDie(err.Error())
+		}
+		natsOpts = *natsd.MergeOptions(fileOpts, &natsOpts)
+	}
+
+	// Remove any host/ip that points to itself in Route
+	newroutes, err := natsd.RemoveSelfReference(natsOpts.ClusterPort, natsOpts.Routes)
+	if err != nil {
+		natsd.PrintAndDie(err.Error())
+	}
+	natsOpts.Routes = newroutes
+
 	// One flag can set multiple options.
 	if natsDebugAndTrace {
 		natsOpts.Trace, natsOpts.Debug = true, true
