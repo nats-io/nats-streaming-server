@@ -16,6 +16,8 @@ script:
 - go test -i -race ./...
 - go test -race -v ./...
 - "./scripts/cov.sh TRAVIS"
+after_script:
+- if [ "$TRAVIS_TAG" != "" ]; then ./scripts/cross_compile.sh $TRAVIS_TAG; ghr --username nats-io --token $GITHUB_TOKEN --replace $TRAVIS_TAG pkg/; fi
 env:
   global:
   - secure: W/YEfiLslsEe2M9QsxQH0DoW1ow5tJcFi58vG/eLJNQBiJ4jCIeyKTdM+YyigoaN4boS9RxllEiN9aG63dQEvo4oNJgDRZG559g9b6PZu8/kdkW3XGSjMCeP7t6ZIEYOSEC85Rmhk9TjbxvGoO8tNlLL84HLN+T5Gsp9xTUiR4+NaNuvdggJCYbuzwRNFBwRV4n9y5MWmYmlhpn0yU7Rhy8OZHvhoXCMqlQNwdfPQxfdqFJM2qwiptNimeEcacSr4cJKXTnPwYWadniqGEAX6LQ+FzBlu3jMkV7tQQJI9zHd47trxTbruZxLOBVqXxEIEdCyMjqV2NA1W0CiJ2KdTEEJKBySSOql6837ecNalvTpOQtAE5SPc7bN0kXZEgG90RVJHZkLNs11Hs4vISO0FdKvps/tJMsU2xSSPKeaoTP2srqWHrMFGqcJw7rE4xtoCExJhLymhkxRYIM0YsR0I2Q5yTcPHn2okm39owswWWo4sIH7GBmKqe8FPyKV3gRSzGZ83Vv64DgAk3hMP8P597sUUM8xkKfT22IYqRZlYxm9vgfUfue0rct7nDw1mi5wPIPoT/T0p03NKnyS5AG1XSm5FXM6hCgmXy3vd/2SQTwcFim+J7xz35T1LBJaqORnvBrVXz5+iRCzc2N955YpUD+wheXm1+gcam57rnzijcE=
