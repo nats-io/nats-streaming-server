@@ -61,7 +61,7 @@ type FileStoreOptions struct {
 // DefaultFileStoreOptions defines the default options for a File Store.
 var DefaultFileStoreOptions = FileStoreOptions{
 	CompactEnabled:       true,
-	CompactInterval:      30,
+	CompactInterval:      5 * 60, // 5 minutes
 	CompactFragmentation: 50,
 	CompactMinFileSize:   1024 * 1024,
 }
@@ -605,6 +605,8 @@ func (fs *FileStore) DeleteClient(clientID string) *Client {
 	return sc
 }
 
+// shouldCompactClientFile returns true if the client file should be compacted
+// Lock is held by caller
 func (fs *FileStore) shouldCompactClientFile() bool {
 	// Global switch
 	if !fs.opts.CompactEnabled {
@@ -1301,6 +1303,7 @@ func (ss *FileSubStore) DeleteSub(subid uint64) {
 }
 
 // shouldCompact returns a boolean indicating if we should compact
+// Lock is held by caller
 func (ss *FileSubStore) shouldCompact() bool {
 	// Gobal switch
 	if !ss.opts.CompactEnabled {
@@ -1455,6 +1458,8 @@ func (ss *FileSubStore) writeRecord(w io.Writer, recType subRecordType, rec subR
 		ss.delRecs++
 	case subRecDel:
 		ss.delRecs++
+	default:
+		panic(fmt.Errorf("Record type %v unknown", recType))
 	}
 	ss.fileSize += int64(totalSize)
 	return nil
