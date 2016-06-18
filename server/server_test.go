@@ -3057,6 +3057,33 @@ func TestAuthenticationToken(t *testing.T) {
 	nc.Close()
 }
 
+func TestAuthenticationMultiUser(t *testing.T) {
+
+	nOpts, err := natsd.ProcessConfigFile("../test/configs/multi_user.conf")
+	if err != nil {
+		t.Fatalf("Unable to parse configuration file: %v", err)
+	}
+	nOpts.Username = "alice"
+	nOpts.Password = "foo"
+
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+
+	s := RunServerWithOpts(sOpts, nOpts)
+	defer s.Shutdown()
+
+	_, err = nats.Connect(fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port))
+	if err == nil {
+		t.Fatalf("Authentication allowed a plain connection")
+	}
+
+	nc, err := nats.Connect(fmt.Sprintf("nats://%s:%s@%s:%d", nOpts.Username, nOpts.Password, nOpts.Host, nOpts.Port))
+	if err != nil {
+		t.Fatalf("Authentication did not succeed when expected to: %v", err)
+	}
+	nc.Close()
+}
+
 func TestTLSSuccess(t *testing.T) {
 	nOpts := DefaultNatsServerOptions
 
