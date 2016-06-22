@@ -19,9 +19,11 @@ The best way to get the NATS Streaming Server is to use one of the pre-built rel
 
 Of course you can build the latest version of the server from the master branch. The master branch will always build and pass tests, but may not work correctly in your environment. You will first need Go installed on your machine (version 1.5+ is required) to build the NATS server.
 
+See also the NATS Streaming Quickstart [tutorial](http://site-nats-streaming-staging.zeppole.buffalo.im/documentation/tutorials/nats-streaming-quickstart/).
+
 ### Running
 
-The NATS Streaming Server embeds a NATS Server. Starting the server with no argument will give you a server with sane default settings and a memory based store.
+The NATS Streaming Server embeds a NATS Server. Starting the server with no argument will give you a server with default settings and a memory based store.
 
 ```
 > ./nats-streaming-server
@@ -35,9 +37,11 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
 
+Note that you do not need to start the embedded NATS Server. It is started automatically when you run the NATS Streaming Server. See below for details on how you secure the embedded NATS Server.
+
 ## Configuring
 
-The server accepts command line arguments to control its behavior. There is a set of parameters specific to the NATS Streaming Server and some to the embedded NATS Server.
+The NATS Streaming Server accepts command line arguments to control its behavior. There is a set of parameters specific to the NATS Streaming Server and some to the embedded NATS Server.
 
 ```
 Streaming Server Options:
@@ -154,7 +158,7 @@ The embedded NATS server specifies TLS server certificates with these:
 
         --tlscacert <file>           Client certificate CA for verification
 
-The server parameters are used the same way you'd secure a typical NATS server.
+The server parameters are used the same way you would secure a typical NATS server. See [here](https://github.com/nats-io/gnatsd#securing-nats).
 
 Proper usage of the NATS Streaming Server requires the use of both client and server parameters.
 
@@ -164,11 +168,11 @@ e.g.:
 nats-streaming-server -tls_client_cert client-cert.pem -tls_client_key client-key.pem -tls_client_cacert ca.pem -tlscert server-cert.pem -tlskey server-key.pem -tlscacert ca.pem
 ```
 
-Further TLS related functionality can be found in usage, and should specifying cipher suites be required, a configuration file for the embedded NATS server can be passed through the `-config` command line parameter.
+Further TLS related functionality can be found in [usage](https://github.com/nats-io/gnatsd#securing-nats), and should specifying cipher suites be required, a configuration file for the embedded NATS server can be passed through the `-config` command line parameter.
 
 ## Persistence
 
-By default, the server stores its state in memory, which means that if the streaming server is stopped, all state is lost. Still, this level of persistence allows applications to stop and later resume the stream of messages, and protect against applications disconnect (network or applications crash).
+By default, the NATS Streaming Server stores its state in memory, which means that if the streaming server is stopped, all state is lost. Still, this level of persistence allows applications to stop and later resume the stream of messages, and protect against applications disconnect (network or applications crash).
 
 ### File Store
 
@@ -201,27 +205,31 @@ The main interace is the `Store` which the server will create a unique instance 
 
 Creating/looking up a channel will return a `ChannelStore`, which points to two other interfaces, the `SubStore` and `MsgStore`. These stores handle, for a given channel, subscriptions and messages respectiverly.
 
-If you wish to contribute to a new store type, your implementation must implement all these interfaces. For stores that allow recovery (such as file store as opposed to memory store), there are additional structures that have been defined and that a store constructor should return. This allows the server to reconstruct its state on startup.
+If you wish to contribute to a new store type, your implementation must include all these interfaces. For stores that allow recovery (such as file store as opposed to memory store), there are additional structures that have been defined and that a store constructor should return. This allows the server to reconstruct its state on startup.
 
-The memory and the provided file store implementations both use a common store implementation to avoid code duplication. You can certaintly take advantage of that.
+The memory and the provided file store implementations both use a generic store implementation to avoid code duplication.
+When writing your own store implementation, you can do the same for APIs that don't need to do more than what the generic implementation provides.
+You can check [MemStore](https://github.com/nats-io/nats-streaming-server/blob/master/stores/memstore.go) and [FileStore](https://github.com/nats-io/nats-streaming-server/blob/master/stores/filestore.go) implementations for more details.
 
 ## Building
 
-This code currently requires at least version 1.5 of Go, but we encourage the use of the latest stable release. Information on installation, including pre-built binaries, is available at http://golang.org/doc/install. Stable branches of operating system packagers provided by your OS vendor may not be sufficient.
+Building the NATS Streaming Server from source requires at least version 1.5 of Go, but we encourage the use of the latest stable release. Information on installation, including pre-built binaries, is available at http://golang.org/doc/install. Stable branches of operating system packagers provided by your OS vendor may not be sufficient.
 
 Run `go version` to see the version of Go which you have installed.
+
+Run `go get` inside the directory to include all possible dependencies.
 
 Run `go build` inside the directory to build.
 
 Run `go test ./...` to run the unit regression tests.
 
-A successful build run produces no messages and creates an executable called `nats-streaming-server` in this directory. You can invoke that binary, with no options and no configuration file, to start a server with acceptable standalone defaults (no authentication, memory store).
+A successful build produces no messages and creates an executable called `nats-streaming-server` in the current directory. You can invoke that binary, with no options and no configuration file, to start a server with acceptable standalone defaults (no authentication, memory store).
 
 Run go help for more guidance, and visit http://golang.org/ for tutorials, presentations, references and more.
 
 ## Clients
 
-Two clients are initially supported by Apcera. We will add in the future and encourage community contribution.
+Currently, there are two NATS Streaming clients, both supported by Apcera. We will be adding additional supported streaming clients in the future, and encourage community-contributed clients.
 
 - [Go](https://github.com/nats-io/go-nats-streaming)
 - [Java](https://github.com/nats-io/java-nats-streaming)
