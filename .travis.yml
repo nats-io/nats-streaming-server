@@ -7,7 +7,7 @@ go:
 install:
 - go get -t ./...
 - go get github.com/nats-io/gnatsd
-- go get github.com/mattn/goveralls -repotoken $COVERALLS_TOKEN
+- go get github.com/mattn/goveralls
 - go get github.com/wadey/gocovmerge
 script:
 - go build
