@@ -306,7 +306,12 @@ func (ss *subStore) Remove(sub *subState, force bool) {
 
 	// Delete ourselves from the list
 	if qs != nil {
+		// For queue state, we need to lock specifically,
+		// because qs.subs can be modified by findBestQueueSub,
+		// for which we don't have substore lock held.
+		qs.Lock()
 		qs.subs, _ = sub.deleteFromList(qs.subs)
+		qs.Unlock()
 	} else {
 		ss.psubs, _ = sub.deleteFromList(ss.psubs)
 	}
