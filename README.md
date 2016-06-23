@@ -2,9 +2,7 @@
 
 NATS Streaming is an extremely performant, lightweight reliable streaming platform built on [NATS](https://nats.io).
 
-[![License MIT](https://img.shields.io/npm/l/express.svg)](http://opensource.org/licenses/MIT) 
-[![Build Status](https://travis-ci.org/nats-io/nats-streaming-server.svg?branch=master)](http://travis-ci.org/nats-io/nats-streaming-server)
-[![Coverage Status](https://coveralls.io/repos/github/nats-io/nats-streaming-server/badge.svg?branch=master&t=kIxrDE)](https://coveralls.io/github/nats-io/nats-streaming-server?branch=master)
+[![License][License-Image]][License-Url] [![ReportCard][ReportCard-Image]][ReportCard-Url] [![Build][Build-Status-Image]][Build-Status-Url] [![Coverage][Coverage-Image]][Coverage-Url]
 
 NATS Streaming provides the following high-level feature set.
 - Log based.
@@ -257,3 +255,14 @@ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
 COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+[License-Url]: http://opensource.org/licenses/MIT
+[License-Image]: https://img.shields.io/npm/l/express.svg
+[Build-Status-Url]: http://travis-ci.org/nats-io/nats-streaming-server
+[Build-Status-Image]: https://travis-ci.org/nats-io/nats-streaming-server.svg?branch=master
+[Coverage-Url]: https://coveralls.io/r/nats-io/nats-streaming-server?branch=master
+[Coverage-image]: https://coveralls.io/repos/github/nats-io/nats-streaming-server/badge.svg?branch=master&t=kIxrDE
+[ReportCard-Url]: http://goreportcard.com/report/nats-io/nats-streaming-server
+[ReportCard-Image]: http://goreportcard.com/badge/github.com/nats-io/nats-streaming-server
+[github-release]: https://github.com/nats-io/nats-streaming-server/releases/
