@@ -849,6 +849,61 @@ func TestDurableRedelivery(t *testing.T) {
 	}
 }
 
+func TestDurableRestartWithMaxAckInFlight(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	maxAckPending := 100
+	stopDurAt := 10
+	total := stopDurAt + maxAckPending + 100
+
+	// Send all messages
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	msg := []byte("hello")
+	for i := 0; i < total; i++ {
+		if err := sc.Publish("foo", msg); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+
+	// Have a cb that stop the connection after a certain amount of
+	// messages received
+	count := 0
+	ch := make(chan bool)
+	cb := func(_ *stan.Msg) {
+		count++
+		if count == stopDurAt || count == total {
+			sc.Close()
+			ch <- true
+		}
+	}
+	// Start the durable
+	_, err := sc.Subscribe("foo", cb, stan.DurableName("dur"),
+		stan.MaxInflight(maxAckPending), stan.DeliverAllAvailable())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for the connection to be closed after receiving
+	// a certain amount of messages.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Waited too long for the messages to be received")
+	}
+	// Restart a connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Restart the durable
+	_, err = sc.Subscribe("foo", cb, stan.DurableName("dur"),
+		stan.MaxInflight(maxAckPending), stan.DeliverAllAvailable())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for all messages to be received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Waited too long for the messages to be received")
+	}
+}
+
 func testStalledDelivery(t *testing.T, typeSub string) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()

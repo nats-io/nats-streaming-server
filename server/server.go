@@ -1343,7 +1343,9 @@ func (s *StanServer) performDurableRedelivery(sub *subState) {
 		m.Redelivered = true
 
 		sub.Lock()
-		s.sendMsgToSub(sub, m, honorMaxInFlight)
+		// Force delivery
+		// TODO(ik): Should we instead clean the acks pending when the durable is closed?
+		s.sendMsgToSub(sub, m, true)
 		sub.Unlock()
 	}
 }
@@ -1874,6 +1876,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			sub.AckInbox = ackInbox
 			sub.ClientID = sr.ClientID
 			sub.Inbox = sr.Inbox
+			sub.stalled = false
 			sub.Unlock()
 		}
 	}
