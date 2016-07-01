@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"bufio"
+
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
@@ -193,6 +194,7 @@ type FileMsgStore struct {
 	genericMsgStore
 	tmpMsgBuf    []byte
 	file         *os.File
+	fileWriter   *bufio.Writer
 	files        [numFiles]*fileSlice
 	currSliceIdx int
 }
@@ -758,7 +760,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 			err = ms.recoverOneMsgFile(file, i)
 		} else if i == 0 {
 			// Otherwise, keep the first file opened...
-			ms.file = file
+			ms.setFile(file)
 		} else {
 			// and close all others.
 			err = file.Close()
@@ -778,7 +780,20 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		err = fmt.Errorf("unable to %s message store for [%s]: %v", action, channel, err)
 		return nil, err
 	}
+
 	return ms, nil
+}
+
+func (ms *FileMsgStore) setFile(f *os.File) {
+	if ms.fileWriter != nil {
+		ms.fileWriter.Flush()
+		ms.file.Sync()
+	}
+
+	ms.file = f
+	if ms.file != nil {
+		ms.fileWriter = bufio.NewWriterSize(f, 1024*1024*2)
+	}
 }
 
 // recovers one of the file
@@ -839,14 +854,16 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 
 		// Close the previous file
 		if numFile > 0 {
+			ms.Flush()
 			err = ms.file.Close()
-			ms.file = nil
+			ms.setFile(nil)
 		}
 	}
 	// Keep the file opened if this is the first or messages were recovered
 	if err == nil && (fslice.msgsCount > 0 || numFile == 0) {
-		ms.file = file
+		ms.setFile(file)
 	} else {
+		ms.Flush()
 		// Close otherwise...
 		if lerr := file.Close(); lerr != nil {
 			if err == nil {
@@ -873,6 +890,9 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 		nextSlice := ms.currSliceIdx + 1
 
 		// Close the file and open the next slice
+		if err := ms.Flush(); err != nil {
+			return nil, err
+		}
 		if err := ms.file.Close(); err != nil {
 			return nil, err
 		}
@@ -881,7 +901,7 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 			return nil, err
 		}
 		// Success, update the store's variables
-		ms.file = file
+		ms.setFile(file)
 		ms.currSliceIdx = nextSlice
 
 		fslice = ms.files[ms.currSliceIdx]
@@ -912,8 +932,8 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	if _, err := m.MarshalTo(ms.tmpMsgBuf[4:totalSize]); err != nil {
 		return nil, err
 	}
-	// Write the buffer
-	if _, err := ms.file.Write(ms.tmpMsgBuf[:totalSize]); err != nil {
+
+	if _, err := ms.fileWriter.Write(ms.tmpMsgBuf[:totalSize]); err != nil {
 		return nil, err
 	}
 
@@ -1009,6 +1029,9 @@ func (ms *FileMsgStore) enforceLimits() error {
 // removeAndShiftFiles
 func (ms *FileMsgStore) removeAndShiftFiles() error {
 	// Close the currently opened file since it is going to be renamed.
+	if err := ms.Flush(); err != nil {
+		return err
+	}
 	if err := ms.file.Close(); err != nil {
 		return err
 	}
@@ -1062,10 +1085,11 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 
 	// Now re-open the file we closed at the beginning, which is the one
 	// before last.
-	ms.file, err = openFile(ms.files[numFiles-2].fileName)
+	file, err = openFile(ms.files[numFiles-2].fileName)
 	if err != nil {
 		return err
 	}
+	ms.setFile(file)
 	return nil
 }
 
@@ -1082,9 +1106,27 @@ func (ms *FileMsgStore) Close() error {
 
 	var err error
 	if ms.file != nil {
+		err = ms.Flush()
+		if err != nil {
+			return err
+		}
 		err = ms.file.Close()
+		ms.setFile(nil)
 	}
 	return err
+}
+
+// Flush flushes outstanding data into the store.
+func (ms *FileMsgStore) Flush() error {
+	var err error
+	if ms.fileWriter == nil {
+		return nil
+	}
+	if err = ms.fileWriter.Flush(); err != nil {
+		return err
+	}
+
+	return ms.file.Sync()
 }
 
 ////////////////////////////////////////////////////////////////////////////

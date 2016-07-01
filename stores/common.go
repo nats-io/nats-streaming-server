@@ -287,6 +287,11 @@ func (gms *genericMsgStore) LastMsg() *pb.MsgProto {
 	return m
 }
 
+func (gms *genericMsgStore) Flush() error {
+	// no-op
+	return nil
+}
+
 // GetSequenceFromTimestamp returns the sequence of the first message whose
 // timestamp is greater or equal to given timestamp.
 func (gms *genericMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {

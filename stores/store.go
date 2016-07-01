@@ -218,4 +218,7 @@ type MsgStore interface {
 
 	// Close closes the store.
 	Close() error
+
+	// Flushes any pending messages in the store
+	Flush() error
 }
