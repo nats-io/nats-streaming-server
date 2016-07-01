@@ -1559,17 +1559,6 @@ func (s *StanServer) storeIOLoop() {
 		}
 	}
 
-	// store failures should not occur often, so keep this simpler.
-	// alternatively, we could keep pending messages per store.
-	removeMsgsFromPending := func(cs *stores.ChannelStore) {
-		for i, m := range pendingMsgs {
-			c, _ := s.lookupOrCreateChannel(m.pm.Subject)
-			if c == cs {
-				pendingMsgs = append(pendingMsgs[:i], pendingMsgs[i+1:]...)
-			}
-		}
-	}
-
 	batchSize := s.opts.IOFlushMsgCount
 
 	for {
@@ -1613,9 +1602,8 @@ func (s *StanServer) storeIOLoop() {
 			for cs := range storesToFlush {
 				err := cs.Msgs.Flush()
 				if err != nil {
-					// remove all pending messages from that store...
-					Errorf("Unable to flush store.")
-					removeMsgsFromPending(cs)
+					// TODO: Attempt recovery, notify publishers of error.
+					panic(fmt.Errorf("Unable to flush store: %v", err))
 				} else {
 					// Process here since we are going thorough the stores.
 					s.processMsg(cs)
