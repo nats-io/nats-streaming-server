@@ -408,9 +408,13 @@ func buildConnectURL(opts *server.Options) string {
 // connection url, and for other future items (e.g. auth)
 func createNatsClientConn(sOpts *Options, nOpts *server.Options) (*nats.Conn, error) {
 	var err error
-	var ncOpts = nats.Options{}
+	ncOpts := nats.DefaultOptions
 
 	ncOpts.Url = buildConnectURL(nOpts)
+	ncOpts.Servers = strings.Split(ncOpts.Url, ",")
+	for i, s := range ncOpts.Servers {
+		ncOpts.Servers[i] = strings.Trim(s, " ")
+	}
 	ncOpts.Name = fmt.Sprintf("NATS-Streaming-Server-%s", sOpts.ID)
 
 	if err = nats.ErrorHandler(stanErrorHandler)(&ncOpts); err != nil {
