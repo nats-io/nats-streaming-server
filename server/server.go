@@ -120,13 +120,19 @@ type ioPendingMsg struct {
 }
 
 // Constant that defines the size of the channel that feeds the IO thread.
-const ioChannelSize = 66560
+const ioChannelSize = 64 * 1024
 
 // Constant to define how long to wait on a channel to see if a batch can be composed.
 const ioThreadSpinTime = time.Microsecond * 500
 
 // StanServer structure represents the STAN server
 type StanServer struct {
+	// Keep all members for which we use atomic at the beginning of the
+	// struct and make sure they are all 64bits (or use padding if necessary).
+	// atomic.* functions crash on 32bit machines if operand is not aligned
+	// at 64bit. See https://github.com/golang/go/issues/599
+	ioChannelStatsMaxBatchSize int64 // stats of the max number of messages than went into a single batch
+
 	sync.RWMutex
 	shutdown   bool
 	serverID   string
@@ -157,7 +163,8 @@ type StanServer struct {
 	store stores.Store
 
 	// IO Channel
-	ioChannel chan (*ioPendingMsg)
+	ioChannel     chan (*ioPendingMsg)
+	ioChannelQuit chan bool
 }
 
 // subStore holds all known state for all subscriptions
@@ -373,10 +380,11 @@ type Options struct {
 
 // DefaultOptions are default options for the STAN server
 var defaultOptions = Options{
-	ID:             DefaultClusterID,
-	DiscoverPrefix: DefaultDiscoverPrefix,
-	StoreType:      DefaultStoreType,
-	FileStoreOpts:  stores.DefaultFileStoreOptions,
+	ID:              DefaultClusterID,
+	DiscoverPrefix:  DefaultDiscoverPrefix,
+	StoreType:       DefaultStoreType,
+	FileStoreOpts:   stores.DefaultFileStoreOptions,
+	IOFlushMsgCount: DefaultIOFlushMsgCount,
 }
 
 // GetDefaultOptions returns default options for the STAN server
@@ -501,6 +509,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		dupCIDMap:         make(map[string]struct{}),
 		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
 		dupCIDTimeout:     defaultCheckDupCIDTimeout,
+		ioChannelQuit:     make(chan bool, 1),
 	}
 
 	// Set limits
@@ -543,15 +552,14 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	// Create clientStore
 	s.clients = &clientStore{store: s.store}
 
-	// After this point, if the server panics, and s.store is not closed,
-	// it will prevent tests on Windows to properly cleanup the datastore
-	// because files will still be opened. So we recover from the panic
-	// in order to close the store, then issue the original panic.
+	// Ensure that we shutdown the server if there is a panic during startup.
+	// This will ensure that stores are closed (which otherwise would cause
+	// issues during testing) and that the NATS Server (if started) is also
+	// properly shutdown. Tod do so, we recover from the panic in order to
+	// call Shutdown, then issue the original panic.
 	defer func() {
 		if r := recover(); r != nil {
-			if s.store != nil {
-				s.store.Close()
-			}
+			s.Shutdown()
 			// Issue the original panic now that the store is closed.
 			panic(r)
 		}
@@ -1528,11 +1536,14 @@ func (s *StanServer) setupAckTimer(sub *subState, d time.Duration) {
 }
 
 func (s *StanServer) startStoreIOWriter() {
+	s.wg.Add(1)
 	s.ioChannel = make(chan (*ioPendingMsg), ioChannelSize)
 	go s.storeIOLoop()
 }
 
 func (s *StanServer) storeIOLoop() {
+	defer s.wg.Done()
+
 	////////////////////////////////////////////////////////////////////////////
 	// This is where we will store the message and wait for others in the
 	// potential cluster to do so as well, once we have a quorom someone can
@@ -1543,7 +1554,7 @@ func (s *StanServer) storeIOLoop() {
 	// This will be done by a master election within the cluster, for now we
 	// assume we are the master and assign the sequence ID here.
 	////////////////////////////////////////////////////////////////////////////
-	var storesToFlush map[*stores.ChannelStore]int
+	var storesToFlush map[*stores.ChannelStore]struct{}
 
 	var _pendingMsgs [ioChannelSize]*ioPendingMsg
 	var pendingMsgs = _pendingMsgs[:0]
@@ -1555,17 +1566,18 @@ func (s *StanServer) storeIOLoop() {
 			s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, err)
 		} else {
 			pendingMsgs = append(pendingMsgs, iopm)
-			storesToFlush[cs] = 1
+			storesToFlush[cs] = struct{}{}
 		}
 	}
 
 	batchSize := s.opts.IOFlushMsgCount
+	max := 0
 
 	for {
 		select {
 		case iopm := <-s.ioChannel:
-
-			storesToFlush = make(map[*stores.ChannelStore]int)
+			// Create a new map (probably faster than deleting elements down below)
+			storesToFlush = make(map[*stores.ChannelStore]struct{})
 
 			// store the one we just pulled
 			storeIOPendingMsg(iopm)
@@ -1594,6 +1606,11 @@ func (s *StanServer) storeIOLoop() {
 				for i := 0; i < ioChanLen; i++ {
 					storeIOPendingMsg(<-s.ioChannel)
 				}
+				// Keep track of max number of messages in a batch
+				if ioChanLen > max {
+					max = ioChanLen
+					atomic.StoreInt64(&(s.ioChannelStatsMaxBatchSize), int64(max))
+				}
 
 				remaining -= ioChanLen
 			}
@@ -1604,9 +1621,6 @@ func (s *StanServer) storeIOLoop() {
 				if err != nil {
 					// TODO: Attempt recovery, notify publishers of error.
 					panic(fmt.Errorf("Unable to flush store: %v", err))
-				} else {
-					// Process here since we are going thorough the stores.
-					s.processMsg(cs)
 				}
 			}
 
@@ -1615,8 +1629,16 @@ func (s *StanServer) storeIOLoop() {
 				s.ackPublisher(iopm.pm, iopm.m.Reply)
 			}
 
+			// Process messages (trigger delivery of messages for a given channel)
+			for cs := range storesToFlush {
+				s.processMsg(cs)
+			}
+
 			// clear out pending messages and store map
 			pendingMsgs = pendingMsgs[:0]
+
+		case <-s.ioChannelQuit:
+			return
 		}
 	}
 }
@@ -2256,6 +2278,8 @@ func (s *StanServer) Shutdown() {
 	// Do not set s.nc to nil since it is used in many place without locking.
 	// Once closed, s.nc.xxx() calls will simply fail, but we won't panic.
 	nc := s.nc
+	// Notify the IO channel that we are shutting down
+	s.ioChannelQuit <- true
 	s.Unlock()
 
 	// Close/Shutdown resources. Note that unless one instantiates StanServer
