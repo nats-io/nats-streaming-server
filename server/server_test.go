@@ -882,7 +882,7 @@ func testStalledDelivery(t *testing.T, typeSub string) {
 			now := time.Now().UnixNano()
 			sent := atomic.LoadInt64(&lastMsgSentTime)
 			elapsed := time.Duration(now - sent)
-			if elapsed < ackDelay {
+			if elapsed < ackDelay-20*time.Millisecond {
 				errors <- fmt.Errorf("Second message received too soon: %v", elapsed)
 				return
 			}
