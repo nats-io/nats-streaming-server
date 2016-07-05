@@ -3256,8 +3256,8 @@ func TestIOChannel(t *testing.T) {
 		})
 		// Check that the server's ioChannel did not grow bigger than expected
 		ioChannelSize := int(atomic.LoadInt64(&(s.ioChannelStatsMaxBatchSize)))
-		if ioChannelSize > opts.IOFlushMsgCount {
-			stackFatalf(t, "Expected max channel size to be smaller than %v, got %v", opts.IOFlushMsgCount, ioChannelSize)
+		if ioChannelSize > opts.IOBatchSize {
+			stackFatalf(t, "Expected max channel size to be smaller than %v, got %v", opts.IOBatchSize, ioChannelSize)
 		}
 	}
 
@@ -3265,10 +3265,10 @@ func TestIOChannel(t *testing.T) {
 	run(sOpts)
 
 	sOpts = GetDefaultOptions()
-	sOpts.IOFlushMsgCount = 50
+	sOpts.IOBatchSize = 50
 	run(sOpts)
 
 	sOpts = GetDefaultOptions()
-	sOpts.IOFlushMsgCount = 0
+	sOpts.IOBatchSize = 0
 	run(sOpts)
 }

@@ -67,8 +67,8 @@ const (
 	// the susbcriber hit the MaxInFlight limit, before forcing redelivery.
 	defaultMaxStalledRedeliveries = 3
 
-	// Maximum number of messages to accumulate before flushing a store.
-	DefaultIOFlushMsgCount = 1024
+	// DefaultIOBatchSize is the maximum number of messages to accumulate before flushing a store.
+	DefaultIOBatchSize = 1024
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -375,16 +375,16 @@ type Options struct {
 	ClientCert       string // Client Certificate for TLS
 	ClientKey        string // Client Key for TLS
 	ClientCA         string // Client CAs for TLS
-	IOFlushMsgCount  int    // Number of messages to buffer before flushing a store.
+	IOBatchSize      int    // Number of messages we collect from clients before processing them.
 }
 
 // DefaultOptions are default options for the STAN server
 var defaultOptions = Options{
-	ID:              DefaultClusterID,
-	DiscoverPrefix:  DefaultDiscoverPrefix,
-	StoreType:       DefaultStoreType,
-	FileStoreOpts:   stores.DefaultFileStoreOptions,
-	IOFlushMsgCount: DefaultIOFlushMsgCount,
+	ID:             DefaultClusterID,
+	DiscoverPrefix: DefaultDiscoverPrefix,
+	StoreType:      DefaultStoreType,
+	FileStoreOpts:  stores.DefaultFileStoreOptions,
+	IOBatchSize:    DefaultIOBatchSize,
 }
 
 // GetDefaultOptions returns default options for the STAN server
@@ -1570,7 +1570,7 @@ func (s *StanServer) storeIOLoop() {
 		}
 	}
 
-	batchSize := s.opts.IOFlushMsgCount
+	batchSize := s.opts.IOBatchSize
 	max := 0
 
 	for {
