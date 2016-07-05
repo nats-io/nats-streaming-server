@@ -898,7 +898,7 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 		nextSlice := ms.currSliceIdx + 1
 
 		// Close the file and open the next slice
-		if err := ms.Flush(); err != nil {
+		if err := ms.flush(); err != nil {
 			return nil, err
 		}
 		if err := ms.file.Close(); err != nil {
@@ -1037,7 +1037,7 @@ func (ms *FileMsgStore) enforceLimits() error {
 // removeAndShiftFiles
 func (ms *FileMsgStore) removeAndShiftFiles() error {
 	// Close the currently opened file since it is going to be renamed.
-	if err := ms.Flush(); err != nil {
+	if err := ms.flush(); err != nil {
 		return err
 	}
 	if err := ms.file.Close(); err != nil {
@@ -1114,17 +1114,19 @@ func (ms *FileMsgStore) Close() error {
 
 	var err error
 	if ms.file != nil {
-		err = ms.Flush()
-		cerr := ms.file.Close()
-		if err == nil {
-			err = cerr
+		err = ms.flush()
+		if lerr := ms.file.Close(); lerr != nil {
+			if err == nil {
+				err = lerr
+			}
 		}
 	}
 	return err
 }
 
-// Flush flushes outstanding data into the store.
-func (ms *FileMsgStore) Flush() error {
+// flushes the file.
+// Lock is held on entry
+func (ms *FileMsgStore) flush() error {
 	if ms.fileWriter == nil {
 		return nil
 	}
@@ -1132,6 +1134,14 @@ func (ms *FileMsgStore) Flush() error {
 		return err
 	}
 	return ms.file.Sync()
+}
+
+// Flush flushes outstanding data into the store.
+func (ms *FileMsgStore) Flush() error {
+	ms.Lock()
+	err := ms.flush()
+	ms.Unlock()
+	return err
 }
 
 ////////////////////////////////////////////////////////////////////////////
