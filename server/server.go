@@ -69,6 +69,10 @@ const (
 
 	// DefaultIOBatchSize is the maximum number of messages to accumulate before flushing a store.
 	DefaultIOBatchSize = 1024
+
+	// DefaultIOSleepTime is the duration (in micro-seconds) the server waits for more messages
+	// before starting processing. Set to 0 (or negative) to disable the wait.
+	DefaultIOSleepTime = int64(0)
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -121,9 +125,6 @@ type ioPendingMsg struct {
 
 // Constant that defines the size of the channel that feeds the IO thread.
 const ioChannelSize = 64 * 1024
-
-// Constant to define how long to wait on a channel to see if a batch can be composed.
-const ioThreadSpinTime = time.Microsecond * 500
 
 // StanServer structure represents the STAN server
 type StanServer struct {
@@ -376,6 +377,7 @@ type Options struct {
 	ClientKey        string // Client Key for TLS
 	ClientCA         string // Client CAs for TLS
 	IOBatchSize      int    // Number of messages we collect from clients before processing them.
+	IOSleepTime      int64  // Duration (in micro-seconds) the server waits for more message to fill up a batch.
 }
 
 // DefaultOptions are default options for the STAN server
@@ -385,6 +387,7 @@ var defaultOptions = Options{
 	StoreType:      DefaultStoreType,
 	FileStoreOpts:  stores.DefaultFileStoreOptions,
 	IOBatchSize:    DefaultIOBatchSize,
+	IOSleepTime:    DefaultIOSleepTime,
 }
 
 // GetDefaultOptions returns default options for the STAN server
@@ -1571,6 +1574,8 @@ func (s *StanServer) storeIOLoop() {
 	}
 
 	batchSize := s.opts.IOBatchSize
+	sleepTime := s.opts.IOSleepTime
+	sleepDur := time.Duration(sleepTime) * time.Microsecond
 	max := 0
 
 	for {
@@ -1591,9 +1596,13 @@ func (s *StanServer) storeIOLoop() {
 				// if we are empty, wait, check again, and break if nothing.
 				// While this adds some latency, it optimizes batching.
 				if ioChanLen == 0 {
-					time.Sleep(ioThreadSpinTime)
-					ioChanLen := len(s.ioChannel)
-					if ioChanLen == 0 {
+					if sleepTime > 0 {
+						time.Sleep(sleepDur)
+						ioChanLen = len(s.ioChannel)
+						if ioChanLen == 0 {
+							break
+						}
+					} else {
 						break
 					}
 				}
@@ -1617,21 +1626,21 @@ func (s *StanServer) storeIOLoop() {
 
 			// flush all the stores with messages written to them...
 			for cs := range storesToFlush {
-				err := cs.Msgs.Flush()
-				if err != nil {
+				if err := cs.Msgs.Flush(); err != nil {
 					// TODO: Attempt recovery, notify publishers of error.
-					panic(fmt.Errorf("Unable to flush store: %v", err))
+					panic(fmt.Errorf("Unable to flush msg store: %v", err))
+				}
+				// Call this here, so messages are sent to subscribers,
+				// which means that msg seq is added to subscription file
+				s.processMsg(cs)
+				if err := cs.Subs.Flush(); err != nil {
+					panic(fmt.Errorf("Unable to flush sub store: %v", err))
 				}
 			}
 
 			// Ack our messages back to the publisher
 			for _, iopm := range pendingMsgs {
 				s.ackPublisher(iopm.pm, iopm.m.Reply)
-			}
-
-			// Process messages (trigger delivery of messages for a given channel)
-			for cs := range storesToFlush {
-				s.processMsg(cs)
 			}
 
 			// clear out pending messages and store map

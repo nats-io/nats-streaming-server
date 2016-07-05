@@ -376,6 +376,12 @@ func (gss *genericSubStore) AckSeqPending(subid, seqno uint64) error {
 	return nil
 }
 
+// Flush is for stores that may buffer operations and need them to be persisted.
+func (gss *genericSubStore) Flush() error {
+	// no-op
+	return nil
+}
+
 // Close closes this store
 func (gss *genericSubStore) Close() error {
 	// no-op

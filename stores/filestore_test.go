@@ -831,6 +831,7 @@ func TestFSSubLastSentCorrectOnRecovery(t *testing.T) {
 	storeSubPending(t, fs, "foo", subID, m1.Sequence, m2.Sequence, m1.Sequence)
 
 	// Restart server
+	fs.Close()
 	fs, state := openDefaultFileStore(t)
 	defer fs.Close()
 	if state == nil {
@@ -900,6 +901,7 @@ func TestFSUpdatedSub(t *testing.T) {
 	}
 
 	// Restart server
+	fs.Close()
 	fs, state := openDefaultFileStore(t)
 	defer fs.Close()
 	if state == nil {
@@ -1993,9 +1995,9 @@ func TestFSFlush(t *testing.T) {
 	if cs == nil {
 		t.Fatal("Channel foo should exist")
 	}
-	if _, err := cs.Msgs.Store("", []byte("new msg")); err != nil {
-		t.Fatalf("Unexpected error on store: %v", err)
-	}
+	msg := storeMsg(t, fs, "foo", []byte("new msg"))
+	subID := storeSub(t, fs, "foo")
+	storeSubPending(t, fs, "foo", subID, msg.Sequence)
 	// Close the underlying file
 	ms := cs.Msgs.(*FileMsgStore)
 	ms.Lock()
@@ -2003,6 +2005,15 @@ func TestFSFlush(t *testing.T) {
 	ms.Unlock()
 	// Expect Flush to fail
 	if err := cs.Msgs.Flush(); err == nil {
+		t.Fatal("Expected Flush to fail, did not")
+	}
+	// Close the underlying file
+	ss := cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.file.Close()
+	ss.Unlock()
+	// Expect Flush to fail
+	if err := cs.Subs.Flush(); err == nil {
 		t.Fatal("Expected Flush to fail, did not")
 	}
 }

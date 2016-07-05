@@ -180,6 +180,7 @@ type FileSubStore struct {
 	genericSubStore
 	tmpSubBuf   []byte
 	file        *os.File
+	bw          *bufio.Writer
 	delSub      spb.SubStateDelete
 	updateSub   spb.SubStateUpdate
 	subs        map[uint64]*subscription
@@ -1166,6 +1167,7 @@ func (fs *FileStore) newFileSubStore(channelDirName, channel string, doRecover b
 	if err != nil {
 		return nil, err
 	}
+	ss.bw = bufio.NewWriterSize(ss.file, ss.opts.BufferSize)
 	if doRecover {
 		if err := ss.recoverSubscriptions(); err != nil {
 			ss.Close()
@@ -1316,7 +1318,7 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 	if err := ss.createSub(sub); err != nil {
 		return err
 	}
-	if err := ss.writeRecord(ss.file, subRecNew, sub); err != nil {
+	if err := ss.writeRecord(ss.bw, subRecNew, sub); err != nil {
 		return err
 	}
 	s := &subscription{sub: sub, seqnos: make(map[uint64]struct{})}
@@ -1328,7 +1330,7 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 	ss.Lock()
 	defer ss.Unlock()
-	if err := ss.writeRecord(ss.file, subRecUpdate, sub); err != nil {
+	if err := ss.writeRecord(ss.bw, subRecUpdate, sub); err != nil {
 		return err
 	}
 	s := ss.subs[sub.ID]
@@ -1345,7 +1347,7 @@ func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 func (ss *FileSubStore) DeleteSub(subid uint64) {
 	ss.Lock()
 	ss.delSub.ID = subid
-	ss.writeRecord(ss.file, subRecDel, &ss.delSub)
+	ss.writeRecord(ss.bw, subRecDel, &ss.delSub)
 	if s, exists := ss.subs[subid]; exists {
 		delete(ss.subs, subid)
 		// writeRecord has already accounted for the count of the
@@ -1392,7 +1394,7 @@ func (ss *FileSubStore) shouldCompact() bool {
 func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 	ss.Lock()
 	ss.updateSub.ID, ss.updateSub.Seqno = subid, seqno
-	if err := ss.writeRecord(ss.file, subRecMsg, &ss.updateSub); err != nil {
+	if err := ss.writeRecord(ss.bw, subRecMsg, &ss.updateSub); err != nil {
 		ss.Unlock()
 		return err
 	}
@@ -1409,7 +1411,7 @@ func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
 	ss.Lock()
 	ss.updateSub.ID, ss.updateSub.Seqno = subid, seqno
-	if err := ss.writeRecord(ss.file, subRecAck, &ss.updateSub); err != nil {
+	if err := ss.writeRecord(ss.bw, subRecAck, &ss.updateSub); err != nil {
 		ss.Unlock()
 		return err
 	}
@@ -1435,6 +1437,7 @@ func (ss *FileSubStore) compact() error {
 	if err != nil {
 		return err
 	}
+	tmpBW := bufio.NewWriterSize(tmpFile, ss.opts.BufferSize)
 	// Save values in case of failed compaction
 	savedNumRecs := ss.numRecs
 	savedDelRecs := ss.delRecs
@@ -1455,24 +1458,34 @@ func (ss *FileSubStore) compact() error {
 	ss.delRecs = 0
 	ss.fileSize = 0
 	for _, sub := range ss.subs {
-		err = ss.writeRecord(tmpFile, subRecNew, sub.sub)
+		err = ss.writeRecord(tmpBW, subRecNew, sub.sub)
 		if err != nil {
 			return err
 		}
 		ss.updateSub.ID = sub.sub.ID
 		for seqno := range sub.seqnos {
 			ss.updateSub.Seqno = seqno
-			err = ss.writeRecord(tmpFile, subRecMsg, &ss.updateSub)
+			err = ss.writeRecord(tmpBW, subRecMsg, &ss.updateSub)
 			if err != nil {
 				return err
 			}
 		}
+	}
+	// Flush and sync the temporary file
+	err = tmpBW.Flush()
+	if err != nil {
+		return err
+	}
+	err = tmpFile.Sync()
+	if err != nil {
+		return err
 	}
 	// Switch the temporary file with the original one.
 	ss.file, err = swapFiles(tmpFile, ss.file)
 	if err != nil {
 		return err
 	}
+	ss.bw = bufio.NewWriterSize(ss.file, ss.opts.BufferSize)
 	// Update the timestamp of this last successful compact
 	ss.compactTS = time.Now()
 	return nil
@@ -1522,6 +1535,24 @@ func (ss *FileSubStore) writeRecord(w io.Writer, recType subRecordType, rec subR
 	return nil
 }
 
+func (ss *FileSubStore) flush() error {
+	if ss.bw == nil {
+		return nil
+	}
+	if err := ss.bw.Flush(); err != nil {
+		return err
+	}
+	return ss.file.Sync()
+}
+
+// Flush persists buffered operations to disk.
+func (ss *FileSubStore) Flush() error {
+	ss.Lock()
+	err := ss.flush()
+	ss.Unlock()
+	return err
+}
+
 // Close closes this store
 func (ss *FileSubStore) Close() error {
 	ss.RLock()
@@ -1535,7 +1566,12 @@ func (ss *FileSubStore) Close() error {
 
 	var err error
 	if ss.file != nil {
-		err = ss.file.Close()
+		err = ss.flush()
+		if lerr := ss.file.Close(); lerr != nil {
+			if err == nil {
+				err = lerr
+			}
+		}
 	}
 	return err
 }
