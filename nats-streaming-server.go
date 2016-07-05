@@ -121,6 +121,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.IntVar(&stanOpts.FileStoreOpts.CompactFragmentation, "file_compact_frag", stores.DefaultFileStoreOptions.CompactFragmentation, "File fragmentation threshold for compaction")
 	flag.IntVar(&stanOpts.FileStoreOpts.CompactInterval, "file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "Minimum interval (in seconds) between file compactions")
 	flag.Int64Var(&stanOpts.FileStoreOpts.CompactMinFileSize, "file_compact_min_size", stores.DefaultFileStoreOptions.CompactMinFileSize, "Minimum file size for compaction")
+	flag.IntVar(&stanOpts.FileStoreOpts.BufferSize, "file_buffer_size", stores.DefaultFileStoreOptions.BufferSize, "File buffer size (in bytes)")
 	flag.IntVar(&stanOpts.IOFlushMsgCount, "io_buf_msg_count", stand.DefaultIOFlushMsgCount, "# of message to batch in flushing io")
 	// NATS options
 	var showVersion bool

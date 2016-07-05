@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nuid"
 	"github.com/nats-io/nats-streaming-server/spb"
+	"github.com/nats-io/nuid"
 	"runtime"
 	"strings"
 )

@@ -214,6 +214,7 @@ func TestFSOptions(t *testing.T) {
 
 	// Prepare the golden options with custom values
 	expected = FileStoreOptions{
+		BufferSize:           1025 * 1024,
 		CompactEnabled:       false,
 		CompactFragmentation: 60,
 		CompactInterval:      60,
@@ -221,6 +222,7 @@ func TestFSOptions(t *testing.T) {
 	}
 	// Create the file with custom options
 	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits,
+		BufferSize(expected.BufferSize),
 		CompactEnabled(expected.CompactEnabled),
 		CompactFragmentation(expected.CompactFragmentation),
 		CompactInterval(expected.CompactInterval),

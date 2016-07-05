@@ -43,6 +43,9 @@ type FileStoreOption func(*FileStoreOptions) error
 
 // FileStoreOptions can be used to customize a File Store
 type FileStoreOptions struct {
+	// BufferSize is the size of the buffer used during store operations.
+	BufferSize int
+
 	// CompactEnabled allows to enable/disable files compaction.
 	CompactEnabled bool
 
@@ -61,10 +64,20 @@ type FileStoreOptions struct {
 
 // DefaultFileStoreOptions defines the default options for a File Store.
 var DefaultFileStoreOptions = FileStoreOptions{
+	BufferSize:           2 * 1024 * 1024, // 2MB
 	CompactEnabled:       true,
 	CompactInterval:      5 * 60, // 5 minutes
 	CompactFragmentation: 50,
 	CompactMinFileSize:   1024 * 1024,
+}
+
+// BufferSize is a FileStore option that sets the size of the buffer used
+// during store writes. This can help improve write performance.
+func BufferSize(size int) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.BufferSize = size
+		return nil
+	}
 }
 
 // CompactEnabled is a FileStore option that enables or disables file compaction.
@@ -197,6 +210,7 @@ type FileMsgStore struct {
 	fileWriter   *bufio.Writer
 	files        [numFiles]*fileSlice
 	currSliceIdx int
+	opts         *FileStoreOptions // points to FileStore options
 }
 
 // openFile opens the file specified by `filename`.
@@ -739,7 +753,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 	var file *os.File
 
 	// Create an instance and initialize
-	ms := &FileMsgStore{}
+	ms := &FileMsgStore{opts: &fs.opts}
 	ms.init(channel, fs.limits)
 
 	// Open/create all the files
@@ -785,14 +799,10 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 }
 
 func (ms *FileMsgStore) setFile(f *os.File) {
-	if ms.fileWriter != nil {
-		ms.fileWriter.Flush()
-		ms.file.Sync()
-	}
-
+	ms.fileWriter = nil
 	ms.file = f
 	if ms.file != nil {
-		ms.fileWriter = bufio.NewWriterSize(f, 1024*1024*2)
+		ms.fileWriter = bufio.NewWriterSize(ms.file, ms.opts.BufferSize)
 	}
 }
 
@@ -854,7 +864,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 
 		// Close the previous file
 		if numFile > 0 {
-			ms.Flush()
 			err = ms.file.Close()
 			ms.setFile(nil)
 		}
@@ -863,7 +872,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 	if err == nil && (fslice.msgsCount > 0 || numFile == 0) {
 		ms.setFile(file)
 	} else {
-		ms.Flush()
 		// Close otherwise...
 		if lerr := file.Close(); lerr != nil {
 			if err == nil {
@@ -1107,25 +1115,22 @@ func (ms *FileMsgStore) Close() error {
 	var err error
 	if ms.file != nil {
 		err = ms.Flush()
-		if err != nil {
-			return err
+		cerr := ms.file.Close()
+		if err == nil {
+			err = cerr
 		}
-		err = ms.file.Close()
-		ms.setFile(nil)
 	}
 	return err
 }
 
 // Flush flushes outstanding data into the store.
 func (ms *FileMsgStore) Flush() error {
-	var err error
 	if ms.fileWriter == nil {
 		return nil
 	}
-	if err = ms.fileWriter.Flush(); err != nil {
+	if err := ms.fileWriter.Flush(); err != nil {
 		return err
 	}
-
 	return ms.file.Sync()
 }
 
