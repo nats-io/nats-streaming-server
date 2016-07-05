@@ -147,3 +147,10 @@ func TestMSClientAPIs(t *testing.T) {
 
 	testClientAPIs(t, ms)
 }
+
+func TestMSFlush(t *testing.T) {
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+
+	testFlush(t, ms)
+}

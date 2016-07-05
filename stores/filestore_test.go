@@ -1978,3 +1978,31 @@ func TestFSCompactSubsFileOnAck(t *testing.T) {
 	}
 	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, totalSeqs)
 }
+
+func TestFSFlush(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	testFlush(t, fs)
+
+	// Now specific tests to File store
+	cs := fs.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel foo should exist")
+	}
+	if _, err := cs.Msgs.Store("", []byte("new msg")); err != nil {
+		t.Fatalf("Unexpected error on store: %v", err)
+	}
+	// Close the underlying file
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.Lock()
+	ms.file.Close()
+	ms.Unlock()
+	// Expect Flush to fail
+	if err := cs.Msgs.Flush(); err == nil {
+		t.Fatal("Expected Flush to fail, did not")
+	}
+}

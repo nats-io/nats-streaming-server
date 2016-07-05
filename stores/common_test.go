@@ -527,3 +527,16 @@ func testClientAPIs(t *testing.T, s Store) {
 		}
 	}
 }
+
+func testFlush(t *testing.T, s Store) {
+	cs, _, err := s.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error creating channel: %v", err)
+	}
+	if _, err := cs.Msgs.Store("", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on store: %v", err)
+	}
+	if err := cs.Msgs.Flush(); err != nil {
+		t.Fatalf("Unexpected error on flush: %v", err)
+	}
+}
