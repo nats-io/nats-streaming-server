@@ -3271,4 +3271,8 @@ func TestIOChannel(t *testing.T) {
 	sOpts = GetDefaultOptions()
 	sOpts.IOBatchSize = 0
 	run(sOpts)
+
+	sOpts = GetDefaultOptions()
+	sOpts.IOSleepTime = 500
+	run(sOpts)
 }
