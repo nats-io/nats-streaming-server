@@ -287,6 +287,11 @@ func (gms *genericMsgStore) LastMsg() *pb.MsgProto {
 	return m
 }
 
+func (gms *genericMsgStore) Flush() error {
+	// no-op
+	return nil
+}
+
 // GetSequenceFromTimestamp returns the sequence of the first message whose
 // timestamp is greater or equal to given timestamp.
 func (gms *genericMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
@@ -367,6 +372,12 @@ func (gss *genericSubStore) AddSeqPending(subid, seqno uint64) error {
 // AckSeqPending records that the given message seqno has been acknowledged
 // by the given subscription.
 func (gss *genericSubStore) AckSeqPending(subid, seqno uint64) error {
+	// no-op
+	return nil
+}
+
+// Flush is for stores that may buffer operations and need them to be persisted.
+func (gss *genericSubStore) Flush() error {
 	// no-op
 	return nil
 }

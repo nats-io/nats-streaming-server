@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/nats-io/nuid"
 	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/nats-io/nuid"
 	"sync/atomic"
 )
 

@@ -179,6 +179,9 @@ type SubStore interface {
 	// by the subscription 'subid'.
 	AckSeqPending(subid, seqno uint64) error
 
+	// Flush is for stores that may buffer operations and need them to be persisted.
+	Flush() error
+
 	// Close closes the subscriptions store.
 	Close() error
 }
@@ -215,6 +218,9 @@ type MsgStore interface {
 
 	// LastMsg returns the last message stored.
 	LastMsg() *pb.MsgProto
+
+	// Flush is for stores that may buffer operations and need them to be persisted.
+	Flush() error
 
 	// Close closes the store.
 	Close() error

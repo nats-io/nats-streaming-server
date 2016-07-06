@@ -214,6 +214,7 @@ func TestFSOptions(t *testing.T) {
 
 	// Prepare the golden options with custom values
 	expected = FileStoreOptions{
+		BufferSize:           1025 * 1024,
 		CompactEnabled:       false,
 		CompactFragmentation: 60,
 		CompactInterval:      60,
@@ -221,6 +222,7 @@ func TestFSOptions(t *testing.T) {
 	}
 	// Create the file with custom options
 	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits,
+		BufferSize(expected.BufferSize),
 		CompactEnabled(expected.CompactEnabled),
 		CompactFragmentation(expected.CompactFragmentation),
 		CompactInterval(expected.CompactInterval),
@@ -829,6 +831,7 @@ func TestFSSubLastSentCorrectOnRecovery(t *testing.T) {
 	storeSubPending(t, fs, "foo", subID, m1.Sequence, m2.Sequence, m1.Sequence)
 
 	// Restart server
+	fs.Close()
 	fs, state := openDefaultFileStore(t)
 	defer fs.Close()
 	if state == nil {
@@ -898,6 +901,7 @@ func TestFSUpdatedSub(t *testing.T) {
 	}
 
 	// Restart server
+	fs.Close()
 	fs, state := openDefaultFileStore(t)
 	defer fs.Close()
 	if state == nil {
@@ -1975,4 +1979,41 @@ func TestFSCompactSubsFileOnAck(t *testing.T) {
 		}
 	}
 	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, totalSeqs)
+}
+
+func TestFSFlush(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	testFlush(t, fs)
+
+	// Now specific tests to File store
+	cs := fs.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel foo should exist")
+	}
+	msg := storeMsg(t, fs, "foo", []byte("new msg"))
+	subID := storeSub(t, fs, "foo")
+	storeSubPending(t, fs, "foo", subID, msg.Sequence)
+	// Close the underlying file
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.Lock()
+	ms.file.Close()
+	ms.Unlock()
+	// Expect Flush to fail
+	if err := cs.Msgs.Flush(); err == nil {
+		t.Fatal("Expected Flush to fail, did not")
+	}
+	// Close the underlying file
+	ss := cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.file.Close()
+	ss.Unlock()
+	// Expect Flush to fail
+	if err := cs.Subs.Flush(); err == nil {
+		t.Fatal("Expected Flush to fail, did not")
+	}
 }
