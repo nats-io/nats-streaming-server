@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nuid"
 	"github.com/nats-io/nats-streaming-server/spb"
+	"github.com/nats-io/nuid"
 	"runtime"
 	"strings"
 )
@@ -525,5 +525,29 @@ func testClientAPIs(t *testing.T, s Store) {
 		if cID == "client3" && sc.UserData != userData {
 			t.Fatalf("Expected user data to be %v, got %v", userData, sc.UserData)
 		}
+	}
+}
+
+func testFlush(t *testing.T, s Store) {
+	cs, _, err := s.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error creating channel: %v", err)
+	}
+	msg, err := cs.Msgs.Store("", []byte("hello"))
+	if err != nil {
+		t.Fatalf("Unexpected error on store: %v", err)
+	}
+	if err := cs.Msgs.Flush(); err != nil {
+		t.Fatalf("Unexpected error on flush: %v", err)
+	}
+	sub := spb.SubState{}
+	if err := cs.Subs.CreateSub(&sub); err != nil {
+		t.Fatalf("Unexpected error creating sub: %v", err)
+	}
+	if err := cs.Subs.AddSeqPending(sub.ID, msg.Sequence); err != nil {
+		t.Fatalf("Unexpected error adding sequence to substore: %v", err)
+	}
+	if err := cs.Subs.Flush(); err != nil {
+		t.Fatalf("Unexpected error on flush: %v", err)
 	}
 }

@@ -937,7 +937,7 @@ func testStalledDelivery(t *testing.T, typeSub string) {
 			now := time.Now().UnixNano()
 			sent := atomic.LoadInt64(&lastMsgSentTime)
 			elapsed := time.Duration(now - sent)
-			if elapsed < ackDelay {
+			if elapsed < ackDelay-20*time.Millisecond {
 				errors <- fmt.Errorf("Second message received too soon: %v", elapsed)
 				return
 			}
@@ -3191,7 +3191,6 @@ func TestTLSFailServerTLSClientPlain(t *testing.T) {
 		}
 	}()
 	failedServer = RunServerWithOpts(sOpts, &nOpts)
-	defer failedServer.Shutdown()
 }
 
 func TestTLSFailClientTLSServerPlain(t *testing.T) {
@@ -3213,5 +3212,67 @@ func TestTLSFailClientTLSServerPlain(t *testing.T) {
 		}
 	}()
 	failedServer = RunServerWithOpts(sOpts, &nOpts)
-	defer failedServer.Shutdown()
+}
+
+func TestIOChannel(t *testing.T) {
+	// TODO: When running tests on my Windows VM, looks like we are getting
+	// a slow consumer (the NATS Streaming server) situation. So limit the
+	// publisher rate for now...
+	if runtime.GOOS == "windows" {
+		t.SkipNow()
+	}
+
+	run := func(opts *Options) {
+		s := RunServerWithOpts(opts, nil)
+		defer s.Shutdown()
+
+		sc := NewDefaultConnection(t)
+		defer sc.Close()
+
+		ackCb := func(guid string, ackErr error) {
+			if ackErr != nil {
+				panic(fmt.Errorf("%v - Ack for %v: %v", time.Now(), guid, ackErr))
+			}
+		}
+
+		total := 10000
+		msg := []byte("Hello")
+		var err error
+		for i := 0; i < total; i++ {
+			if i < total-1 {
+				_, err = sc.PublishAsync("foo", msg, ackCb)
+			} else {
+				err = sc.Publish("foo", msg)
+			}
+			if err != nil {
+				stackFatalf(t, "Unexpected error on publish: %v", err)
+			}
+		}
+
+		// Make sure we have all our messages stored in the server
+		checkCount(t, total, func() (string, int) {
+			n, _, _ := s.store.MsgsState("foo")
+			return "Messages", n
+		})
+		// Check that the server's ioChannel did not grow bigger than expected
+		ioChannelSize := int(atomic.LoadInt64(&(s.ioChannelStatsMaxBatchSize)))
+		if ioChannelSize > opts.IOBatchSize {
+			stackFatalf(t, "Expected max channel size to be smaller than %v, got %v", opts.IOBatchSize, ioChannelSize)
+		}
+	}
+
+	sOpts := GetDefaultOptions()
+	run(sOpts)
+
+	sOpts = GetDefaultOptions()
+	sOpts.IOBatchSize = 50
+	run(sOpts)
+
+	sOpts = GetDefaultOptions()
+	sOpts.IOBatchSize = 0
+	run(sOpts)
+
+	sOpts = GetDefaultOptions()
+	sOpts.IOSleepTime = 500
+	run(sOpts)
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"bufio"
+
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
@@ -42,6 +43,9 @@ type FileStoreOption func(*FileStoreOptions) error
 
 // FileStoreOptions can be used to customize a File Store
 type FileStoreOptions struct {
+	// BufferSize is the size of the buffer used during store operations.
+	BufferSize int
+
 	// CompactEnabled allows to enable/disable files compaction.
 	CompactEnabled bool
 
@@ -60,10 +64,20 @@ type FileStoreOptions struct {
 
 // DefaultFileStoreOptions defines the default options for a File Store.
 var DefaultFileStoreOptions = FileStoreOptions{
+	BufferSize:           2 * 1024 * 1024, // 2MB
 	CompactEnabled:       true,
 	CompactInterval:      5 * 60, // 5 minutes
 	CompactFragmentation: 50,
 	CompactMinFileSize:   1024 * 1024,
+}
+
+// BufferSize is a FileStore option that sets the size of the buffer used
+// during store writes. This can help improve write performance.
+func BufferSize(size int) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.BufferSize = size
+		return nil
+	}
 }
 
 // CompactEnabled is a FileStore option that enables or disables file compaction.
@@ -166,6 +180,7 @@ type FileSubStore struct {
 	genericSubStore
 	tmpSubBuf   []byte
 	file        *os.File
+	bw          *bufio.Writer
 	delSub      spb.SubStateDelete
 	updateSub   spb.SubStateUpdate
 	subs        map[uint64]*subscription
@@ -193,8 +208,10 @@ type FileMsgStore struct {
 	genericMsgStore
 	tmpMsgBuf    []byte
 	file         *os.File
+	fileWriter   *bufio.Writer
 	files        [numFiles]*fileSlice
 	currSliceIdx int
+	opts         *FileStoreOptions // points to FileStore options
 }
 
 // openFile opens the file specified by `filename`.
@@ -737,7 +754,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 	var file *os.File
 
 	// Create an instance and initialize
-	ms := &FileMsgStore{}
+	ms := &FileMsgStore{opts: &fs.opts}
 	ms.init(channel, fs.limits)
 
 	// Open/create all the files
@@ -758,7 +775,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 			err = ms.recoverOneMsgFile(file, i)
 		} else if i == 0 {
 			// Otherwise, keep the first file opened...
-			ms.file = file
+			ms.setFile(file)
 		} else {
 			// and close all others.
 			err = file.Close()
@@ -778,7 +795,16 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		err = fmt.Errorf("unable to %s message store for [%s]: %v", action, channel, err)
 		return nil, err
 	}
+
 	return ms, nil
+}
+
+func (ms *FileMsgStore) setFile(f *os.File) {
+	ms.fileWriter = nil
+	ms.file = f
+	if ms.file != nil {
+		ms.fileWriter = bufio.NewWriterSize(ms.file, ms.opts.BufferSize)
+	}
 }
 
 // recovers one of the file
@@ -840,12 +866,12 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 		// Close the previous file
 		if numFile > 0 {
 			err = ms.file.Close()
-			ms.file = nil
+			ms.setFile(nil)
 		}
 	}
 	// Keep the file opened if this is the first or messages were recovered
 	if err == nil && (fslice.msgsCount > 0 || numFile == 0) {
-		ms.file = file
+		ms.setFile(file)
 	} else {
 		// Close otherwise...
 		if lerr := file.Close(); lerr != nil {
@@ -873,6 +899,9 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 		nextSlice := ms.currSliceIdx + 1
 
 		// Close the file and open the next slice
+		if err := ms.flush(); err != nil {
+			return nil, err
+		}
 		if err := ms.file.Close(); err != nil {
 			return nil, err
 		}
@@ -881,7 +910,7 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 			return nil, err
 		}
 		// Success, update the store's variables
-		ms.file = file
+		ms.setFile(file)
 		ms.currSliceIdx = nextSlice
 
 		fslice = ms.files[ms.currSliceIdx]
@@ -912,8 +941,8 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	if _, err := m.MarshalTo(ms.tmpMsgBuf[4:totalSize]); err != nil {
 		return nil, err
 	}
-	// Write the buffer
-	if _, err := ms.file.Write(ms.tmpMsgBuf[:totalSize]); err != nil {
+
+	if _, err := ms.fileWriter.Write(ms.tmpMsgBuf[:totalSize]); err != nil {
 		return nil, err
 	}
 
@@ -1009,6 +1038,9 @@ func (ms *FileMsgStore) enforceLimits() error {
 // removeAndShiftFiles
 func (ms *FileMsgStore) removeAndShiftFiles() error {
 	// Close the currently opened file since it is going to be renamed.
+	if err := ms.flush(); err != nil {
+		return err
+	}
 	if err := ms.file.Close(); err != nil {
 		return err
 	}
@@ -1062,10 +1094,11 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 
 	// Now re-open the file we closed at the beginning, which is the one
 	// before last.
-	ms.file, err = openFile(ms.files[numFiles-2].fileName)
+	file, err = openFile(ms.files[numFiles-2].fileName)
 	if err != nil {
 		return err
 	}
+	ms.setFile(file)
 	return nil
 }
 
@@ -1082,8 +1115,33 @@ func (ms *FileMsgStore) Close() error {
 
 	var err error
 	if ms.file != nil {
-		err = ms.file.Close()
+		err = ms.flush()
+		if lerr := ms.file.Close(); lerr != nil {
+			if err == nil {
+				err = lerr
+			}
+		}
 	}
+	return err
+}
+
+// flushes the file.
+// Lock is held on entry
+func (ms *FileMsgStore) flush() error {
+	if ms.fileWriter == nil {
+		return nil
+	}
+	if err := ms.fileWriter.Flush(); err != nil {
+		return err
+	}
+	return ms.file.Sync()
+}
+
+// Flush flushes outstanding data into the store.
+func (ms *FileMsgStore) Flush() error {
+	ms.Lock()
+	err := ms.flush()
+	ms.Unlock()
 	return err
 }
 
@@ -1109,6 +1167,7 @@ func (fs *FileStore) newFileSubStore(channelDirName, channel string, doRecover b
 	if err != nil {
 		return nil, err
 	}
+	ss.bw = bufio.NewWriterSize(ss.file, ss.opts.BufferSize)
 	if doRecover {
 		if err := ss.recoverSubscriptions(); err != nil {
 			ss.Close()
@@ -1259,7 +1318,7 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 	if err := ss.createSub(sub); err != nil {
 		return err
 	}
-	if err := ss.writeRecord(ss.file, subRecNew, sub); err != nil {
+	if err := ss.writeRecord(ss.bw, subRecNew, sub); err != nil {
 		return err
 	}
 	s := &subscription{sub: sub, seqnos: make(map[uint64]struct{})}
@@ -1271,7 +1330,7 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 	ss.Lock()
 	defer ss.Unlock()
-	if err := ss.writeRecord(ss.file, subRecUpdate, sub); err != nil {
+	if err := ss.writeRecord(ss.bw, subRecUpdate, sub); err != nil {
 		return err
 	}
 	s := ss.subs[sub.ID]
@@ -1288,7 +1347,7 @@ func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 func (ss *FileSubStore) DeleteSub(subid uint64) {
 	ss.Lock()
 	ss.delSub.ID = subid
-	ss.writeRecord(ss.file, subRecDel, &ss.delSub)
+	ss.writeRecord(ss.bw, subRecDel, &ss.delSub)
 	if s, exists := ss.subs[subid]; exists {
 		delete(ss.subs, subid)
 		// writeRecord has already accounted for the count of the
@@ -1335,7 +1394,7 @@ func (ss *FileSubStore) shouldCompact() bool {
 func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 	ss.Lock()
 	ss.updateSub.ID, ss.updateSub.Seqno = subid, seqno
-	if err := ss.writeRecord(ss.file, subRecMsg, &ss.updateSub); err != nil {
+	if err := ss.writeRecord(ss.bw, subRecMsg, &ss.updateSub); err != nil {
 		ss.Unlock()
 		return err
 	}
@@ -1352,7 +1411,7 @@ func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
 	ss.Lock()
 	ss.updateSub.ID, ss.updateSub.Seqno = subid, seqno
-	if err := ss.writeRecord(ss.file, subRecAck, &ss.updateSub); err != nil {
+	if err := ss.writeRecord(ss.bw, subRecAck, &ss.updateSub); err != nil {
 		ss.Unlock()
 		return err
 	}
@@ -1378,6 +1437,7 @@ func (ss *FileSubStore) compact() error {
 	if err != nil {
 		return err
 	}
+	tmpBW := bufio.NewWriterSize(tmpFile, ss.opts.BufferSize)
 	// Save values in case of failed compaction
 	savedNumRecs := ss.numRecs
 	savedDelRecs := ss.delRecs
@@ -1398,24 +1458,34 @@ func (ss *FileSubStore) compact() error {
 	ss.delRecs = 0
 	ss.fileSize = 0
 	for _, sub := range ss.subs {
-		err = ss.writeRecord(tmpFile, subRecNew, sub.sub)
+		err = ss.writeRecord(tmpBW, subRecNew, sub.sub)
 		if err != nil {
 			return err
 		}
 		ss.updateSub.ID = sub.sub.ID
 		for seqno := range sub.seqnos {
 			ss.updateSub.Seqno = seqno
-			err = ss.writeRecord(tmpFile, subRecMsg, &ss.updateSub)
+			err = ss.writeRecord(tmpBW, subRecMsg, &ss.updateSub)
 			if err != nil {
 				return err
 			}
 		}
+	}
+	// Flush and sync the temporary file
+	err = tmpBW.Flush()
+	if err != nil {
+		return err
+	}
+	err = tmpFile.Sync()
+	if err != nil {
+		return err
 	}
 	// Switch the temporary file with the original one.
 	ss.file, err = swapFiles(tmpFile, ss.file)
 	if err != nil {
 		return err
 	}
+	ss.bw = bufio.NewWriterSize(ss.file, ss.opts.BufferSize)
 	// Update the timestamp of this last successful compact
 	ss.compactTS = time.Now()
 	return nil
@@ -1465,6 +1535,24 @@ func (ss *FileSubStore) writeRecord(w io.Writer, recType subRecordType, rec subR
 	return nil
 }
 
+func (ss *FileSubStore) flush() error {
+	if ss.bw == nil {
+		return nil
+	}
+	if err := ss.bw.Flush(); err != nil {
+		return err
+	}
+	return ss.file.Sync()
+}
+
+// Flush persists buffered operations to disk.
+func (ss *FileSubStore) Flush() error {
+	ss.Lock()
+	err := ss.flush()
+	ss.Unlock()
+	return err
+}
+
 // Close closes this store
 func (ss *FileSubStore) Close() error {
 	ss.RLock()
@@ -1478,7 +1566,12 @@ func (ss *FileSubStore) Close() error {
 
 	var err error
 	if ss.file != nil {
-		err = ss.file.Close()
+		err = ss.flush()
+		if lerr := ss.file.Close(); lerr != nil {
+			if err == nil {
+				err = lerr
+			}
+		}
 	}
 	return err
 }

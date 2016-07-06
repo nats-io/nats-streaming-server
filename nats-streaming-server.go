@@ -5,6 +5,7 @@ package main
 import (
 	"flag"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
 
@@ -89,8 +90,17 @@ func main() {
 
 	// Parse flags
 	sOpts, nOpts := parseFlags()
+	// override the NoSigs for NATS since we have our own signal handler below
+	nOpts.NoSigs = true
 	stand.ConfigureLogger(sOpts, nOpts)
-	stand.RunServerWithOpts(sOpts, nOpts)
+	s := stand.RunServerWithOpts(sOpts, nOpts)
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		<-c
+		s.Shutdown()
+		os.Exit(0)
+	}()
 
 	runtime.Goexit()
 }
@@ -121,7 +131,9 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.IntVar(&stanOpts.FileStoreOpts.CompactFragmentation, "file_compact_frag", stores.DefaultFileStoreOptions.CompactFragmentation, "File fragmentation threshold for compaction")
 	flag.IntVar(&stanOpts.FileStoreOpts.CompactInterval, "file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "Minimum interval (in seconds) between file compactions")
 	flag.Int64Var(&stanOpts.FileStoreOpts.CompactMinFileSize, "file_compact_min_size", stores.DefaultFileStoreOptions.CompactMinFileSize, "Minimum file size for compaction")
-
+	flag.IntVar(&stanOpts.FileStoreOpts.BufferSize, "file_buffer_size", stores.DefaultFileStoreOptions.BufferSize, "File buffer size (in bytes)")
+	flag.IntVar(&stanOpts.IOBatchSize, "io_batch_size", stand.DefaultIOBatchSize, "# of message to batch in flushing io")
+	flag.Int64Var(&stanOpts.IOSleepTime, "io_sleep_time", stand.DefaultIOSleepTime, "duration the server waits for more messages (in micro-seconds, 0 to disable)")
 	// NATS options
 	var showVersion bool
 	var natsDebugAndTrace bool
