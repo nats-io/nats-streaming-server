@@ -66,6 +66,13 @@ const (
 	// Number of times the redelivery callback is allowed to stall, because
 	// the susbcriber hit the MaxInFlight limit, before forcing redelivery.
 	defaultMaxStalledRedeliveries = 3
+
+	// DefaultIOBatchSize is the maximum number of messages to accumulate before flushing a store.
+	DefaultIOBatchSize = 1024
+
+	// DefaultIOSleepTime is the duration (in micro-seconds) the server waits for more messages
+	// before starting processing. Set to 0 (or negative) to disable the wait.
+	DefaultIOSleepTime = int64(0)
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -111,8 +118,22 @@ func init() {
 	}
 }
 
+type ioPendingMsg struct {
+	pm *pb.PubMsg
+	m  *nats.Msg
+}
+
+// Constant that defines the size of the channel that feeds the IO thread.
+const ioChannelSize = 64 * 1024
+
 // StanServer structure represents the STAN server
 type StanServer struct {
+	// Keep all members for which we use atomic at the beginning of the
+	// struct and make sure they are all 64bits (or use padding if necessary).
+	// atomic.* functions crash on 32bit machines if operand is not aligned
+	// at 64bit. See https://github.com/golang/go/issues/599
+	ioChannelStatsMaxBatchSize int64 // stats of the max number of messages than went into a single batch
+
 	sync.RWMutex
 	shutdown   bool
 	serverID   string
@@ -141,6 +162,10 @@ type StanServer struct {
 
 	// Store
 	store stores.Store
+
+	// IO Channel
+	ioChannel     chan (*ioPendingMsg)
+	ioChannelQuit chan bool
 }
 
 // subStore holds all known state for all subscriptions
@@ -351,6 +376,8 @@ type Options struct {
 	ClientCert       string // Client Certificate for TLS
 	ClientKey        string // Client Key for TLS
 	ClientCA         string // Client CAs for TLS
+	IOBatchSize      int    // Number of messages we collect from clients before processing them.
+	IOSleepTime      int64  // Duration (in micro-seconds) the server waits for more message to fill up a batch.
 }
 
 // DefaultOptions are default options for the STAN server
@@ -359,6 +386,8 @@ var defaultOptions = Options{
 	DiscoverPrefix: DefaultDiscoverPrefix,
 	StoreType:      DefaultStoreType,
 	FileStoreOpts:  stores.DefaultFileStoreOptions,
+	IOBatchSize:    DefaultIOBatchSize,
+	IOSleepTime:    DefaultIOSleepTime,
 }
 
 // GetDefaultOptions returns default options for the STAN server
@@ -487,6 +516,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		dupCIDMap:         make(map[string]struct{}),
 		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
 		dupCIDTimeout:     defaultCheckDupCIDTimeout,
+		ioChannelQuit:     make(chan bool, 1),
 	}
 
 	// Set limits
@@ -529,15 +559,14 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	// Create clientStore
 	s.clients = &clientStore{store: s.store}
 
-	// After this point, if the server panics, and s.store is not closed,
-	// it will prevent tests on Windows to properly cleanup the datastore
-	// because files will still be opened. So we recover from the panic
-	// in order to close the store, then issue the original panic.
+	// Ensure that we shutdown the server if there is a panic during startup.
+	// This will ensure that stores are closed (which otherwise would cause
+	// issues during testing) and that the NATS Server (if started) is also
+	// properly shutdown. Tod do so, we recover from the panic in order to
+	// call Shutdown, then issue the original panic.
 	defer func() {
 		if r := recover(); r != nil {
-			if s.store != nil {
-				s.store.Close()
-			}
+			s.Shutdown()
 			// Issue the original panic now that the store is closed.
 			panic(r)
 		}
@@ -897,6 +926,9 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 
 // initSubscriptions will setup initial subscriptions for discovery etc.
 func (s *StanServer) initSubscriptions() {
+
+	s.startStoreIOWriter()
+
 	// Listen for connection requests.
 	_, err := s.nc.Subscribe(s.info.Discovery, s.connectCB)
 	if err != nil {
@@ -1194,32 +1226,8 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 		return
 	}
 
-	////////////////////////////////////////////////////////////////////////////
-	// This is where we will store the message and wait for others in the
-	// potential cluster to do so as well, once we have a quorom someone can
-	// ack the publisher. We simply do so here for now.
-	////////////////////////////////////////////////////////////////////////////
-	////////////////////////////////////////////////////////////////////////////
-	// Once we have ack'd the publisher, we need to assign this a sequence ID.
-	// This will be done by a master election within the cluster, for now we
-	// assume we are the master and assign the sequence ID here.
-	////////////////////////////////////////////////////////////////////////////
-
-	// Store first, and check for error.
-	cs, err := s.assignAndStore(pm)
-	if err != nil {
-		Errorf("STAN: [Client:%s] Error processing message for subject %q: %v", pm.ClientID, pm.Subject, err)
-		s.sendPublishErr(m.Reply, pm.Guid, err)
-		return
-	}
-
-	s.ackPublisher(pm, m.Reply)
-
-	////////////////////////////////////////////////////////////////////////////
-	// Now trigger sends to any active subscribers
-	////////////////////////////////////////////////////////////////////////////
-
-	s.processMsg(cs)
+	// add the message to the IO channel for batching
+	s.addMessageToIOChannel(pm, m)
 }
 
 func (s *StanServer) sendPublishErr(subj, guid string, err error) {
@@ -1532,6 +1540,127 @@ func (s *StanServer) setupAckTimer(sub *subState, d time.Duration) {
 	sub.ackTimer = time.AfterFunc(d, func() {
 		s.performAckExpirationRedelivery(sub)
 	})
+}
+
+func (s *StanServer) startStoreIOWriter() {
+	s.wg.Add(1)
+	s.ioChannel = make(chan (*ioPendingMsg), ioChannelSize)
+	go s.storeIOLoop()
+}
+
+func (s *StanServer) storeIOLoop() {
+	defer s.wg.Done()
+
+	////////////////////////////////////////////////////////////////////////////
+	// This is where we will store the message and wait for others in the
+	// potential cluster to do so as well, once we have a quorom someone can
+	// ack the publisher. We simply do so here for now.
+	////////////////////////////////////////////////////////////////////////////
+	////////////////////////////////////////////////////////////////////////////
+	// Once we have ack'd the publisher, we need to assign this a sequence ID.
+	// This will be done by a master election within the cluster, for now we
+	// assume we are the master and assign the sequence ID here.
+	////////////////////////////////////////////////////////////////////////////
+	var storesToFlush map[*stores.ChannelStore]struct{}
+
+	var _pendingMsgs [ioChannelSize]*ioPendingMsg
+	var pendingMsgs = _pendingMsgs[:0]
+
+	storeIOPendingMsg := func(iopm *ioPendingMsg) {
+		cs, err := s.assignAndStore(iopm.pm)
+		if err != nil {
+			Errorf("STAN: [Client:%s] Error processing message for subject %q: %v", iopm.pm.ClientID, iopm.m.Subject, err)
+			s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, err)
+		} else {
+			pendingMsgs = append(pendingMsgs, iopm)
+			storesToFlush[cs] = struct{}{}
+		}
+	}
+
+	batchSize := s.opts.IOBatchSize
+	sleepTime := s.opts.IOSleepTime
+	sleepDur := time.Duration(sleepTime) * time.Microsecond
+	max := 0
+
+	for {
+		select {
+		case iopm := <-s.ioChannel:
+			// Create a new map (probably faster than deleting elements down below)
+			storesToFlush = make(map[*stores.ChannelStore]struct{})
+
+			// store the one we just pulled
+			storeIOPendingMsg(iopm)
+
+			remaining := batchSize - 1
+			// fill the pending messages slice with at most our batch size,
+			// unless the channel is empty.
+			for remaining > 0 {
+				ioChanLen := len(s.ioChannel)
+
+				// if we are empty, wait, check again, and break if nothing.
+				// While this adds some latency, it optimizes batching.
+				if ioChanLen == 0 {
+					if sleepTime > 0 {
+						time.Sleep(sleepDur)
+						ioChanLen = len(s.ioChannel)
+						if ioChanLen == 0 {
+							break
+						}
+					} else {
+						break
+					}
+				}
+
+				// stick to our buffer size
+				if ioChanLen > remaining {
+					ioChanLen = remaining
+				}
+
+				for i := 0; i < ioChanLen; i++ {
+					storeIOPendingMsg(<-s.ioChannel)
+				}
+				// Keep track of max number of messages in a batch
+				if ioChanLen > max {
+					max = ioChanLen
+					atomic.StoreInt64(&(s.ioChannelStatsMaxBatchSize), int64(max))
+				}
+
+				remaining -= ioChanLen
+			}
+
+			// flush all the stores with messages written to them...
+			for cs := range storesToFlush {
+				if err := cs.Msgs.Flush(); err != nil {
+					// TODO: Attempt recovery, notify publishers of error.
+					panic(fmt.Errorf("Unable to flush msg store: %v", err))
+				}
+				// Call this here, so messages are sent to subscribers,
+				// which means that msg seq is added to subscription file
+				s.processMsg(cs)
+				if err := cs.Subs.Flush(); err != nil {
+					panic(fmt.Errorf("Unable to flush sub store: %v", err))
+				}
+			}
+
+			// Ack our messages back to the publisher
+			for _, iopm := range pendingMsgs {
+				s.ackPublisher(iopm.pm, iopm.m.Reply)
+			}
+
+			// clear out pending messages and store map
+			pendingMsgs = pendingMsgs[:0]
+
+		case <-s.ioChannelQuit:
+			return
+		}
+	}
+}
+
+// addMessageToIOChannel passes the message to the IO go routine
+func (s *StanServer) addMessageToIOChannel(publishMsg *pb.PubMsg, natsMsg *nats.Msg) {
+	// TODO:  Pool/Preallocate here?
+	iopm := ioPendingMsg{pm: publishMsg, m: natsMsg}
+	s.ioChannel <- &iopm
 }
 
 // assignAndStore will assign a sequence ID and then store the message.
@@ -2162,6 +2291,8 @@ func (s *StanServer) Shutdown() {
 	// Do not set s.nc to nil since it is used in many place without locking.
 	// Once closed, s.nc.xxx() calls will simply fail, but we won't panic.
 	nc := s.nc
+	// Notify the IO channel that we are shutting down
+	s.ioChannelQuit <- true
 	s.Unlock()
 
 	// Close/Shutdown resources. Note that unless one instantiates StanServer
