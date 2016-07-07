@@ -18,7 +18,9 @@ func init() {
 // EnsureBufBigEnough checks that given buffer is big enough to hold 'needed'
 // bytes, otherwise returns a buffer of a size of at least 'needed' bytes.
 func EnsureBufBigEnough(buf []byte, needed int) []byte {
-	if buf == nil || needed > len(buf) {
+	if buf == nil {
+		return make([]byte, needed)
+	} else if needed > len(buf) {
 		return make([]byte, int(float32(needed)*1.1))
 	}
 	return buf

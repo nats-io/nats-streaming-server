@@ -68,8 +68,7 @@ type RecoveredState struct {
 // Client represents a client with ID, Heartbeat Inbox and user data sets
 // when adding it to the store.
 type Client struct {
-	ClientID string
-	HbInbox  string
+	spb.ClientInfo
 	UserData interface{}
 }
 
@@ -89,7 +88,7 @@ type RecoveredSubState struct {
 
 // ChannelStore contains a reference to both Subscription and Message stores.
 type ChannelStore struct {
-	// UserData allows the user of a ChannelStore to store private data.
+	// UserData is set when the channel is created.
 	UserData interface{}
 	// Subs is the Subscriptions Store.
 	Subs SubStore
