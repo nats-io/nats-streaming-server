@@ -133,7 +133,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.Int64Var(&stanOpts.FileStoreOpts.CompactMinFileSize, "file_compact_min_size", stores.DefaultFileStoreOptions.CompactMinFileSize, "Minimum file size for compaction")
 	flag.IntVar(&stanOpts.FileStoreOpts.BufferSize, "file_buffer_size", stores.DefaultFileStoreOptions.BufferSize, "File buffer size (in bytes)")
 	flag.BoolVar(&stanOpts.FileStoreOpts.DoCRC, "file_crc", stores.DefaultFileStoreOptions.DoCRC, "Enable file CRC-32 checksum")
-	flag.IntVar(&stanOpts.FileStoreOpts.CRCPolynomial, "file_crc_poly", stores.DefaultFileStoreOptions.CRCPolynomial, "Polynomial used to make the table used for CRC-32 checksum")
+	flag.Int64Var(&stanOpts.FileStoreOpts.CRCPolynomial, "file_crc_poly", stores.DefaultFileStoreOptions.CRCPolynomial, "Polynomial used to make the table used for CRC-32 checksum")
 	flag.IntVar(&stanOpts.IOBatchSize, "io_batch_size", stand.DefaultIOBatchSize, "# of message to batch in flushing io")
 	flag.Int64Var(&stanOpts.IOSleepTime, "io_sleep_time", stand.DefaultIOSleepTime, "duration the server waits for more messages (in micro-seconds, 0 to disable)")
 	// NATS options

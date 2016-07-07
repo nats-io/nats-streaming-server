@@ -74,7 +74,7 @@ type FileStoreOptions struct {
 	DoCRC bool
 
 	// CRCPoly is a polynomial used to make the table used in CRC computation.
-	CRCPolynomial int
+	CRCPolynomial int64
 }
 
 // DefaultFileStoreOptions defines the default options for a File Store.
@@ -85,7 +85,7 @@ var DefaultFileStoreOptions = FileStoreOptions{
 	CompactFragmentation: 50,
 	CompactMinFileSize:   1024 * 1024,
 	DoCRC:                true,
-	CRCPolynomial:        crc32.IEEE,
+	CRCPolynomial:        int64(crc32.IEEE),
 }
 
 // BufferSize is a FileStore option that sets the size of the buffer used
@@ -148,7 +148,7 @@ func DoCRC(enableCRC bool) FileStoreOption {
 // CRCPolynomial is a FileStore option that defines the polynomial to use to create
 // the table used for CRC-32 Checksum.
 // See https://golang.org/pkg/hash/crc32/#MakeTable
-func CRCPolynomial(polynomial int) FileStoreOption {
+func CRCPolynomial(polynomial int64) FileStoreOption {
 	return func(o *FileStoreOptions) error {
 		o.CRCPolynomial = polynomial
 		return nil
@@ -412,7 +412,7 @@ func NewFileStore(rootDir string, limits *ChannelLimits, options ...FileStoreOpt
 	// Convert the compact interval in time.Duration
 	fs.compactItvl = time.Duration(fs.opts.CompactInterval) * time.Second
 	// Create the table using polynomial in options
-	if fs.opts.CRCPolynomial == crc32.IEEE {
+	if fs.opts.CRCPolynomial == int64(crc32.IEEE) {
 		fs.crcTable = crc32.IEEETable
 	} else {
 		fs.crcTable = crc32.MakeTable(uint32(fs.opts.CRCPolynomial))
