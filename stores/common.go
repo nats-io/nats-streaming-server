@@ -136,14 +136,14 @@ func (gs *genericStore) canAddChannel() error {
 
 // AddClient stores information about the client identified by `clientID`.
 func (gs *genericStore) AddClient(clientID, hbInbox string, userData interface{}) (*Client, bool, error) {
-	c := &Client{ClientID: clientID, HbInbox: hbInbox, UserData: userData}
+	c := &Client{spb.ClientInfo{ID: clientID, HbInbox: hbInbox}, userData}
 	gs.Lock()
 	oldClient := gs.clients[clientID]
 	if oldClient != nil {
 		gs.Unlock()
 		return oldClient, false, nil
 	}
-	gs.clients[c.ClientID] = c
+	gs.clients[c.ID] = c
 	gs.Unlock()
 	return c, true, nil
 }

@@ -45,8 +45,8 @@ func TestClientRegister(t *testing.T) {
 	func() {
 		c.RLock()
 		defer c.RUnlock()
-		if sc.ClientID != clientID {
-			t.Fatalf("Expected client id to be %v, got %v", clientID, sc.ClientID)
+		if sc.ID != clientID {
+			t.Fatalf("Expected client id to be %v, got %v", clientID, sc.ID)
 		}
 		if sc.HbInbox != hbInbox {
 			t.Fatalf("Expected client hbInbox to be %v, got %v", hbInbox, sc.HbInbox)

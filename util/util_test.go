@@ -17,6 +17,10 @@ func TestEnsureBufBigEnough(t *testing.T) {
 	if len(newBuf) <= 10 {
 		t.Fatalf("Buffer should be at least 10, it is: %v", len(newBuf))
 	}
+	newBuf = EnsureBufBigEnough(nil, 5)
+	if len(newBuf) != 5 {
+		t.Fatalf("Buffer should be exactly 5, it is: %v", len(newBuf))
+	}
 }
 
 func TestWriteInt(t *testing.T) {

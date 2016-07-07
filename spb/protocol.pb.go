@@ -13,6 +13,8 @@
 		SubStateDelete
 		SubStateUpdate
 		ServerInfo
+		ClientInfo
+		ClientDelete
 */
 package spb
 
@@ -78,11 +80,31 @@ func (m *ServerInfo) Reset()         { *m = ServerInfo{} }
 func (m *ServerInfo) String() string { return proto.CompactTextString(m) }
 func (*ServerInfo) ProtoMessage()    {}
 
+// ClientInfo contains information related to a Client
+type ClientInfo struct {
+	ID      string `protobuf:"bytes,1,opt,name=ID,proto3" json:"ID,omitempty"`
+	HbInbox string `protobuf:"bytes,2,opt,name=HbInbox,proto3" json:"HbInbox,omitempty"`
+}
+
+func (m *ClientInfo) Reset()         { *m = ClientInfo{} }
+func (m *ClientInfo) String() string { return proto.CompactTextString(m) }
+func (*ClientInfo) ProtoMessage()    {}
+
+type ClientDelete struct {
+	ID string `protobuf:"bytes,1,opt,name=ID,proto3" json:"ID,omitempty"`
+}
+
+func (m *ClientDelete) Reset()         { *m = ClientDelete{} }
+func (m *ClientDelete) String() string { return proto.CompactTextString(m) }
+func (*ClientDelete) ProtoMessage()    {}
+
 func init() {
 	proto.RegisterType((*SubState)(nil), "spb.SubState")
 	proto.RegisterType((*SubStateDelete)(nil), "spb.SubStateDelete")
 	proto.RegisterType((*SubStateUpdate)(nil), "spb.SubStateUpdate")
 	proto.RegisterType((*ServerInfo)(nil), "spb.ServerInfo")
+	proto.RegisterType((*ClientInfo)(nil), "spb.ClientInfo")
+	proto.RegisterType((*ClientDelete)(nil), "spb.ClientDelete")
 }
 func (m *SubState) Marshal() (data []byte, err error) {
 	size := m.Size()
@@ -257,6 +279,60 @@ func (m *ServerInfo) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
+func (m *ClientInfo) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *ClientInfo) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if len(m.ID) > 0 {
+		data[i] = 0xa
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.ID)))
+		i += copy(data[i:], m.ID)
+	}
+	if len(m.HbInbox) > 0 {
+		data[i] = 0x12
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.HbInbox)))
+		i += copy(data[i:], m.HbInbox)
+	}
+	return i, nil
+}
+
+func (m *ClientDelete) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *ClientDelete) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if len(m.ID) > 0 {
+		data[i] = 0xa
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.ID)))
+		i += copy(data[i:], m.ID)
+	}
+	return i, nil
+}
+
 func encodeFixed64Protocol(data []byte, offset int, v uint64) int {
 	data[offset] = uint8(v)
 	data[offset+1] = uint8(v >> 8)
@@ -367,6 +443,30 @@ func (m *ServerInfo) Size() (n int) {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
 	l = len(m.Close)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	return n
+}
+
+func (m *ClientInfo) Size() (n int) {
+	var l int
+	_ = l
+	l = len(m.ID)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.HbInbox)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	return n
+}
+
+func (m *ClientDelete) Size() (n int) {
+	var l int
+	_ = l
+	l = len(m.ID)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
@@ -1016,6 +1116,193 @@ func (m *ServerInfo) Unmarshal(data []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.Close = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProtocol(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ClientInfo) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProtocol
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ClientInfo: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ClientInfo: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ID = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field HbInbox", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.HbInbox = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProtocol(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ClientDelete) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProtocol
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ClientDelete: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ClientDelete: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ID = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
