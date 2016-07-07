@@ -13,6 +13,8 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
+	"hash/crc32"
+	"io"
 	"io/ioutil"
 	"time"
 )
@@ -219,6 +221,8 @@ func TestFSOptions(t *testing.T) {
 		CompactFragmentation: 60,
 		CompactInterval:      60,
 		CompactMinFileSize:   1024 * 1024,
+		DoCRC:                false,
+		CRCPolynomial:        crc32.Castagnoli,
 	}
 	// Create the file with custom options
 	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits,
@@ -226,7 +230,9 @@ func TestFSOptions(t *testing.T) {
 		CompactEnabled(expected.CompactEnabled),
 		CompactFragmentation(expected.CompactFragmentation),
 		CompactInterval(expected.CompactInterval),
-		CompactMinFileSize(expected.CompactMinFileSize))
+		CompactMinFileSize(expected.CompactMinFileSize),
+		DoCRC(expected.DoCRC),
+		CRCPolynomial(int(expected.CRCPolynomial)))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
@@ -968,32 +974,119 @@ func TestFSBadClientFile(t *testing.T) {
 	}
 	// So we should fail to create the filestore
 	expectedErrorOpeningDefaultFileStore(t)
-	// Now test with various unexpected content
-	contents := []string{"Nothing as expected", "A clientID-alone", "A", "D"}
-	for _, c := range contents {
-		// Delete the previous client file
+
+	resetToValidFile := func() *os.File {
+		// First remove the file
 		if err := os.Remove(fileName); err != nil {
 			t.Fatalf("Unexpected error removing file: %v", err)
 		}
-		// Now create the file with proper file version
+		// Create the file with proper file version
 		file, err := openFile(fileName)
 		if err != nil {
 			t.Fatalf("Error creating client file: %v", err)
 		}
-		// Add something that is not what we expect to read back
-		if _, err := file.WriteString(c); err != nil {
-			t.Fatalf("Unexpected error writing content: %v", err)
-		}
-		if err := file.Close(); err != nil {
-			t.Fatalf("Unexpected error closing file: %v", err)
-		}
-		// We should fail to create the filestore
-		fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
-		if err == nil {
-			fs.Close()
-			t.Fatalf("Expected error opening file store with content %q, got none", c)
-		}
+		return file
 	}
+
+	clientID := "this-is-a-valid-client-id"
+	cli := spb.ClientInfo{ID: clientID, HbInbox: "hbInbox"}
+	b, _ := cli.Marshal()
+
+	//
+	// WRONG CRC
+	//
+	file := resetToValidFile()
+	// Write the header
+	if err := util.WriteInt(file, int(addClient)<<24|len(b)); err != nil {
+		t.Fatalf("Error writing header: %v", err)
+	}
+	// Write WRONG crc
+	if err := util.WriteInt(file, int(crc32.ChecksumIEEE(b))+3); err != nil {
+		t.Fatalf("Error writing crc: %v", err)
+	}
+	// Write content
+	if _, err := file.Write(b); err != nil {
+		t.Fatalf("Error writing info: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	expectedErrorOpeningDefaultFileStore(t)
+
+	//
+	// UNMARSHAL addClient ERROR
+	//
+	file = resetToValidFile()
+	copy(b, []byte("hello"))
+	// Write the header
+	if err := util.WriteInt(file, int(addClient)<<24|len(b)); err != nil {
+		t.Fatalf("Error writing header: %v", err)
+	}
+	// Write crc
+	if err := util.WriteInt(file, int(crc32.ChecksumIEEE(b))); err != nil {
+		t.Fatalf("Error writing crc: %v", err)
+	}
+	// Write content
+	if _, err := file.Write(b); err != nil {
+		t.Fatalf("Error writing info: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	expectedErrorOpeningDefaultFileStore(t)
+
+	//
+	// UNMARSHAL delClient ERROR
+	//
+	file = resetToValidFile()
+	// First write a valid addClient
+	writeRecord(file, nil, addClient, &cli, crc32.IEEETable)
+	// Then write an invalid delClient
+	delCli := spb.ClientDelete{ID: clientID}
+	b, _ = delCli.Marshal()
+	copy(b, []byte("hello"))
+	// Write the header
+	if err := util.WriteInt(file, int(delClient)<<24|len(b)); err != nil {
+		t.Fatalf("Error writing header: %v", err)
+	}
+	// Write crc
+	if err := util.WriteInt(file, int(crc32.ChecksumIEEE(b))); err != nil {
+		t.Fatalf("Error writing crc: %v", err)
+	}
+	// Write content
+	if _, err := file.Write(b); err != nil {
+		t.Fatalf("Error writing info: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	expectedErrorOpeningDefaultFileStore(t)
+
+	//
+	// INVALID TYPE
+	//
+	file = resetToValidFile()
+	b, _ = cli.Marshal()
+	// Write the header
+	if err := util.WriteInt(file, 99<<24|len(b)); err != nil {
+		t.Fatalf("Error writing header: %v", err)
+	}
+	// Write crc
+	if err := util.WriteInt(file, int(crc32.ChecksumIEEE(b))); err != nil {
+		t.Fatalf("Error writing crc: %v", err)
+	}
+	// Write content
+	if _, err := file.Write(b); err != nil {
+		t.Fatalf("Error writing info: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	expectedErrorOpeningDefaultFileStore(t)
 }
 
 func TestFSClientAPIs(t *testing.T) {
@@ -1017,8 +1110,8 @@ func TestFSClientAPIs(t *testing.T) {
 		t.Fatalf("Expected 2 clients to be recovered, got %v", len(state.Clients))
 	}
 	for _, c := range state.Clients {
-		if c.ClientID != "client2" && c.ClientID != "client3" {
-			t.Fatalf("Unexpected recovered client: %v", c.ClientID)
+		if c.ID != "client2" && c.ID != "client3" {
+			t.Fatalf("Unexpected recovered client: %v", c.ID)
 		}
 	}
 }
@@ -1068,7 +1161,11 @@ func TestFSBadServerFile(t *testing.T) {
 		b, _ := info.Marshal()
 		// Write the size of the proto buf
 		if err := util.WriteInt(file, info.Size()); err != nil {
-			t.Fatalf("Error writing zie: %v", err)
+			t.Fatalf("Error writing header: %v", err)
+		}
+		// Write crc
+		if err := util.WriteInt(file, int(crc32.ChecksumIEEE(b))); err != nil {
+			t.Fatalf("Error writing crc: %v", err)
 		}
 		// Write content
 		if _, err := file.Write(b); err != nil {
@@ -1089,7 +1186,11 @@ func TestFSBadServerFile(t *testing.T) {
 	b, _ := info.Marshal()
 	// Write the incorrect size (too big) of the proto buf
 	if err := util.WriteInt(file, info.Size()+10); err != nil {
-		t.Fatalf("Error writing zie: %v", err)
+		t.Fatalf("Error writing header: %v", err)
+	}
+	// Write crc
+	if err := util.WriteInt(file, int(crc32.ChecksumIEEE(b))); err != nil {
+		t.Fatalf("Error writing crc: %v", err)
 	}
 	// Write content
 	if _, err := file.Write(b); err != nil {
@@ -1109,7 +1210,11 @@ func TestFSBadServerFile(t *testing.T) {
 	b, _ = info.Marshal()
 	// Write the incorrect size (too small) of the proto buf
 	if err := util.WriteInt(file, info.Size()-10); err != nil {
-		t.Fatalf("Error writing zie: %v", err)
+		t.Fatalf("Error writing header: %v", err)
+	}
+	// Write crc
+	if err := util.WriteInt(file, int(crc32.ChecksumIEEE(b))); err != nil {
+		t.Fatalf("Error writing crc: %v", err)
 	}
 	// Write content
 	if _, err := file.Write(b); err != nil {
@@ -1128,7 +1233,11 @@ func TestFSBadServerFile(t *testing.T) {
 	b, _ = info.Marshal()
 	// Write the size of the proto buf
 	if err := util.WriteInt(file, info.Size()); err != nil {
-		t.Fatalf("Error writing zie: %v", err)
+		t.Fatalf("Error writing header: %v", err)
+	}
+	// Write crc
+	if err := util.WriteInt(file, int(crc32.ChecksumIEEE(b))); err != nil {
+		t.Fatalf("Error writing crc: %v", err)
 	}
 	// Write content
 	if _, err := file.Write(b); err != nil {
@@ -1151,10 +1260,15 @@ func TestFSBadServerFile(t *testing.T) {
 	b, _ = info.Marshal()
 	// Write the size of the proto buf
 	if err := util.WriteInt(file, info.Size()); err != nil {
-		t.Fatalf("Error writing zie: %v", err)
+		t.Fatalf("Error writing header: %v", err)
 	}
 	// Alter the content
 	copy(b, []byte("hello"))
+	// Write a valid CRC of the corrupted protobuf. This is checking
+	// that Unmarshall error is correctly captured.
+	if err := util.WriteInt(file, int(crc32.ChecksumIEEE(b))); err != nil {
+		t.Fatalf("Error writing crc: %v", err)
+	}
 	// Write the corrupted content
 	if _, err := file.Write(b); err != nil {
 		t.Fatalf("Error writing info: %v", err)
@@ -1213,18 +1327,15 @@ func TestFSBadMsgFile(t *testing.T) {
 		return file
 	}
 
-	// Restore a valid file
+	//
+	// INVALID CONTENT
+	//
 	file := resetToValidFile()
-	// Write message with wrong size
-	msg := &pb.MsgProto{}
-	b, _ := msg.Marshal()
-	// Write the wrong size of the proto buf
-	if err := util.WriteInt(file, len(b)+10); err != nil {
-		t.Fatalf("Error writing zie: %v", err)
+	if err := util.WriteInt(file, 5); err != nil {
+		t.Fatalf("Error writing header: %v", err)
 	}
-	// Write content
-	if _, err := file.Write(b); err != nil {
-		t.Fatalf("Error writing info: %v", err)
+	if _, err := file.Write([]byte("hello")); err != nil {
+		t.Fatalf("Error writing content: %v", err)
 	}
 	// Close the file
 	if err := file.Close(); err != nil {
@@ -1233,18 +1344,23 @@ func TestFSBadMsgFile(t *testing.T) {
 	// We should fail to create the filestore
 	expectedErrorOpeningDefaultFileStore(t)
 
-	// Restore a valid file
+	//
+	// UNMARSHALL ERROR
+	//
 	file = resetToValidFile()
-	// Write message with wrong content
-	msg = &pb.MsgProto{Subject: "foo", Data: []byte("msg")}
-	b, _ = msg.Marshal()
-	// Write the size of the proto buf
-	if err := util.WriteInt(file, msg.Size()); err != nil {
-		t.Fatalf("Error writing zie: %v", err)
-	}
-	// Alter the content
+	msg := &pb.MsgProto{Sequence: 1, Data: []byte("this is a message")}
+	b, _ := msg.Marshal()
+	// overwrite with dummy content
 	copy(b, []byte("hello"))
-	// Write the corrupted content
+	// Write the header
+	if err := util.WriteInt(file, len(b)); err != nil {
+		t.Fatalf("Error writing header: %v", err)
+	}
+	// Write CRC
+	if err := util.WriteInt(file, int(crc32.ChecksumIEEE(b))); err != nil {
+		t.Fatalf("Unexpected error writing CRC: %v", err)
+	}
+	// Write content
 	if _, err := file.Write(b); err != nil {
 		t.Fatalf("Error writing info: %v", err)
 	}
@@ -1305,7 +1421,7 @@ func TestFSBadSubFile(t *testing.T) {
 	file := resetToValidFile()
 	// Write size that causes read of content to EOF
 	if err := util.WriteInt(file, 100); err != nil {
-		t.Fatalf("Error writing zie: %v", err)
+		t.Fatalf("Error writing header: %v", err)
 	}
 	// Close the file
 	if err := file.Close(); err != nil {
@@ -1315,16 +1431,22 @@ func TestFSBadSubFile(t *testing.T) {
 	expectedErrorOpeningDefaultFileStore(t)
 
 	// Test with various types
-	types := []subRecordType{subRecNew, subRecUpdate, subRecDel, subRecMsg, subRecAck, 99}
+	types := []recordType{subRecNew, subRecUpdate, subRecDel, subRecMsg, subRecAck, 99}
+	content := []byte("abc")
+	crc := crc32.ChecksumIEEE(content)
 	for _, oneType := range types {
 		// Restore a valid file
 		file = resetToValidFile()
 		// Write a type that does not exist
-		if err := util.WriteInt(file, int(oneType)<<24|3); err != nil {
-			t.Fatalf("Error writing zie: %v", err)
+		if err := util.WriteInt(file, int(oneType)<<24|len(content)); err != nil {
+			t.Fatalf("Error writing header: %v", err)
+		}
+		// Write CRC
+		if err := util.WriteInt(file, int(crc)); err != nil {
+			t.Fatalf("Error writing crc: %v", err)
 		}
 		// Write dummy content
-		if _, err := file.Write([]byte("abc")); err != nil {
+		if _, err := file.Write(content); err != nil {
 			t.Fatalf("Error writing info: %v", err)
 		}
 		// Close the file
@@ -2015,5 +2137,264 @@ func TestFSFlush(t *testing.T) {
 	// Expect Flush to fail
 	if err := cs.Subs.Flush(); err == nil {
 		t.Fatal("Expected Flush to fail, did not")
+	}
+}
+
+type testReader struct {
+	content     []byte
+	start       int
+	errToReturn error
+}
+
+func (t *testReader) setContent(content []byte) {
+	t.content = content
+	t.start = 0
+}
+
+func (t *testReader) setErrToReturn(err error) {
+	t.errToReturn = err
+}
+
+func (t *testReader) Read(p []byte) (n int, err error) {
+	if t.errToReturn != nil {
+		return 0, t.errToReturn
+	}
+	if len(t.content)-t.start < len(p) {
+		return 0, io.EOF
+	}
+	copy(p, t.content[t.start:t.start+len(p)])
+	t.start += len(p)
+	return len(t.content), nil
+}
+
+func TestFSReadRecord(t *testing.T) {
+	r := &testReader{}
+
+	var err error
+
+	buf := make([]byte, 5)
+	var retBuf []byte
+	recType := recNoType
+	recSize := 0
+
+	// Reader returns an error
+	errReturned := fmt.Errorf("Fake error")
+	r.setErrToReturn(errReturned)
+	retBuf, recSize, recType, err = readRecord(r, buf, false, crc32.IEEETable, true)
+	if err != errReturned {
+		t.Fatalf("Expected error %v, got: %v", errReturned, err)
+	}
+	if !reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be same as the one provided")
+	}
+	if recSize != 0 {
+		t.Fatalf("Expected recSize to be 0, got %v", recSize)
+	}
+	if recType != recNoType {
+		t.Fatalf("Expected recType to be recNoType, got %v", recType)
+	}
+
+	// Record not containing CRC
+	_header := [4]byte{}
+	header := _header[:]
+	util.ByteOrder.PutUint32(header, 0)
+	r.setErrToReturn(nil)
+	r.setContent(header)
+	retBuf, recSize, recType, err = readRecord(r, buf, false, crc32.IEEETable, true)
+	if err == nil {
+		t.Fatal("Expected error got none")
+	}
+	if !reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be same as the one provided")
+	}
+	if recSize != 0 {
+		t.Fatalf("Expected recSize to be 0, got %v", recSize)
+	}
+	if recType != recNoType {
+		t.Fatalf("Expected recType to be recNoType, got %v", recType)
+	}
+
+	// Wrong CRC
+	b := make([]byte, recordHeaderSize+5)
+	util.ByteOrder.PutUint32(b, 5)
+	copy(b[recordHeaderSize:], []byte("hello"))
+	r.setErrToReturn(nil)
+	r.setContent(b)
+	retBuf, recSize, recType, err = readRecord(r, buf, false, crc32.IEEETable, true)
+	if err == nil {
+		t.Fatal("Expected error got none")
+	}
+	if !reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be same as the one provided")
+	}
+	if recSize != 0 {
+		t.Fatalf("Expected recSize to be 0, got %v", recSize)
+	}
+	if recType != recNoType {
+		t.Fatalf("Expected recType to be recNoType, got %v", recType)
+	}
+	// Not asking for CRC should return ok
+	r.setContent(b)
+	retBuf, recSize, recType, err = readRecord(r, buf, false, crc32.IEEETable, false)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be same as the one provided")
+	}
+	if string(retBuf[:recSize]) != "hello" {
+		t.Fatalf("Expected body to be \"hello\", got %q", string(retBuf[:recSize]))
+	}
+	if recType != recNoType {
+		t.Fatalf("Expected recType to be recNoType, got %v", recType)
+	}
+
+	// Check that returned buffer has expanded as required
+	b = make([]byte, recordHeaderSize+10)
+	payload := []byte("hellohello")
+	util.ByteOrder.PutUint32(b, uint32(len(payload)))
+	util.ByteOrder.PutUint32(b[4:recordHeaderSize], crc32.ChecksumIEEE(payload))
+	copy(b[recordHeaderSize:], payload)
+	r.setErrToReturn(nil)
+	r.setContent(b)
+	retBuf, recSize, recType, err = readRecord(r, buf, false, crc32.IEEETable, true)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be different than the one provided")
+	}
+	if string(retBuf[:recSize]) != string(payload) {
+		t.Fatalf("Expected body to be %q got %v", string(payload), string(retBuf[:recSize]))
+	}
+	if recType != recNoType {
+		t.Fatalf("Expected recType to be recNoType, got %v", recType)
+	}
+
+	// Check rec type returned properly
+	util.ByteOrder.PutUint32(b, 1<<24|10) // reuse previous buf
+	r.setErrToReturn(nil)
+	r.setContent(b)
+	retBuf, recSize, recType, err = readRecord(r, buf, true, crc32.IEEETable, true)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be different than the one provided")
+	}
+	if string(retBuf[:recSize]) != string(payload) {
+		t.Fatalf("Expected body to be %q got %v", string(payload), string(retBuf[:recSize]))
+	}
+	if recType != recordType(1) {
+		t.Fatalf("Expected recType to be 1, got %v", recType)
+	}
+}
+
+type testWriter struct {
+	buf         []byte
+	errToReturn error
+}
+
+func (t *testWriter) setErrToReturn(err error) {
+	t.errToReturn = err
+}
+
+func (t *testWriter) reset() {
+	t.buf = t.buf[:0]
+}
+
+func (t *testWriter) Write(p []byte) (n int, err error) {
+	if t.errToReturn != nil {
+		return 0, t.errToReturn
+	}
+	t.buf = append(t.buf, p...)
+	return len(p), nil
+}
+
+type recordProduceErrorOnMarshal struct {
+	errToReturn error
+}
+
+func (r *recordProduceErrorOnMarshal) Size() int {
+	return 1
+}
+
+func (r *recordProduceErrorOnMarshal) MarshalTo(b []byte) (int, error) {
+	return 0, r.errToReturn
+}
+
+func TestFSWriteRecord(t *testing.T) {
+	w := &testWriter{}
+
+	var err error
+
+	buf := make([]byte, 100)
+	var retBuf []byte
+	size := 0
+
+	cli := &spb.ClientInfo{ID: "me", HbInbox: "inbox"}
+	cliBuf, _ := cli.Marshal()
+
+	retBuf, size, err = writeRecord(w, buf, addClient, cli, crc32.IEEETable)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be same as the one provided")
+	}
+	if size != recordHeaderSize+len(cliBuf) {
+		t.Fatalf("Expected size to be %v, got %v", recordHeaderSize+len(cliBuf), size)
+	}
+	header := util.ByteOrder.Uint32(w.buf[:4])
+	recType := recordType(header >> 24 & 0xFF)
+	if recType != addClient {
+		t.Fatalf("Expected type %v, got %v", addClient, recType)
+	}
+	crc := util.ByteOrder.Uint32(w.buf[4:recordHeaderSize])
+	if crc != crc32.ChecksumIEEE(cliBuf) {
+		t.Fatal("Wrong crc")
+	}
+	if !reflect.DeepEqual(retBuf[recordHeaderSize:size], cliBuf) {
+		t.Fatalf("Unexpected content: %v", retBuf[recordHeaderSize:len(retBuf)])
+	}
+
+	// Check with no type
+	w.reset()
+	retBuf, size, err = writeRecord(w, buf, recNoType, cli, crc32.IEEETable)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be same as the one provided")
+	}
+	if size != recordHeaderSize+len(cliBuf) {
+		t.Fatalf("Expected size to be %v, got %v", recordHeaderSize+len(cliBuf), size)
+	}
+	header = util.ByteOrder.Uint32(w.buf[:4])
+	recType = recordType(header >> 24 & 0xFF)
+	if recType != recNoType {
+		t.Fatalf("Expected type %v, got %v", recNoType, recType)
+	}
+	crc = util.ByteOrder.Uint32(w.buf[4:recordHeaderSize])
+	if crc != crc32.ChecksumIEEE(cliBuf) {
+		t.Fatal("Wrong crc")
+	}
+	if !reflect.DeepEqual(retBuf[recordHeaderSize:size], cliBuf) {
+		t.Fatalf("Unexpected content: %v", retBuf[recordHeaderSize:len(retBuf)])
+	}
+
+	// Check for marshalling error
+	w.reset()
+	errReturned := fmt.Errorf("Fake error")
+	corruptRec := &recordProduceErrorOnMarshal{errToReturn: errReturned}
+	retBuf, size, err = writeRecord(w, buf, recNoType, corruptRec, crc32.IEEETable)
+	if err != errReturned {
+		t.Fatalf("Expected error %v, got %v", errReturned, err)
+	}
+	if retBuf == nil {
+		t.Fatal("Returned slice should not be nil")
+	}
+	if size != 0 {
+		t.Fatalf("Size should be 0, got %v", size)
 	}
 }

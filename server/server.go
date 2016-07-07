@@ -835,9 +835,7 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 			// Copy over fields from SubState protobuf
 			sub.SubState = *recSub.Sub
 			// Add the subscription to the corresponding client
-			if !s.clients.AddSub(sub.ClientID, sub) {
-				Errorf("Client %q not found, skipping subscription on ['%s']", sub.ClientID, channelName)
-			} else {
+			if s.clients.AddSub(sub.ClientID, sub) || sub.DurableName != "" {
 				// Add this subscription to subStore.
 				ss.updateState(sub)
 				// Add to the array
@@ -875,7 +873,7 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 		if !c.unregistered && c.hbt == nil {
 			// Because of the loop, we need to make copy for the closure
 			// to time.AfterFunc
-			cID := sc.ClientID
+			cID := sc.ID
 			c.hbt = time.AfterFunc(s.hbInterval, func() {
 				s.checkClientHealth(cID)
 			})
@@ -1071,7 +1069,7 @@ func (s *StanServer) processConnectRequestWithDupID(sc *stores.Client, req *pb.C
 	sendErr := true
 
 	hbInbox := sc.HbInbox
-	clientID := sc.ClientID
+	clientID := sc.ID
 
 	defer func() {
 		s.dupCIDGuard.Lock()

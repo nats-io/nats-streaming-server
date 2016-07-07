@@ -33,8 +33,8 @@ message SubStateDelete {
 
 // SubStateUpdate represents a subscription update (either Msg or Ack)
 message SubStateUpdate {
-  uint64        ID 	  = 1; // Subscription ID
-  uint64	    seqno = 2; // Sequence of the message (pending or ack'ed)
+  uint64 ID 	 = 1; // Subscription ID
+  uint64 seqno = 2; // Sequence of the message (pending or ack'ed)
 }
 
 // ServerInfo contains basic information regarding the Server
@@ -45,4 +45,14 @@ message ServerInfo {
 	string Subscribe   = 4; // Subject server receives subscription requests on.
 	string Unsubscribe = 5; // Subject server receives unsubscribe requests on.
 	string Close       = 6; // Subject server receives close requests on.
+}
+
+// ClientInfo contains information related to a Client
+message ClientInfo {
+  string ID      = 1; // Client ID
+  string HbInbox = 2; // The inbox heartbeats are sent to
+}
+
+message ClientDelete {
+  string ID = 1; // ID of the client being unregistered
 }

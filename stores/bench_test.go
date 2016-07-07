@@ -5,6 +5,8 @@ package stores
 import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
+	"hash/crc32"
+	"math/rand"
 	"os"
 	"sync"
 	"testing"
@@ -143,4 +145,53 @@ func BenchmarkRecoverSubs(b *testing.B) {
 			b.Fatalf("Non pending message should have been recovered, got %v", len(sub.Pending))
 		}
 	}
+}
+
+func benchCRCWithPoly(b *testing.B, arraySize int, poly uint32) {
+	b.StopTimer()
+	array := make([]byte, arraySize)
+	for i := 0; i < arraySize; i++ {
+		array[i] = byte(rand.Intn(255))
+	}
+	table := crc32.MakeTable(poly)
+	crc := crc32.Checksum(array, table)
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		if c := crc32.Checksum(array, table); c != crc {
+			stackFatalf(b, "Expected checksum %v, got %v", crc, c)
+		}
+	}
+	b.StopTimer()
+}
+
+func BenchmarkCRCIEEE_64(b *testing.B) {
+	benchCRCWithPoly(b, 64, crc32.IEEE)
+}
+
+func BenchmarkCRCIEEE_512(b *testing.B) {
+	benchCRCWithPoly(b, 512, crc32.IEEE)
+}
+
+func BenchmarkCRCIEEE_4096(b *testing.B) {
+	benchCRCWithPoly(b, 4096, crc32.IEEE)
+}
+
+func BenchmarkCRCIEEE_1M(b *testing.B) {
+	benchCRCWithPoly(b, 1024*1024, crc32.IEEE)
+}
+
+func BenchmarkCRCCastagnoli_64(b *testing.B) {
+	benchCRCWithPoly(b, 64, crc32.Castagnoli)
+}
+
+func BenchmarkCRCCastagnoli_512(b *testing.B) {
+	benchCRCWithPoly(b, 512, crc32.Castagnoli)
+}
+
+func BenchmarkCRCCastagnoli_4096(b *testing.B) {
+	benchCRCWithPoly(b, 4096, crc32.Castagnoli)
+}
+
+func BenchmarkCRCCastagnoli_1M(b *testing.B) {
+	benchCRCWithPoly(b, 1024*1024, crc32.Castagnoli)
 }
