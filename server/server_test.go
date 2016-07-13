@@ -11,6 +11,7 @@ import (
 	"time"
 
 	natsd "github.com/nats-io/gnatsd/server"
+	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats"
@@ -3275,4 +3276,34 @@ func TestIOChannel(t *testing.T) {
 	sOpts = GetDefaultOptions()
 	sOpts.IOSleepTime = 500
 	run(sOpts)
+}
+
+func TestDontEmbedNATSNotRunning(t *testing.T) {
+	sOpts := GetDefaultOptions()
+	sOpts.EmbedNATS = false
+
+	// Don't start a NATS Server, starting streaming server
+	// should fail.
+
+	var failedServer *StanServer
+	defer func() {
+		if r := recover(); r == nil {
+			failedServer.Shutdown()
+			t.Fatal("Expected streaming server to fail to start")
+		}
+	}()
+	failedServer = RunServerWithOpts(sOpts, nil)
+}
+
+func TestDontEmbedNATRunning(t *testing.T) {
+	sOpts := GetDefaultOptions()
+	sOpts.EmbedNATS = false
+
+	nOpts := DefaultNatsServerOptions
+	nOpts.Host = "localhost"
+	nOpts.Port = 5223
+	natsdTest.RunServer(&nOpts)
+
+	s := RunServerWithOpts(sOpts, &nOpts)
+	defer s.Shutdown()
 }
