@@ -10,6 +10,11 @@ import (
 	"github.com/nats-io/nats-streaming-server/spb"
 )
 
+// format string used to report that limit is reached when storing
+// messages.
+var droppingMsgsFmt = "WARNING: Reached limits for store %q (msgs=%v/%v bytes=%v/%v), " +
+	"dropping old messages to make room for new ones."
+
 // commonStore contains everything that is common to any type of store
 type commonStore struct {
 	sync.RWMutex
