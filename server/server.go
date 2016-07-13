@@ -378,6 +378,7 @@ type Options struct {
 	ClientCA         string // Client CAs for TLS
 	IOBatchSize      int    // Number of messages we collect from clients before processing them.
 	IOSleepTime      int64  // Duration (in micro-seconds) the server waits for more message to fill up a batch.
+	EmbedNATS        bool   // NATS Streaming Server embeds the NATS Server.
 }
 
 // DefaultOptions are default options for the STAN server
@@ -388,6 +389,7 @@ var defaultOptions = Options{
 	FileStoreOpts:  stores.DefaultFileStoreOptions,
 	IOBatchSize:    DefaultIOBatchSize,
 	IOSleepTime:    DefaultIOSleepTime,
+	EmbedNATS:      true,
 }
 
 // GetDefaultOptions returns default options for the STAN server
@@ -602,7 +604,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		}
 	}
 
-	s.startNATSServer(nOpts)
+	if sOpts.EmbedNATS {
+		s.startNATSServer(nOpts)
+	}
 
 	if s.nc, err = createNatsClientConn(sOpts, nOpts); err != nil {
 		panic(fmt.Sprintf("Can't connect to NATS server: %v\n", err))

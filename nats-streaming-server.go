@@ -127,6 +127,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.StringVar(&stanOpts.ClientCert, "tls_client_cert", "", "Path to a client certificate file")
 	flag.StringVar(&stanOpts.ClientKey, "tls_client_key", "", "Path to a client key file")
 	flag.StringVar(&stanOpts.ClientCA, "tls_client_cacert", "", "Path to a client CA file")
+	flag.BoolVar(&stanOpts.EmbedNATS, "embed", true, "Embed the NATS Server")
 	flag.BoolVar(&stanOpts.FileStoreOpts.CompactEnabled, "file_compact_enabled", stores.DefaultFileStoreOptions.CompactEnabled, "Enable file compaction")
 	flag.IntVar(&stanOpts.FileStoreOpts.CompactFragmentation, "file_compact_frag", stores.DefaultFileStoreOptions.CompactFragmentation, "File fragmentation threshold for compaction")
 	flag.IntVar(&stanOpts.FileStoreOpts.CompactInterval, "file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "Minimum interval (in seconds) between file compactions")
