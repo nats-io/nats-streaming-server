@@ -44,6 +44,7 @@ type genericMsgStore struct {
 	msgs       map[uint64]*pb.MsgProto
 	totalCount int
 	totalBytes uint64
+	hitLimit   bool // indicates if store had to drop messages due to limit
 }
 
 ////////////////////////////////////////////////////////////////////////////

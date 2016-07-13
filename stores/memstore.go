@@ -97,7 +97,11 @@ func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error)
 		firstMsg := ms.msgs[ms.first]
 		ms.totalBytes -= uint64(len(firstMsg.Data))
 		ms.totalCount--
-		Noticef("WARNING: Removing message[%d] from the store for [`%s`]", ms.first, ms.subject)
+		if !ms.hitLimit {
+			ms.hitLimit = true
+			Noticef("WARNING: One of the limits (msgs=%v bytes=%v) reached for store [`%s`]",
+				ms.limits.MaxNumMsgs, ms.limits.MaxMsgBytes, ms.subject)
+		}
 		delete(ms.msgs, ms.first)
 		ms.first++
 	}
