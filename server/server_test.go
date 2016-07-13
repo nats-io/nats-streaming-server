@@ -3282,9 +3282,8 @@ func TestDontEmbedNATSNotRunning(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.EmbedNATS = false
 
-	nOpts := DefaultNatsServerOptions
-	nOpts.Host = "localhost"
-	nOpts.Port = 5222
+	// Don't start a NATS Server, starting streaming server
+	// should fail.
 
 	var failedServer *StanServer
 	defer func() {
@@ -3293,7 +3292,7 @@ func TestDontEmbedNATSNotRunning(t *testing.T) {
 			t.Fatal("Expected streaming server to fail to start")
 		}
 	}()
-	failedServer = RunServerWithOpts(sOpts, &nOpts)
+	failedServer = RunServerWithOpts(sOpts, nil)
 }
 
 func TestDontEmbedNATRunning(t *testing.T) {

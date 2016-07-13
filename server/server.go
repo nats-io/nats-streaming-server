@@ -41,6 +41,7 @@ const (
 	DefaultUnSubPrefix    = "_STAN.unsub"
 	DefaultClosePrefix    = "_STAN.close"
 	DefaultStoreType      = stores.TypeMemory
+	DefaultEmbedNATS      = true
 
 	// DefaultChannelLimit defines how many channels (literal subjects) we allow
 	DefaultChannelLimit = 100
@@ -389,7 +390,7 @@ var defaultOptions = Options{
 	FileStoreOpts:  stores.DefaultFileStoreOptions,
 	IOBatchSize:    DefaultIOBatchSize,
 	IOSleepTime:    DefaultIOSleepTime,
-	EmbedNATS:      true,
+	EmbedNATS:      DefaultEmbedNATS,
 }
 
 // GetDefaultOptions returns default options for the STAN server
