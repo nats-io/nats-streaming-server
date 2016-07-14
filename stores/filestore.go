@@ -1112,7 +1112,10 @@ func (ms *FileMsgStore) enforceLimits() error {
 		ms.totalBytes -= firstMsgSize
 
 		// Remove the first message from our cache
-		Noticef("WARNING: Removing message[%d] from the store for [`%s`]", ms.first, ms.subject)
+		if !ms.hitLimit {
+			ms.hitLimit = true
+			Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxNumMsgs, ms.totalBytes, ms.limits.MaxMsgBytes)
+		}
 		delete(ms.msgs, ms.first)
 
 		// Messages sequence is incremental with no gap on a given msgstore.

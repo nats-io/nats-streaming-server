@@ -632,7 +632,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	}
 
 	Noticef("STAN: Message store is %s", s.store.Name())
-	Noticef("STAN: Maximum of %d will be stored", DefaultMsgStoreLimit)
+	Noticef("STAN: Maximum of %d will be stored", limits.MaxNumMsgs)
 
 	// Execute (in a go routine) redelivery of unacknowledged messages,
 	// and release newOnHold
