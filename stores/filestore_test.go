@@ -223,6 +223,7 @@ func TestFSOptions(t *testing.T) {
 		CompactMinFileSize:   1024 * 1024,
 		DoCRC:                false,
 		CRCPolynomial:        int64(crc32.Castagnoli),
+		DoSync:               false,
 	}
 	// Create the file with custom options
 	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits,
@@ -232,7 +233,8 @@ func TestFSOptions(t *testing.T) {
 		CompactInterval(expected.CompactInterval),
 		CompactMinFileSize(expected.CompactMinFileSize),
 		DoCRC(expected.DoCRC),
-		CRCPolynomial(expected.CRCPolynomial))
+		CRCPolynomial(expected.CRCPolynomial),
+		DoSync(expected.DoSync))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
@@ -2137,6 +2139,51 @@ func TestFSFlush(t *testing.T) {
 	// Expect Flush to fail
 	if err := cs.Subs.Flush(); err == nil {
 		t.Fatal("Expected Flush to fail, did not")
+	}
+}
+
+func TestFSDoSync(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	dur := [2]time.Duration{}
+
+	for i := 0; i < 2; i++ {
+		sOpts := DefaultFileStoreOptions
+		sOpts.DoSync = true
+		if i == 1 {
+			sOpts.DoSync = false
+		}
+		fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits, AllOptions(&sOpts))
+		if err != nil {
+			stackFatalf(t, "Unable to create a FileStore instance: %v", err)
+		}
+		defer fs.Close()
+
+		cs, _, err := fs.CreateChannel("foo", nil)
+		if err != nil {
+			t.Fatalf("Unexpected error creating channel: %v", err)
+		}
+		subID := storeSub(t, fs, "foo")
+
+		msg := make([]byte, 1024)
+		start := time.Now()
+		// Send more message when fsync is disabled. It should still be faster,
+		// and would catch if bug in code where we always do fsync, regardless
+		// of option.
+		for j := 0; j < 10000+(i*1000); j++ {
+			m := storeMsg(t, fs, "foo", msg)
+			cs.Msgs.Flush()
+			storeSubPending(t, fs, "foo", subID, m.Sequence)
+			cs.Subs.Flush()
+		}
+		dur[i] = time.Now().Sub(start)
+
+		fs.Close()
+		cleanupDatastore(t, defaultDataStore)
+	}
+	if dur[0] < dur[1] {
+		t.Fatalf("Expected File sync enabled to be slower than disabled: %v vs %v", dur[0], dur[1])
 	}
 }
 
