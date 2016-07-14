@@ -25,6 +25,7 @@ import (
 	stores "github.com/nats-io/nats-streaming-server/stores"
 
 	"regexp"
+	"strconv"
 )
 
 // A single STAN server
@@ -41,7 +42,6 @@ const (
 	DefaultUnSubPrefix    = "_STAN.unsub"
 	DefaultClosePrefix    = "_STAN.close"
 	DefaultStoreType      = stores.TypeMemory
-	DefaultEmbedNATS      = true
 
 	// DefaultChannelLimit defines how many channels (literal subjects) we allow
 	DefaultChannelLimit = 100
@@ -379,7 +379,7 @@ type Options struct {
 	ClientCA         string // Client CAs for TLS
 	IOBatchSize      int    // Number of messages we collect from clients before processing them.
 	IOSleepTime      int64  // Duration (in micro-seconds) the server waits for more message to fill up a batch.
-	EmbedNATS        bool   // NATS Streaming Server embeds the NATS Server.
+	NATSServerURL    string // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
 }
 
 // DefaultOptions are default options for the STAN server
@@ -390,7 +390,7 @@ var defaultOptions = Options{
 	FileStoreOpts:  stores.DefaultFileStoreOptions,
 	IOBatchSize:    DefaultIOBatchSize,
 	IOSleepTime:    DefaultIOSleepTime,
-	EmbedNATS:      DefaultEmbedNATS,
+	NATSServerURL:  "",
 }
 
 // GetDefaultOptions returns default options for the STAN server
@@ -421,18 +421,49 @@ func stanErrorHandler(_ *nats.Conn, sub *nats.Subscription, err error) {
 	Errorf("STAN: Asynchronous error on subject %s: %s", sub.Subject, err)
 }
 
-func buildConnectURL(opts *server.Options) string {
+func buildServerURLs(sOpts *Options, opts *server.Options) ([]string, error) {
+	var hostport string
+	natsURL := sOpts.NATSServerURL
+	// If the URL to an external NATS is provided...
+	if natsURL != "" {
+		// If it has user/pwd info or is a list of urls...
+		if strings.Contains(natsURL, "@") || strings.Contains(natsURL, ",") {
+			// Return the array
+			urls := strings.Split(natsURL, ",")
+			for i, s := range urls {
+				urls[i] = strings.Trim(s, " ")
+			}
+			return urls, nil
+		}
+		// Otherwise, prepare the host and port and continue to see
+		// if user/pass needs to be added.
+
+		// First trim the protocol.
+		parts := strings.Split(natsURL, "://")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("malformed url: %v", natsURL)
+		}
+		natsURL = parts[1]
+		host, port, err := net.SplitHostPort(natsURL)
+		if err != nil {
+			return nil, err
+		}
+		// Use net.Join to support IPV6 addresses.
+		hostport = net.JoinHostPort(host, port)
+	} else {
+		// Use host and port info from the options.
+		hostport = net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
+	}
 	var userpart string
 	if opts.Authorization != "" {
 		userpart = opts.Authorization
 	} else if opts.Username != "" {
 		userpart = fmt.Sprintf("%s:%s", opts.Username, opts.Password)
 	}
-	hostport := fmt.Sprintf("%s:%d", opts.Host, opts.Port)
 	if userpart != "" {
-		return fmt.Sprintf("nats://%s@%s", userpart, hostport)
+		return []string{fmt.Sprintf("nats://%s@%s", userpart, hostport)}, nil
 	}
-	return fmt.Sprintf("nats://%s", hostport)
+	return []string{fmt.Sprintf("nats://%s", hostport)}, nil
 }
 
 // createNatsClientConn creates a connection to the NATS server, using
@@ -442,10 +473,9 @@ func createNatsClientConn(sOpts *Options, nOpts *server.Options) (*nats.Conn, er
 	var err error
 	ncOpts := nats.DefaultOptions
 
-	ncOpts.Url = buildConnectURL(nOpts)
-	ncOpts.Servers = strings.Split(ncOpts.Url, ",")
-	for i, s := range ncOpts.Servers {
-		ncOpts.Servers[i] = strings.Trim(s, " ")
+	ncOpts.Servers, err = buildServerURLs(sOpts, nOpts)
+	if err != nil {
+		return nil, err
 	}
 	ncOpts.Name = fmt.Sprintf("NATS-Streaming-Server-%s", sOpts.ID)
 
@@ -605,7 +635,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		}
 	}
 
-	if sOpts.EmbedNATS {
+	// If no NATS server url is provided, it means that we embed the NATS Server
+	if sOpts.NATSServerURL == "" {
 		s.startNATSServer(nOpts)
 	}
 
