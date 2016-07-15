@@ -17,6 +17,7 @@ import (
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nats-streaming-server/stores"
 
+	"github.com/nats-io/gnatsd/auth"
 	"io/ioutil"
 	"sync"
 	"sync/atomic"
@@ -3280,7 +3281,14 @@ func TestIOChannel(t *testing.T) {
 
 func TestDontEmbedNATSNotRunning(t *testing.T) {
 	sOpts := GetDefaultOptions()
-	sOpts.EmbedNATS = false
+	// Make sure that with empty string (normally the default), we
+	// can run the streaming server (will embed NATS)
+	sOpts.NATSServerURL = ""
+	s := RunServerWithOpts(sOpts, nil)
+	s.Shutdown()
+
+	// Point to a NATS Server that will not be running
+	sOpts.NATSServerURL = "nats://localhost:5223"
 
 	// Don't start a NATS Server, starting streaming server
 	// should fail.
@@ -3295,15 +3303,64 @@ func TestDontEmbedNATSNotRunning(t *testing.T) {
 	failedServer = RunServerWithOpts(sOpts, nil)
 }
 
-func TestDontEmbedNATRunning(t *testing.T) {
+func TestDontEmbedNATSRunning(t *testing.T) {
 	sOpts := GetDefaultOptions()
-	sOpts.EmbedNATS = false
+	sOpts.NATSServerURL = "nats://localhost:5223"
 
 	nOpts := DefaultNatsServerOptions
 	nOpts.Host = "localhost"
 	nOpts.Port = 5223
-	natsdTest.RunServer(&nOpts)
+	natsd := natsdTest.RunServer(&nOpts)
+	defer natsd.Shutdown()
 
 	s := RunServerWithOpts(sOpts, &nOpts)
 	defer s.Shutdown()
+}
+
+func TestDontEmbedNATSMultipleURLs(t *testing.T) {
+	nOpts := DefaultNatsServerOptions
+	nOpts.Host = "localhost"
+	nOpts.Port = 5223
+	nOpts.Username = "ivan"
+	nOpts.Password = "pwd"
+	natsServer := natsdTest.RunServer(&nOpts)
+	defer natsServer.Shutdown()
+	auth := &auth.Plain{Username: nOpts.Username, Password: nOpts.Password}
+	natsServer.SetClientAuthMethod(auth)
+
+	sOpts := GetDefaultOptions()
+
+	workingURLs := []string{
+		"nats://localhost:5223",
+		"nats://ivan:pwd@localhost:5223",
+		"nats://ivan:pwd@localhost:5223, nats://ivan:pwd@localhost:5224",
+	}
+	for _, url := range workingURLs {
+		sOpts.NATSServerURL = url
+		s := RunServerWithOpts(sOpts, &nOpts)
+		s.Shutdown()
+	}
+
+	notWorkingURLs := []string{
+		"nats://ivan:incorrect@localhost:5223",
+		"nats://localhost:5223,nats://ivan:pwd@localhost:5224",
+		"nats://localhost",
+		"localhost:5223",
+		"localhost",
+		"nats://ivan:pwd@:5224",
+		" ",
+	}
+	for _, url := range notWorkingURLs {
+		func() {
+			var s *StanServer
+			defer func() {
+				if r := recover(); r == nil {
+					s.Shutdown()
+					t.Fatalf("Expected streaming server to fail to start with url=%v", url)
+				}
+			}()
+			sOpts.NATSServerURL = url
+			s = RunServerWithOpts(sOpts, &nOpts)
+		}()
+	}
 }
