@@ -3347,6 +3347,8 @@ func TestDontEmbedNATSMultipleURLs(t *testing.T) {
 		"nats://localhost",
 		"localhost:5223",
 		"localhost",
+		"nats://ivan:pwd@:5224",
+		" ",
 	}
 	for _, url := range notWorkingURLs {
 		func() {
