@@ -2146,6 +2146,7 @@ func TestFSDoSync(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
+	total := 100
 	dur := [2]time.Duration{}
 
 	for i := 0; i < 2; i++ {
@@ -2171,7 +2172,7 @@ func TestFSDoSync(t *testing.T) {
 		// Send more message when fsync is disabled. It should still be faster,
 		// and would catch if bug in code where we always do fsync, regardless
 		// of option.
-		for j := 0; j < 10000+(i*1000); j++ {
+		for j := 0; j < total+(i*total/10); j++ {
 			m := storeMsg(t, fs, "foo", msg)
 			cs.Msgs.Flush()
 			storeSubPending(t, fs, "foo", subID, m.Sequence)
