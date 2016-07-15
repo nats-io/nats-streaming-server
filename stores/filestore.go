@@ -75,6 +75,9 @@ type FileStoreOptions struct {
 
 	// CRCPoly is a polynomial used to make the table used in CRC computation.
 	CRCPolynomial int64
+
+	// DoSync indicates if `File.Sync()`` is called during a flush.
+	DoSync bool
 }
 
 // DefaultFileStoreOptions defines the default options for a File Store.
@@ -86,6 +89,7 @@ var DefaultFileStoreOptions = FileStoreOptions{
 	CompactMinFileSize:   1024 * 1024,
 	DoCRC:                true,
 	CRCPolynomial:        int64(crc32.IEEE),
+	DoSync:               true,
 }
 
 // BufferSize is a FileStore option that sets the size of the buffer used
@@ -151,6 +155,15 @@ func DoCRC(enableCRC bool) FileStoreOption {
 func CRCPolynomial(polynomial int64) FileStoreOption {
 	return func(o *FileStoreOptions) error {
 		o.CRCPolynomial = polynomial
+		return nil
+	}
+}
+
+// DoSync is a FileStore option that defines if `File.Sync()` should be called
+// during a `Flush()` call.
+func DoSync(enableFileSync bool) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.DoSync = enableFileSync
 		return nil
 	}
 }
@@ -1247,7 +1260,10 @@ func (ms *FileMsgStore) flush() error {
 	if err := ms.bw.Flush(); err != nil {
 		return err
 	}
-	return ms.file.Sync()
+	if ms.opts.DoSync {
+		return ms.file.Sync()
+	}
+	return nil
 }
 
 // Flush flushes outstanding data into the store.
@@ -1631,7 +1647,10 @@ func (ss *FileSubStore) flush() error {
 	if err := ss.bw.Flush(); err != nil {
 		return err
 	}
-	return ss.file.Sync()
+	if ss.opts.DoSync {
+		return ss.file.Sync()
+	}
+	return nil
 }
 
 // Flush persists buffered operations to disk.
