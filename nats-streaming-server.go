@@ -27,7 +27,7 @@ Streaming Server Options:
     -max_subs <number>           Max number of subscriptions per channel
     -max_msgs <number>           Max number of messages per channel
     -max_bytes <number>          Max messages total size per channel
-    -nats_server <url>           Connect to this external NATS Server (embedded otherwise)
+    -ns, --nats_server <url>     Connect to this external NATS Server (embedded otherwise)
 
 Streaming Server TLS Options:
     -secure                      Use a TLS connection to the NATS server without
@@ -129,6 +129,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.StringVar(&stanOpts.ClientKey, "tls_client_key", "", "Path to a client key file")
 	flag.StringVar(&stanOpts.ClientCA, "tls_client_cacert", "", "Path to a client CA file")
 	flag.StringVar(&stanOpts.NATSServerURL, "nats_server", "", "URL of the NATS Server to connect to (embedded by default)")
+	flag.StringVar(&stanOpts.NATSServerURL, "ns", "", "URL of the NATS Server to connect to (embedded by default)")
 	flag.BoolVar(&stanOpts.FileStoreOpts.CompactEnabled, "file_compact_enabled", stores.DefaultFileStoreOptions.CompactEnabled, "Enable file compaction")
 	flag.IntVar(&stanOpts.FileStoreOpts.CompactFragmentation, "file_compact_frag", stores.DefaultFileStoreOptions.CompactFragmentation, "File fragmentation threshold for compaction")
 	flag.IntVar(&stanOpts.FileStoreOpts.CompactInterval, "file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "Minimum interval (in seconds) between file compactions")
