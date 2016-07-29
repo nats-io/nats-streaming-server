@@ -25,7 +25,6 @@ import (
 	stores "github.com/nats-io/nats-streaming-server/stores"
 
 	"regexp"
-	"strconv"
 )
 
 // A single STAN server
@@ -33,7 +32,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.2.0"
+	VERSION = "0.2.1"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -421,7 +420,7 @@ func stanErrorHandler(_ *nats.Conn, sub *nats.Subscription, err error) {
 	Errorf("STAN: Asynchronous error on subject %s: %s", sub.Subject, err)
 }
 
-func buildServerURLs(sOpts *Options, opts *server.Options) ([]string, error) {
+func (s *StanServer) buildServerURLs(sOpts *Options, opts *server.Options) ([]string, error) {
 	var hostport string
 	natsURL := sOpts.NATSServerURL
 	// If the URL to an external NATS is provided...
@@ -451,8 +450,9 @@ func buildServerURLs(sOpts *Options, opts *server.Options) ([]string, error) {
 		// Use net.Join to support IPV6 addresses.
 		hostport = net.JoinHostPort(host, port)
 	} else {
-		// Use host and port info from the options.
-		hostport = net.JoinHostPort(opts.Host, strconv.Itoa(opts.Port))
+		// We embed the server, use listen endpoint which takes care
+		// of Windows use of 0.0.0.0 or [::].
+		hostport = s.natsServer.GetListenEndpoint()
 	}
 	var userpart string
 	if opts.Authorization != "" {
@@ -469,11 +469,11 @@ func buildServerURLs(sOpts *Options, opts *server.Options) ([]string, error) {
 // createNatsClientConn creates a connection to the NATS server, using
 // TLS if configured.  Pass in the NATS server options to derive a
 // connection url, and for other future items (e.g. auth)
-func createNatsClientConn(sOpts *Options, nOpts *server.Options) (*nats.Conn, error) {
+func (s *StanServer) createNatsClientConn(sOpts *Options, nOpts *server.Options) (*nats.Conn, error) {
 	var err error
 	ncOpts := nats.DefaultOptions
 
-	ncOpts.Servers, err = buildServerURLs(sOpts, nOpts)
+	ncOpts.Servers, err = s.buildServerURLs(sOpts, nOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -640,7 +640,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		s.startNATSServer(nOpts)
 	}
 
-	if s.nc, err = createNatsClientConn(sOpts, nOpts); err != nil {
+	if s.nc, err = s.createNatsClientConn(sOpts, nOpts); err != nil {
 		panic(fmt.Sprintf("Can't connect to NATS server: %v\n", err))
 	}
 
@@ -779,9 +779,6 @@ func (s *StanServer) configureNATSServerAuth(opts *server.Options) server.Auth {
 // startNATSServer massages options as necessary, and starts the embedded
 // NATS server.  No errors, only panics upon error conditions.
 func (s *StanServer) startNATSServer(opts *server.Options) {
-	if opts.Host == "" {
-		opts.Host = "localhost"
-	}
 	s.configureClusterOpts(opts)
 	s.configureNATSServerTLS(opts)
 	a := s.configureNATSServerAuth(opts)
