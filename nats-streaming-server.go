@@ -20,26 +20,26 @@ var usageStr = `
 Usage: nats-streaming-server [options]
 
 Streaming Server Options:
-    -cluster_id  <cluster ID>    Cluster ID (default: test-cluster)
-    -store <type>                Store type: MEMORY|FILE (default: MEMORY)
-    -dir <directory>             For FILE store type, this is the root directory
-    -max_channels <number>       Max number of channels
-    -max_subs <number>           Max number of subscriptions per channel
-    -max_msgs <number>           Max number of messages per channel
-    -max_bytes <number>          Max messages total size per channel
-    -ns, --nats_server <url>     Connect to this external NATS Server (embedded otherwise)
+    -cid, --cluster_id  <cluster ID> Cluster ID (default: test-cluster)
+    -st,  --store <type>             Store type: MEMORY|FILE (default: MEMORY)
+          --dir <directory>          For FILE store type, this is the root directory
+    -mc,  --max_channels <number>    Max number of channels (aka subjects, topics, etc...)
+    -msu, --max_subs <number>        Max number of subscriptions per channel
+    -mm,  --max_msgs <number>        Max number of messages per channel
+    -mb,  --max_bytes <number>       Max messages total size per channel
+    -ns,  --nats_server <url>        Connect to this external NATS Server (embedded otherwise)
 
 Streaming Server TLS Options:
-    -secure                      Use a TLS connection to the NATS server without
-	                             verification; weaker than specifying certificates.
-    -tls_client_key              Client key for the streaming server
-    -tls_client_cert             Client certificate for the streaming server
-    -tls_client_cacert           Client certificate CA for the streaming server
+    -secure                          Use a TLS connection to the NATS server without
+                                     verification; weaker than specifying certificates.
+    -tls_client_key                  Client key for the streaming server
+    -tls_client_cert                 Client certificate for the streaming server
+    -tls_client_cacert               Client certificate CA for the streaming server
 
 Streaming Server Logging Options:
-    -SD, --stan_debug            Enable STAN debugging output
-    -SV, --stan_trace            Trace the raw STAN protocol
-    -SDV                         Debug and trace STAN
+    -SD, --stan_debug                Enable STAN debugging output
+    -SV, --stan_trace                Trace the raw STAN protocol
+    -SDV                             Debug and trace STAN
     (See additional NATS logging options below)
 
 Embedded NATS Server Options:
@@ -113,12 +113,18 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 
 	stanOpts := stand.GetDefaultOptions()
 	flag.StringVar(&stanOpts.ID, "cluster_id", stand.DefaultClusterID, "Cluster ID.")
+	flag.StringVar(&stanOpts.ID, "cid", stand.DefaultClusterID, "Cluster ID.")
 	flag.StringVar(&stanOpts.StoreType, "store", stores.TypeMemory, fmt.Sprintf("Store type: (%s|%s)", stores.TypeMemory, stores.TypeFile))
+	flag.StringVar(&stanOpts.StoreType, "st", stores.TypeMemory, fmt.Sprintf("Store type: (%s|%s)", stores.TypeMemory, stores.TypeFile))
 	flag.StringVar(&stanOpts.FilestoreDir, "dir", "", "Root directory")
 	flag.IntVar(&stanOpts.MaxChannels, "max_channels", stand.DefaultChannelLimit, "Max number of channels")
+	flag.IntVar(&stanOpts.MaxChannels, "mc", stand.DefaultChannelLimit, "Max number of channels")
 	flag.IntVar(&stanOpts.MaxSubscriptions, "max_subs", stand.DefaultSubStoreLimit, "Max number of subscriptions per channel")
+	flag.IntVar(&stanOpts.MaxSubscriptions, "msu", stand.DefaultSubStoreLimit, "Max number of subscriptions per channel")
 	flag.IntVar(&stanOpts.MaxMsgs, "max_msgs", stand.DefaultMsgStoreLimit, "Max number of messages per channel")
+	flag.IntVar(&stanOpts.MaxMsgs, "mm", stand.DefaultMsgStoreLimit, "Max number of messages per channel")
 	flag.Uint64Var(&stanOpts.MaxBytes, "max_bytes", stand.DefaultMsgSizeStoreLimit, "Max messages total size per channel")
+	flag.Uint64Var(&stanOpts.MaxBytes, "mb", stand.DefaultMsgSizeStoreLimit, "Max messages total size per channel")
 	flag.BoolVar(&stanOpts.Debug, "SD", false, "Enable STAN Debug logging.")
 	flag.BoolVar(&stanOpts.Debug, "stan_debug", false, "Enable STAN Debug logging.")
 	flag.BoolVar(&stanOpts.Trace, "SV", false, "Enable STAN Trace logging.")
