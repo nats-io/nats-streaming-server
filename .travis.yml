@@ -2,8 +2,6 @@ language: go
 sudo: false
 go:
 - 1.6.3
-#before_install:
-#- echo -e "machine github.com\n login $TRAVIS_CI_TOKEN" >> ~/.netrc
 install:
 - go get -t ./...
 - go get github.com/nats-io/gnatsd
