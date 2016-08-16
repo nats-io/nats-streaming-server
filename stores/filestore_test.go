@@ -2446,3 +2446,50 @@ func TestFSWriteRecord(t *testing.T) {
 		t.Fatalf("Size should be 0, got %v", size)
 	}
 }
+
+func TestFSNoPartialWriteDueToBuffering(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// Make this big enough so that msg payload (50%) with MsgProto overhead is
+	// less than the buffer size. As this time of writting, 100 works ok.
+	bufferSize := 100
+	s, _, err := NewFileStore(defaultDataStore, nil, BufferSize(bufferSize))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+	info := testDefaultServerInfo
+	if err := s.Init(&info); err != nil {
+		t.Fatalf("Error during init: %v", err)
+	}
+
+	// Write a message that is less than buffer size
+	msgSize := (bufferSize * 5) / 10
+	msg := make([]byte, msgSize)
+	for i := 0; i < len(msg); i++ {
+		msg[i] = byte('A' + (i % 26))
+	}
+	storeMsg(t, s, "foo", msg)
+	// Store 2nd message
+	storeMsg(t, s, "foo", msg)
+	// At this point manually close and remove the reference of the msg store file
+	// so that on file store close, no flush is done.
+	cs := s.LookupChannel("foo")
+	msgStore := cs.Msgs.(*FileMsgStore)
+	if err := msgStore.file.Close(); err != nil {
+		t.Fatalf("Error on close: %v", err)
+	}
+	msgStore.file = nil
+	// Close the file store
+	s.Close()
+	// Reopen, there should be no error due to partials
+	s, _ = openDefaultFileStore(t)
+	defer s.Close()
+	// And there should be only 1 message
+	cs = s.LookupChannel("foo")
+	msgStore = cs.Msgs.(*FileMsgStore)
+	if n, _, _ := msgStore.State(); n != 1 {
+		t.Fatalf("Expected 1 message, got: %v", n)
+	}
+}

@@ -359,6 +359,16 @@ func writeRecord(w io.Writer, buf []byte, recType recordType, rec record, crcTab
 	crc := crc32.Checksum(buf[recordHeaderSize:totalSize], crcTable)
 	// Write it in the buffer
 	util.ByteOrder.PutUint32(buf[4:recordHeaderSize], crc)
+	// Are we dealing with a buffered writer?
+	bw, isBuffered := w.(*bufio.Writer)
+	// if so, make sure that if what we are about to "write" is more
+	// than what's available, then first flush the buffer.
+	// This is to reduce the risk of partial writes.
+	if isBuffered && (bw.Buffered() > 0) && (bw.Available() < totalSize) {
+		if err := bw.Flush(); err != nil {
+			return buf, 0, err
+		}
+	}
 	// Write the content of our slice into the writer `w`
 	if _, err := w.Write(buf[:totalSize]); err != nil {
 		// Return the tmpBuf because the caller may have provided one
