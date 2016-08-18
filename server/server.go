@@ -412,6 +412,10 @@ func stanDisconnectedHandler(nc *nats.Conn) {
 	}
 }
 
+func stanReconnectedHandler(nc *nats.Conn) {
+	Noticef("STAN: reconnected to NATS Server at %q", nc.ConnectedUrl())
+}
+
 func stanClosedHandler(_ *nats.Conn) {
 	Debugf("STAN: connection has been closed")
 }
@@ -482,7 +486,7 @@ func (s *StanServer) createNatsClientConn(sOpts *Options, nOpts *server.Options)
 	if err = nats.ErrorHandler(stanErrorHandler)(&ncOpts); err != nil {
 		return nil, err
 	}
-	if err = nats.ErrorHandler(stanErrorHandler)(&ncOpts); err != nil {
+	if err = nats.ReconnectHandler(stanReconnectedHandler)(&ncOpts); err != nil {
 		return nil, err
 	}
 	if err = nats.ClosedHandler(stanClosedHandler)(&ncOpts); err != nil {
