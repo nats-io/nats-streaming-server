@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
+	"sort"
 )
 
 // MemoryStore is a factory for message and subscription stores.
@@ -21,6 +22,7 @@ type MemorySubStore struct {
 // MemoryMsgStore is a per channel message store in memory
 type MemoryMsgStore struct {
 	genericMsgStore
+	msgs map[uint64]*pb.MsgProto
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -50,7 +52,7 @@ func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*Cha
 		return nil, false, err
 	}
 
-	msgStore := &MemoryMsgStore{}
+	msgStore := &MemoryMsgStore{msgs: make(map[uint64]*pb.MsgProto, 64)}
 	msgStore.init(channel, ms.limits)
 
 	subStore := &MemorySubStore{}
@@ -106,6 +108,47 @@ func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error)
 	}
 
 	return m, nil
+}
+
+// Lookup returns the stored message with given sequence number.
+func (ms *MemoryMsgStore) Lookup(seq uint64) *pb.MsgProto {
+	ms.RLock()
+	m := ms.msgs[seq]
+	ms.RUnlock()
+	return m
+}
+
+// FirstMsg returns the first message stored.
+func (ms *MemoryMsgStore) FirstMsg() *pb.MsgProto {
+	ms.RLock()
+	m := ms.msgs[ms.first]
+	ms.RUnlock()
+	return m
+}
+
+// LastMsg returns the last message stored.
+func (ms *MemoryMsgStore) LastMsg() *pb.MsgProto {
+	ms.RLock()
+	m := ms.msgs[ms.last]
+	ms.RUnlock()
+	return m
+}
+
+// GetSequenceFromTimestamp returns the sequence of the first message whose
+// timestamp is greater or equal to given timestamp.
+func (ms *MemoryMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
+	ms.RLock()
+	defer ms.RUnlock()
+
+	index := sort.Search(len(ms.msgs), func(i int) bool {
+		m := ms.msgs[uint64(i)+ms.first]
+		if m.Timestamp >= timestamp {
+			return true
+		}
+		return false
+	})
+
+	return uint64(index) + ms.first
 }
 
 ////////////////////////////////////////////////////////////////////////////

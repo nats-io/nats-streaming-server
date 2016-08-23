@@ -10,6 +10,7 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nuid"
+	"reflect"
 	"runtime"
 	"strings"
 )
@@ -265,11 +266,13 @@ func testBasicMsgStore(t *testing.T, s Store) {
 		t.Fatalf("Unexpected sequences: %v,%v", s1, s2)
 	}
 
-	if lm1 := ms.Lookup(m1.Sequence); lm1 != m1 {
+	lm1 := ms.Lookup(m1.Sequence)
+	if !reflect.DeepEqual(lm1, m1) {
 		t.Fatalf("Unexpected lookup result: %v instead of %v", lm1, m1)
 	}
 
-	if lm2 := ms.Lookup(m2.Sequence); lm2 != m2 {
+	lm2 := ms.Lookup(m2.Sequence)
+	if !reflect.DeepEqual(lm2, m2) {
 		t.Fatalf("Unexpected lookup result: %v instead of %v", lm2, m2)
 	}
 

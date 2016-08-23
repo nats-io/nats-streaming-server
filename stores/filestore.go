@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
+	"sort"
 )
 
 const (
@@ -258,6 +259,14 @@ type fileSlice struct {
 	msgsSize  uint64
 }
 
+// msgRecord contains data regarding a message that the FileMsgStore needs to
+// keep in memory for performance reasons.
+type msgRecord struct {
+	offset    int64
+	timestamp int64
+	msg       *pb.MsgProto
+}
+
 // FileMsgStore is a per channel message file store.
 type FileMsgStore struct {
 	genericMsgStore
@@ -266,8 +275,11 @@ type FileMsgStore struct {
 	bw           *bufio.Writer
 	files        [numFiles]*fileSlice
 	currSliceIdx int
-	opts         *FileStoreOptions // points to FileStore options
-	crcTable     *crc32.Table      // reference to the one from FileStore
+	fstore       *FileStore // pointers to file store object
+	msgs         map[uint64]*msgRecord
+	wOffset      int64
+	firstMsg     *pb.MsgProto
+	lastMsg      *pb.MsgProto
 }
 
 // openFile opens the file specified by `filename`.
@@ -544,7 +556,7 @@ func NewFileStore(rootDir string, limits *ChannelLimits, options ...FileStoreOpt
 					// then be cleared after this loop when we
 					// are done restoring the subscriptions.
 					if m := msgStore.msgs[seq]; m != nil {
-						rss.Pending[seq] = m
+						rss.Pending[seq] = m.msg
 					}
 				}
 			}
@@ -914,8 +926,9 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 
 	// Create an instance and initialize
 	ms := &FileMsgStore{
-		opts:     &fs.opts,
-		crcTable: fs.crcTable,
+		fstore:  fs,
+		msgs:    make(map[uint64]*msgRecord, 64),
+		wOffset: int64(4), // The very first record starts after the file version record
 	}
 	ms.init(channel, fs.limits)
 
@@ -965,7 +978,7 @@ func (ms *FileMsgStore) setFile(f *os.File) {
 	ms.bw = nil
 	ms.file = f
 	if ms.file != nil {
-		ms.bw = bufio.NewWriterSize(ms.file, ms.opts.BufferSize)
+		ms.bw = bufio.NewWriterSize(ms.file, ms.fstore.opts.BufferSize)
 	}
 }
 
@@ -981,8 +994,14 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 	// Create a buffered reader to speed-up recovery
 	br := bufio.NewReaderSize(file, defaultBufSize)
 
+	// The first record starts after the file version record
+	offset := int64(4)
+	// Get these from the file store object
+	crcTable := ms.fstore.crcTable
+	doCRC := ms.fstore.opts.DoCRC
+
 	for {
-		ms.tmpMsgBuf, msgSize, _, err = readRecord(br, ms.tmpMsgBuf, false, ms.crcTable, ms.opts.DoCRC)
+		ms.tmpMsgBuf, msgSize, _, err = readRecord(br, ms.tmpMsgBuf, false, crcTable, doCRC)
 		if err != nil {
 			if err == io.EOF {
 				// We are done, reset err
@@ -1007,17 +1026,23 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 
 		if ms.first == 0 {
 			ms.first = msg.Sequence
+			ms.firstMsg = msg
 		}
-		ms.msgs[msg.Sequence] = msg
+		ms.msgs[msg.Sequence] = &msgRecord{offset: offset, msg: msg, timestamp: msg.Timestamp}
+
+		// Move offset
+		offset += int64(recordHeaderSize + msgSize)
 	}
 
 	// Do more accounting and bump the current slice index if we recovered
 	// at least one message on that file.
 	if err == nil && fslice.msgsCount > 0 {
 		ms.last = fslice.lastMsg.Sequence
+		ms.lastMsg = fslice.lastMsg
 		ms.totalCount += fslice.msgsCount
 		ms.totalBytes += fslice.msgsSize
 		ms.currSliceIdx = numFile
+		ms.wOffset = offset
 
 		// Close the previous file
 		if numFile > 0 {
@@ -1068,6 +1093,7 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 		// Success, update the store's variables
 		ms.setFile(file)
 		ms.currSliceIdx = nextSlice
+		ms.wOffset = int64(4)
 
 		fslice = ms.files[ms.currSliceIdx]
 	}
@@ -1081,17 +1107,21 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 		Timestamp: time.Now().UnixNano(),
 	}
 
+	var recSize int
 	var err error
-	ms.tmpMsgBuf, _, err = writeRecord(ms.bw, ms.tmpMsgBuf, recNoType, m, ms.crcTable)
+	ms.tmpMsgBuf, recSize, err = writeRecord(ms.bw, ms.tmpMsgBuf, recNoType, m, ms.fstore.crcTable)
 	if err != nil {
 		return nil, err
 	}
 
 	if ms.first == 0 {
 		ms.first = 1
+		ms.firstMsg = m
 	}
 	ms.last = seq
-	ms.msgs[ms.last] = m
+	ms.lastMsg = m
+	ms.msgs[ms.last] = &msgRecord{offset: ms.wOffset, msg: m, timestamp: m.Timestamp}
+	ms.wOffset += int64(recSize)
 
 	msgSize := uint64(len(data))
 
@@ -1147,6 +1177,7 @@ func (ms *FileMsgStore) enforceLimits() error {
 
 		// Messages sequence is incremental with no gap on a given msgstore.
 		ms.first++
+		ms.firstMsg = ms.lookup(ms.first)
 		// Is file slice "empty"
 		if slice.msgsCount == 0 {
 			// If we are at the last file slice, remove the first.
@@ -1173,7 +1204,7 @@ func (ms *FileMsgStore) enforceLimits() error {
 			}
 		} else {
 			// This is the new first message in this slice.
-			slice.firstMsg = ms.msgs[ms.first]
+			slice.firstMsg = ms.firstMsg
 		}
 	}
 	return nil
@@ -1246,6 +1277,53 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 	return nil
 }
 
+func (ms *FileMsgStore) lookup(seq uint64) *pb.MsgProto {
+	if rec := ms.msgs[seq]; rec != nil {
+		return rec.msg
+	}
+	return nil
+}
+
+// Lookup returns the stored message with given sequence number.
+func (ms *FileMsgStore) Lookup(seq uint64) *pb.MsgProto {
+	ms.Lock()
+	msg := ms.lookup(seq)
+	ms.Unlock()
+	return msg
+}
+
+// FirstMsg returns the first message stored.
+func (ms *FileMsgStore) FirstMsg() *pb.MsgProto {
+	ms.RLock()
+	m := ms.firstMsg
+	ms.RUnlock()
+	return m
+}
+
+// LastMsg returns the last message stored.
+func (ms *FileMsgStore) LastMsg() *pb.MsgProto {
+	ms.RLock()
+	m := ms.lastMsg
+	ms.RUnlock()
+	return m
+}
+
+// GetSequenceFromTimestamp returns the sequence of the first message whose
+// timestamp is greater or equal to given timestamp.
+func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
+	ms.RLock()
+	defer ms.RUnlock()
+
+	index := sort.Search(len(ms.msgs), func(i int) bool {
+		if ms.msgs[uint64(i)+ms.first].timestamp >= timestamp {
+			return true
+		}
+		return false
+	})
+
+	return uint64(index) + ms.first
+}
+
 // Close closes the store.
 func (ms *FileMsgStore) Close() error {
 	ms.Lock()
@@ -1274,7 +1352,7 @@ func (ms *FileMsgStore) flush() error {
 	if err := ms.bw.Flush(); err != nil {
 		return err
 	}
-	if ms.opts.DoSync {
+	if ms.fstore.opts.DoSync {
 		return ms.file.Sync()
 	}
 	return nil

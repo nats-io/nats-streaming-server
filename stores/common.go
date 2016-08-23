@@ -3,7 +3,6 @@
 package stores
 
 import (
-	"sort"
 	"sync"
 
 	"github.com/nats-io/go-nats-streaming/pb"
@@ -46,7 +45,6 @@ type genericMsgStore struct {
 	subject    string // Can't be wildcard
 	first      uint64
 	last       uint64
-	msgs       map[uint64]*pb.MsgProto
 	totalCount int
 	totalBytes uint64
 	hitLimit   bool // indicates if store had to drop messages due to limit
@@ -229,12 +227,6 @@ func (gs *genericStore) close() error {
 func (gms *genericMsgStore) init(subject string, limits ChannelLimits) {
 	gms.subject = subject
 	gms.limits = limits
-	// FIXME(ik) - Long term, msgs map should probably not be part of the
-	// generic store.
-	// We could use limits.MaxNumMsgs for the size of the map, but that
-	// may be too big if there is lots of channels with only few messages.
-	// The map will grow as needed.
-	gms.msgs = make(map[uint64]*pb.MsgProto, 64)
 }
 
 // State returns some statistics related to this store
@@ -271,26 +263,20 @@ func (gms *genericMsgStore) FirstAndLastSequence() (uint64, uint64) {
 
 // Lookup returns the stored message with given sequence number.
 func (gms *genericMsgStore) Lookup(seq uint64) *pb.MsgProto {
-	gms.RLock()
-	m := gms.msgs[seq]
-	gms.RUnlock()
-	return m
+	// no-op
+	return nil
 }
 
 // FirstMsg returns the first message stored.
 func (gms *genericMsgStore) FirstMsg() *pb.MsgProto {
-	gms.RLock()
-	m := gms.msgs[gms.first]
-	gms.RUnlock()
-	return m
+	// no-op
+	return nil
 }
 
 // LastMsg returns the last message stored.
 func (gms *genericMsgStore) LastMsg() *pb.MsgProto {
-	gms.RLock()
-	m := gms.msgs[gms.last]
-	gms.RUnlock()
-	return m
+	// no-op
+	return nil
 }
 
 func (gms *genericMsgStore) Flush() error {
@@ -301,18 +287,8 @@ func (gms *genericMsgStore) Flush() error {
 // GetSequenceFromTimestamp returns the sequence of the first message whose
 // timestamp is greater or equal to given timestamp.
 func (gms *genericMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
-	gms.RLock()
-	defer gms.RUnlock()
-
-	index := sort.Search(len(gms.msgs), func(i int) bool {
-		m := gms.msgs[uint64(i)+gms.first]
-		if m.Timestamp >= timestamp {
-			return true
-		}
-		return false
-	})
-
-	return uint64(index) + gms.first
+	// no-op
+	return 0
 }
 
 // Close closes this store.
