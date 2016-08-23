@@ -206,7 +206,7 @@ type subState struct {
 	ackTimer     *time.Timer
 	ackTimeFloor int64
 	ackSub       *nats.Subscription
-	acksPending  map[uint64]*pb.MsgProto
+	acksPending  map[uint64]struct{}
 	stalledRdlv  int32 // number of times the redelivery cb ended with a stalled subscriber (due to MaxInFlight)
 	stalled      bool
 	newOnHold    bool            // Prevents delivery of new msgs until old are redelivered (on restart)
@@ -962,16 +962,15 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 		for _, recSub := range recoveredSubs {
 			// Create a subState
 			sub := &subState{
-				subject:     channelName,
-				ackWait:     time.Duration(recSub.Sub.AckWaitInSecs) * time.Second,
-				acksPending: recSub.Pending,
-				store:       channel.Subs,
+				subject: channelName,
+				ackWait: time.Duration(recSub.Sub.AckWaitInSecs) * time.Second,
+				store:   channel.Subs,
 			}
-			// Ensure acksPending is not nil
-			if sub.acksPending == nil {
-				// Create an empty map
-				sub.acksPending = make(map[uint64]*pb.MsgProto)
-			} else if len(sub.acksPending) > 0 {
+			sub.acksPending = make(map[uint64]struct{}, len(recSub.Pending))
+			for seq := range recSub.Pending {
+				sub.acksPending[seq] = struct{}{}
+			}
+			if len(sub.acksPending) > 0 {
 				// Prevent delivery of new messages until resent of old ones
 				sub.newOnHold = true
 				// We may not need to set this because this would be set
@@ -1488,10 +1487,10 @@ func (a bySeq) Len() int           { return (len(a)) }
 func (a bySeq) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a bySeq) Less(i, j int) bool { return a[i].Sequence < a[j].Sequence }
 
-func makeSortedMsgs(msgs map[uint64]*pb.MsgProto) []*pb.MsgProto {
+func makeSortedMsgs(msgStore stores.MsgStore, msgs map[uint64]struct{}) []*pb.MsgProto {
 	results := make([]*pb.MsgProto, 0, len(msgs))
-	for _, m := range msgs {
-		mCopy := *m // copy since we need to set redelivered flag.
+	for seq := range msgs {
+		mCopy := *(msgStore.Lookup(seq)) // copy since we need to set redelivered flag.
 		results = append(results, &mCopy)
 	}
 	sort.Sort(bySeq(results))
@@ -1499,10 +1498,10 @@ func makeSortedMsgs(msgs map[uint64]*pb.MsgProto) []*pb.MsgProto {
 }
 
 // Redeliver all outstanding messages to a durable subscriber, used on resubscribe.
-func (s *StanServer) performDurableRedelivery(sub *subState) {
+func (s *StanServer) performDurableRedelivery(msgStore stores.MsgStore, sub *subState) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.RLock()
-	sortedMsgs := makeSortedMsgs(sub.acksPending)
+	sortedMsgs := makeSortedMsgs(msgStore, sub.acksPending)
 	clientID := sub.ClientID
 	sub.RUnlock()
 
@@ -1542,7 +1541,8 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.RLock()
 	expTime := int64(sub.ackWait)
-	sortedMsgs := makeSortedMsgs(sub.acksPending)
+	cs := s.store.LookupChannel(sub.subject)
+	sortedMsgs := makeSortedMsgs(cs.Msgs, sub.acksPending)
 	subject := sub.subject
 	qs := sub.qstate
 	clientID := sub.ClientID
@@ -1577,13 +1577,6 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	if s.debug {
 		Debugf("STAN: [Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
 			clientID, subject, inbox)
-	}
-
-	var cs *stores.ChannelStore
-
-	// If we are dealing with a queue subscriber, get the subStore here.
-	if qs != nil {
-		cs = s.store.LookupChannel(subject)
 	}
 
 	now := time.Now().UnixNano()
@@ -1713,7 +1706,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	}
 
 	// If this message is already pending, nothing else to do.
-	if sub.acksPending[m.Sequence] != nil {
+	if _, present := sub.acksPending[m.Sequence]; present {
 		return true, true
 	}
 	// Store in storage
@@ -1729,7 +1722,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	}
 
 	// Store in ackPending.
-	sub.acksPending[m.Sequence] = m
+	sub.acksPending[m.Sequence] = struct{}{}
 
 	// Now that we have added to acksPending, check again if we
 	// have reached the max and tell the caller that it should not
@@ -2325,7 +2318,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			},
 			subject:     sr.Subject,
 			ackWait:     time.Duration(sr.AckWaitInSecs) * time.Second,
-			acksPending: make(map[uint64]*pb.MsgProto),
+			acksPending: make(map[uint64]struct{}),
 			store:       cs.Subs,
 		}
 
@@ -2365,7 +2358,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// If we are a durable (queue or not) and have state
 	if isDurable {
 		// Redeliver any oustanding.
-		s.performDurableRedelivery(sub)
+		s.performDurableRedelivery(cs.Msgs, sub)
 	}
 
 	// publish messages to this subscriber

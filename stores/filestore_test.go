@@ -378,9 +378,9 @@ func TestFSBasicRecovery(t *testing.T) {
 			if subID != sub1 {
 				t.Fatalf("Invalid subscription id. Expected %v, got %v", sub1, subID)
 			}
-			for _, m := range recSub.Pending {
-				if m.Sequence != foo2.Sequence {
-					t.Fatalf("Unexpected recovered pending seqno for sub1: %v", m.Sequence)
+			for seq := range recSub.Pending {
+				if seq != foo2.Sequence {
+					t.Fatalf("Unexpected recovered pending seqno for sub1: %v", seq)
 				}
 			}
 			break
@@ -388,9 +388,9 @@ func TestFSBasicRecovery(t *testing.T) {
 			if subID != sub2 {
 				t.Fatalf("Invalid subscription id. Expected %v, got %v", sub2, subID)
 			}
-			for _, m := range recSub.Pending {
-				if m.Sequence != bar1.Sequence && m.Sequence != bar2.Sequence && m.Sequence != bar3.Sequence {
-					t.Fatalf("Unexpected recovered pending seqno for sub2: %v", m.Sequence)
+			for seq := range recSub.Pending {
+				if seq != bar1.Sequence && seq != bar2.Sequence && seq != bar3.Sequence {
+					t.Fatalf("Unexpected recovered pending seqno for sub2: %v", seq)
 				}
 			}
 			break

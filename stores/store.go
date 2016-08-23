@@ -75,9 +75,8 @@ type Client struct {
 // RecoveredSubscriptions is a map of recovered subscriptions, keyed by channel name.
 type RecoveredSubscriptions map[string][]*RecoveredSubState
 
-// PendingAcks is a map of messages waiting to be acknowledged, keyed by
-// message sequence number.
-type PendingAcks map[uint64]*pb.MsgProto
+// PendingAcks is a set of message sequences waiting to be acknowledged.
+type PendingAcks map[uint64]struct{}
 
 // RecoveredSubState represents a recovered Subscription with a map
 // of pending messages.

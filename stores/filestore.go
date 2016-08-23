@@ -549,15 +549,7 @@ func NewFileStore(rootDir string, limits *ChannelLimits, options ...FileStoreOpt
 				// Lookup messages, and if we find those, update the
 				// Pending map.
 				for seq := range sub.seqnos {
-					// Access directly 'msgs' here. If we have a
-					// different implementation where we don't
-					// keep messages around, we would still have
-					// a cache of messages per channel that will
-					// then be cleared after this loop when we
-					// are done restoring the subscriptions.
-					if m := msgStore.msgs[seq]; m != nil {
-						rss.Pending[seq] = m.msg
-					}
+					rss.Pending[seq] = struct{}{}
 				}
 			}
 			// Add to the array of recovered subscriptions
