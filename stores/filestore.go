@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
 	"sort"
+	"sync"
 )
 
 const (
@@ -78,6 +79,10 @@ type FileStoreOptions struct {
 
 	// DoSync indicates if `File.Sync()`` is called during a flush.
 	DoSync bool
+
+	// CacheMsgs allows MsgStore objects to keep messages in memory after being
+	// written to disk. This allows fast lookups at the expense of memory usage.
+	CacheMsgs bool
 }
 
 // DefaultFileStoreOptions defines the default options for a File Store.
@@ -90,6 +95,7 @@ var DefaultFileStoreOptions = FileStoreOptions{
 	DoCRC:                true,
 	CRCPolynomial:        int64(crc32.IEEE),
 	DoSync:               true,
+	CacheMsgs:            true,
 }
 
 // BufferSize is a FileStore option that sets the size of the buffer used
@@ -164,6 +170,16 @@ func CRCPolynomial(polynomial int64) FileStoreOption {
 func DoSync(enableFileSync bool) FileStoreOption {
 	return func(o *FileStoreOptions) error {
 		o.DoSync = enableFileSync
+		return nil
+	}
+}
+
+// CacheMsgs is a FileStore option that allows channels' message stores to
+// keep messages in memory after being stored for fast lookup performance
+// (at the expense of memory).
+func CacheMsgs(cache bool) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.CacheMsgs = cache
 		return nil
 	}
 }
@@ -257,6 +273,8 @@ type fileSlice struct {
 	lastMsg   *pb.MsgProto
 	msgsCount int
 	msgsSize  uint64
+	file      *os.File // Used during lookups.
+	lastUsed  int64
 }
 
 // msgRecord contains data regarding a message that the FileMsgStore needs to
@@ -264,7 +282,7 @@ type fileSlice struct {
 type msgRecord struct {
 	offset    int64
 	timestamp int64
-	msg       *pb.MsgProto
+	msg       *pb.MsgProto // will be nil when message flushed on disk and/or no caching allowed.
 }
 
 // FileMsgStore is a per channel message file store.
@@ -280,6 +298,10 @@ type FileMsgStore struct {
 	wOffset      int64
 	firstMsg     *pb.MsgProto
 	lastMsg      *pb.MsgProto
+	pinnedMsgs   []uint64
+	tasksTimer   *time.Timer // close file slices not recently used, etc...
+	timeTick     int64       // time captured in background task
+	allDone      sync.WaitGroup
 }
 
 // openFile opens the file specified by `filename`.
@@ -918,9 +940,10 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 
 	// Create an instance and initialize
 	ms := &FileMsgStore{
-		fstore:  fs,
-		msgs:    make(map[uint64]*msgRecord, 64),
-		wOffset: int64(4), // The very first record starts after the file version record
+		fstore:     fs,
+		msgs:       make(map[uint64]*msgRecord, 64),
+		wOffset:    int64(4), // The very first record starts after the file version record
+		pinnedMsgs: make([]uint64, 0, 1),
 	}
 	ms.init(channel, fs.limits)
 
@@ -991,6 +1014,7 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 	// Get these from the file store object
 	crcTable := ms.fstore.crcTable
 	doCRC := ms.fstore.opts.DoCRC
+	cache := ms.fstore.opts.CacheMsgs
 
 	for {
 		ms.tmpMsgBuf, msgSize, _, err = readRecord(br, ms.tmpMsgBuf, false, crcTable, doCRC)
@@ -1020,7 +1044,11 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 			ms.first = msg.Sequence
 			ms.firstMsg = msg
 		}
-		ms.msgs[msg.Sequence] = &msgRecord{offset: offset, msg: msg, timestamp: msg.Timestamp}
+		mrec := &msgRecord{offset: offset, timestamp: msg.Timestamp}
+		ms.msgs[msg.Sequence] = mrec
+		if cache {
+			mrec.msg = msg
+		}
 
 		// Move offset
 		offset += int64(recordHeaderSize + msgSize)
@@ -1099,11 +1127,43 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 		Timestamp: time.Now().UnixNano(),
 	}
 
+	cache := ms.fstore.opts.CacheMsgs
+	pinMsg := false
+
 	var recSize int
 	var err error
 	ms.tmpMsgBuf, recSize, err = writeRecord(ms.bw, ms.tmpMsgBuf, recNoType, m, ms.fstore.crcTable)
 	if err != nil {
 		return nil, err
+	}
+	if !cache {
+		bufferedAfter := ms.bw.Buffered()
+		// When caching is disabled, we still need to keep around messages
+		// that are written due to the use of a buffered writer, since those messages
+		// will not make it to the file until the store is flushed. Trying to
+		// locate them on disk during a lookup would fail.
+		// We know that writeRecord will flush the buffer if it can not fit
+		// the current record. We also know that bufio will not use the internal
+		// buffer if what we try to write is a buffer bigger than the bw capacity
+		// (bufio writes directly to the underlying writer).
+		// So, there are 3 outcomes for bufferedAfter:
+		// - > recSize:             pin current msg
+		// - recSize  : unpin all + pin current msg
+		// - 0		  : unpin all
+		if bufferedAfter <= recSize {
+			for _, pseq := range ms.pinnedMsgs {
+				mrec := ms.msgs[pseq]
+				if mrec != nil {
+					mrec.msg = nil
+				}
+			}
+			ms.pinnedMsgs = ms.pinnedMsgs[:0]
+		}
+		// no else here...
+		if bufferedAfter >= recSize {
+			ms.pinnedMsgs = append(ms.pinnedMsgs, seq)
+			pinMsg = true
+		}
 	}
 
 	if ms.first == 0 {
@@ -1112,7 +1172,11 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	}
 	ms.last = seq
 	ms.lastMsg = m
-	ms.msgs[ms.last] = &msgRecord{offset: ms.wOffset, msg: m, timestamp: m.Timestamp}
+	mrec := &msgRecord{offset: ms.wOffset, timestamp: m.Timestamp}
+	ms.msgs[ms.last] = mrec
+	if cache || pinMsg {
+		mrec.msg = m
+	}
 	ms.wOffset += int64(recSize)
 
 	msgSize := uint64(len(data))
@@ -1211,6 +1275,13 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 	if err := ms.file.Close(); err != nil {
 		return err
 	}
+	// Close all files that may have been opened due to lookups
+	for _, slice := range ms.files {
+		if slice.file != nil {
+			slice.file.Close()
+			slice.file = nil
+		}
+	}
 
 	// Rename msgs.2.dat to msgs.1.dat, refresh state, etc...
 	for i := 0; i < numFiles-1; i++ {
@@ -1269,11 +1340,102 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 	return nil
 }
 
-func (ms *FileMsgStore) lookup(seq uint64) *pb.MsgProto {
-	if rec := ms.msgs[seq]; rec != nil {
-		return rec.msg
+// getFileForSeq returns the file where the message of the given sequence
+// is stored. If the file is opened, a task is triggered to close this
+// file when no longer used after a period of time.
+func (ms *FileMsgStore) getFileForSeq(seq uint64) (*os.File, error) {
+	// Start with current slice
+	slice := ms.files[ms.currSliceIdx]
+	if (slice.firstMsg.Sequence <= seq) && (seq <= slice.lastMsg.Sequence) {
+		return ms.file, nil
 	}
-	return nil
+	// Check all previous slices
+	for i := 0; i < ms.currSliceIdx; i++ {
+		slice = ms.files[i]
+		if (slice.firstMsg.Sequence <= seq) && (seq <= slice.lastMsg.Sequence) {
+			file := slice.file
+			if file == nil {
+				var err error
+				file, err = openFile(slice.fileName)
+				if err != nil {
+					return nil, fmt.Errorf("unable to open file %q: %v", slice.fileName, err)
+				}
+				slice.file = file
+				if ms.tasksTimer == nil {
+					ms.allDone.Add(1)
+					ms.timeTick = time.Now().UnixNano()
+					ms.tasksTimer = time.AfterFunc(time.Second, ms.backgroundTasks)
+				}
+			}
+			slice.lastUsed = ms.timeTick
+			return file, nil
+		}
+	}
+	return nil, fmt.Errorf("could not find file slice for store %q, message seq: %v", ms.subject, seq)
+}
+
+// backgroundTasks performs some background tasks related to this
+// messages store.
+func (ms *FileMsgStore) backgroundTasks() {
+	ms.Lock()
+	defer ms.Unlock()
+
+	if ms.closed {
+		ms.allDone.Done()
+		return
+	}
+
+	// Update time
+	ms.timeTick = time.Now().UnixNano()
+
+	// Close unused file slices
+	for i := 0; i < ms.currSliceIdx; i++ {
+		slice := ms.files[i]
+		if slice.file != nil && time.Duration(ms.timeTick-slice.lastUsed) >= time.Second {
+			slice.file.Close()
+			slice.file = nil
+		}
+	}
+
+	// Fire again..
+	ms.tasksTimer.Reset(time.Second)
+}
+
+// lookup returns the message for the given sequence number, possibly
+// reading the message from disk.
+func (ms *FileMsgStore) lookup(seq uint64) *pb.MsgProto {
+	var msg *pb.MsgProto
+	m := ms.msgs[seq]
+	if m != nil {
+		msg = m.msg
+		if msg == nil {
+			var msgSize int
+			// Look in which file slice the message is located.
+			file, err := ms.getFileForSeq(seq)
+			if err != nil {
+				return nil
+			}
+			// Position file to message's offset. 0 means from start.
+			if _, err := file.Seek(m.offset, 0); err != nil {
+				return nil
+			}
+			ms.tmpMsgBuf, msgSize, _, err = readRecord(file, ms.tmpMsgBuf, false, ms.fstore.crcTable, ms.fstore.opts.DoCRC)
+			if err != nil {
+				return nil
+			}
+			// Recover this message
+			msg = &pb.MsgProto{}
+			err = msg.Unmarshal(ms.tmpMsgBuf[:msgSize])
+			if err != nil {
+				return nil
+			}
+			// Cache if allowed
+			if ms.fstore.opts.CacheMsgs {
+				m.msg = msg
+			}
+		}
+	}
+	return msg
 }
 
 // Lookup returns the stored message with given sequence number.
@@ -1319,21 +1481,46 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
 // Close closes the store.
 func (ms *FileMsgStore) Close() error {
 	ms.Lock()
-	defer ms.Unlock()
-
 	if ms.closed {
+		ms.Unlock()
 		return nil
 	}
 
 	ms.closed = true
 
 	var err error
+	// Close file slices that may have been opened due to
+	// message lookups.
+	for i := 0; i < ms.currSliceIdx; i++ {
+		slice := ms.files[i]
+		if slice.file != nil {
+			if lerr := slice.file.Close(); lerr != nil && err == nil {
+				err = lerr
+			}
+		}
+	}
+	// Flush and close current file
 	if ms.file != nil {
-		err = ms.flush()
+		if lerr := ms.flush(); lerr != nil && err == nil {
+			err = lerr
+		}
 		if lerr := ms.file.Close(); lerr != nil && err == nil {
 			err = lerr
 		}
 	}
+	if ms.tasksTimer != nil {
+		if ms.tasksTimer.Stop() {
+			// If we can stop, timer callback won't fire,
+			// so we need to decrement the wait group.
+			ms.allDone.Done()
+		}
+	}
+
+	ms.Unlock()
+
+	// Wait on go routines/timers to finish
+	ms.allDone.Wait()
+
 	return err
 }
 

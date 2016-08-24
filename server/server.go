@@ -1024,6 +1024,7 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 				sub.Unlock()
 				return err
 			}
+			sub.ackSub.SetPendingLimits(-1, -1)
 		}
 		sub.Unlock()
 	}
@@ -2348,6 +2349,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		sub.Unlock()
 		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
 	}
+	sub.ackSub.SetPendingLimits(-1, -1)
 	sub.Unlock()
 
 	// Create a non-error response
@@ -2549,7 +2551,7 @@ func (s *StanServer) ClusterID() string {
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.
 func (s *StanServer) Shutdown() {
-	Debugf("STAN: Shutting down.")
+	Noticef("STAN: Shutting down.")
 
 	s.Lock()
 	if s.shutdown {

@@ -224,6 +224,7 @@ func TestFSOptions(t *testing.T) {
 		DoCRC:                false,
 		CRCPolynomial:        int64(crc32.Castagnoli),
 		DoSync:               false,
+		CacheMsgs:            false,
 	}
 	// Create the file with custom options
 	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits,
@@ -234,7 +235,8 @@ func TestFSOptions(t *testing.T) {
 		CompactMinFileSize(expected.CompactMinFileSize),
 		DoCRC(expected.DoCRC),
 		CRCPolynomial(expected.CRCPolynomial),
-		DoSync(expected.DoSync))
+		DoSync(expected.DoSync),
+		CacheMsgs(expected.CacheMsgs))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
