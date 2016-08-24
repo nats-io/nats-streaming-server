@@ -91,13 +91,13 @@ func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error)
 	}
 	ms.msgs[ms.last] = m
 	ms.totalCount++
-	ms.totalBytes += uint64(len(data))
+	ms.totalBytes += uint64(m.Size())
 
 	// Check if we need to remove any (but leave at least the last added)
 	for ms.totalCount > ms.limits.MaxNumMsgs ||
 		((ms.totalCount > 1) && (ms.totalBytes > ms.limits.MaxMsgBytes)) {
 		firstMsg := ms.msgs[ms.first]
-		ms.totalBytes -= uint64(len(firstMsg.Data))
+		ms.totalBytes -= uint64(firstMsg.Size())
 		ms.totalCount--
 		if !ms.hitLimit {
 			ms.hitLimit = true

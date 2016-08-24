@@ -283,6 +283,7 @@ type msgRecord struct {
 	offset    int64
 	timestamp int64
 	msg       *pb.MsgProto // will be nil when message flushed on disk and/or no caching allowed.
+	msgSize   uint32
 }
 
 // FileMsgStore is a per channel message file store.
@@ -1038,13 +1039,13 @@ func (ms *FileMsgStore) recoverOneMsgFile(file *os.File, numFile int) error {
 		}
 		fslice.lastMsg = msg
 		fslice.msgsCount++
-		fslice.msgsSize += uint64(len(msg.Data))
+		fslice.msgsSize += uint64(msgSize)
 
 		if ms.first == 0 {
 			ms.first = msg.Sequence
 			ms.firstMsg = msg
 		}
-		mrec := &msgRecord{offset: offset, timestamp: msg.Timestamp}
+		mrec := &msgRecord{offset: offset, timestamp: msg.Timestamp, msgSize: uint32(msgSize)}
 		ms.msgs[msg.Sequence] = mrec
 		if cache {
 			mrec.msg = msg
@@ -1172,22 +1173,21 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	}
 	ms.last = seq
 	ms.lastMsg = m
-	mrec := &msgRecord{offset: ms.wOffset, timestamp: m.Timestamp}
+	msgSize := uint64(recSize - recordHeaderSize)
+	mrec := &msgRecord{offset: ms.wOffset, timestamp: m.Timestamp, msgSize: uint32(msgSize)}
 	ms.msgs[ms.last] = mrec
 	if cache || pinMsg {
 		mrec.msg = m
 	}
 	ms.wOffset += int64(recSize)
 
-	msgSize := uint64(len(data))
-
 	// Total stats
 	ms.totalCount++
-	ms.totalBytes += msgSize
+	ms.totalBytes += uint64(msgSize)
 
 	// Stats per file slice
 	fslice.msgsCount++
-	fslice.msgsSize += msgSize
+	fslice.msgsSize += uint64(msgSize)
 
 	// Save references to first and last message for this slice
 	if fslice.firstMsg == nil {
@@ -1217,7 +1217,7 @@ func (ms *FileMsgStore) enforceLimits() error {
 		// slice we are inspecting
 		slice := ms.files[idx]
 		// Size of the first message in this slice
-		firstMsgSize := uint64(len(slice.firstMsg.Data))
+		firstMsgSize := uint64(slice.firstMsg.Size())
 		// Update slice and total counts
 		slice.msgsCount--
 		slice.msgsSize -= firstMsgSize

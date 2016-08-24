@@ -459,17 +459,25 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	subsCount := 5
 	payload := []byte("hello")
 	expectedMsgCount := chanCount * msgCount
-	expectedMsgBytes := uint64(expectedMsgCount * len(payload))
+	expectedMsgBytes := uint64(0)
+	maxMsgsAfterRecovery := 4
+	expectedMsgBytesAfterRecovery := uint64(0)
 	for c := 0; c < chanCount; c++ {
 		channelName := fmt.Sprintf("channel.%d", (c + 1))
 
-		// Create a several subscriptions per channel.
+		// Create several subscriptions per channel.
 		for s := 0; s < subsCount; s++ {
 			storeSub(t, fs, channelName)
 		}
 
 		for m := 0; m < msgCount; m++ {
-			storeMsg(t, fs, channelName, payload)
+			msg := storeMsg(t, fs, channelName, payload)
+			expectedMsgBytes += uint64(msg.Size())
+			if c == 0 {
+				if m < maxMsgsAfterRecovery {
+					expectedMsgBytesAfterRecovery += uint64(msg.Size())
+				}
+			}
 		}
 	}
 
@@ -479,7 +487,7 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	// Now re-open with limits below all the above counts
 	limit := testDefaultChannelLimits
 	limit.MaxChannels = 1
-	limit.MaxNumMsgs = 4
+	limit.MaxNumMsgs = maxMsgsAfterRecovery
 	limit.MaxSubs = 1
 	fs, state, err := NewFileStore(defaultDataStore, &limit)
 	if err != nil {
@@ -543,8 +551,7 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	if recMsg != limit.MaxNumMsgs {
 		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", limit.MaxNumMsgs, recMsg)
 	}
-	expectedMsgBytes = uint64(limit.MaxNumMsgs * len(payload))
-	if recBytes != expectedMsgBytes {
+	if recBytes != expectedMsgBytesAfterRecovery {
 		t.Fatalf("Unexpected count of recovered bytes: Expected %v, got %v", expectedMsgBytes, recBytes)
 	}
 

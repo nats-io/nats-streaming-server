@@ -1260,9 +1260,11 @@ func TestMaxMsgs(t *testing.T) {
 
 func TestMaxBytes(t *testing.T) {
 	payload := []byte("hello")
+	m := pb.MsgProto{Data: payload, Subject: "foo", Sequence: 1, Timestamp: time.Now().UnixNano()}
+	msgSize := m.Size()
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
-	sOpts.MaxBytes = uint64(len(payload) * 10)
+	sOpts.MaxBytes = uint64(msgSize * 10)
 	s := RunServerWithOpts(sOpts, nil)
 	defer s.Shutdown()
 
