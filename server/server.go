@@ -166,6 +166,16 @@ type StanServer struct {
 	// IO Channel
 	ioChannel     chan (*ioPendingMsg)
 	ioChannelQuit chan bool
+
+	// Use these flags for Debug/Trace in places where speed matters.
+	// Normally, Debugf and Tracef will check an atomic variable to
+	// figure out if the statement should be logged, however, the
+	// cost of calling Debugf/Tracef is still significant since there
+	// may be memory allocations to format the string passed to these
+	// calls. So in those situations, use these flags to surround the
+	// calls to Debugf/Tracef.
+	trace bool
+	debug bool
 }
 
 // subStore holds all known state for all subscriptions
@@ -554,6 +564,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
 		dupCIDTimeout:     defaultCheckDupCIDTimeout,
 		ioChannelQuit:     make(chan bool, 1),
+		trace:             sOpts.Trace,
+		debug:             sOpts.Debug,
 	}
 
 	// Set limits
@@ -1375,7 +1387,9 @@ func (s *StanServer) performDurableRedelivery(sub *subState) {
 	durName := sub.DurableName
 	sub.RUnlock()
 
-	Debugf("STAN: [Client:%s] Redelivering to durable %s", clientID, durName)
+	if s.debug {
+		Debugf("STAN: [Client:%s] Redelivering to durable %s", clientID, durName)
+	}
 
 	// If we don't find the client, we are done.
 	client := s.clients.Lookup(clientID)
@@ -1384,7 +1398,9 @@ func (s *StanServer) performDurableRedelivery(sub *subState) {
 	}
 	// Go through all messages
 	for _, m := range sortedMsgs {
-		Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", clientID, m.Sequence)
+		if s.trace {
+			Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", clientID, m.Sequence)
+		}
 
 		// Flag as redelivered.
 		m.Redelivered = true
@@ -1411,8 +1427,10 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	stalledRedeliveries := sub.stalledRdlv
 	sub.RUnlock()
 
-	Debugf("STAN: [Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
-		clientID, subject, inbox)
+	if s.debug {
+		Debugf("STAN: [Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
+			clientID, subject, inbox)
+	}
 
 	// If we don't find the client, we are done.
 	client := s.clients.Lookup(clientID)
@@ -1462,7 +1480,9 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			// times are ascending.  Once we've get here, we've hit an
 			// unexpired message, and we're done. Reset the sub's ack
 			// timer to fire on the next message expiration.
-			Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
+			if s.trace {
+				Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
+			}
 			sub.adjustAckTimer(m.Timestamp)
 			return
 		}
@@ -1470,7 +1490,9 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 		// Flag as redelivered.
 		m.Redelivered = true
 
-		Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", clientID, m.Sequence)
+		if s.trace {
+			Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", clientID, m.Sequence)
+		}
 
 		// Handle QueueSubscribers differently, since we will choose best subscriber
 		// to redeliver to, not necessarily the same one.
@@ -1523,14 +1545,18 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) boo
 		return false
 	}
 
-	Tracef("STAN: [Client:%s] Sending msg subject=%s inbox=%s seqno=%d.",
-		sub.ClientID, m.Subject, sub.Inbox, m.Sequence)
+	if s.trace {
+		Tracef("STAN: [Client:%s] Sending msg subject=%s inbox=%s seqno=%d.",
+			sub.ClientID, m.Subject, sub.Inbox, m.Sequence)
+	}
 
 	// Don't send if we have too many outstanding already, unless forced to send.
 	if !force && (int32(len(sub.acksPending)) >= sub.MaxInFlight) {
 		sub.stalled = true
-		Debugf("STAN: [Client:%s] Stalled msgseq %s:%d to %s.",
-			sub.ClientID, m.Subject, m.Sequence, sub.Inbox)
+		if s.debug {
+			Debugf("STAN: [Client:%s] Stalled msgseq %s:%d to %s.",
+				sub.ClientID, m.Subject, m.Sequence, sub.Inbox)
+		}
 		return false
 	}
 
@@ -1716,7 +1742,9 @@ func (s *StanServer) ackPublisher(pm *pb.PubMsg, reply string) {
 	var buf [32]byte
 	b := buf[:]
 	n, _ := msgAck.MarshalTo(b)
-	Tracef("STAN: [Client:%s] Acking Publisher subj=%s guid=%s", pm.ClientID, pm.Subject, pm.Guid)
+	if s.trace {
+		Tracef("STAN: [Client:%s] Acking Publisher subj=%s guid=%s", pm.ClientID, pm.Subject, pm.Guid)
+	}
 	s.nc.Publish(reply, b[:n])
 }
 
@@ -2158,8 +2186,10 @@ func (s *StanServer) processAck(cs *stores.ChannelStore, sub *subState, sequence
 
 	sub.Lock()
 
-	Tracef("STAN: [Client:%s] removing pending ack, subj=%s, seq=%d",
-		sub.ClientID, sub.subject, sequence)
+	if s.trace {
+		Tracef("STAN: [Client:%s] removing pending ack, subj=%s, seq=%d",
+			sub.ClientID, sub.subject, sequence)
+	}
 
 	if err := sub.store.AckSeqPending(sub.ID, sequence); err != nil {
 		Errorf("STAN: [Client:%s] Unable to persist ack for %s:%v (%v)",
