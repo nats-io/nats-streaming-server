@@ -312,7 +312,7 @@ func (ss *subStore) updateState(sub *subState) {
 
 // Remove a subscriber from the subscription store, leaving durable
 // subscriptions unless `unsubscribe` is true.
-func (ss *subStore) Remove(sub *subState, unsubscribe bool) {
+func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe bool) {
 	if sub == nil {
 		return
 	}
@@ -390,7 +390,8 @@ func (ss *subStore) Remove(sub *subState, unsubscribe bool) {
 			// Need to update if this member was the one with the last
 			// message of the group.
 			storageUpdate = sub.LastSent == qs.lastSent
-			for _, m := range sub.acksPending {
+			storedMsgs := makeSortedMsgs(cs.Msgs, sub.acksPending)
+			for _, m := range storedMsgs {
 				// Get one of the remaning queue subscribers.
 				qsub := qs.subs[idx]
 				qsub.Lock()
@@ -411,12 +412,12 @@ func (ss *subStore) Remove(sub *subState, unsubscribe bool) {
 					qsub.LastSent = m.Sequence
 				}
 				// Store in ackPending.
-				qsub.acksPending[m.Sequence] = m
+				qsub.acksPending[m.Sequence] = struct{}{}
 				// Make sure we set its ack timer if none already set, otherwise
 				// adjust the ackTimer floor as needed.s
 				if qsub.ackTimer == nil {
 					ss.stan.setupAckTimer(qsub, qsub.ackWait)
-				} else if qsub.ackTimeFloor == 0 || m.Timestamp < qsub.ackTimeFloor {
+				} else if qsub.ackTimeFloor > 0 && m.Timestamp < qsub.ackTimeFloor {
 					qsub.ackTimeFloor = m.Timestamp
 				}
 				qsub.Unlock()
@@ -1941,7 +1942,7 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 		// Get the subStore from the ChannelStore
 		ss := cs.UserData.(*subStore)
 		// Don't remove durables
-		ss.Remove(sub, false)
+		ss.Remove(cs, sub, false)
 	}
 }
 
@@ -1982,7 +1983,7 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 	}
 
 	// Remove the subscription, force removal if durable.
-	ss.Remove(sub, true)
+	ss.Remove(cs, sub, true)
 
 	Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", req.ClientID, sub.subject)
 
@@ -2333,7 +2334,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 	if err != nil {
 		// Try to undo what has been done.
-		ss.Remove(sub, false)
+		ss.Remove(cs, sub, false)
 		Errorf("STAN: Unable to add subscription for %s: %v", sr.Subject, err)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return

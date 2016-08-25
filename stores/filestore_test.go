@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"flag"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
@@ -29,6 +30,7 @@ var testDefaultServerInfo = spb.ServerInfo{
 }
 
 var defaultDataStore string
+var cacheMsgs bool
 
 func init() {
 	tmpDir, err := ioutil.TempDir(".", "data_stores_")
@@ -41,14 +43,36 @@ func init() {
 	defaultDataStore = tmpDir
 }
 
+func TestMain(m *testing.M) {
+	flag.BoolVar(&cacheMsgs, "cache", true, "Allow message caching")
+	flag.Parse()
+	os.Exit(m.Run())
+}
+
 func cleanupDatastore(t *testing.T, dir string) {
 	if err := os.RemoveAll(dir); err != nil {
 		stackFatalf(t, "Error cleaning up datastore: %v", err)
 	}
 }
 
+func newFileStore(t *testing.T, dataStore string, limits *ChannelLimits, options ...FileStoreOption) (*FileStore, *RecoveredState, error) {
+	opts := DefaultFileStoreOptions
+	for _, opt := range options {
+		if err := opt(&opts); err != nil {
+			return nil, nil, err
+		}
+	}
+	// Make sure caching is overriden by command line
+	opts.CacheMsgs = cacheMsgs
+	fs, state, err := NewFileStore(dataStore, limits, AllOptions(&opts))
+	if err != nil {
+		return nil, nil, err
+	}
+	return fs, state, nil
+}
+
 func createDefaultFileStore(t *testing.T) *FileStore {
-	fs, state, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+	fs, state, err := newFileStore(t, defaultDataStore, &testDefaultChannelLimits)
 	if err != nil {
 		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 	}
@@ -63,7 +87,7 @@ func createDefaultFileStore(t *testing.T) *FileStore {
 }
 
 func openDefaultFileStore(t *testing.T) (*FileStore, *RecoveredState) {
-	fs, state, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+	fs, state, err := newFileStore(t, defaultDataStore, &testDefaultChannelLimits)
 	if err != nil {
 		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 	}
@@ -71,7 +95,7 @@ func openDefaultFileStore(t *testing.T) (*FileStore, *RecoveredState) {
 }
 
 func expectedErrorOpeningDefaultFileStore(t *testing.T) error {
-	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+	fs, _, err := newFileStore(t, defaultDataStore, &testDefaultChannelLimits)
 	if err == nil {
 		fs.Close()
 		stackFatalf(t, "Expected an error opening the FileStore, got none")
@@ -121,7 +145,7 @@ func TestFSInit(t *testing.T) {
 }
 
 func TestFSUseDefaultLimits(t *testing.T) {
-	fs, _, err := NewFileStore(defaultDataStore, nil)
+	fs, _, err := newFileStore(t, defaultDataStore, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -199,6 +223,7 @@ func TestFSOptions(t *testing.T) {
 		}
 	}
 	expected := DefaultFileStoreOptions
+	expected.CacheMsgs = cacheMsgs
 	checkOpts(expected, opts)
 
 	fs.CreateChannel("foo", nil)
@@ -489,7 +514,7 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	limit.MaxChannels = 1
 	limit.MaxNumMsgs = maxMsgsAfterRecovery
 	limit.MaxSubs = 1
-	fs, state, err := NewFileStore(defaultDataStore, &limit)
+	fs, state, err := newFileStore(t, defaultDataStore, &limit)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -572,8 +597,8 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	if secondSlice.msgsCount != 1 {
 		t.Fatalf("Expected second slice to have 1 mesage, got %v", secondSlice.msgsCount)
 	}
-	if secondSlice.firstMsg != lastMsg {
-		t.Fatalf("Expected last message to be %v, got %v", lastMsg, secondSlice.firstMsg)
+	if secondSlice.firstSeq != lastMsg.Sequence {
+		t.Fatalf("Expected last message seq to be %v, got %v", lastMsg.Sequence, secondSlice.firstSeq)
 	}
 	// The first slice should have the new limit msgs count - 1.
 	firstSlice := msgStore.files[0]
@@ -591,7 +616,7 @@ func TestFSRecoveryFileSlices(t *testing.T) {
 
 	limit := testDefaultChannelLimits
 	limit.MaxNumMsgs = 4
-	fs, state, err := NewFileStore(defaultDataStore, &limit)
+	fs, state, err := newFileStore(t, defaultDataStore, &limit)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -718,7 +743,7 @@ func TestFSRecoverSubUpdatesForDeleteSubOK(t *testing.T) {
 	// Recovers now, should not have any error
 	limits := testDefaultChannelLimits
 	limits.MaxSubs = 1
-	fs, state, err := NewFileStore(defaultDataStore, &limits)
+	fs, state, err := newFileStore(t, defaultDataStore, &limits)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -2164,7 +2189,7 @@ func TestFSDoSync(t *testing.T) {
 		if i == 1 {
 			sOpts.DoSync = false
 		}
-		fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits, AllOptions(&sOpts))
+		fs, _, err := newFileStore(t, defaultDataStore, &testDefaultChannelLimits, AllOptions(&sOpts))
 		if err != nil {
 			stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 		}
@@ -2463,7 +2488,7 @@ func TestFSNoPartialWriteDueToBuffering(t *testing.T) {
 	// Make this big enough so that msg payload (50%) with MsgProto overhead is
 	// less than the buffer size. As this time of writting, 100 works ok.
 	bufferSize := 100
-	s, _, err := NewFileStore(defaultDataStore, nil, BufferSize(bufferSize))
+	s, _, err := newFileStore(t, defaultDataStore, nil, BufferSize(bufferSize))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -2575,4 +2600,36 @@ func TestFSCompactSubsUpdateLastSent(t *testing.T) {
 	if rsub.Sub.LastSent != uint64(expectedLastSent) {
 		t.Fatalf("Expected recovered subscription LastSent to be %v, got %v", expectedLastSent, rsub.Sub.LastSent)
 	}
+}
+
+func TestFSFileSlicesClosed(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	limits := DefaultChannelLimits
+	limits.MaxNumMsgs = 50
+	fs, _, err := NewFileStore(defaultDataStore, &limits, CacheMsgs(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer fs.Close()
+	payload := []byte("hello")
+	for i := 0; i < limits.MaxNumMsgs; i++ {
+		storeMsg(t, fs, "foo", payload)
+	}
+	cs := fs.LookupChannel("foo")
+	msgStore := cs.Msgs
+	for i := 0; i < limits.MaxNumMsgs; i++ {
+		msgStore.Lookup(uint64(i + 1))
+	}
+	time.Sleep(1500 * time.Millisecond)
+	ms := msgStore.(*FileMsgStore)
+	ms.RLock()
+	for i, s := range ms.files {
+		if s.file != nil {
+			ms.RUnlock()
+			t.Fatalf("File slice %v should be closed", i)
+		}
+	}
+	ms.RUnlock()
 }
