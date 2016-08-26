@@ -3364,3 +3364,37 @@ func TestDontEmbedNATSMultipleURLs(t *testing.T) {
 		}()
 	}
 }
+
+func TestQueueMaxInFlight(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	total := 100
+	payload := []byte("hello")
+	for i := 0; i < total; i++ {
+		sc.Publish("foo", payload)
+	}
+
+	ch := make(chan bool)
+	received := 0
+	cb := func(m *stan.Msg) {
+		if !m.Redelivered {
+			received++
+			if received == total {
+				ch <- true
+			}
+		}
+	}
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.MaxInflight(5)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get all our messages")
+	}
+}
