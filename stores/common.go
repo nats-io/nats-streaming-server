@@ -5,6 +5,7 @@ package stores
 import (
 	"sync"
 
+	"fmt"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 )
@@ -82,6 +83,13 @@ func (gs *genericStore) SetChannelLimits(limits ChannelLimits) {
 	gs.Lock()
 	gs.limits = limits
 	gs.Unlock()
+}
+
+// CreateChannel creates a ChannelStore for the given channel, and returns
+// `true` to indicate that the channel is new, false if it already exists.
+func (gs *genericStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, bool, error) {
+	// no-op
+	return nil, false, fmt.Errorf("Generic store, feature not implemented")
 }
 
 // LookupChannel returns a ChannelStore for the given channel.

@@ -563,3 +563,32 @@ func testFlush(t *testing.T, s Store) {
 		t.Fatalf("Unexpected error on flush: %v", err)
 	}
 }
+
+func TestGSNoOps(t *testing.T) {
+	gs := &genericStore{}
+	defer gs.Close()
+	limits := DefaultChannelLimits
+	gs.init("test generic", &limits)
+	if _, _, err := gs.CreateChannel("foo", nil); err == nil {
+		t.Fatal("Expected to get an error since this should not be implemented for generic store")
+	}
+	if err := gs.Close(); err != nil {
+		t.Fatalf("Expected nil, got %v", err)
+	}
+
+	gms := &genericMsgStore{}
+	defer gms.Close()
+	gms.init("foo", limits)
+	if gms.Lookup(1) != nil || gms.FirstMsg() != nil || gms.LastMsg() != nil || gms.Flush() != nil ||
+		gms.GetSequenceFromTimestamp(0) != 0 || gms.Close() != nil {
+		t.Fatal("Expected no value since these should not be implemented for generic store")
+	}
+
+	gss := &genericSubStore{}
+	defer gss.Close()
+	gss.init("foo", limits)
+	if gss.AddSeqPending(1, 1) != nil || gss.AckSeqPending(1, 1) != nil || gss.Flush() != nil ||
+		gss.Close() != nil {
+		t.Fatal("Expected no value since these should not be implemented for generic store")
+	}
+}

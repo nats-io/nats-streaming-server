@@ -1333,9 +1333,46 @@ func TestFSBadMsgFile(t *testing.T) {
 	}
 	msgStore := cs.Msgs.(*FileMsgStore)
 	firstSliceFileName := msgStore.files[0].fileName
+	firstIdxFileName := msgStore.files[0].idxFName
 
 	// Close it
 	fs.Close()
+
+	//
+	// INVALID INDEX FILE CONTENT
+	//
+	idxFile, err := openFile(firstIdxFileName, os.O_RDWR)
+	if err != nil {
+		t.Fatalf("Error creating index file: %v", err)
+	}
+	if _, err := idxFile.Write([]byte("abcdefg")); err != nil {
+		t.Fatalf("Error writing content: %v", err)
+	}
+	// Close the file
+	if err := idxFile.Close(); err != nil {
+		t.Fatalf("Unexpected error closing index file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	// Delete the file
+	if err := os.Remove(firstIdxFileName); err != nil {
+		t.Fatalf("Unable to delete the index file %q: %v", firstIdxFileName, err)
+	}
+	// This will create the file without the file version
+	if file, err := os.OpenFile(firstIdxFileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666); err != nil {
+		t.Fatalf("Error creating client file: %v", err)
+	} else {
+		file.Close()
+	}
+	// So we should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	// Now for all other tests below, remove the index file so that
+	// the server recovers the data file.
+	if err := os.Remove(firstIdxFileName); err != nil {
+		t.Fatalf("Unexpected error removing index file: %v", err)
+	}
 
 	// First delete the file...
 	if err := os.Remove(firstSliceFileName); err != nil {
@@ -1353,12 +1390,14 @@ func TestFSBadMsgFile(t *testing.T) {
 	resetToValidFile := func() *os.File {
 		// First remove the file
 		if err := os.Remove(firstSliceFileName); err != nil {
-			t.Fatalf("Unexpected error removing file: %v", err)
+			stackFatalf(t, "Unexpected error removing file: %v", err)
 		}
+		// If present, remove the index file
+		os.Remove(firstIdxFileName)
 		// Create the file with proper file version
 		file, err := openFile(firstSliceFileName)
 		if err != nil {
-			t.Fatalf("Error creating file: %v", err)
+			stackFatalf(t, "Error creating file: %v", err)
 		}
 		return file
 	}
@@ -2632,4 +2671,191 @@ func TestFSFileSlicesClosed(t *testing.T) {
 		}
 	}
 	ms.RUnlock()
+}
+
+func TestFSRecoverWithoutIndexFiles(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	limits := DefaultChannelLimits
+	limits.MaxNumMsgs = 8
+	fs, _, err := newFileStore(t, defaultDataStore, &limits)
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer fs.Close()
+	info := testDefaultServerInfo
+	if err := fs.Init(&info); err != nil {
+		t.Fatalf("Error during init: %v", err)
+	}
+
+	total := limits.MaxNumMsgs + 1
+	payload := []byte("hello")
+	msgs := make([]*pb.MsgProto, 0, total)
+	for i := 0; i < total; i++ {
+		msgs = append(msgs, storeMsg(t, fs, "foo", payload))
+	}
+	cs := fs.LookupChannel("foo")
+	msgStore := cs.Msgs.(*FileMsgStore)
+	// Get the index file names
+	fs.RLock()
+	idxFileNames := make([]string, len(msgStore.files))
+	for i := 0; i < len(msgStore.files); i++ {
+		idxFileNames[i] = msgStore.files[i].idxFName
+	}
+	fs.RUnlock()
+	// Close store
+	fs.Close()
+
+	// Remove the index files
+	for _, fn := range idxFileNames {
+		if err := os.Remove(fn); err != nil {
+			t.Fatalf("Error removing file %q: %v", fn, err)
+		}
+	}
+	// Restart store
+	fs, _, err = newFileStore(t, defaultDataStore, &limits)
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer fs.Close()
+	cs = fs.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Expected channel foo to be recovered")
+	}
+	for i := 0; i < total; i++ {
+		m := cs.Msgs.Lookup(uint64(i + 1))
+		if !reflect.DeepEqual(m, msgs[i]) {
+			t.Fatalf("Expected to get message %v, got %v", msgs[i], m)
+		}
+	}
+}
+
+func TestFSEmptySlice(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	m := storeMsg(t, fs, "foo", []byte("hello"))
+
+	fs.Close()
+
+	// Add an empty slice
+	file, err := openFile(filepath.Join(defaultDataStore, "foo", "msgs.2.dat"))
+	if err != nil {
+		t.Fatalf("Error creating file: %v", err)
+	}
+	file.Close()
+
+	// Recover
+	fs, _ = openDefaultFileStore(t)
+	defer fs.Close()
+
+	cs := fs.LookupChannel("foo")
+	if cs == nil {
+		t.Fatalf("Expected to recover foo channel")
+	}
+	lm := cs.Msgs.Lookup(1)
+	if !reflect.DeepEqual(m, lm) {
+		t.Fatalf("Expected recovered message to be %v, got %v", m, lm)
+	}
+}
+
+func TestFSStoreMsgCausesFlush(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	limits := DefaultChannelLimits
+	fs, _, err := newFileStore(t, defaultDataStore, &limits, BufferSize(50))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer fs.Close()
+	info := testDefaultServerInfo
+	if err := fs.Init(&info); err != nil {
+		t.Fatalf("Error during init: %v", err)
+	}
+
+	m1 := storeMsg(t, fs, "foo", []byte("hello"))
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	buffered := ms.bw.Buffered()
+	bufferedMsgs := len(ms.bufferedMsgs)
+	ms.RUnlock()
+	if buffered != m1.Size()+recordHeaderSize {
+		t.Fatalf("Expected buffered to be %v, got %v", m1.Size()+recordHeaderSize, buffered)
+	}
+	if bufferedMsgs != 1 {
+		t.Fatalf("Expected 1 buffered message, got %v", bufferedMsgs)
+	}
+
+	m2 := storeMsg(t, fs, "foo", []byte("hello again!"))
+	ms.RLock()
+	buffered = ms.bw.Buffered()
+	bufferedMsgs = len(ms.bufferedMsgs)
+	ms.RUnlock()
+	if buffered != m2.Size()+recordHeaderSize {
+		t.Fatalf("Expected buffered to be %v, got %v", m2.Size()+recordHeaderSize, buffered)
+	}
+	if bufferedMsgs != 1 {
+		t.Fatalf("Expected 1 buffered message, got %v", bufferedMsgs)
+	}
+
+	// Now store a message that is bigger than the buffer, it should be
+	// directly written to file
+	payload := make([]byte, 200)
+	storeMsg(t, fs, "foo", payload)
+	ms.RLock()
+	buffered = ms.bw.Buffered()
+	bufferedMsgs = len(ms.bufferedMsgs)
+	ms.RUnlock()
+	if buffered != 0 {
+		t.Fatalf("Expected buffered to be 0, got %v", buffered)
+	}
+	if bufferedMsgs != 0 {
+		t.Fatalf("Expected 0 buffered message, got %v", bufferedMsgs)
+	}
+}
+
+func TestFSRemoveAndShiftFiles(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	limits := DefaultChannelLimits
+	limits.MaxNumMsgs = 8
+	fs, _, err := newFileStore(t, defaultDataStore, &limits)
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer fs.Close()
+	info := testDefaultServerInfo
+	if err := fs.Init(&info); err != nil {
+		t.Fatalf("Error during init: %v", err)
+	}
+
+	total := 12
+	payload := []byte("hello")
+	for i := 0; i < total; i++ {
+		storeMsg(t, fs, "foo", payload)
+	}
+	// Close store
+	fs.Close()
+
+	// Reopen
+	fs, _, err = newFileStore(t, defaultDataStore, &limits)
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer fs.Close()
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	if ms.FirstMsg().Sequence != 5 {
+		t.Fatalf("Expected message sequence to be 3, got %v", ms.FirstMsg().Sequence)
+	}
+	if ms.LastMsg().Sequence != uint64(total) {
+		t.Fatalf("Expected message sequence to be %v, got %v", total, ms.LastMsg().Sequence)
+	}
 }
