@@ -1570,6 +1570,94 @@ func TestDurableCanReconnect(t *testing.T) {
 	checkDurable(t, s, "foo", durName, durKey)
 }
 
+func TestRecoveredDurableCanReconnect(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	cb := func(_ *stan.Msg) {}
+
+	durName := "mydur"
+	sr := &pb.SubscriptionRequest{
+		ClientID:    clientName,
+		Subject:     "foo",
+		DurableName: durName,
+	}
+	durKey := durableKey(sr)
+
+	// Create durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is created
+	checkDurable(t, s, "foo", durName, durKey)
+
+	// We should not be able to create a second durable on same subject
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err == nil {
+		t.Fatal("Expected to fail to create a second durable with same name")
+	}
+
+	// Close stan connection
+	sc.Close()
+
+	// Connect again
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Start the durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is found
+	checkDurable(t, s, "foo", durName, durKey)
+
+	// Close stan connection
+	sc.Close()
+
+	// Connect again
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Start the durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is found
+	checkDurable(t, s, "foo", durName, durKey)
+
+	// Close the connection
+	sc.Close()
+
+	// Restart the server
+	s.Shutdown()
+
+	// Recover
+	s = RunServerWithOpts(opts, nil)
+
+	// Connect again
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Start the durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is found
+	checkDurable(t, s, "foo", durName, durKey)
+}
+
 func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()

@@ -884,9 +884,16 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 			// Copy over fields from SubState protobuf
 			sub.SubState = *recSub.Sub
 			// Add the subscription to the corresponding client
-			if s.clients.AddSub(sub.ClientID, sub) || sub.DurableName != "" {
+			added := s.clients.AddSub(sub.ClientID, sub)
+			if added || sub.DurableName != "" {
 				// Add this subscription to subStore.
 				ss.updateState(sub)
+				// If this is a durable and the client was not recovered
+				// (was offline), we need to clear the ClientID otherwise
+				// it won't be able to reconnect
+				if sub.DurableName != "" && !added {
+					sub.ClientID = ""
+				}
 				// Add to the array
 				allSubs = append(allSubs, sub)
 			}
