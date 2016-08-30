@@ -1339,26 +1339,25 @@ func findBestQueueSub(sl []*subState) (rsub *subState) {
 
 // Send a message to the queue group
 // Assumes qs lock held for write
-func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force bool) (*subState, bool) {
+func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force bool) (*subState, bool, bool) {
 	if qs == nil {
-		return nil, false
+		return nil, false, false
 	}
 	sub := findBestQueueSub(qs.subs)
 	if sub == nil {
-		return nil, false
+		return nil, false, false
 	}
 	sub.Lock()
-	didSend := s.sendMsgToSub(sub, m, force)
+	didSend, sendMore := s.sendMsgToSub(sub, m, force)
 	lastSent := sub.LastSent
 	sub.Unlock()
-	if !didSend {
-		qs.stalled = true
-		return sub, false
-	}
-	if lastSent > qs.lastSent {
+	if didSend && lastSent > qs.lastSent {
 		qs.lastSent = lastSent
 	}
-	return sub, true
+	if !sendMore {
+		qs.stalled = true
+	}
+	return sub, didSend, sendMore
 }
 
 // processMsg will proces a message, and possibly send to clients, etc.
@@ -1489,6 +1488,10 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 		sub.Unlock()
 	}
 
+	var pick *subState
+	sent := false
+	sendMore := false
+
 	// We will move through acksPending(sorted) and see what needs redelivery.
 	for _, m := range sortedMsgs {
 		// Ignore messages with a timestamp below our floor
@@ -1519,7 +1522,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 		// to redeliver to, not necessarily the same one.
 		if qs != nil {
 			qs.Lock()
-			pick, didSend := s.sendMsgToQueueGroup(qs, m, shouldForce)
+			pick, sent, sendMore = s.sendMsgToQueueGroup(qs, m, shouldForce)
 			qs.Unlock()
 			if pick == nil {
 				Errorf("STAN: [Client:%s] Unable to find queue subscriber", clientID)
@@ -1529,13 +1532,18 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			// we need to process an implicit ack for the original subscriber.
 			// We do this only after confirmation that it was successfully added
 			// as pending on the other queue subscriber.
-			if pick != sub && didSend {
+			if pick != sub && sent {
 				s.processAck(cs, sub, m.Sequence)
 			}
 		} else {
 			sub.Lock()
-			s.sendMsgToSub(sub, m, shouldForce)
+			sent, sendMore = s.sendMsgToSub(sub, m, shouldForce)
 			sub.Unlock()
+		}
+		// If we did not send that message or reached the maxInFlight
+		// and we should not force redelivery, then stop.
+		if !shouldForce && (!sent || !sendMore) {
+			break
 		}
 	}
 
@@ -1561,9 +1569,9 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 // of acksPending is greater or equal to the sub's MaxInFlight limit, messages
 // are not sent and subscriber is marked as stalled.
 // Sub lock should be held before calling.
-func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) bool {
+func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bool, bool) {
 	if sub == nil || m == nil || (sub.newOnHold && !m.Redelivered) {
-		return false
+		return false, false
 	}
 
 	if s.trace {
@@ -1572,20 +1580,21 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) boo
 	}
 
 	// Don't send if we have too many outstanding already, unless forced to send.
-	if !force && (int32(len(sub.acksPending)) >= sub.MaxInFlight) {
+	ap := int32(len(sub.acksPending))
+	if !force && (ap >= sub.MaxInFlight) {
 		sub.stalled = true
 		if s.debug {
 			Debugf("STAN: [Client:%s] Stalled msgseq %s:%d to %s.",
 				sub.ClientID, m.Subject, m.Sequence, sub.Inbox)
 		}
-		return false
+		return false, false
 	}
 
 	b, _ := m.Marshal()
 	if err := s.nc.Publish(sub.Inbox, b); err != nil {
 		Errorf("STAN: [Client:%s] Failed Sending msgseq %s:%d to %s (%s).",
 			sub.ClientID, m.Subject, m.Sequence, sub.Inbox, err)
-		return false
+		return false, false
 	}
 
 	// Setup the ackTimer as needed now. I don't want to use defer in this
@@ -1597,13 +1606,13 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) boo
 
 	// If this message is already pending, nothing else to do.
 	if sub.acksPending[m.Sequence] != nil {
-		return true
+		return true, true
 	}
 	// Store in storage
 	if err := sub.store.AddSeqPending(sub.ID, m.Sequence); err != nil {
 		Errorf("STAN: [Client:%s] Unable to update subscription for %s:%v (%v)",
 			sub.ClientID, m.Subject, m.Sequence, err)
-		return false
+		return false, false
 	}
 
 	// Update LastSent if applicable
@@ -1614,7 +1623,19 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) boo
 	// Store in ackPending.
 	sub.acksPending[m.Sequence] = m
 
-	return true
+	// Now that we have added to acksPending, check again if we
+	// have reached the max and tell the caller that it should not
+	// be sending more at this time.
+	if !force && (ap+1 == sub.MaxInFlight) {
+		sub.stalled = true
+		if s.debug {
+			Debugf("STAN: [Client:%s] Stalling after msgseq %s:%d to %s.",
+				sub.ClientID, m.Subject, m.Sequence, sub.Inbox)
+		}
+		return true, false
+	}
+
+	return true, true
 }
 
 // Sets up the ackTimer to fire at the given duration.
@@ -1923,7 +1944,7 @@ func (sub *subState) adjustAckTimer(firstUnackedTimestamp int64) {
 		// redelivery stalled too.
 		if sub.stalled {
 			sub.stalledRdlv++
-			if sub.stalledRdlv >= atomic.LoadInt32(&maxStalledRedeliveries) {
+			if sub.stalledRdlv > atomic.LoadInt32(&maxStalledRedeliveries) {
 				// Reset the timer to a short value
 				sub.ackTimer.Reset(time.Millisecond)
 				return
@@ -2261,7 +2282,7 @@ func (s *StanServer) sendAvailableMessagesToQueue(cs *stores.ChannelStore, qs *q
 		if nextMsg == nil {
 			break
 		}
-		if _, sent := s.sendMsgToQueueGroup(qs, nextMsg, honorMaxInFlight); !sent {
+		if _, sent, sendMore := s.sendMsgToQueueGroup(qs, nextMsg, honorMaxInFlight); !sent || !sendMore {
 			break
 		}
 	}
@@ -2273,7 +2294,10 @@ func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subStat
 	sub.Lock()
 	for nextSeq := sub.LastSent + 1; ; nextSeq++ {
 		nextMsg := cs.Msgs.Lookup(nextSeq)
-		if nextMsg == nil || s.sendMsgToSub(sub, nextMsg, honorMaxInFlight) == false {
+		if nextMsg == nil {
+			break
+		}
+		if sent, sendMore := s.sendMsgToSub(sub, nextMsg, honorMaxInFlight); !sent || !sendMore {
 			break
 		}
 	}
