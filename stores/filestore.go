@@ -1707,20 +1707,19 @@ func (ms *FileMsgStore) Close() error {
 }
 
 func (ms *FileMsgStore) flush() error {
-	if ms.bw == nil || ms.bw.Buffered() == 0 {
-		return nil
-	}
-	if err := ms.bw.Flush(); err != nil {
-		return err
-	}
-	// If there were pending buffered messages, they have now been
-	// written to disk, so we need to write the corresponding
-	// message index records.
-	bufPos := 0
-	ms.tmpMsgBuf, bufPos = ms.processBufferedMsgs(ms.tmpMsgBuf, false)
-	if bufPos > 0 {
-		if _, err := ms.idxFile.Write(ms.tmpMsgBuf[:bufPos]); err != nil {
+	if ms.bw != nil && ms.bw.Buffered() > 0 {
+		if err := ms.bw.Flush(); err != nil {
 			return err
+		}
+		// If there were pending buffered messages, they have now been
+		// written to disk, so we need to write the corresponding
+		// message index records.
+		bufPos := 0
+		ms.tmpMsgBuf, bufPos = ms.processBufferedMsgs(ms.tmpMsgBuf, false)
+		if bufPos > 0 {
+			if _, err := ms.idxFile.Write(ms.tmpMsgBuf[:bufPos]); err != nil {
+				return err
+			}
 		}
 	}
 	if ms.fstore.opts.DoSync {
@@ -2118,11 +2117,10 @@ func (ss *FileSubStore) writeRecord(w io.Writer, recType recordType, rec record)
 }
 
 func (ss *FileSubStore) flush() error {
-	if ss.bw == nil {
-		return nil
-	}
-	if err := ss.bw.Flush(); err != nil {
-		return err
+	if ss.bw != nil && ss.bw.Buffered() > 0 {
+		if err := ss.bw.Flush(); err != nil {
+			return err
+		}
 	}
 	if ss.opts.DoSync {
 		return ss.file.Sync()

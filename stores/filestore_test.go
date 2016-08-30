@@ -71,8 +71,9 @@ func newFileStore(t *testing.T, dataStore string, limits *ChannelLimits, options
 	return fs, state, nil
 }
 
-func createDefaultFileStore(t *testing.T) *FileStore {
-	fs, state, err := newFileStore(t, defaultDataStore, &testDefaultChannelLimits)
+func createDefaultFileStore(t *testing.T, options ...FileStoreOption) *FileStore {
+	limits := testDefaultChannelLimits
+	fs, state, err := newFileStore(t, defaultDataStore, &limits, options...)
 	if err != nil {
 		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 	}
@@ -86,8 +87,9 @@ func createDefaultFileStore(t *testing.T) *FileStore {
 	return fs
 }
 
-func openDefaultFileStore(t *testing.T) (*FileStore, *RecoveredState) {
-	fs, state, err := newFileStore(t, defaultDataStore, &testDefaultChannelLimits)
+func openDefaultFileStore(t *testing.T, options ...FileStoreOption) (*FileStore, *RecoveredState) {
+	limits := testDefaultChannelLimits
+	fs, state, err := newFileStore(t, defaultDataStore, &limits, options...)
 	if err != nil {
 		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 	}
@@ -95,7 +97,8 @@ func openDefaultFileStore(t *testing.T) (*FileStore, *RecoveredState) {
 }
 
 func expectedErrorOpeningDefaultFileStore(t *testing.T) error {
-	fs, _, err := newFileStore(t, defaultDataStore, &testDefaultChannelLimits)
+	limits := testDefaultChannelLimits
+	fs, _, err := newFileStore(t, defaultDataStore, &limits)
 	if err == nil {
 		fs.Close()
 		stackFatalf(t, "Expected an error opening the FileStore, got none")
@@ -2182,7 +2185,7 @@ func TestFSFlush(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs := createDefaultFileStore(t)
+	fs := createDefaultFileStore(t, DoSync(true))
 	defer fs.Close()
 
 	testFlush(t, fs)
@@ -2206,6 +2209,36 @@ func TestFSFlush(t *testing.T) {
 	}
 	// Close the underlying file
 	ss := cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.file.Close()
+	ss.Unlock()
+	// Expect Flush to fail
+	if err := cs.Subs.Flush(); err == nil {
+		t.Fatal("Expected Flush to fail, did not")
+	}
+
+	// Close and re-open
+	fs.Close()
+	fs, _ = openDefaultFileStore(t, DoSync(true))
+	defer fs.Close()
+
+	// Check that Flush() is still doing Sync even if
+	// buf writer is empty
+	cs = fs.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel foo should exist")
+	}
+	// Close the underlying file
+	ms = cs.Msgs.(*FileMsgStore)
+	ms.Lock()
+	ms.file.Close()
+	ms.Unlock()
+	// Expect Flush to fail
+	if err := cs.Msgs.Flush(); err == nil {
+		t.Fatal("Expected Flush to fail, did not")
+	}
+	// Close the underlying file
+	ss = cs.Subs.(*FileSubStore)
 	ss.Lock()
 	ss.file.Close()
 	ss.Unlock()
@@ -2527,15 +2560,8 @@ func TestFSNoPartialWriteDueToBuffering(t *testing.T) {
 	// Make this big enough so that msg payload (50%) with MsgProto overhead is
 	// less than the buffer size. As this time of writting, 100 works ok.
 	bufferSize := 100
-	s, _, err := newFileStore(t, defaultDataStore, nil, BufferSize(bufferSize))
-	if err != nil {
-		t.Fatalf("Error creating store: %v", err)
-	}
+	s := createDefaultFileStore(t, BufferSize(bufferSize))
 	defer s.Close()
-	info := testDefaultServerInfo
-	if err := s.Init(&info); err != nil {
-		t.Fatalf("Error during init: %v", err)
-	}
 
 	// Write a message that is less than buffer size
 	msgSize := (bufferSize * 5) / 10
@@ -2677,17 +2703,12 @@ func TestFSRecoverWithoutIndexFiles(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
 	limits := DefaultChannelLimits
 	limits.MaxNumMsgs = 8
-	fs, _, err := newFileStore(t, defaultDataStore, &limits)
-	if err != nil {
-		t.Fatalf("Error creating store: %v", err)
-	}
-	defer fs.Close()
-	info := testDefaultServerInfo
-	if err := fs.Init(&info); err != nil {
-		t.Fatalf("Error during init: %v", err)
-	}
+	fs.SetChannelLimits(limits)
 
 	total := limits.MaxNumMsgs + 1
 	payload := []byte("hello")
@@ -2714,10 +2735,7 @@ func TestFSRecoverWithoutIndexFiles(t *testing.T) {
 		}
 	}
 	// Restart store
-	fs, _, err = newFileStore(t, defaultDataStore, &limits)
-	if err != nil {
-		t.Fatalf("Error creating store: %v", err)
-	}
+	fs, _ = openDefaultFileStore(t)
 	defer fs.Close()
 	cs = fs.LookupChannel("foo")
 	if cs == nil {
@@ -2767,16 +2785,8 @@ func TestFSStoreMsgCausesFlush(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	limits := DefaultChannelLimits
-	fs, _, err := newFileStore(t, defaultDataStore, &limits, BufferSize(50))
-	if err != nil {
-		t.Fatalf("Error creating store: %v", err)
-	}
+	fs := createDefaultFileStore(t, BufferSize(50))
 	defer fs.Close()
-	info := testDefaultServerInfo
-	if err := fs.Init(&info); err != nil {
-		t.Fatalf("Error during init: %v", err)
-	}
 
 	m1 := storeMsg(t, fs, "foo", []byte("hello"))
 	cs := fs.LookupChannel("foo")
@@ -2824,17 +2834,12 @@ func TestFSRemoveAndShiftFiles(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
 	limits := DefaultChannelLimits
 	limits.MaxNumMsgs = 8
-	fs, _, err := newFileStore(t, defaultDataStore, &limits)
-	if err != nil {
-		t.Fatalf("Error creating store: %v", err)
-	}
-	defer fs.Close()
-	info := testDefaultServerInfo
-	if err := fs.Init(&info); err != nil {
-		t.Fatalf("Error during init: %v", err)
-	}
+	fs.SetChannelLimits(limits)
 
 	total := 12
 	payload := []byte("hello")
@@ -2845,10 +2850,7 @@ func TestFSRemoveAndShiftFiles(t *testing.T) {
 	fs.Close()
 
 	// Reopen
-	fs, _, err = newFileStore(t, defaultDataStore, &limits)
-	if err != nil {
-		t.Fatalf("Error creating store: %v", err)
-	}
+	fs, _ = openDefaultFileStore(t)
 	defer fs.Close()
 	cs := fs.LookupChannel("foo")
 	ms := cs.Msgs.(*FileMsgStore)
