@@ -3504,3 +3504,81 @@ func TestAckTimerSetOnStalledSub(t *testing.T) {
 		t.Fatal("Timer should have been set")
 	}
 }
+
+func TestFileStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// Run a standalone NATS Server
+	gs := natsdTest.RunServer(nil)
+	defer gs.Shutdown()
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	opts.NATSServerURL = nats.DefaultURL
+	s := RunServerWithOpts(opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	durName := "mydur"
+	// Create a durable with manual ack mode (don't ack the message)
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {},
+		stan.DurableName(durName),
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode()); err != nil {
+		stackFatalf(t, "Unexpected error on subscribe: %v", err)
+	}
+	// Make sure durable is created
+	subs := checkSubs(t, s, clientName, 1)
+	if len(subs) != 1 {
+		stackFatalf(t, "Should be only 1 durable, got %v", len(subs))
+	}
+	dur := subs[0]
+	dur.RLock()
+	inbox := dur.Inbox
+	dur.RUnlock()
+
+	// Close the client
+	sc.Close()
+
+	newSender := NewDefaultConnection(t)
+	defer newSender.Close()
+	if err := newSender.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	newSender.Close()
+
+	// Create a raw NATS connection
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	failCh := make(chan bool, 10)
+	// Setup a consumer on the durable inbox
+	sub, err := nc.Subscribe(inbox, func(_ *nats.Msg) {
+		failCh <- true
+	})
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Stop the Streaming server
+	s.Shutdown()
+	// Restart the Streaming server
+	s = RunServerWithOpts(opts, nil)
+
+	// We should not get any message, if we do, this is an error
+	if err := WaitTime(failCh, time.Second); err == nil {
+		t.Fatal("Consumer got a message")
+	}
+}
