@@ -3452,3 +3452,55 @@ func TestDontEmbedNATSMultipleURLs(t *testing.T) {
 		}()
 	}
 }
+
+func TestAckTimerSetOnStalledSub(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	createDur := func() *subState {
+		durName := "mydur"
+
+		// Create a durable with MaxInFlight==1 and ack mode (don't ack the message)
+		if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {},
+			stan.DurableName(durName),
+			stan.DeliverAllAvailable(),
+			stan.SetManualAckMode(),
+			stan.MaxInflight(1)); err != nil {
+			stackFatalf(t, "Unexpected error on subscribe: %v", err)
+		}
+		// Make sure durable is created
+		subs := checkSubs(t, s, clientName, 1)
+		if len(subs) != 1 {
+			stackFatalf(t, "Should be only 1 durable, got %v", len(subs))
+		}
+		return subs[0]
+	}
+
+	// Create durable
+	createDur()
+
+	// Close
+	sc.Close()
+
+	// Recreate connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Restart durable
+	dur := createDur()
+
+	// Now check that the timer is set
+	dur.RLock()
+	timerSet := dur.ackTimer != nil
+	dur.RUnlock()
+	if !timerSet {
+		t.Fatal("Timer should have been set")
+	}
+}
