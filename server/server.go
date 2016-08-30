@@ -880,13 +880,25 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 			} else if len(sub.acksPending) > 0 {
 				// Prevent delivery of new messages until resent of old ones
 				sub.newOnHold = true
+				// We may not need to set this because this would be set
+				// during the initial redelivery attempt, but does not hurt.
+				if int32(len(sub.acksPending)) >= sub.MaxInFlight {
+					sub.stalled = true
+				}
 			}
 			// Copy over fields from SubState protobuf
 			sub.SubState = *recSub.Sub
 			// Add the subscription to the corresponding client
-			if s.clients.AddSub(sub.ClientID, sub) || sub.DurableName != "" {
+			added := s.clients.AddSub(sub.ClientID, sub)
+			if added || sub.DurableName != "" {
 				// Add this subscription to subStore.
 				ss.updateState(sub)
+				// If this is a durable and the client was not recovered
+				// (was offline), we need to clear the ClientID otherwise
+				// it won't be able to reconnect
+				if sub.DurableName != "" && !added {
+					sub.ClientID = ""
+				}
 				// Add to the array
 				allSubs = append(allSubs, sub)
 			}
@@ -947,6 +959,12 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 		// may need to reset the timer (which would not work if timer is nil).
 		// Set it to a high value, it will be correctly reset or cleared.
 		s.setupAckTimer(sub, time.Hour)
+		// If this is a durable and it is offline, then skip the rest.
+		if sub.DurableName != "" && sub.ClientID == "" {
+			sub.newOnHold = false
+			sub.Unlock()
+			continue
+		}
 		// Unlock in order to call function below
 		sub.Unlock()
 		// Send old messages (lock is acquired in that function)
@@ -1406,7 +1424,6 @@ func (s *StanServer) performDurableRedelivery(sub *subState) {
 
 		sub.Lock()
 		// Force delivery
-		// TODO(ik): Should we instead clean the acks pending when the durable is closed?
 		s.sendMsgToSub(sub, m, true)
 		sub.Unlock()
 	}
@@ -1426,11 +1443,6 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	stalledRedeliveries := sub.stalledRdlv
 	sub.RUnlock()
 
-	if s.debug {
-		Debugf("STAN: [Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
-			clientID, subject, inbox)
-	}
-
 	// If we don't find the client, we are done.
 	client := s.clients.Lookup(clientID)
 	if client == nil {
@@ -1447,7 +1459,16 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			sub.ackTimer.Reset(sub.ackWait)
 		}
 		sub.Unlock()
+		if s.debug {
+			Debugf("STAN: [Client:%s] Skipping redelivering on ack expiration due to client missed hearbeat, subject=%s, inbox=%s",
+				clientID, subject, inbox)
+		}
 		return
+	}
+
+	if s.debug {
+		Debugf("STAN: [Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
+			clientID, subject, inbox)
 	}
 
 	var cs *stores.ChannelStore
@@ -1576,6 +1597,13 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 		return false, false
 	}
 
+	// Setup the ackTimer as needed now. I don't want to use defer in this
+	// function, and want to make sure that if we exit before the end, the
+	// timer is set. It will be adjusted/stopped as needed.
+	if sub.ackTimer == nil {
+		s.setupAckTimer(sub, sub.ackWait)
+	}
+
 	// If this message is already pending, nothing else to do.
 	if sub.acksPending[m.Sequence] != nil {
 		return true, true
@@ -1594,12 +1622,6 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 
 	// Store in ackPending.
 	sub.acksPending[m.Sequence] = m
-
-	// Setup the ackTimer as needed.
-	if sub.ackTimer == nil {
-		s.setupAckTimer(sub, sub.ackWait)
-		sub.ackTimeFloor = m.Timestamp
-	}
 
 	// Now that we have added to acksPending, check again if we
 	// have reached the max and tell the caller that it should not

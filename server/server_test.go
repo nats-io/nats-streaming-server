@@ -1570,6 +1570,94 @@ func TestDurableCanReconnect(t *testing.T) {
 	checkDurable(t, s, "foo", durName, durKey)
 }
 
+func TestRecoveredDurableCanReconnect(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	cb := func(_ *stan.Msg) {}
+
+	durName := "mydur"
+	sr := &pb.SubscriptionRequest{
+		ClientID:    clientName,
+		Subject:     "foo",
+		DurableName: durName,
+	}
+	durKey := durableKey(sr)
+
+	// Create durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is created
+	checkDurable(t, s, "foo", durName, durKey)
+
+	// We should not be able to create a second durable on same subject
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err == nil {
+		t.Fatal("Expected to fail to create a second durable with same name")
+	}
+
+	// Close stan connection
+	sc.Close()
+
+	// Connect again
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Start the durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is found
+	checkDurable(t, s, "foo", durName, durKey)
+
+	// Close stan connection
+	sc.Close()
+
+	// Connect again
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Start the durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is found
+	checkDurable(t, s, "foo", durName, durKey)
+
+	// Close the connection
+	sc.Close()
+
+	// Restart the server
+	s.Shutdown()
+
+	// Recover
+	s = RunServerWithOpts(opts, nil)
+
+	// Connect again
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Start the durable
+	if _, err := sc.Subscribe("foo", cb, stan.DurableName(durName)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is found
+	checkDurable(t, s, "foo", durName, durKey)
+}
+
 func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
@@ -3396,5 +3484,136 @@ func TestQueueMaxInFlight(t *testing.T) {
 
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get all our messages")
+	}
+}
+
+func TestAckTimerSetOnStalledSub(t *testing.T) {
+
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	createDur := func() *subState {
+		durName := "mydur"
+
+		// Create a durable with MaxInFlight==1 and ack mode (don't ack the message)
+		if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {},
+			stan.DurableName(durName),
+			stan.DeliverAllAvailable(),
+			stan.SetManualAckMode(),
+			stan.MaxInflight(1)); err != nil {
+			stackFatalf(t, "Unexpected error on subscribe: %v", err)
+		}
+		// Make sure durable is created
+		subs := checkSubs(t, s, clientName, 1)
+		if len(subs) != 1 {
+			stackFatalf(t, "Should be only 1 durable, got %v", len(subs))
+		}
+		return subs[0]
+	}
+
+	// Create durable
+	createDur()
+
+	// Close
+	sc.Close()
+
+	// Recreate connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Restart durable
+	dur := createDur()
+
+	// Now check that the timer is set
+	dur.RLock()
+	timerSet := dur.ackTimer != nil
+	dur.RUnlock()
+	if !timerSet {
+		t.Fatal("Timer should have been set")
+	}
+}
+
+func TestFileStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// Run a standalone NATS Server
+	gs := natsdTest.RunServer(nil)
+	defer gs.Shutdown()
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	opts.NATSServerURL = nats.DefaultURL
+	s := RunServerWithOpts(opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	durName := "mydur"
+	// Create a durable with manual ack mode (don't ack the message)
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {},
+		stan.DurableName(durName),
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode()); err != nil {
+		stackFatalf(t, "Unexpected error on subscribe: %v", err)
+	}
+	// Make sure durable is created
+	subs := checkSubs(t, s, clientName, 1)
+	if len(subs) != 1 {
+		stackFatalf(t, "Should be only 1 durable, got %v", len(subs))
+	}
+	dur := subs[0]
+	dur.RLock()
+	inbox := dur.Inbox
+	dur.RUnlock()
+
+	// Close the client
+	sc.Close()
+
+	newSender := NewDefaultConnection(t)
+	defer newSender.Close()
+	if err := newSender.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	newSender.Close()
+
+	// Create a raw NATS connection
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	failCh := make(chan bool, 10)
+	// Setup a consumer on the durable inbox
+	sub, err := nc.Subscribe(inbox, func(_ *nats.Msg) {
+		failCh <- true
+	})
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Stop the Streaming server
+	s.Shutdown()
+	// Restart the Streaming server
+	s = RunServerWithOpts(opts, nil)
+
+	// We should not get any message, if we do, this is an error
+	if err := WaitTime(failCh, time.Second); err == nil {
+		t.Fatal("Consumer got a message")
 	}
 }
