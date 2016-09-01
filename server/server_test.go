@@ -3521,6 +3521,9 @@ func TestAckTimerSetOnStalledSub(t *testing.T) {
 	// Create durable
 	createDur()
 
+	// Wait for durable to be created
+	waitForNumSubs(t, s, clientName, 1)
+
 	// Close
 	sc.Close()
 
@@ -3530,6 +3533,9 @@ func TestAckTimerSetOnStalledSub(t *testing.T) {
 
 	// Restart durable
 	dur := createDur()
+
+	// Wait for durable to be created
+	waitForNumSubs(t, s, clientName, 1)
 
 	// Now check that the timer is set
 	dur.RLock()
