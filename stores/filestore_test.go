@@ -30,7 +30,8 @@ var testDefaultServerInfo = spb.ServerInfo{
 }
 
 var defaultDataStore string
-var cacheMsgs bool
+var disableMsgsCaching bool
+var disableBufferWriters bool
 
 func init() {
 	tmpDir, err := ioutil.TempDir(".", "data_stores_")
@@ -44,7 +45,8 @@ func init() {
 }
 
 func TestMain(m *testing.M) {
-	flag.BoolVar(&cacheMsgs, "cache", true, "Allow message caching")
+	flag.BoolVar(&disableMsgsCaching, "no_cache", false, "Disable message caching")
+	flag.BoolVar(&disableBufferWriters, "no_buffer", false, "Disable use of buffer writers")
 	flag.Parse()
 	os.Exit(m.Run())
 }
@@ -57,13 +59,20 @@ func cleanupDatastore(t *testing.T, dir string) {
 
 func newFileStore(t *testing.T, dataStore string, limits *ChannelLimits, options ...FileStoreOption) (*FileStore, *RecoveredState, error) {
 	opts := DefaultFileStoreOptions
+	// Set those options based on command line parameters.
+	// Each test may override those.
+	if disableMsgsCaching {
+		opts.CacheMsgs = false
+	}
+	if disableBufferWriters {
+		opts.BufferSize = 0
+	}
+	// Apply the provided options
 	for _, opt := range options {
 		if err := opt(&opts); err != nil {
 			return nil, nil, err
 		}
 	}
-	// Make sure caching is overriden by command line
-	opts.CacheMsgs = cacheMsgs
 	fs, state, err := NewFileStore(dataStore, limits, AllOptions(&opts))
 	if err != nil {
 		return nil, nil, err
@@ -226,7 +235,12 @@ func TestFSOptions(t *testing.T) {
 		}
 	}
 	expected := DefaultFileStoreOptions
-	expected.CacheMsgs = cacheMsgs
+	if disableMsgsCaching {
+		expected.CacheMsgs = false
+	}
+	if disableBufferWriters {
+		expected.BufferSize = 0
+	}
 	checkOpts(expected, opts)
 
 	fs.CreateChannel("foo", nil)
@@ -482,9 +496,9 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	defer fs.Close()
 
 	// Store some messages in various channels
-	chanCount := 10
+	chanCount := 1
 	msgCount := 50
-	subsCount := 5
+	subsCount := 3
 	payload := []byte("hello")
 	expectedMsgCount := chanCount * msgCount
 	expectedMsgBytes := uint64(0)
@@ -2241,6 +2255,10 @@ func TestFSFlush(t *testing.T) {
 	ss = cs.Subs.(*FileSubStore)
 	ss.Lock()
 	ss.file.Close()
+	// Simulate that there was activity (alternatively,
+	// we would need a buffer size smaller than a sub record
+	// being written so that buffer writer is by-passed).
+	ss.activity = true
 	ss.Unlock()
 	// Expect Flush to fail
 	if err := cs.Subs.Flush(); err == nil {
@@ -2859,5 +2877,190 @@ func TestFSRemoveAndShiftFiles(t *testing.T) {
 	}
 	if ms.LastMsg().Sequence != uint64(total) {
 		t.Fatalf("Expected message sequence to be %v, got %v", total, ms.LastMsg().Sequence)
+	}
+}
+
+func TestFSSubStoreVariousBufferSizes(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	sizes := []int{0, subBufMinShrinkSize - subBufMinShrinkSize/10, subBufMinShrinkSize, 3*subBufMinShrinkSize + subBufMinShrinkSize/2}
+	for _, size := range sizes {
+
+		// Create a store with buffer writer of the given size
+		fs := createDefaultFileStore(t, BufferSize(size))
+		defer fs.Close()
+
+		m := storeMsg(t, fs, "foo", []byte("hello"))
+
+		// Perform some activities on subscriptions file
+		subID := storeSub(t, fs, "foo")
+
+		// Get FileSubStore
+		cs := fs.LookupChannel("foo")
+		ss := cs.Subs.(*FileSubStore)
+
+		// Cause a flush to empty the buffer
+		ss.Flush()
+
+		// Check that bw is not nil and writer points to the buffer writer
+		ss.RLock()
+		bw := ss.bw
+		writer := ss.writer
+		file := ss.file
+		bufSize := 0
+		if ss.bw != nil {
+			bufSize = ss.bw.Available()
+		}
+		ss.RUnlock()
+		if size == 0 {
+			if bw != nil {
+				t.Fatal("FileSubStore's buffer writer should be nil")
+			}
+		} else if bw == nil {
+			t.Fatal("FileSubStore's buffer writer should not be nil")
+		}
+		if size == 0 {
+			if writer != file {
+				t.Fatal("FileSubStore's writer should be set to file")
+			}
+		} else if writer != bw {
+			t.Fatal("FileSubStore's writer should be set to the buffer writer")
+		}
+		initialSize := size
+		if size > subBufMinShrinkSize {
+			initialSize = subBufMinShrinkSize
+		}
+		if bufSize != initialSize {
+			t.Fatalf("Incorrect initial size, should be %v, got %v", initialSize, bufSize)
+		}
+
+		// Fill up the buffer (meaningfull only when buffer is used)
+		expandBuffer := func() {
+			total := 0
+			for size > 0 {
+				ss.RLock()
+				before := ss.bw.Buffered()
+				ss.RUnlock()
+				storeSubPending(t, fs, "foo", subID, m.Sequence)
+				ss.RLock()
+				if ss.bw.Buffered() > before {
+					total += ss.bw.Buffered() - before
+				} else {
+					total += ss.bw.Buffered()
+				}
+				ss.RUnlock()
+				// Stop when we have persisted at least 2 times the max buffer size
+				if total >= 2*size {
+					// We should have caused buffer to be flushed by now
+					break
+				}
+			}
+		}
+		if size > 0 {
+			expandBuffer()
+		} else {
+			// Just write a bunch of stuff
+			for i := 0; i < 50; i++ {
+				storeSubPending(t, fs, "foo", subID, m.Sequence)
+			}
+		}
+
+		ss.RLock()
+		bufSize = ss.bufSize
+		ss.RUnlock()
+		if size == 0 {
+			if bufSize != 0 {
+				t.Fatalf("BufferSize is 0, so ss.bufSize should be 0, got %v", bufSize)
+			}
+		} else if size <= subBufMinShrinkSize {
+			// If size is smaller than min shrink size, the buffer should not have
+			// increased in size
+			if bufSize > subBufMinShrinkSize {
+				t.Fatalf("BufferSize=%v - ss.bw size should at or below %v, got %v", size, subBufMinShrinkSize, bufSize)
+			}
+		} else {
+			// We should have started at min size, and now size should have been increased.
+			if bufSize <= subBufMinShrinkSize || bufSize > size {
+				t.Fatalf("BufferSize=%v - ss.bw size should have increased but no more than %v, got %v", size, size, bufSize)
+			}
+		}
+
+		// Delete subscription
+		storeSubDelete(t, fs, "foo", subID)
+		// Compact
+		ss.Lock()
+		err := ss.compact()
+		ss.Unlock()
+		if err != nil {
+			t.Fatalf("Error during compact: %v", err)
+		}
+		ss.RLock()
+		bw = ss.bw
+		writer = ss.writer
+		file = ss.file
+		shrinkTimerOn := ss.shrinkTimer != nil
+		ss.RUnlock()
+		if size == 0 {
+			if bw != nil {
+				t.Fatal("FileSubStore's buffer writer should be nil")
+			}
+		} else if bw == nil {
+			t.Fatal("FileSubStore's buffer writer should not be nil")
+		}
+		if size == 0 {
+			if writer != file {
+				t.Fatal("FileSubStore's writer should be set to file")
+			}
+		} else if writer != bw {
+			t.Fatal("FileSubStore's writer should be set to the buffer writer")
+		}
+		// When buffer size is greater than min size, see if it shrinks
+		if size > subBufMinShrinkSize {
+			if !shrinkTimerOn {
+				t.Fatal("Timer should have been created to try shrink the buffer")
+			}
+			// Invoke the timer callback manually (so we don't have to wait)
+			// Call many times and make sure size never goes down too low.
+			for i := 0; i < 14; i++ {
+				ss.shrinkBuffer()
+			}
+			// Now check
+			ss.RLock()
+			bufSizeNow := ss.bufSize
+			ss.RUnlock()
+			if bufSizeNow >= bufSize {
+				t.Fatalf("BufferSize=%v - Buffer size expected to decrease, got: %v", size, bufSizeNow)
+			}
+			if bufSizeNow < subBufMinShrinkSize {
+				t.Fatalf("BufferSize=%v - Buffer should not go below %v, got %v", size, subBufMinShrinkSize, bufSizeNow)
+			}
+
+			// Check that the request to shrink is canceled if more data arrive
+			// First make buffer expand.
+			expandBuffer()
+			// Flush to empty it
+			ss.Flush()
+			// Invoke shrink
+			ss.shrinkBuffer()
+			// Check that request is set
+			ss.RLock()
+			shrinkReq := ss.shrinkReq
+			ss.RUnlock()
+			if !shrinkReq {
+				t.Fatal("Shrink request should be true")
+			}
+			// Cause buffer to expand again
+			expandBuffer()
+			// Check that request should have been cancelled.
+			ss.RLock()
+			shrinkReq = ss.shrinkReq
+			ss.RUnlock()
+			if shrinkReq {
+				t.Fatal("Shrink request should be false")
+			}
+		}
+		fs.Close()
+		cleanupDatastore(t, defaultDataStore)
 	}
 }
