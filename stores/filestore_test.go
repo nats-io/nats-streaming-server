@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"bufio"
 	"flag"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
@@ -1095,7 +1096,7 @@ func TestFSBadClientFile(t *testing.T) {
 	//
 	file = resetToValidFile()
 	// First write a valid addClient
-	writeRecord(file, nil, addClient, &cli, crc32.IEEETable)
+	writeRecord(file, nil, addClient, &cli, cli.Size(), crc32.IEEETable)
 	// Then write an invalid delClient
 	delCli := spb.ClientDelete{ID: clientID}
 	b, _ = delCli.Marshal()
@@ -2507,7 +2508,7 @@ func TestFSWriteRecord(t *testing.T) {
 	cli := &spb.ClientInfo{ID: "me", HbInbox: "inbox"}
 	cliBuf, _ := cli.Marshal()
 
-	retBuf, size, err = writeRecord(w, buf, addClient, cli, crc32.IEEETable)
+	retBuf, size, err = writeRecord(w, buf, addClient, cli, cli.Size(), crc32.IEEETable)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -2532,7 +2533,7 @@ func TestFSWriteRecord(t *testing.T) {
 
 	// Check with no type
 	w.reset()
-	retBuf, size, err = writeRecord(w, buf, recNoType, cli, crc32.IEEETable)
+	retBuf, size, err = writeRecord(w, buf, recNoType, cli, cli.Size(), crc32.IEEETable)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -2559,7 +2560,7 @@ func TestFSWriteRecord(t *testing.T) {
 	w.reset()
 	errReturned := fmt.Errorf("Fake error")
 	corruptRec := &recordProduceErrorOnMarshal{errToReturn: errReturned}
-	retBuf, size, err = writeRecord(w, buf, recNoType, corruptRec, crc32.IEEETable)
+	retBuf, size, err = writeRecord(w, buf, recNoType, corruptRec, corruptRec.Size(), crc32.IEEETable)
 	if err != errReturned {
 		t.Fatalf("Expected error %v, got %v", errReturned, err)
 	}
@@ -2572,42 +2573,38 @@ func TestFSWriteRecord(t *testing.T) {
 }
 
 func TestFSNoPartialWriteDueToBuffering(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	// We could use any record type here, using MsgProto
+	m1 := &pb.MsgProto{Sequence: 1, Subject: "foo", Data: []byte("msg1")}
+	m2 := &pb.MsgProto{Sequence: 2, Subject: "foo", Data: []byte("msg2")}
 
-	// Make this big enough so that msg payload (50%) with MsgProto overhead is
-	// less than the buffer size. As this time of writting, 100 works ok.
-	bufferSize := 100
-	s := createDefaultFileStore(t, BufferSize(bufferSize))
-	defer s.Close()
+	w := &testWriter{}
+	size := m1.Size() + recordHeaderSize + 2
+	bw := bufio.NewWriterSize(w, size)
 
-	// Write a message that is less than buffer size
-	msgSize := (bufferSize * 5) / 10
-	msg := make([]byte, msgSize)
-	for i := 0; i < len(msg); i++ {
-		msg[i] = byte('A' + (i % 26))
+	// Write first record
+	m1buf, _, _ := writeRecord(bw, nil, recNoType, m1, m1.Size(), crc32.IEEETable)
+	// Now add m2
+	writeRecord(bw, nil, recNoType, m2, m2.Size(), crc32.IEEETable)
+	// Check that w's buf only contains m2 (no partial)
+	if bw.Buffered() != m2.Size()+recordHeaderSize {
+		t.Fatalf("Expected buffer to contain %v bytes, got %v", m2.Size()+recordHeaderSize, bw.Buffered())
 	}
-	storeMsg(t, s, "foo", msg)
-	// Store 2nd message
-	storeMsg(t, s, "foo", msg)
-	// At this point manually close and remove the reference of the msg store file
-	// so that on file store close, no flush is done.
-	cs := s.LookupChannel("foo")
-	msgStore := cs.Msgs.(*FileMsgStore)
-	if err := msgStore.file.Close(); err != nil {
-		t.Fatalf("Error on close: %v", err)
+	if len(w.buf) != m1.Size()+recordHeaderSize {
+		t.Fatalf("Expected backend buffer to contain %v bytes, got %v", m1.Size()+recordHeaderSize, len(w.buf))
 	}
-	msgStore.file = nil
-	// Close the file store
-	s.Close()
-	// Reopen, there should be no error due to partials
-	s, _ = openDefaultFileStore(t)
-	defer s.Close()
-	// And there should be only 1 message
-	cs = s.LookupChannel("foo")
-	msgStore = cs.Msgs.(*FileMsgStore)
-	if n, _, _ := msgStore.State(); n != 1 {
-		t.Fatalf("Expected 1 message, got: %v", n)
+	if !reflect.DeepEqual(w.buf, m1buf) {
+		t.Fatal("Backend buffer does not contain what we expected")
+	}
+
+	w.reset()
+	errThrown := fmt.Errorf("On purpose")
+	w.setErrToReturn(errThrown)
+	// Write first record
+	writeRecord(bw, nil, recNoType, m1, m1.Size(), crc32.IEEETable)
+	// Now add m2
+	_, _, err := writeRecord(bw, nil, recNoType, m2, m2.Size(), crc32.IEEETable)
+	if err != errThrown {
+		t.Fatalf("Expected error %v, got %v", errThrown, err)
 	}
 }
 
@@ -2810,7 +2807,7 @@ func TestFSStoreMsgCausesFlush(t *testing.T) {
 	cs := fs.LookupChannel("foo")
 	ms := cs.Msgs.(*FileMsgStore)
 	ms.RLock()
-	buffered := ms.bw.Buffered()
+	buffered := ms.bw.buf.Buffered()
 	bufferedMsgs := len(ms.bufferedMsgs)
 	ms.RUnlock()
 	if buffered != m1.Size()+recordHeaderSize {
@@ -2822,7 +2819,7 @@ func TestFSStoreMsgCausesFlush(t *testing.T) {
 
 	m2 := storeMsg(t, fs, "foo", []byte("hello again!"))
 	ms.RLock()
-	buffered = ms.bw.Buffered()
+	buffered = ms.bw.buf.Buffered()
 	bufferedMsgs = len(ms.bufferedMsgs)
 	ms.RUnlock()
 	if buffered != m2.Size()+recordHeaderSize {
@@ -2837,7 +2834,7 @@ func TestFSStoreMsgCausesFlush(t *testing.T) {
 	payload := make([]byte, 200)
 	storeMsg(t, fs, "foo", payload)
 	ms.RLock()
-	buffered = ms.bw.Buffered()
+	buffered = ms.bw.buf.Buffered()
 	bufferedMsgs = len(ms.bufferedMsgs)
 	ms.RUnlock()
 	if buffered != 0 {
@@ -2910,7 +2907,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 		file := ss.file
 		bufSize := 0
 		if ss.bw != nil {
-			bufSize = ss.bw.Available()
+			bufSize = ss.bw.buf.Available()
 		}
 		ss.RUnlock()
 		if size == 0 {
@@ -2924,7 +2921,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 			if writer != file {
 				t.Fatal("FileSubStore's writer should be set to file")
 			}
-		} else if writer != bw {
+		} else if writer != bw.buf {
 			t.Fatal("FileSubStore's writer should be set to the buffer writer")
 		}
 		initialSize := size
@@ -2936,18 +2933,18 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 		}
 
 		// Fill up the buffer (meaningfull only when buffer is used)
-		expandBuffer := func() {
+		fillBuffer := func() {
 			total := 0
-			for size > 0 {
+			for i := 0; i < 1000; i++ {
 				ss.RLock()
-				before := ss.bw.Buffered()
+				before := ss.bw.buf.Buffered()
 				ss.RUnlock()
 				storeSubPending(t, fs, "foo", subID, m.Sequence)
 				ss.RLock()
-				if ss.bw.Buffered() > before {
-					total += ss.bw.Buffered() - before
+				if ss.bw.buf.Buffered() > before {
+					total += ss.bw.buf.Buffered() - before
 				} else {
-					total += ss.bw.Buffered()
+					total += ss.bw.buf.Buffered()
 				}
 				ss.RUnlock()
 				// Stop when we have persisted at least 2 times the max buffer size
@@ -2956,9 +2953,12 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 					break
 				}
 			}
+			if total < 2*size {
+				t.Fatalf("Did not reach target total (%v, got %v) after limit iterations", 2*size, total)
+			}
 		}
 		if size > 0 {
-			expandBuffer()
+			fillBuffer()
 		} else {
 			// Just write a bunch of stuff
 			for i := 0; i < 50; i++ {
@@ -2967,7 +2967,10 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 		}
 
 		ss.RLock()
-		bufSize = ss.bufSize
+		bufSize = 0
+		if size > 0 {
+			bufSize = ss.bw.bufSize
+		}
 		ss.RUnlock()
 		if size == 0 {
 			if bufSize != 0 {
@@ -3012,7 +3015,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 			if writer != file {
 				t.Fatal("FileSubStore's writer should be set to file")
 			}
-		} else if writer != bw {
+		} else if writer != bw.buf {
 			t.Fatal("FileSubStore's writer should be set to the buffer writer")
 		}
 		// When buffer size is greater than min size, see if it shrinks
@@ -3027,7 +3030,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 			}
 			// Now check
 			ss.RLock()
-			bufSizeNow := ss.bufSize
+			bufSizeNow := ss.bw.bufSize
 			ss.RUnlock()
 			if bufSizeNow >= bufSize {
 				t.Fatalf("BufferSize=%v - Buffer size expected to decrease, got: %v", size, bufSizeNow)
@@ -3038,24 +3041,185 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 
 			// Check that the request to shrink is canceled if more data arrive
 			// First make buffer expand.
-			expandBuffer()
+			fillBuffer()
 			// Flush to empty it
 			ss.Flush()
 			// Invoke shrink
 			ss.shrinkBuffer()
 			// Check that request is set
 			ss.RLock()
-			shrinkReq := ss.shrinkReq
+			shrinkReq := ss.bw.shrinkReq
 			ss.RUnlock()
 			if !shrinkReq {
 				t.Fatal("Shrink request should be true")
 			}
 			// Cause buffer to expand again
-			expandBuffer()
+			fillBuffer()
 			// Check that request should have been cancelled.
 			ss.RLock()
-			shrinkReq = ss.shrinkReq
+			shrinkReq = ss.bw.shrinkReq
 			ss.RUnlock()
+			if shrinkReq {
+				t.Fatal("Shrink request should be false")
+			}
+		}
+		fs.Close()
+		cleanupDatastore(t, defaultDataStore)
+	}
+}
+
+func TestFSMsgStoreVariousBufferSizes(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	sizes := []int{0, msgBufMinShrinkSize - msgBufMinShrinkSize/10, msgBufMinShrinkSize, 3*msgBufMinShrinkSize + msgBufMinShrinkSize/2}
+	for _, size := range sizes {
+
+		// Create a store with buffer writer of the given size
+		fs := createDefaultFileStore(t, BufferSize(size))
+		defer fs.Close()
+
+		storeMsg(t, fs, "foo", []byte("hello"))
+
+		// Get FileMsgStore
+		cs := fs.LookupChannel("foo")
+		ms := cs.Msgs.(*FileMsgStore)
+
+		// Cause a flush to empty the buffer
+		ms.Flush()
+
+		// Check that bw is not nil and writer points to the buffer writer
+		ms.RLock()
+		bw := ms.bw
+		writer := ms.writer
+		file := ms.file
+		bufSize := 0
+		if ms.bw != nil {
+			bufSize = ms.bw.buf.Available()
+		}
+		ms.RUnlock()
+		if size == 0 {
+			if bw != nil {
+				t.Fatal("FileMsgStore's buffer writer should be nil")
+			}
+		} else if bw == nil {
+			t.Fatal("FileMsgStore's buffer writer should not be nil")
+		}
+		if size == 0 {
+			if writer != file {
+				t.Fatal("FileMsgStore's writer should be set to file")
+			}
+		} else if writer != bw.buf {
+			t.Fatal("FileMsgStore's writer should be set to the buffer writer")
+		}
+		initialSize := size
+		if size > msgBufMinShrinkSize {
+			initialSize = msgBufMinShrinkSize
+		}
+		if bufSize != initialSize {
+			t.Fatalf("Incorrect initial size, should be %v, got %v", initialSize, bufSize)
+		}
+
+		// Fill up the buffer (meaningfull only when buffer is used)
+		fillBuffer := func() {
+			total := 0
+			for i := 0; i < 1000; i++ {
+				ms.RLock()
+				before := ms.bw.buf.Buffered()
+				ms.RUnlock()
+				storeMsg(t, fs, "foo", []byte("hello"))
+				ms.RLock()
+				if ms.bw.buf.Buffered() > before {
+					total += ms.bw.buf.Buffered() - before
+				} else {
+					total += ms.bw.buf.Buffered()
+				}
+				ms.RUnlock()
+				// Stop when we have persisted at least 2 times the max buffer size
+				if total >= 2*size {
+					// We should have caused buffer to be flushed by now
+					break
+				}
+			}
+			if total < 2*size {
+				t.Fatalf("Did not reach target total (%v, got %v) after limit iterations", 2*size, total)
+			}
+		}
+		if size > 0 {
+			fillBuffer()
+		} else {
+			// Just write a bunch of stuff
+			for i := 0; i < 50; i++ {
+				storeMsg(t, fs, "foo", []byte("hello"))
+			}
+		}
+
+		ms.RLock()
+		bufSize = 0
+		if size > 0 {
+			bufSize = ms.bw.bufSize
+		}
+		ms.RUnlock()
+		if size == 0 {
+			if bufSize != 0 {
+				t.Fatalf("BufferSize is 0, so ss.bufSize should be 0, got %v", bufSize)
+			}
+		} else if size < msgBufMinShrinkSize {
+			// If size is smaller than min shrink size, the buffer should not have
+			// increased in size
+			if bufSize > msgBufMinShrinkSize {
+				t.Fatalf("BufferSize=%v - ss.bw size should at or below %v, got %v", size, msgBufMinShrinkSize, bufSize)
+			}
+		} else {
+			// We should have started at min size, and now size should have been increased.
+			if bufSize < msgBufMinShrinkSize || bufSize > size {
+				t.Fatalf("BufferSize=%v - ss.bw size should have increased but no more than %v, got %v", size, size, bufSize)
+			}
+		}
+
+		// When buffer size is greater than min size, see if it shrinks
+		if size > msgBufMinShrinkSize {
+			// Invoke the timer callback manually (so we don't have to wait)
+			// Call many times and make sure size never goes down too low.
+			for i := 0; i < 14; i++ {
+				ms.Lock()
+				ms.bw.tryShrinkBuffer(ms.file)
+				ms.writer = ms.bw.buf
+				ms.Unlock()
+			}
+			// Now check
+			ms.RLock()
+			bufSizeNow := ms.bw.bufSize
+			ms.RUnlock()
+			if bufSizeNow >= bufSize {
+				t.Fatalf("Buffer size expected to decrease, got: %v", bufSizeNow)
+			}
+			if bufSizeNow < msgBufMinShrinkSize {
+				t.Fatalf("Buffer should not go below %v, got %v", msgBufMinShrinkSize, bufSizeNow)
+			}
+
+			// Check that the request to shrink is canceled if more data arrive
+			// First make buffer expand.
+			fillBuffer()
+			// Flush to empty it
+			ms.Flush()
+			// Invoke shrink
+			ms.Lock()
+			ms.bw.tryShrinkBuffer(ms.file)
+			ms.Unlock()
+			// Check that request is set
+			ms.RLock()
+			shrinkReq := ms.bw.shrinkReq
+			ms.RUnlock()
+			if !shrinkReq {
+				t.Fatal("Shrink request should be true")
+			}
+			// Cause buffer to expand again
+			fillBuffer()
+			// Check that request should have been cancelled.
+			ms.RLock()
+			shrinkReq = ms.bw.shrinkReq
+			ms.RUnlock()
 			if shrinkReq {
 				t.Fatal("Shrink request should be false")
 			}

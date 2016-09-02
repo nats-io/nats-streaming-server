@@ -54,14 +54,20 @@ const (
 	// Percentage of buffer usage to decide if the buffer should shrink
 	bufShrinkThreshold = 50
 
+	// Interval when to check/try to shrink buffer writers
+	bufShrinkTimerInterval = 5 * time.Second
+
 	// If FileStoreOption's BufferSize is > 0, the buffer writer is initially
 	// created with this size (unless this is > than BufferSize, in which case
 	// BufferSize is used). When possible, the buffer will shrink but not lower
 	// than this value. This is for FileSubStore's
 	subBufMinShrinkSize = 128
 
-	// Interval for the FileSubStore's shrink buffer timer callback
-	subShrinkTimerInterval = 5 * time.Second
+	// If FileStoreOption's BufferSize is > 0, the buffer writer is initially
+	// created with this size (unless this is > than BufferSize, in which case
+	// BufferSize is used). When possible, the buffer will shrink but not lower
+	// than this value. This is for FileMsgStore's
+	msgBufMinShrinkSize = 512
 )
 
 // FileStoreOption is a function on the options for a File Store
@@ -262,12 +268,20 @@ type subscription struct {
 	seqnos map[uint64]struct{}
 }
 
+type bufferedWriter struct {
+	buf           *bufio.Writer
+	bufSize       int  // current buffer size
+	minShrinkSize int  // minimum shrink size. Note that this can be bigger than maxSize (see setSizes)
+	maxSize       int  // maximum size the buffer can grow
+	shrinkReq     bool // used to decide if buffer should shrink
+}
+
 // FileSubStore is a subscription store in files.
 type FileSubStore struct {
 	genericSubStore
 	tmpSubBuf   []byte
 	file        *os.File
-	bw          *bufio.Writer
+	bw          *bufferedWriter
 	delSub      spb.SubStateDelete
 	updateSub   spb.SubStateUpdate
 	subs        map[uint64]*subscription
@@ -279,8 +293,6 @@ type FileSubStore struct {
 	rootDir     string
 	compactTS   time.Time
 	crcTable    *crc32.Table // reference to the one from FileStore
-	bufSize     int          // current buffer size of the buffer writer if one is used
-	shrinkReq   bool         // used to decide if the buffer should shrink
 	activity    bool         // was there any write between two flush calls
 	writer      io.Writer    // this is either `bw` or `file` depending if buffer writer is used or not
 	shrinkTimer *time.Timer  // timer associated with callback shrinking buffer when possible
@@ -315,10 +327,12 @@ type FileMsgStore struct {
 	tmpMsgBuf    []byte
 	file         *os.File
 	idxFile      *os.File
-	bw           *bufio.Writer
+	bw           *bufferedWriter
+	writer       io.Writer // this is `bw.buf` or `file` depending if buffer writer is used or not
 	files        [numFiles]*fileSlice
 	currSliceIdx int
 	fstore       *FileStore // pointers to file store object
+	cache        bool       // shortcut to fstore.opts.CacheMsgs
 	msgs         map[uint64]*msgRecord
 	wOffset      int64
 	firstMsg     *pb.MsgProto
@@ -326,6 +340,8 @@ type FileMsgStore struct {
 	bufferedMsgs []uint64
 	tasksTimer   *time.Timer // close file slices not recently used, etc...
 	timeTick     int64       // time captured in background task
+	lastShrink   int64       // last time we checked for opportunity to shrink
+	timerReset   bool
 	allDone      sync.WaitGroup
 }
 
@@ -387,9 +403,7 @@ func checkFileVersion(r io.Reader) error {
 // If a buffer is provided, this function uses it and expands it if necessary.
 // The function returns the buffer (possibly changed due to expansion) and the
 // number of bytes written into that buffer.
-func writeRecord(w io.Writer, buf []byte, recType recordType, rec record, crcTable *crc32.Table) ([]byte, int, error) {
-	// Size of record itself
-	recSize := rec.Size()
+func writeRecord(w io.Writer, buf []byte, recType recordType, rec record, recSize int, crcTable *crc32.Table) ([]byte, int, error) {
 	// This is the header + payload size
 	totalSize := recordHeaderSize + recSize
 	// Alloc or realloc as needed
@@ -468,6 +482,86 @@ func readRecord(r io.Reader, buf []byte, recTyped bool, crcTable *crc32.Table, c
 		}
 	}
 	return buf, recSize, recType, nil
+}
+
+// setSize sets the initial buffer size and keep track of min/max allowed sizes
+func newBufferWriter(minShrinkSize, maxSize int) *bufferedWriter {
+	w := &bufferedWriter{minShrinkSize: minShrinkSize, maxSize: maxSize}
+	w.bufSize = minShrinkSize
+	// The minSize is the minimum size the buffer can shrink to.
+	// However, if the given max size is smaller than the min
+	// shrink size, use that instead.
+	if maxSize < minShrinkSize {
+		w.bufSize = maxSize
+	}
+	return w
+}
+
+// createNewWriter creates a new buffer writer for `file` with
+// the bufferedWriter's current buffer size.
+func (w *bufferedWriter) createNewWriter(file *os.File) io.Writer {
+	w.buf = bufio.NewWriterSize(file, w.bufSize)
+	return w.buf
+}
+
+// expand the buffer (first flushing the buffer if not empty)
+func (w *bufferedWriter) expand(file *os.File) (io.Writer, error) {
+	// If there was a request to shrink the buffer, cancel that.
+	w.shrinkReq = false
+	// If there was something, flush first
+	if w.buf.Buffered() > 0 {
+		if err := w.buf.Flush(); err != nil {
+			return w.buf, err
+		}
+	}
+	// Double the size, but cap it.
+	w.bufSize *= 2
+	if w.bufSize > w.maxSize {
+		w.bufSize = w.maxSize
+	}
+	w.buf = bufio.NewWriterSize(file, w.bufSize)
+	return w.buf, nil
+}
+
+// tryShrinkBuffer checks and possibly shrinks the buffer
+func (w *bufferedWriter) tryShrinkBuffer(file *os.File) (io.Writer, error) {
+	// Nothing to do if we are already at the lowest
+	if w.bufSize == w.minShrinkSize {
+		return w.buf, nil
+	}
+
+	if !w.shrinkReq {
+		percentFilled := w.buf.Buffered() * 100 / w.bufSize
+		if percentFilled <= bufShrinkThreshold {
+			w.shrinkReq = true
+		}
+		// Wait for next tick to see if we can shrink
+		return w.buf, nil
+	}
+	if err := w.buf.Flush(); err != nil {
+		return w.buf, err
+	}
+	// Reduce size, but ensure it does not go below the limit
+	w.bufSize /= 2
+	if w.bufSize < w.minShrinkSize {
+		w.bufSize = w.minShrinkSize
+	}
+	w.buf = bufio.NewWriterSize(file, w.bufSize)
+	// Don't reset shrinkReq unless we are down to the limit
+	if w.bufSize == w.minShrinkSize {
+		w.shrinkReq = true
+	}
+	return w.buf, nil
+}
+
+// checkShrinkRequest checks how full the buffer is, and if is above a certain
+// threshold, cancels the shrink request
+func (w *bufferedWriter) checkShrinkRequest() {
+	percentFilled := w.buf.Buffered() * 100 / w.bufSize
+	// If above the threshold, cancel the request.
+	if percentFilled > bufShrinkThreshold {
+		w.shrinkReq = false
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -638,7 +732,7 @@ func (fs *FileStore) Init(info *spb.ServerInfo) error {
 		return err
 	}
 	// ServerInfo record is not typed. We also don't pass a reusable buffer.
-	if _, _, err := writeRecord(f, nil, recNoType, info, fs.crcTable); err != nil {
+	if _, _, err := writeRecord(f, nil, recNoType, info, info.Size(), fs.crcTable); err != nil {
 		return err
 	}
 	return nil
@@ -786,7 +880,7 @@ func (fs *FileStore) AddClient(clientID, hbInbox string, userData interface{}) (
 	}
 	fs.Lock()
 	fs.addClientRec = spb.ClientInfo{ID: clientID, HbInbox: hbInbox}
-	_, size, err := writeRecord(fs.clientsFile, nil, addClient, &fs.addClientRec, fs.crcTable)
+	_, size, err := writeRecord(fs.clientsFile, nil, addClient, &fs.addClientRec, fs.addClientRec.Size(), fs.crcTable)
 	if err != nil {
 		delete(fs.clients, clientID)
 		fs.Unlock()
@@ -803,7 +897,7 @@ func (fs *FileStore) DeleteClient(clientID string) *Client {
 	if sc != nil {
 		fs.Lock()
 		fs.delClientRec = spb.ClientDelete{ID: clientID}
-		_, size, _ := writeRecord(fs.clientsFile, nil, delClient, &fs.delClientRec, fs.crcTable)
+		_, size, _ := writeRecord(fs.clientsFile, nil, delClient, &fs.delClientRec, fs.delClientRec.Size(), fs.crcTable)
 		fs.cliDeleteRecs++
 		fs.cliFileSize += int64(size)
 		// Check if this triggers a need for compaction
@@ -862,7 +956,7 @@ func (fs *FileStore) compactClientFile() error {
 	// Dump the content of active clients into the temporary file.
 	for _, c := range fs.clients {
 		fs.addClientRec = spb.ClientInfo{ID: c.ID, HbInbox: c.HbInbox}
-		buf, size, err = writeRecord(bw, buf, addClient, &fs.addClientRec, fs.crcTable)
+		buf, size, err = writeRecord(bw, buf, addClient, &fs.addClientRec, fs.addClientRec.Size(), fs.crcTable)
 		if err != nil {
 			return err
 		}
@@ -969,9 +1063,14 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		msgs:         make(map[uint64]*msgRecord, 64),
 		wOffset:      int64(4), // The very first record starts after the file version record
 		bufferedMsgs: make([]uint64, 0, 1),
+		cache:        fs.opts.CacheMsgs,
 	}
 	ms.init(channel, fs.limits)
 
+	maxBufSize := fs.opts.BufferSize
+	if maxBufSize > 0 {
+		ms.bw = newBufferWriter(msgBufMinShrinkSize, maxBufSize)
+	}
 	done := false
 	for i := 0; err == nil && i < numFiles; i++ {
 		// Fully qualified file name.
@@ -1008,8 +1107,18 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 			done, err = ms.recoverOneMsgFile(useIdxFile, i)
 		}
 	}
+	if err == nil && maxBufSize > 0 {
+		ms.Lock()
+		ms.allDone.Add(1)
+		ms.tasksTimer = time.AfterFunc(time.Second, ms.backgroundTasks)
+		ms.Unlock()
+	}
 	// Cleanup on error
 	if err != nil {
+		// The buffer writer may not be fully set yet
+		if ms.bw != nil && ms.bw.buf == nil {
+			ms.bw = nil
+		}
 		ms.Close()
 		ms = nil
 		action := "create"
@@ -1054,10 +1163,10 @@ func (ms *FileMsgStore) closeDataAndIndexFiles() error {
 // setFile sets the current data and index file.
 // The buffered writer is recreated.
 func (ms *FileMsgStore) setFile(dataFile, idxFile *os.File) {
-	ms.bw = nil
 	ms.file = dataFile
-	if ms.file != nil {
-		ms.bw = bufio.NewWriterSize(ms.file, ms.fstore.opts.BufferSize)
+	ms.writer = ms.file
+	if ms.file != nil && ms.bw != nil {
+		ms.writer = ms.bw.createNewWriter(ms.file)
 	}
 	ms.idxFile = idxFile
 }
@@ -1113,7 +1222,7 @@ func (ms *FileMsgStore) recoverOneMsgFile(useIdxFile bool, numFile int) (bool, e
 		// Get these from the file store object
 		crcTable := ms.fstore.crcTable
 		doCRC := ms.fstore.opts.DoCRC
-		cache := ms.fstore.opts.CacheMsgs
+		cache := ms.cache
 
 		// We are going to write the index file while recovering the data file
 		bw := bufio.NewWriterSize(ms.idxFile, msgIndexRecSize*1000)
@@ -1291,51 +1400,50 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 		Timestamp: time.Now().UnixNano(),
 	}
 
-	cache := ms.fstore.opts.CacheMsgs
 	pinMsg := false
 
 	var recSize int
 	var err error
 
-	bufferedBeforeWrite := ms.bw.Buffered()
-	ms.tmpMsgBuf, recSize, err = writeRecord(ms.bw, ms.tmpMsgBuf, recNoType, m, ms.fstore.crcTable)
+	var bwBuf *bufio.Writer
+	if ms.bw != nil {
+		bwBuf = ms.bw.buf
+	}
+	msgSize := m.Size()
+	if bwBuf != nil {
+		if msgSize+recordHeaderSize > bwBuf.Available() {
+			ms.writer, err = ms.bw.expand(ms.file)
+			if err != nil {
+				return nil, err
+			}
+			if err := ms.processBufferedMsgs(); err != nil {
+				return nil, err
+			}
+			// Refresh this since it has changed.
+			bwBuf = ms.bw.buf
+		}
+	}
+	ms.tmpMsgBuf, recSize, err = writeRecord(ms.writer, ms.tmpMsgBuf, recNoType, m, msgSize, ms.fstore.crcTable)
 	if err != nil {
 		return nil, err
 	}
-	bufferedAfterWrite := ms.bw.Buffered()
-	msgSize := recSize - recordHeaderSize
-	// We need to know which messages where flushed on disk so we
-	// correctly update the index file.
-	// We know that writeRecord will flush the buffer if it can not fit
-	// the current record. We also know that bufio will not use the internal
-	// buffer if what we try to write is bigger than the bw capacity (bufio
-	// writes directly to the underlying writer).
-	// So, there are 3 outcomes for bufferedAfter:
-	// - > recSize:             pin current msg
-	// - recSize  : unpin all + pin current msg
-	// - 0		  : unpin all
-	if bufferedBeforeWrite > 0 && bufferedAfterWrite <= recSize {
-		bufPos := 0
-		// We need to add the current if it has been flushed to disk too.
-		oneMore := (bufferedAfterWrite == 0)
-		// Add all index records in tmpMsgBuf
-		ms.tmpMsgBuf, bufPos = ms.processBufferedMsgs(ms.tmpMsgBuf, oneMore)
-		// Add the current message if applicable
-		if oneMore {
-			ms.addIndex(ms.tmpMsgBuf[bufPos:], seq, ms.wOffset, m.Timestamp, msgSize)
-			bufPos += msgIndexRecSize
+	if bwBuf != nil {
+		// Check to see if we should cancel a buffer shrink request
+		if ms.bw.shrinkReq {
+			ms.bw.checkShrinkRequest()
 		}
-		// If there is something to write, do so now.
-		if bufPos > 0 {
-			if _, err := ms.idxFile.Write(ms.tmpMsgBuf[:bufPos]); err != nil {
-				return nil, err
-			}
+		// If message was added to the buffer we need to pin the message.
+		if bwBuf.Buffered() >= recSize {
+			ms.bufferedMsgs = append(ms.bufferedMsgs, seq)
+			pinMsg = true
 		}
 	}
-	// no else here...
-	if bufferedAfterWrite >= recSize {
-		ms.bufferedMsgs = append(ms.bufferedMsgs, seq)
-		pinMsg = true
+	// Message was flushed to disk, write corresponding index
+	if !pinMsg {
+		// No buffering, simply write index
+		if err := ms.writeIndex(ms.idxFile, seq, ms.wOffset, m.Timestamp, msgSize); err != nil {
+			return nil, err
+		}
 	}
 
 	if ms.first == 0 {
@@ -1346,7 +1454,7 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	ms.lastMsg = m
 	mrec := &msgRecord{offset: ms.wOffset, timestamp: m.Timestamp, msgSize: uint32(msgSize)}
 	ms.msgs[ms.last] = mrec
-	if cache || pinMsg {
+	if ms.cache || pinMsg {
 		mrec.msg = m
 	}
 	ms.wOffset += int64(recSize)
@@ -1373,30 +1481,32 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 }
 
 // processBufferedMsgs adds message index records in the given buffer
-// for every pending buffered messages. If `addOneMore` is true, the
-// returned buffer is big enough to accomodate another message index
-// record.
-func (ms *FileMsgStore) processBufferedMsgs(buf []byte, addOneMore bool) ([]byte, int) {
-	idxBufferSize := len(ms.bufferedMsgs) * msgIndexRecSize
-	if addOneMore {
-		idxBufferSize += msgIndexRecSize
+// for every pending buffered messages.
+func (ms *FileMsgStore) processBufferedMsgs() error {
+	if len(ms.bufferedMsgs) == 0 {
+		return nil
 	}
-	buf = util.EnsureBufBigEnough(buf, idxBufferSize)
+	idxBufferSize := len(ms.bufferedMsgs) * msgIndexRecSize
+	ms.tmpMsgBuf = util.EnsureBufBigEnough(ms.tmpMsgBuf, idxBufferSize)
 	bufOffset := 0
-	cache := ms.fstore.opts.CacheMsgs
 	for _, pseq := range ms.bufferedMsgs {
 		mrec := ms.msgs[pseq]
 		if mrec != nil {
 			// We add the index info for this flushed message
-			ms.addIndex(buf[bufOffset:], pseq, mrec.offset, mrec.timestamp, int(mrec.msgSize))
+			ms.addIndex(ms.tmpMsgBuf[bufOffset:], pseq, mrec.offset, mrec.timestamp, int(mrec.msgSize))
 			bufOffset += msgIndexRecSize
-			if !cache {
+			if !ms.cache {
 				mrec.msg = nil
 			}
 		}
 	}
+	if bufOffset > 0 {
+		if _, err := ms.idxFile.Write(ms.tmpMsgBuf[:bufOffset]); err != nil {
+			return err
+		}
+	}
 	ms.bufferedMsgs = ms.bufferedMsgs[:0]
-	return buf, bufOffset
+	return nil
 }
 
 // enforceLimits checks total counts with current msg store's limits,
@@ -1564,6 +1674,10 @@ func (ms *FileMsgStore) getFileForSeq(seq uint64) (*os.File, error) {
 					ms.allDone.Add(1)
 					ms.timeTick = time.Now().UnixNano()
 					ms.tasksTimer = time.AfterFunc(time.Second, ms.backgroundTasks)
+				} else if !ms.timerReset {
+					ms.timerReset = true
+					// Fire sooner than the regular interval
+					ms.tasksTimer.Reset(time.Second)
 				}
 			}
 			slice.lastUsed = ms.timeTick
@@ -1595,9 +1709,20 @@ func (ms *FileMsgStore) backgroundTasks() {
 			slice.file = nil
 		}
 	}
+	// Let the lookup know that if a file slice is opened,
+	// it should reset the timer to a shorter interval so this
+	// callback can close the files.
+	ms.timerReset = false
 
-	// Fire again..
-	ms.tasksTimer.Reset(time.Second)
+	// Shrink the buffer if applicable
+	if ms.bw != nil && time.Duration(ms.timeTick-ms.lastShrink) >= bufShrinkTimerInterval {
+		ms.lastShrink = ms.timeTick
+		ms.writer, _ = ms.bw.tryShrinkBuffer(ms.file)
+	}
+
+	// Fire again. Set it to the shrink buffer interval, if slices are opened,
+	// the timer will be reset to fire sooner.
+	ms.tasksTimer.Reset(bufShrinkTimerInterval)
 }
 
 // lookup returns the message for the given sequence number, possibly
@@ -1629,7 +1754,7 @@ func (ms *FileMsgStore) lookup(seq uint64) *pb.MsgProto {
 				return nil
 			}
 			// Cache if allowed
-			if ms.fstore.opts.CacheMsgs {
+			if ms.cache {
 				m.msg = msg
 			}
 		}
@@ -1725,19 +1850,12 @@ func (ms *FileMsgStore) Close() error {
 }
 
 func (ms *FileMsgStore) flush() error {
-	if ms.bw != nil && ms.bw.Buffered() > 0 {
-		if err := ms.bw.Flush(); err != nil {
+	if ms.bw != nil && ms.bw.buf.Buffered() > 0 {
+		if err := ms.bw.buf.Flush(); err != nil {
 			return err
 		}
-		// If there were pending buffered messages, they have now been
-		// written to disk, so we need to write the corresponding
-		// message index records.
-		bufPos := 0
-		ms.tmpMsgBuf, bufPos = ms.processBufferedMsgs(ms.tmpMsgBuf, false)
-		if bufPos > 0 {
-			if _, err := ms.idxFile.Write(ms.tmpMsgBuf[:bufPos]); err != nil {
-				return err
-			}
+		if err := ms.processBufferedMsgs(); err != nil {
+			return err
 		}
 	}
 	if ms.fstore.opts.DoSync {
@@ -1783,34 +1901,27 @@ func (fs *FileStore) newFileSubStore(channelDirName, channel string, doRecover b
 		return nil, err
 	}
 	maxBufSize := ss.opts.BufferSize
-	// Set ss.bufSize before calling ss.setWriter()
+	// This needs to be done before the call to ss.setWriter()
 	if maxBufSize > 0 {
-		// If BufferSize is big enough, start with a minimum
-		// buffer size. The buffer will grow as needed.
-		if maxBufSize >= subBufMinShrinkSize {
-			ss.bufSize = subBufMinShrinkSize
-		} else {
-			// Otherwise, use the size as given.
-			ss.bufSize = maxBufSize
-		}
+		ss.bw = newBufferWriter(subBufMinShrinkSize, maxBufSize)
 	}
-	// Grab the lock here to prevent possible shrinkTimer to start until we are done
-	ss.Lock()
 	ss.setWriter()
-	// Do not attempt to shrink unless the option is greater than the
-	// minimum shrinkable size.
-	if maxBufSize > subBufMinShrinkSize {
-		ss.allDone.Add(1)
-		ss.shrinkTimer = time.AfterFunc(subShrinkTimerInterval, ss.shrinkBuffer)
-	}
 	if doRecover {
 		if err := ss.recoverSubscriptions(); err != nil {
-			ss.Unlock()
 			ss.Close()
 			return nil, fmt.Errorf("unable to create subscription store for [%s]: %v", channel, err)
 		}
 	}
-	ss.Unlock()
+	// Do not attempt to shrink unless the option is greater than the
+	// minimum shrinkable size.
+	if maxBufSize > subBufMinShrinkSize {
+		// Use lock to avoid RACE report between setting shrinkTimer and
+		// execution of the callback itself.
+		ss.Lock()
+		ss.allDone.Add(1)
+		ss.shrinkTimer = time.AfterFunc(bufShrinkTimerInterval, ss.shrinkBuffer)
+		ss.Unlock()
+	}
 	return ss, nil
 }
 
@@ -1818,9 +1929,8 @@ func (fs *FileStore) newFileSubStore(channelDirName, channel string, doRecover b
 // based on store option.
 func (ss *FileSubStore) setWriter() {
 	ss.writer = ss.file
-	if ss.bufSize > 0 {
-		ss.bw = bufio.NewWriterSize(ss.file, ss.bufSize)
-		ss.writer = ss.bw
+	if ss.bw != nil {
+		ss.writer = ss.bw.createNewWriter(ss.file)
 	}
 }
 
@@ -1834,43 +1944,14 @@ func (ss *FileSubStore) shrinkBuffer() {
 		return
 	}
 
-	// Make the timer fire again with a defer since we have multiple returns.
-	defer func() {
-		ss.shrinkTimer.Reset(subShrinkTimerInterval)
-	}()
-
-	// Nothing to do if we are already at the lowest
-	if ss.bufSize == subBufMinShrinkSize {
-		return
-	}
-
-	if !ss.shrinkReq {
-		percentFilled := ss.bw.Buffered() * 100 / ss.bufSize
-		if percentFilled <= bufShrinkThreshold {
-			ss.shrinkReq = true
-		}
-		// We are requesting to shrink the buffer and will wait the next
-		// tick. If this request is still true, we will shrink, otherwise
-		// check again...
-		return
-	}
-	// If we get an error simply return here. The buffer (in bufio) memorizes
-	// the error so any other write/flush on that buffer will fail. We will get
-	// the error at the next "synchronous" operation where we can report back
+	// If error, the buffer (in bufio) memorizes the error
+	// so any other write/flush on that buffer will fail. We will get the
+	// error at the next "synchronous" operation where we can report back
 	// to the user.
-	if err := ss.bw.Flush(); err != nil {
-		return
-	}
-	ss.bufSize /= 2
-	if ss.bufSize < subBufMinShrinkSize {
-		ss.bufSize = subBufMinShrinkSize
-	}
-	ss.bw = bufio.NewWriterSize(ss.file, ss.bufSize)
-	ss.writer = ss.bw
-	// Don't reset shrinkReq to false unless we are down to minimum size.
-	if ss.bufSize == subBufMinShrinkSize {
-		ss.shrinkReq = false
-	}
+	ss.writer, _ = ss.bw.tryShrinkBuffer(ss.file)
+
+	// Fire again
+	ss.shrinkTimer.Reset(bufShrinkTimerInterval)
 }
 
 // recoverSubscriptions recovers subscriptions state for this store.
@@ -2191,41 +2272,32 @@ func (ss *FileSubStore) compact() error {
 func (ss *FileSubStore) writeRecord(w io.Writer, recType recordType, rec record) error {
 	var err error
 	totalSize := 0
+	recSize := rec.Size()
 
+	var bwBuf *bufio.Writer
+	if ss.bw != nil && w == ss.bw.buf {
+		bwBuf = ss.bw.buf
+	}
 	// If we are using the buffer writer on this call, and the buffer is
 	// not already at the max size...
-	if w == ss.bw && ss.bufSize != ss.opts.BufferSize {
+	if bwBuf != nil && ss.bw.bufSize != ss.opts.BufferSize {
 		// Check if record fits
-		if rec.Size()+recordHeaderSize > ss.bw.Available() {
-			// If there was a request to shrink the buffer, cancel that.
-			ss.shrinkReq = false
-			// If there was something, flush first
-			if ss.bw.Buffered() > 0 {
-				if err := ss.bw.Flush(); err != nil {
-					return err
-				}
+		if recSize+recordHeaderSize > bwBuf.Available() {
+			ss.writer, err = ss.bw.expand(ss.file)
+			if err != nil {
+				return err
 			}
-			// Double the size, but cap it.
-			ss.bufSize *= 2
-			if ss.bufSize > ss.opts.BufferSize {
-				ss.bufSize = ss.opts.BufferSize
-			}
-			ss.bw = bufio.NewWriterSize(ss.file, ss.bufSize)
-			ss.writer = ss.bw
 			// `w` is used in this function, so point it to the new buffer
-			w = ss.bw
+			bwBuf = ss.bw.buf
+			w = bwBuf
 		}
 	}
-	ss.tmpSubBuf, totalSize, err = writeRecord(w, ss.tmpSubBuf, recType, rec, ss.crcTable)
+	ss.tmpSubBuf, totalSize, err = writeRecord(w, ss.tmpSubBuf, recType, rec, recSize, ss.crcTable)
 	if err != nil {
 		return err
 	}
-	if ss.shrinkReq {
-		percentFilled := ss.bw.Buffered() * 100 / ss.bufSize
-		// If above the threshold, cancel the request.
-		if percentFilled > bufShrinkThreshold {
-			ss.shrinkReq = false
-		}
+	if bwBuf != nil && ss.bw.shrinkReq {
+		ss.bw.checkShrinkRequest()
 	}
 	// Indicate that we wrote something to the buffer/file
 	ss.activity = true
@@ -2257,8 +2329,8 @@ func (ss *FileSubStore) flush() error {
 	}
 	// Reset this now
 	ss.activity = false
-	if ss.bw != nil {
-		if err := ss.bw.Flush(); err != nil {
+	if ss.bw != nil && ss.bw.buf.Buffered() > 0 {
+		if err := ss.bw.buf.Flush(); err != nil {
 			return err
 		}
 	}
