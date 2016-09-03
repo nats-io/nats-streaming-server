@@ -189,8 +189,8 @@ type MsgStore interface {
 	// State returns some statistics related to this store.
 	State() (numMessages int, byteSize uint64, err error)
 
-	// Store stores a message.
-	Store(reply string, data []byte) (*pb.MsgProto, error)
+	// Store stores a message and returns the message sequence.
+	Store(data []byte) (uint64, error)
 
 	// Lookup returns the stored message with given sequence number.
 	Lookup(seq uint64) *pb.MsgProto

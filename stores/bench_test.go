@@ -34,11 +34,11 @@ func benchCreateDefaultFileStore(t *testing.B) *FileStore {
 }
 
 func benchStoreMsg(b *testing.B, ms MsgStore, data []byte) *pb.MsgProto {
-	m, err := ms.Store("", data)
+	seq, err := ms.Store(data)
 	if err != nil {
 		stackFatalf(b, "Error storing message: %v", err)
 	}
-	return m
+	return ms.Lookup(seq)
 }
 
 func BenchmarkRecoverMsgs(b *testing.B) {

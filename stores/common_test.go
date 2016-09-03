@@ -61,11 +61,11 @@ func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
 		}
 	}
 	ms := cs.Msgs
-	m, err := ms.Store("", data)
+	seq, err := ms.Store(data)
 	if err != nil {
 		stackFatalf(t, "Error storing message into channel [%v]: %v", channel, err)
 	}
-	return m
+	return ms.Lookup(seq)
 }
 
 func storeSub(t *testing.T, s Store, channel string) uint64 {
@@ -616,7 +616,7 @@ func testFlush(t *testing.T, s Store) {
 	if err != nil {
 		t.Fatalf("Unexpected error creating channel: %v", err)
 	}
-	msg, err := cs.Msgs.Store("", []byte("hello"))
+	seq, err := cs.Msgs.Store([]byte("hello"))
 	if err != nil {
 		t.Fatalf("Unexpected error on store: %v", err)
 	}
@@ -627,7 +627,7 @@ func testFlush(t *testing.T, s Store) {
 	if err := cs.Subs.CreateSub(&sub); err != nil {
 		t.Fatalf("Unexpected error creating sub: %v", err)
 	}
-	if err := cs.Subs.AddSeqPending(sub.ID, msg.Sequence); err != nil {
+	if err := cs.Subs.AddSeqPending(sub.ID, seq); err != nil {
 		t.Fatalf("Unexpected error adding sequence to substore: %v", err)
 	}
 	if err := cs.Subs.Flush(); err != nil {

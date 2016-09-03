@@ -1880,7 +1880,7 @@ func (s *StanServer) assignAndStore(pm *pb.PubMsg) (*stores.ChannelStore, error)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := cs.Msgs.Store(pm.Reply, pm.Data); err != nil {
+	if _, err := cs.Msgs.Store(pm.Data); err != nil {
 		return nil, err
 	}
 	return cs, nil

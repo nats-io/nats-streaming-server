@@ -1360,7 +1360,7 @@ func (ms *FileMsgStore) readIndex(r io.Reader) (uint64, *msgRecord, error) {
 }
 
 // Store a given message.
-func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
+func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	ms.Lock()
 	defer ms.Unlock()
 
@@ -1379,13 +1379,13 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 
 			// Close the file and open the next slice
 			if err := ms.closeDataAndIndexFiles(); err != nil {
-				return nil, err
+				return 0, err
 			}
 			// Open the new slice
 			if err := ms.openDataAndIndexFiles(
 				ms.files[nextSlice].fileName,
 				ms.files[nextSlice].idxFName); err != nil {
-				return nil, err
+				return 0, err
 			}
 			// Success, update the store's variables
 			ms.currSliceIdx = nextSlice
@@ -1399,7 +1399,6 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	m := &pb.MsgProto{
 		Sequence:  seq,
 		Subject:   ms.subject,
-		Reply:     reply,
 		Data:      data,
 		Timestamp: time.Now().UnixNano(),
 	}
@@ -1418,10 +1417,10 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 		if msgSize+recordHeaderSize > bwBuf.Available() {
 			ms.writer, err = ms.bw.expand(ms.file)
 			if err != nil {
-				return nil, err
+				return 0, err
 			}
 			if err := ms.processBufferedMsgs(); err != nil {
-				return nil, err
+				return 0, err
 			}
 			// Refresh this since it has changed.
 			bwBuf = ms.bw.buf
@@ -1429,7 +1428,7 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	}
 	ms.tmpMsgBuf, recSize, err = writeRecord(ms.writer, ms.tmpMsgBuf, recNoType, m, msgSize, ms.fstore.crcTable)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	if bwBuf != nil {
 		// Check to see if we should cancel a buffer shrink request
@@ -1446,7 +1445,7 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	if !pinMsg {
 		// No buffering, simply write index
 		if err := ms.writeIndex(ms.idxFile, seq, ms.wOffset, m.Timestamp, msgSize); err != nil {
-			return nil, err
+			return 0, err
 		}
 	}
 
@@ -1480,10 +1479,10 @@ func (ms *FileMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
 	if maxMsgs > 0 || maxBytes > 0 {
 		// Enfore limits and update file slice if needed.
 		if err := ms.enforceLimits(); err != nil {
-			return nil, err
+			return 0, err
 		}
 	}
-	return m, nil
+	return seq, nil
 }
 
 // processBufferedMsgs adds message index records in the given buffer

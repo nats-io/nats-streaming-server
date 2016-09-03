@@ -74,7 +74,7 @@ func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*Cha
 ////////////////////////////////////////////////////////////////////////////
 
 // Store a given message.
-func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error) {
+func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
 	ms.Lock()
 	defer ms.Unlock()
 
@@ -85,7 +85,6 @@ func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error)
 	m := &pb.MsgProto{
 		Sequence:  ms.last,
 		Subject:   ms.subject,
-		Reply:     reply,
 		Data:      data,
 		Timestamp: time.Now().UnixNano(),
 	}
@@ -112,7 +111,7 @@ func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error)
 		}
 	}
 
-	return m, nil
+	return ms.last, nil
 }
 
 // Lookup returns the stored message with given sequence number.
