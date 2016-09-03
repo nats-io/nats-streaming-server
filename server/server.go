@@ -473,7 +473,7 @@ type Options struct {
 	FileStoreOpts    stores.FileStoreOptions
 	MaxChannels      int
 	MaxMsgs          int    // Maximum number of messages per channel
-	MaxBytes         uint64 // Maximum number of bytes used by messages per channel
+	MaxBytes         int64  // Maximum number of bytes used by messages per channel
 	MaxSubscriptions int    // Maximum number of subscriptions per channel
 	Trace            bool   // Verbose trace
 	Debug            bool   // Debug trace
@@ -774,7 +774,11 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	}
 
 	Noticef("STAN: Message store is %s", s.store.Name())
-	Noticef("STAN: Maximum of %d will be stored", limits.MaxNumMsgs)
+	if limits.MaxNumMsgs > 0 {
+		Noticef("STAN: Maximum of %d will be stored", limits.MaxNumMsgs)
+	} else {
+		Noticef("STAN: No limit in number of messages stored")
+	}
 
 	// Execute (in a go routine) redelivery of unacknowledged messages,
 	// and release newOnHold

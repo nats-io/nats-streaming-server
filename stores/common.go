@@ -3,9 +3,9 @@
 package stores
 
 import (
+	"fmt"
 	"sync"
 
-	"fmt"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 )
@@ -140,7 +140,7 @@ func (gs *genericStore) MsgsState(channel string) (numMessages int, byteSize uin
 // canAddChannel returns true if the current number of channels is below the limit.
 // Store lock is assumed to be locked.
 func (gs *genericStore) canAddChannel() error {
-	if len(gs.channels) >= gs.limits.MaxChannels {
+	if gs.limits.MaxChannels > 0 && len(gs.channels) >= gs.limits.MaxChannels {
 		return ErrTooManyChannels
 	}
 	return nil
@@ -332,7 +332,7 @@ func (gss *genericSubStore) UpdateSub(sub *spb.SubState) error {
 // createSub is the unlocked version of CreateSub that can be used by
 // non-generic implementations.
 func (gss *genericSubStore) createSub(sub *spb.SubState) error {
-	if gss.subsCount >= gss.limits.MaxSubs {
+	if gss.limits.MaxSubs > 0 && gss.subsCount >= gss.limits.MaxSubs {
 		return ErrTooManySubs
 	}
 

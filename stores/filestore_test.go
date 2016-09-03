@@ -3,6 +3,8 @@
 package stores
 
 import (
+	"bufio"
+	"flag"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -14,8 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"bufio"
-	"flag"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
@@ -700,6 +700,13 @@ func TestFSMaxChannels(t *testing.T) {
 	fs.SetChannelLimits(limits)
 
 	testMaxChannels(t, fs, limitCount)
+
+	// Set the limit to 0
+	limits.MaxChannels = 0
+	fs.SetChannelLimits(limits)
+	// Now try to test the limit against
+	// any value, it should not fail
+	testMaxChannels(t, fs, 0)
 }
 
 func TestFSMaxSubs(t *testing.T) {
@@ -716,7 +723,14 @@ func TestFSMaxSubs(t *testing.T) {
 
 	fs.SetChannelLimits(limits)
 
-	testMaxSubs(t, fs, limitCount)
+	testMaxSubs(t, fs, "foo", limitCount)
+
+	// Set the limit to 0
+	limits.MaxSubs = 0
+	fs.SetChannelLimits(limits)
+	// Now try to test the limit against
+	// any value, it should not fail
+	testMaxSubs(t, fs, "bar", 0)
 }
 
 func TestFSBasicSubStore(t *testing.T) {

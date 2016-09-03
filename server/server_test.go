@@ -1264,7 +1264,7 @@ func TestMaxBytes(t *testing.T) {
 	msgSize := m.Size()
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
-	sOpts.MaxBytes = uint64(msgSize * 10)
+	sOpts.MaxBytes = int64(msgSize * 10)
 	s := RunServerWithOpts(sOpts, nil)
 	defer s.Shutdown()
 
@@ -1285,7 +1285,7 @@ func TestMaxBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error getting state: %v", err)
 	}
-	if b != sOpts.MaxBytes {
+	if b != uint64(sOpts.MaxBytes) {
 		t.Fatalf("Expected msgs size to be %v, got %v", sOpts.MaxBytes, b)
 	}
 }

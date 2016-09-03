@@ -4,12 +4,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"runtime"
 	"strings"
-
-	"fmt"
 
 	natsd "github.com/nats-io/gnatsd/server"
 	stand "github.com/nats-io/nats-streaming-server/server"
@@ -117,14 +116,14 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.StringVar(&stanOpts.StoreType, "store", stores.TypeMemory, fmt.Sprintf("Store type: (%s|%s)", stores.TypeMemory, stores.TypeFile))
 	flag.StringVar(&stanOpts.StoreType, "st", stores.TypeMemory, fmt.Sprintf("Store type: (%s|%s)", stores.TypeMemory, stores.TypeFile))
 	flag.StringVar(&stanOpts.FilestoreDir, "dir", "", "Root directory")
-	flag.IntVar(&stanOpts.MaxChannels, "max_channels", stand.DefaultChannelLimit, "Max number of channels")
-	flag.IntVar(&stanOpts.MaxChannels, "mc", stand.DefaultChannelLimit, "Max number of channels")
-	flag.IntVar(&stanOpts.MaxSubscriptions, "max_subs", stand.DefaultSubStoreLimit, "Max number of subscriptions per channel")
-	flag.IntVar(&stanOpts.MaxSubscriptions, "msu", stand.DefaultSubStoreLimit, "Max number of subscriptions per channel")
-	flag.IntVar(&stanOpts.MaxMsgs, "max_msgs", stand.DefaultMsgStoreLimit, "Max number of messages per channel")
-	flag.IntVar(&stanOpts.MaxMsgs, "mm", stand.DefaultMsgStoreLimit, "Max number of messages per channel")
-	flag.Uint64Var(&stanOpts.MaxBytes, "max_bytes", stand.DefaultMsgSizeStoreLimit, "Max messages total size per channel")
-	flag.Uint64Var(&stanOpts.MaxBytes, "mb", stand.DefaultMsgSizeStoreLimit, "Max messages total size per channel")
+	flag.IntVar(&stanOpts.MaxChannels, "max_channels", stand.DefaultChannelLimit, "Max number of channels (-1 for unlimited)")
+	flag.IntVar(&stanOpts.MaxChannels, "mc", stand.DefaultChannelLimit, "Max number of channels (-1 for unlimited)")
+	flag.IntVar(&stanOpts.MaxSubscriptions, "max_subs", stand.DefaultSubStoreLimit, "Max number of subscriptions per channel (-1 for unlimited)")
+	flag.IntVar(&stanOpts.MaxSubscriptions, "msu", stand.DefaultSubStoreLimit, "Max number of subscriptions per channel (-1 for unlimited)")
+	flag.IntVar(&stanOpts.MaxMsgs, "max_msgs", stand.DefaultMsgStoreLimit, "Max number of messages per channel (-1 for unlimited)")
+	flag.IntVar(&stanOpts.MaxMsgs, "mm", stand.DefaultMsgStoreLimit, "Max number of messages per channel (-1 for unlimited)")
+	flag.Int64Var(&stanOpts.MaxBytes, "max_bytes", stand.DefaultMsgSizeStoreLimit, "Max messages total size per channel (-1 for unlimited)")
+	flag.Int64Var(&stanOpts.MaxBytes, "mb", stand.DefaultMsgSizeStoreLimit, "Max messages total size per channel (-1 for unlimited)")
 	flag.BoolVar(&stanOpts.Debug, "SD", false, "Enable STAN Debug logging.")
 	flag.BoolVar(&stanOpts.Debug, "stan_debug", false, "Enable STAN Debug logging.")
 	flag.BoolVar(&stanOpts.Trace, "SV", false, "Enable STAN Trace logging.")

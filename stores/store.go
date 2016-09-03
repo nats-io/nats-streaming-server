@@ -41,7 +41,7 @@ type ChannelLimits struct {
 	// How many messages per channel are allowed.
 	MaxNumMsgs int
 	// How many bytes (messages payloads) per channel are allowed.
-	MaxMsgBytes uint64
+	MaxMsgBytes int64
 	// How old messages on a channel can be before being removed.
 	MaxMsgAge time.Duration
 	// How many subscriptions per channel are allowed.

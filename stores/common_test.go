@@ -326,7 +326,7 @@ func testMaxMsgs(t *testing.T, s Store) {
 
 	limits := testDefaultChannelLimits
 	limits.MaxNumMsgs = limitCount
-	limits.MaxMsgBytes = uint64(expectedBytes)
+	limits.MaxMsgBytes = int64(expectedBytes)
 
 	s.SetChannelLimits(limits)
 
@@ -375,45 +375,116 @@ func testMaxMsgs(t *testing.T, s Store) {
 	if count != 1 || bytes != expectedBytes || err != nil {
 		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, expectedBytes, err)
 	}
+
+	// Test that we check only on non-zero limits
+	expectedCount := 10
+	expectedBytes = uint64(0)
+	channelName := "maxcount"
+	for i := 0; i < expectedCount; i++ {
+		seq := uint64(i + 1)
+		m := pb.MsgProto{Data: payload, Subject: channelName, Sequence: seq, Timestamp: time.Now().UnixNano()}
+		expectedBytes += uint64(m.Size())
+	}
+	limits.MaxNumMsgs = expectedCount
+	limits.MaxMsgBytes = 0
+	s.SetChannelLimits(limits)
+	for i := 0; i < expectedCount+10; i++ {
+		storeMsg(t, s, channelName, payload)
+	}
+	n, b, err := s.MsgsState(channelName)
+	if err != nil {
+		t.Fatalf("Unexpected error on MsgsState: %v", err)
+	}
+	if n != expectedCount {
+		t.Fatalf("Expected %v messages, got %v", expectedCount, n)
+	}
+	if b != expectedBytes {
+		t.Fatalf("Expected %v bytes, got %v", expectedBytes, b)
+	}
+
+	expectedCount = 0
+	expectedBytes = uint64(0)
+	channelName = "maxbytes"
+	for i := 0; ; i++ {
+		seq := uint64(i + 1)
+		m := pb.MsgProto{Data: payload, Subject: channelName, Sequence: seq, Timestamp: time.Now().UnixNano()}
+		expectedBytes += uint64(m.Size())
+		expectedCount++
+		if expectedBytes >= 1000 {
+			break
+		}
+	}
+	limits.MaxNumMsgs = 0
+	limits.MaxMsgBytes = int64(expectedBytes)
+	s.SetChannelLimits(limits)
+	for i := 0; i < expectedCount+10; i++ {
+		storeMsg(t, s, channelName, payload)
+	}
+	n, b, err = s.MsgsState(channelName)
+	if err != nil {
+		t.Fatalf("Unexpected error on MsgsState: %v", err)
+	}
+	if n != expectedCount {
+		t.Fatalf("Expected %d messages, got %v", expectedCount, n)
+	}
+	if b != expectedBytes {
+		t.Fatalf("Expected %v bytes, got %v", expectedBytes, b)
+	}
 }
 
 func testMaxChannels(t *testing.T, s Store, maxChannels int) {
+	total := maxChannels + 1
+	if maxChannels == 0 {
+		total = 10
+	}
 	var err error
 	numCh := 0
-	for i := 0; i < maxChannels+1; i++ {
+	for i := 0; i < total; i++ {
 		_, _, err = s.CreateChannel(fmt.Sprintf("foo.%d", i), nil)
 		if err != nil {
 			break
 		}
 		numCh++
 	}
-	if err == nil || err != ErrTooManyChannels {
-		t.Fatalf("Error should have been ErrTooManyChannels, got %v", err)
-	}
-	if numCh != maxChannels {
-		t.Fatalf("Wrong number of channels: %v vs %v", numCh, maxChannels)
+	if maxChannels == 0 && err != nil {
+		t.Fatalf("Should not have failed, got %v", err)
+	} else if maxChannels > 0 {
+		if err == nil || err != ErrTooManyChannels {
+			t.Fatalf("Error should have been ErrTooManyChannels, got %v", err)
+		}
+		if numCh != maxChannels {
+			t.Fatalf("Wrong number of channels: %v vs %v", numCh, maxChannels)
+		}
 	}
 }
 
-func testMaxSubs(t *testing.T, s Store, maxSubs int) {
-	cs, _, err := s.CreateChannel("foo", nil)
+func testMaxSubs(t *testing.T, s Store, channel string, maxSubs int) {
+	total := maxSubs + 1
+	if maxSubs == 0 {
+		total = 10
+	}
+	cs, _, err := s.CreateChannel(channel, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error creating channel: %v", err)
 	}
 	sub := &spb.SubState{}
 	numSubs := 0
-	for i := 0; i < maxSubs+1; i++ {
+	for i := 0; i < total; i++ {
 		err = cs.Subs.CreateSub(sub)
 		if err != nil {
 			break
 		}
 		numSubs++
 	}
-	if err == nil || err != ErrTooManySubs {
-		t.Fatalf("Error should have been ErrTooManySubs, got %v", err)
-	}
-	if numSubs != maxSubs {
-		t.Fatalf("Wrong number of subs: %v vs %v", numSubs, maxSubs)
+	if maxSubs == 0 && err != nil {
+		t.Fatalf("Should not have failed, got %v", err)
+	} else if maxSubs > 0 {
+		if err == nil || err != ErrTooManySubs {
+			t.Fatalf("Error should have been ErrTooManySubs, got %v", err)
+		}
+		if numSubs != maxSubs {
+			t.Fatalf("Wrong number of subs: %v vs %v", numSubs, maxSubs)
+		}
 	}
 }
 

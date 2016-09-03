@@ -3,10 +3,10 @@
 package stores
 
 import (
+	"sort"
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
-	"sort"
 )
 
 // MemoryStore is a factory for message and subscription stores.
@@ -94,17 +94,22 @@ func (ms *MemoryMsgStore) Store(reply string, data []byte) (*pb.MsgProto, error)
 	ms.totalBytes += uint64(m.Size())
 
 	// Check if we need to remove any (but leave at least the last added)
-	for ms.totalCount > ms.limits.MaxNumMsgs ||
-		((ms.totalCount > 1) && (ms.totalBytes > ms.limits.MaxMsgBytes)) {
-		firstMsg := ms.msgs[ms.first]
-		ms.totalBytes -= uint64(firstMsg.Size())
-		ms.totalCount--
-		if !ms.hitLimit {
-			ms.hitLimit = true
-			Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxNumMsgs, ms.totalBytes, ms.limits.MaxMsgBytes)
+	maxMsgs := ms.limits.MaxNumMsgs
+	maxBytes := ms.limits.MaxMsgBytes
+	if maxMsgs > 0 || maxBytes > 0 {
+		for ms.totalCount > 1 &&
+			((maxMsgs > 0 && ms.totalCount > maxMsgs) ||
+				(maxBytes > 0 && (ms.totalBytes > uint64(maxBytes)))) {
+			firstMsg := ms.msgs[ms.first]
+			ms.totalBytes -= uint64(firstMsg.Size())
+			ms.totalCount--
+			if !ms.hitLimit {
+				ms.hitLimit = true
+				Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxNumMsgs, ms.totalBytes, ms.limits.MaxMsgBytes)
+			}
+			delete(ms.msgs, ms.first)
+			ms.first++
 		}
-		delete(ms.msgs, ms.first)
-		ms.first++
 	}
 
 	return m, nil

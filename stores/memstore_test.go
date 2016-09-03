@@ -111,6 +111,13 @@ func TestMSMaxChannels(t *testing.T) {
 	ms.SetChannelLimits(limits)
 
 	testMaxChannels(t, ms, limitCount)
+
+	// Set the limit to 0
+	limits.MaxChannels = 0
+	ms.SetChannelLimits(limits)
+	// Now try to test the limit against
+	// any value, it should not fail
+	testMaxChannels(t, ms, 0)
 }
 
 func TestMSMaxSubs(t *testing.T) {
@@ -124,7 +131,14 @@ func TestMSMaxSubs(t *testing.T) {
 
 	ms.SetChannelLimits(limits)
 
-	testMaxSubs(t, ms, limitCount)
+	testMaxSubs(t, ms, "foo", limitCount)
+
+	// Set the limit to 0
+	limits.MaxSubs = 0
+	ms.SetChannelLimits(limits)
+	// Now try to test the limit against
+	// any value, it should not fail
+	testMaxSubs(t, ms, "bar", 0)
 }
 
 func TestMSBasicSubStore(t *testing.T) {
