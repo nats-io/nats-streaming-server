@@ -2005,12 +2005,12 @@ func (s *StanServer) sendSubscriptionResponseErr(reply string, err error) {
 
 // Check for valid subjects
 func isValidSubject(subject string) bool {
-	tokens := strings.Split(subject, ".")
-	if len(tokens) == 0 {
+	if subject == "" {
 		return false
 	}
-	for _, token := range tokens {
-		if strings.ContainsAny(token, ">*") {
+	for i := 0; i < len(subject); i++ {
+		c := subject[i]
+		if c == '*' || c == '>' {
 			return false
 		}
 	}
