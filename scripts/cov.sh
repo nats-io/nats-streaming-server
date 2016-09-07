@@ -5,8 +5,9 @@ rm -rf ./cov
 mkdir cov
 go test -v -covermode=atomic -coverprofile=./cov/server.out ./server
 go test -v -covermode=atomic -coverprofile=./cov/stores.out ./stores
-go test -v -covermode=atomic -coverprofile=./cov/stores_nocaching.out -run=TestFS ./stores -no_cache
-go test -v -covermode=atomic -coverprofile=./cov/stores_nobuffer.out -run=TestFS ./stores -no_buffer
+go test -v -covermode=atomic -coverprofile=./cov/stores_no_cache.out -run=TestFS ./stores -no_cache
+go test -v -covermode=atomic -coverprofile=./cov/stores_no_buffer.out -run=TestFS ./stores -no_buffer
+go test -v -covermode=atomic -coverprofile=./cov/stores_no_cache_buffer.out -run=TestFS ./stores -no_cache -no_buffer
 go test -v -covermode=atomic -coverprofile=./cov/util.out ./util
 gocovmerge ./cov/*.out > acc.out
 rm -rf ./cov

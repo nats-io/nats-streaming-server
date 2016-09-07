@@ -246,12 +246,12 @@ func testBasicMsgStore(t *testing.T, s Store) {
 		t.Fatalf("Unexpected payload: %v", string(m1.Data))
 	}
 
-	if ms.FirstMsg() != m1 {
+	if !reflect.DeepEqual(ms.FirstMsg(), m1) {
 		t.Fatalf("Unexpected first message: %v vs %v", ms.FirstMsg(), m1)
 	}
 
-	if ms.LastMsg() != m2 {
-		t.Fatalf("Unexpected first message: %v vs %v", ms.LastMsg(), m2)
+	if !reflect.DeepEqual(ms.LastMsg(), m2) {
+		t.Fatalf("Unexpected last message: %v vs %v", ms.LastMsg(), m2)
 	}
 
 	if ms.FirstSequence() != m1.Sequence {
@@ -283,6 +283,12 @@ func testBasicMsgStore(t *testing.T, s Store) {
 	expectedBytes := uint64(m1.Size() + m2.Size())
 	if count != 2 || bytes != expectedBytes {
 		t.Fatalf("Unexpected counts: %v, %v vs %v, %v", count, bytes, 2, expectedBytes)
+	}
+
+	// Store one more mesasge to check that LastMsg is correctly updated
+	m3 := storeMsg(t, s, "foo", []byte("last"))
+	if !reflect.DeepEqual(ms.LastMsg(), m3) {
+		t.Fatalf("Expected last message to be %v, got %v", m3, ms.LastMsg())
 	}
 }
 
