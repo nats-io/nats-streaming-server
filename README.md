@@ -140,21 +140,25 @@ While there are several TLS related parameters to the streaming server, securing
 That means two sets of TLS configuration parameters must be used:  TLS server parameters for the embedded NATS server, and TLS client parameters for the streaming server itself.
 
 The streaming server specifies it's TLS client certificates with the following three parameters:
+```    
     -tls_client_key              Client key for the streaming server
 
     -tls_client_cert             Client certificate for the streaming server
 
     -tls_client_cacert           Client certificate CA for the streaming server
+```
 
 These could be the same certificates used with your NATS streaming clients.
 
 The embedded NATS server specifies TLS server certificates with these:
 
+```
         --tlscert <file>             Server certificate file
 
         --tlskey <file>              Private key for server certificate
 
         --tlscacert <file>           Client certificate CA for verification
+```
 
 The server parameters are used the same way you would secure a typical NATS server. See [here](https://github.com/nats-io/gnatsd#securing-nats).
 
