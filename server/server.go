@@ -166,6 +166,7 @@ type StanServer struct {
 	// IO Channel
 	ioChannel     chan (*ioPendingMsg)
 	ioChannelQuit chan bool
+	ioChannelWG   sync.WaitGroup
 
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
@@ -1647,13 +1648,13 @@ func (s *StanServer) setupAckTimer(sub *subState, d time.Duration) {
 }
 
 func (s *StanServer) startStoreIOWriter() {
-	s.wg.Add(1)
+	s.ioChannelWG.Add(1)
 	s.ioChannel = make(chan (*ioPendingMsg), ioChannelSize)
 	go s.storeIOLoop()
 }
 
 func (s *StanServer) storeIOLoop() {
-	defer s.wg.Done()
+	defer s.ioChannelWG.Done()
 
 	////////////////////////////////////////////////////////////////////////////
 	// This is where we will store the message and wait for others in the
@@ -2396,15 +2397,28 @@ func (s *StanServer) Shutdown() {
 	// Allows Shutdown() to be idempotent
 	s.shutdown = true
 
+	// We need to make sure that the storeIOLoop returns before
+	// closing the Store
+	waitForIOStoreLoop := true
+
 	// Capture under lock
 	store := s.store
 	ns := s.natsServer
 	// Do not set s.nc to nil since it is used in many place without locking.
 	// Once closed, s.nc.xxx() calls will simply fail, but we won't panic.
 	nc := s.nc
-	// Notify the IO channel that we are shutting down
-	s.ioChannelQuit <- true
+	if s.ioChannel != nil {
+		// Notify the IO channel that we are shutting down
+		s.ioChannelQuit <- true
+	} else {
+		waitForIOStoreLoop = false
+	}
 	s.Unlock()
+
+	// Make sure the StoreIOLoop returns before closing the Store
+	if waitForIOStoreLoop {
+		s.ioChannelWG.Wait()
+	}
 
 	// Close/Shutdown resources. Note that unless one instantiates StanServer
 	// directly (instead of calling RunServer() and the like), these should
