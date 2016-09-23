@@ -3623,3 +3623,51 @@ func TestFileStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
 		t.Fatal("Consumer got a message")
 	}
 }
+
+func TestFileStoreNoPanicOnShutdown(t *testing.T) {
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	opts.NATSServerURL = nats.DefaultURL
+
+	test := func() {
+		cleanupDatastore(t, defaultDataStore)
+		defer cleanupDatastore(t, defaultDataStore)
+
+		s := RunServerWithOpts(opts, nil)
+		defer s.Shutdown()
+
+		// Start a go routine that keeps sending messages
+		sendQuit := make(chan bool)
+		wg := &sync.WaitGroup{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			sc, nc := createConnectionWithNatsOpts(t, clientName, nats.NoReconnect())
+			defer sc.Close()
+			defer nc.Close()
+			for {
+				select {
+				case <-sendQuit:
+					return
+				default:
+					sc.PublishAsync("foo", []byte("hello"), nil)
+				}
+			}
+		}()
+		// Wait for some messages to have been sent
+		time.Sleep(500 * time.Millisecond)
+		// Shutdown the server, it should not panic
+		s.Shutdown()
+		// Stop and wait for go routine to end
+		sendQuit <- true
+		wg.Wait()
+	}
+	for i := 0; i < 3; i++ {
+		test()
+	}
+}
