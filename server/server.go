@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -15,16 +16,12 @@ import (
 
 	"github.com/nats-io/gnatsd/auth"
 	"github.com/nats-io/gnatsd/server"
+	natsd "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nats-streaming-server/spb"
-	"github.com/nats-io/nuid"
-
-	natsd "github.com/nats-io/gnatsd/test"
-
 	stores "github.com/nats-io/nats-streaming-server/stores"
-
-	"regexp"
+	"github.com/nats-io/nuid"
 )
 
 // A single STAN server
@@ -302,8 +299,9 @@ func (ss *subStore) updateState(sub *subState) {
 	}
 }
 
-// Remove
-func (ss *subStore) Remove(sub *subState, force bool) {
+// Remove a subscriber from the subscription store, leaving durable
+// subscriptions unless `force` is true.
+func (ss *subStore) Remove(s *StanServer, sub *subState, force bool) {
 	if sub == nil {
 		return
 	}
@@ -325,6 +323,7 @@ func (ss *subStore) Remove(sub *subState, force bool) {
 	nondurable := durableKey == ""
 	subid := sub.ID
 	store := sub.store
+	qgroup := sub.QGroup
 	sub.Unlock()
 
 	if nondurable || force {
@@ -348,6 +347,67 @@ func (ss *subStore) Remove(sub *subState, force bool) {
 		// for which we don't have substore lock held.
 		qs.Lock()
 		qs.subs, _ = sub.deleteFromList(qs.subs)
+		if len(qs.subs) == 0 {
+			// If it was the last being removed, also remove the
+			// queue group from the subStore map.
+			delete(ss.qsubs, qgroup)
+		} else {
+			// If there are pending messages in this sub, they need to be
+			// transfered to remaining queue subscribers.
+			// Also, we may need to update the store to keep track of the
+			// group's LastSent if the leaving member was the one with
+			// the queue group's lastSent value.
+			numQSubs := len(qs.subs)
+			idx := 0
+			sub.RLock()
+			needUpdate := sub.LastSent == qs.lastSent
+			for _, m := range sub.acksPending {
+				// Get one of the remaning queue subscribers.
+				qsub := qs.subs[idx]
+				qsub.Lock()
+				// Store in storage
+				if err := qsub.store.AddSeqPending(qsub.ID, m.Sequence); err != nil {
+					Errorf("STAN: [Client:%s] Unable to update subscription for %s:%v (%v)",
+						qsub.ClientID, m.Subject, m.Sequence, err)
+					qsub.Unlock()
+					continue
+				}
+				// We don't need to update if the sub's lastSent is transfered
+				// to another queue subscriber.
+				if needUpdate && m.Sequence == qs.lastSent {
+					needUpdate = false
+				}
+				// Update LastSent if applicable
+				if m.Sequence > qsub.LastSent {
+					qsub.LastSent = m.Sequence
+				}
+				// Store in ackPending.
+				qsub.acksPending[m.Sequence] = m
+				// Make sure we set its ack timer if none already set, otherwise
+				// adjust the ackTimer floor as needed.s
+				if qsub.ackTimer == nil {
+					s.setupAckTimer(qsub, qsub.ackWait)
+				} else if qsub.ackTimeFloor > 0 && qsub.ackTimeFloor > m.Timestamp {
+					qsub.ackTimeFloor = m.Timestamp
+				}
+				qsub.Unlock()
+				// Move to the next queue subscriber, going back to first if needed.
+				idx++
+				if idx == numQSubs {
+					idx = 0
+				}
+			}
+			sub.RUnlock()
+			if needUpdate {
+				// if we need to update use any of the queue subscriber.
+				// The first will do.
+				qsub := qs.subs[0]
+				qsub.Lock()
+				qsub.LastSent = qs.lastSent
+				qsub.store.UpdateSub(&qsub.SubState)
+				qsub.Unlock()
+			}
+		}
 		qs.Unlock()
 	} else {
 		ss.psubs, _ = sub.deleteFromList(ss.psubs)
@@ -1841,7 +1901,7 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 		// Get the subStore from the ChannelStore
 		ss := cs.UserData.(*subStore)
 		// Don't remove durables
-		ss.Remove(sub, false)
+		ss.Remove(s, sub, false)
 	}
 }
 
@@ -1882,7 +1942,7 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 	}
 
 	// Remove the subscription, force removal if durable.
-	ss.Remove(sub, true)
+	ss.Remove(s, sub, true)
 
 	Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", req.ClientID, sub.subject)
 
