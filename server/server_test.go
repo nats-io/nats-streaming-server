@@ -3671,3 +3671,39 @@ func TestFileStoreNoPanicOnShutdown(t *testing.T) {
 		test()
 	}
 }
+
+func TestNonDurableRemovedFromStoreOnConnClose(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	// Create a subscription
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Close the client connection
+	sc.Close()
+	// Shutdown the server
+	s.Shutdown()
+	// Open the store directly and verify that the sub record is not even found.
+	limits := stores.DefaultChannelLimits
+	store, recoveredState, err := stores.NewFileStore(defaultDataStore, &limits)
+	if err != nil {
+		t.Fatalf("Error opening file: %v", err)
+	}
+	defer store.Close()
+	if recoveredState == nil {
+		t.Fatal("Expected to recover state, got none")
+	}
+	rsubsArray := recoveredState.Subs["foo"]
+	if len(rsubsArray) > 0 {
+		t.Fatalf("Expected no subscription to be recovered from store, got %v", len(rsubsArray))
+	}
+}
