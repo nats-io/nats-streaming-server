@@ -3,24 +3,23 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/nats-io/gnatsd/auth"
 	natsd "github.com/nats-io/gnatsd/server"
 	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats"
 	"github.com/nats-io/nats-streaming-server/stores"
-
-	"github.com/nats-io/gnatsd/auth"
-	"io/ioutil"
-	"sync"
-	"sync/atomic"
 )
 
 const (
@@ -3705,5 +3704,196 @@ func TestNonDurableRemovedFromStoreOnConnClose(t *testing.T) {
 	rsubsArray := recoveredState.Subs["foo"]
 	if len(rsubsArray) > 0 {
 		t.Fatalf("Expected no subscription to be recovered from store, got %v", len(rsubsArray))
+	}
+}
+
+func TestQueueGroupRemovedOnLastMemberLeaving(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	ch := make(chan bool)
+	cb := func(m *stan.Msg) {
+		if m.Sequence == 1 {
+			ch <- true
+		}
+	}
+	// Create a queue subscriber
+	if _, err := sc.QueueSubscribe("foo", "group", cb, stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive the message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Close the connection which will remove the queue subscriber
+	sc.Close()
+
+	// Create a new connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Send a new message
+	if err := sc.Publish("foo", []byte("msg2")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Start a queue subscriber. The group should have been destroyed
+	// when the last member left, so even with a new name, this should
+	// be a new group and start from msg seq 1
+	qsub, err := sc.QueueSubscribe("foo", "group", cb, stan.DeliverAllAvailable())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive the message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Test with unsubscribe
+	if err := qsub.Unsubscribe(); err != nil {
+		t.Fatalf("Error during Unsubscribe: %v", err)
+	}
+	// Recreate a queue subscriber, it should again receive from msg1
+	if _, err := sc.QueueSubscribe("foo", "group", cb, stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive the message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+}
+
+func TestQueueSubscriberTransferPendingMsgsOnClose(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	var sub1 stan.Subscription
+	var sub2 stan.Subscription
+	var err error
+	ch := make(chan bool)
+	qsetup := make(chan bool)
+	cb := func(m *stan.Msg) {
+		<-qsetup
+		if m.Sub == sub1 && m.Sequence == 1 && m.Redelivered == false {
+			ch <- true
+		} else if m.Sub == sub2 && m.Sequence == 1 && m.Redelivered == true {
+			ch <- true
+		}
+	}
+	// Create a queue subscriber with MaxInflight == 1 and manual ACK
+	// so that it does not ack it and see if it will be redelivered.
+	sub1, err = sc.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.MaxInflight(1),
+		stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	qsetup <- true
+	// Wait to receive the message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Start 2nd queue subscriber on same group
+	sub2, err = sc.QueueSubscribe("foo", "group", cb, stan.AckWait(time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Unsubscribe the first member
+	sub1.Unsubscribe()
+	qsetup <- true
+	// The second queue subscriber should receive the first message.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+}
+
+func TestFileStoreQueueSubLeavingUpdateQGroupLastSent(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	ch := make(chan bool)
+	cb := func(m *stan.Msg) {
+		ch <- true
+	}
+	// Create a queue subscriber with MaxInflight == 1 and manual ACK
+	// so that it does not ack it and see if it will be redelivered.
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.MaxInflight(1),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive the message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// send second message
+	if err := sc.Publish("foo", []byte("msg2")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Start 2nd queue subscriber on same group
+	sub2, err := sc.QueueSubscribe("foo", "group", cb, stan.DeliverAllAvailable())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// The second queue subscriber should receive the second message.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Unsubscribe the second member
+	sub2.Unsubscribe()
+	// Restart server
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+	// Send a third message
+	if err := sc.Publish("foo", []byte("msg3")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Start a third queue subscriber, it should receive message 3
+	msgCh := make(chan *stan.Msg)
+	lastMsgCb := func(m *stan.Msg) {
+		msgCh <- m
+	}
+	if _, err := sc.QueueSubscribe("foo", "group", lastMsgCb, stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for msg3 or an error to occur
+	gotIt := false
+	select {
+	case m := <-msgCh:
+		if m.Sequence != 3 {
+			t.Fatalf("Unexpected message: %v", m)
+		} else {
+			gotIt = true
+			break
+		}
+	case <-time.After(time.Second):
+		// Wait for a bit to see if we receive extraneous messages
+		break
+	}
+	if !gotIt {
+		t.Fatal("Did not get message 3")
 	}
 }
