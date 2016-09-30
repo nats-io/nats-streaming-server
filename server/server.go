@@ -322,11 +322,12 @@ func (ss *subStore) Remove(sub *subState, force bool) {
 	if sub.DurableName != "" {
 		durableKey = sub.durableKey()
 	}
+	nondurable := durableKey == ""
 	subid := sub.ID
 	store := sub.store
 	sub.Unlock()
 
-	if force {
+	if nondurable || force {
 		// Delete from storage
 		store.DeleteSub(subid)
 	}
