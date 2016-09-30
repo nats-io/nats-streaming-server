@@ -4,19 +4,19 @@ package stores
 
 import (
 	"fmt"
+	"hash/crc32"
+	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
-	"hash/crc32"
-	"io"
-	"io/ioutil"
-	"time"
 )
 
 var testDefaultServerInfo = spb.ServerInfo{
@@ -2491,5 +2491,79 @@ func TestFSNoPartialWriteDueToBuffering(t *testing.T) {
 	msgStore = cs.Msgs.(*FileMsgStore)
 	if n, _, _ := msgStore.State(); n != 1 {
 		t.Fatalf("Expected 1 message, got: %v", n)
+	}
+}
+
+func TestFSNoReferenceToCallerSubState(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	cs, _, err := s.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Error creating channel [foo]: %v", err)
+	}
+	ss := cs.Subs
+	sub := &spb.SubState{
+		ClientID:      "me",
+		Inbox:         nuidGen.Next(),
+		AckInbox:      nuidGen.Next(),
+		AckWaitInSecs: 10,
+	}
+	if err := ss.CreateSub(sub); err != nil {
+		t.Fatalf("Error creating subscription")
+	}
+	// Get the fileStore sub object
+	fss := ss.(*FileSubStore)
+	fss.RLock()
+	storeSub := fss.subs[sub.ID].sub
+	fss.RUnlock()
+	// Content of filestore's subscription must match sub
+	if !reflect.DeepEqual(*sub, *storeSub) {
+		t.Fatalf("Expected sub to be %v, got %v", sub, storeSub)
+	}
+	// However, these should not be the same objects (no sharing)
+	if sub == storeSub {
+		t.Fatalf("SubState should not be shared between server and store")
+	}
+}
+
+func TestFSCompactSubsUpdateLastSent(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	total := 10
+	for i := 0; i < total; i++ {
+		storeMsg(t, s, "foo", []byte("hello"))
+	}
+	expectedLastSent := 5
+	subID := storeSub(t, s, "foo")
+	for i := 0; i < expectedLastSent; i++ {
+		storeSubPending(t, s, "foo", subID, uint64(i+1))
+	}
+	// Consume the 2 last
+	storeSubAck(t, s, "foo", subID, 4, 5)
+	// Force a compact
+	s.LookupChannel("foo").Subs.(*FileSubStore).compact()
+	// Close and re-open store
+	s.Close()
+	s, rs := openDefaultFileStore(t)
+	defer s.Close()
+	// Get sub from recovered state
+	if len(rs.Subs) != 1 {
+		t.Fatalf("Expected to recover one subscription, got %v", len(rs.Subs))
+	}
+	rsubArray := rs.Subs["foo"]
+	if len(rsubArray) != 1 {
+		t.Fatalf("Expected to recover on subscription on foo channel, got %v", len(rsubArray))
+	}
+	rsub := rsubArray[0]
+	if rsub.Sub.LastSent != uint64(expectedLastSent) {
+		t.Fatalf("Expected recovered subscription LastSent to be %v, got %v", expectedLastSent, rsub.Sub.LastSent)
 	}
 }

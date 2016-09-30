@@ -3,6 +3,7 @@
 package stores
 
 import (
+	"bufio"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -10,8 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"bufio"
 
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
@@ -524,8 +523,13 @@ func NewFileStore(rootDir string, limits *ChannelLimits, options ...FileStoreOpt
 
 		// Fill that array with what we got from newFileSubStore.
 		for _, sub := range subStore.subs {
+			// The server is making a copy of rss.Sub, still it is not
+			// a good idea to return a pointer to an object that belong
+			// to the store. So make a copy and return the pointer to
+			// that copy.
+			csub := *sub.sub
 			rss := &RecoveredSubState{
-				Sub:     sub.sub,
+				Sub:     &csub,
 				Pending: make(PendingAcks),
 			}
 			// If we recovered any seqno...
@@ -1447,7 +1451,10 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 	if err := ss.writeRecord(ss.bw, subRecNew, sub); err != nil {
 		return err
 	}
-	s := &subscription{sub: sub, seqnos: make(map[uint64]struct{})}
+	// We need to get a copy of the passed sub, we can't hold a reference
+	// to it.
+	csub := *sub
+	s := &subscription{sub: &csub, seqnos: make(map[uint64]struct{})}
 	ss.subs[sub.ID] = s
 	return nil
 }
@@ -1459,11 +1466,14 @@ func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 	if err := ss.writeRecord(ss.bw, subRecUpdate, sub); err != nil {
 		return err
 	}
+	// We need to get a copy of the passed sub, we can't hold a reference
+	// to it.
+	csub := *sub
 	s := ss.subs[sub.ID]
 	if s != nil {
-		s.sub = sub
+		s.sub = &csub
 	} else {
-		s := &subscription{sub: sub, seqnos: make(map[uint64]struct{})}
+		s := &subscription{sub: &csub, seqnos: make(map[uint64]struct{})}
 		ss.subs[sub.ID] = s
 	}
 	return nil
@@ -1526,6 +1536,9 @@ func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 	}
 	s := ss.subs[subid]
 	if s != nil {
+		if seqno > s.sub.LastSent {
+			s.sub.LastSent = seqno
+		}
 		s.seqnos[seqno] = struct{}{}
 	}
 	ss.Unlock()
