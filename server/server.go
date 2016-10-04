@@ -270,7 +270,7 @@ func (ss *subStore) updateState(sub *subState) {
 	ss.acks[sub.AckInbox] = sub
 
 	// Store by type
-	if sub.QGroup != "" {
+	if sub.isQueueSubscriber() {
 		// Queue subscriber.
 		qs := ss.qsubs[sub.QGroup]
 		if qs == nil {
@@ -305,7 +305,7 @@ func (ss *subStore) updateState(sub *subState) {
 	}
 
 	// Hold onto durables in special lookup.
-	if sub.DurableName != "" {
+	if sub.isDurableSubscriber() {
 		ss.durables[sub.durableKey()] = sub
 	}
 }
@@ -328,7 +328,7 @@ func (ss *subStore) Remove(sub *subState, unsubscribe bool) {
 	ackInbox := sub.AckInbox
 	qs := sub.qstate
 	durableKey := ""
-	if sub.DurableName != "" {
+	if sub.isDurableSubscriber() {
 		durableKey = sub.durableKey()
 	}
 	isDurable := sub.IsDurable
@@ -984,7 +984,8 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 			sub.SubState = *recSub.Sub
 			// When recovering older stores, IsDurable may not exist for
 			// durable subscribers. Set it now.
-			if sub.DurableName != "" {
+			durableSub := sub.isDurableSubscriber() // not a durable queue sub!
+			if durableSub {
 				sub.IsDurable = true
 			}
 			// Add the subscription to the corresponding client
@@ -995,12 +996,12 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 				// If this is a durable and the client was not recovered
 				// (was offline), we need to clear the ClientID otherwise
 				// it won't be able to reconnect
-				if sub.DurableName != "" && !added {
+				if durableSub && !added {
 					sub.ClientID = ""
 				}
 				// Add to the array, unless this is the shadow durable queue sub that
 				// was left in the store in order to maintain the group's state.
-				if !(sub.IsDurable && sub.QGroup != "" && sub.ClientID == "") {
+				if !sub.isShadowQueueDurable() {
 					allSubs = append(allSubs, sub)
 				}
 			}
@@ -1062,7 +1063,7 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 		// Set it to a high value, it will be correctly reset or cleared.
 		s.setupAckTimer(sub, time.Hour)
 		// If this is a durable and it is offline, then skip the rest.
-		if sub.DurableName != "" && sub.ClientID == "" {
+		if sub.isOfflineDurableSubscriber() {
 			sub.newOnHold = false
 			sub.Unlock()
 			continue
@@ -1503,13 +1504,15 @@ func (s *StanServer) performDurableRedelivery(sub *subState) {
 	sub.RLock()
 	sortedMsgs := makeSortedMsgs(sub.acksPending)
 	clientID := sub.ClientID
-	durName := sub.DurableName
-	if durName == "" {
-		durName = sub.QGroup
-	}
 	sub.RUnlock()
 
 	if s.debug {
+		sub.RLock()
+		durName := sub.DurableName
+		if durName == "" {
+			durName = sub.QGroup
+		}
+		sub.RUnlock()
 		Debugf("STAN: [Client:%s] Redelivering to durable %s", clientID, durName)
 	}
 
@@ -2096,6 +2099,26 @@ func (sub *subState) durableKey() string {
 	return fmt.Sprintf("%s-%s-%s", sub.ClientID, sub.subject, sub.DurableName)
 }
 
+// Returns true if this sub is a queue subscriber (durable or not)
+func (sub *subState) isQueueSubscriber() bool {
+	return sub.QGroup != ""
+}
+
+// Returns true if this is a "shadow" durable queue subscriber
+func (sub *subState) isShadowQueueDurable() bool {
+	return sub.IsDurable && sub.QGroup != "" && sub.ClientID == ""
+}
+
+// Returns true if this sub is a durable subscriber (not a durable queue sub)
+func (sub *subState) isDurableSubscriber() bool {
+	return sub.DurableName != ""
+}
+
+// Returns true if this is an offline durable subscriber.
+func (sub *subState) isOfflineDurableSubscriber() bool {
+	return sub.DurableName != "" && sub.ClientID == ""
+}
+
 // Used to generate durable key. This should not be called on non-durables.
 func durableKey(sr *pb.SubscriptionRequest) string {
 	if sr.DurableName == "" {
@@ -2130,7 +2153,7 @@ func (s *StanServer) updateDurable(ss *subStore, sub *subState) error {
 	}
 	ss.Lock()
 	// Do this only for durable subscribers (not durable queue subscribers).
-	if sub.DurableName != "" {
+	if sub.isDurableSubscriber() {
 		// Add back into plain subscribers
 		ss.psubs = append(ss.psubs, sub)
 	}
