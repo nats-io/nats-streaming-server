@@ -41,6 +41,7 @@ type SubState struct {
 	AckWaitInSecs int32  `protobuf:"varint,7,opt,name=ackWaitInSecs,proto3" json:"ackWaitInSecs,omitempty"`
 	DurableName   string `protobuf:"bytes,8,opt,name=durableName,proto3" json:"durableName,omitempty"`
 	LastSent      uint64 `protobuf:"varint,9,opt,name=lastSent,proto3" json:"lastSent,omitempty"`
+	IsDurable     bool   `protobuf:"varint,10,opt,name=isDurable,proto3" json:"isDurable,omitempty"`
 }
 
 func (m *SubState) Reset()         { *m = SubState{} }
@@ -170,6 +171,16 @@ func (m *SubState) MarshalTo(data []byte) (int, error) {
 		data[i] = 0x48
 		i++
 		i = encodeVarintProtocol(data, i, uint64(m.LastSent))
+	}
+	if m.IsDurable {
+		data[i] = 0x50
+		i++
+		if m.IsDurable {
+			data[i] = 1
+		} else {
+			data[i] = 0
+		}
+		i++
 	}
 	return i, nil
 }
@@ -394,6 +405,9 @@ func (m *SubState) Size() (n int) {
 	}
 	if m.LastSent != 0 {
 		n += 1 + sovProtocol(uint64(m.LastSent))
+	}
+	if m.IsDurable {
+		n += 2
 	}
 	return n
 }
@@ -736,6 +750,26 @@ func (m *SubState) Unmarshal(data []byte) error {
 					break
 				}
 			}
+		case 10:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field IsDurable", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.IsDurable = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := skipProtocol(data[iNdEx:])

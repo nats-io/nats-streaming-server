@@ -137,7 +137,7 @@ func waitForNumSubs(t tLogger, s *StanServer, ID string, expected int) {
 }
 
 func waitForAcks(t tLogger, s *StanServer, ID string, subID uint64, expected int) {
-	subs := s.clients.GetSubs(clientName)
+	subs := s.clients.GetSubs(ID)
 	var sub *subState
 	for _, s := range subs {
 		s.RLock()
@@ -850,7 +850,7 @@ func TestDurableRedelivery(t *testing.T) {
 	}
 }
 
-func TestDurableRestartWithMaxAckInFlight(t *testing.T) {
+func TestDurableRestartWithMaxInflight(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
@@ -2118,6 +2118,239 @@ func TestStartPositionTimeDelta(t *testing.T) {
 	// Message 2 should be received
 	if err := Wait(rch); err != nil {
 		t.Fatal("Did not receive our message")
+	}
+}
+
+func TestStartPositionWithDurable(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	total := 100
+	for i := 0; i < total; i++ {
+		if err := sc.Publish("foo", []byte("msg")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	ch := make(chan bool)
+	expected := uint64(1)
+	cb := func(m *stan.Msg) {
+		if m.Sequence == atomic.LoadUint64(&expected) {
+			sc.Close()
+			ch <- true
+		}
+	}
+	// Start a durable at first index
+	if _, err := sc.Subscribe("foo", cb,
+		stan.DeliverAllAvailable(),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for message to be received and connection to be closed.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Restart a connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Restart the durable with different start position. It should
+	// be ignored and resume from where it left of.
+	// Since connection is closed in the callback last message is not
+	// acked, but that's fine. We still wait for the next message.
+	atomic.StoreUint64(&expected, 2)
+	if _, err := sc.Subscribe("foo", cb,
+		stan.StartAtSequence(uint64(total-5)),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive message and connection to be closed.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Restart a connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Try with start sequence above total message
+	atomic.StoreUint64(&expected, 3)
+	if _, err := sc.Subscribe("foo", cb,
+		stan.StartAtSequence(uint64(total+10)),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive message and connection to be closed.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Restart a connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Try with start time in future, which should not fail if
+	// start position is ignored for a resumed durable.
+	atomic.StoreUint64(&expected, 4)
+	if _, err := sc.Subscribe("foo", cb,
+		stan.StartAtTime(time.Now().Add(10*time.Second)),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive message and connection to be closed.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+}
+
+func TestStartPositionWithDurableQueueSub(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	total := 100
+	for i := 0; i < total; i++ {
+		if err := sc.Publish("foo", []byte("msg")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	ch := make(chan bool)
+	expected := uint64(1)
+	cb := func(m *stan.Msg) {
+		if m.Sequence == atomic.LoadUint64(&expected) {
+			sc.Close()
+			ch <- true
+		}
+	}
+	// Start a durable queue subscriber at first index
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for message to be received and connection to be closed.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Restart a connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Restart the queue durable with different start position. It should
+	// be ignored and resume from where it left of.
+	// Since connection is closed in the callback last message is not
+	// acked, but that's fine. We still wait for the next message.
+	atomic.StoreUint64(&expected, 2)
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.StartAtSequence(uint64(total-5)),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive message and connection to be closed.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Restart a connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Try with start sequence above total message
+	atomic.StoreUint64(&expected, 3)
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.StartAtSequence(uint64(total+10)),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive message and connection to be closed.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Restart a connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Try with start time in future, which should not fail if
+	// start position is ignored for a resumed durable.
+	atomic.StoreUint64(&expected, 4)
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.StartAtTime(time.Now().Add(10*time.Second)),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive message and connection to be closed.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+}
+
+func TestStartPositionWithQueueSub(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	total := 100
+	for i := 0; i < total; i++ {
+		if err := sc.Publish("foo", []byte("msg")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	ch := make(chan bool)
+	expected := uint64(1)
+	cb := func(m *stan.Msg) {
+		if m.Sequence == atomic.LoadUint64(&expected) {
+			ch <- true
+		}
+	}
+	// Start a queue subsriber at first index
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.MaxInflight(1),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	atomic.StoreUint64(&expected, 2)
+	// Add a member to the group with start sequence
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.StartAtSequence(uint64(total-5)),
+		stan.MaxInflight(1),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Try with start sequence above total message
+	atomic.StoreUint64(&expected, 3)
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.StartAtSequence(uint64(total+10)),
+		stan.MaxInflight(1),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Try with start time in future, which should not fail if
+	// start position is ignored for queue group
+	atomic.StoreUint64(&expected, 4)
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.StartAtTime(time.Now().Add(10*time.Second)),
+		stan.MaxInflight(1),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
 	}
 }
 
@@ -3895,5 +4128,367 @@ func TestFileStoreQueueSubLeavingUpdateQGroupLastSent(t *testing.T) {
 	}
 	if !gotIt {
 		t.Fatal("Did not get message 3")
+	}
+}
+
+func checkQueueGroupSize(t *testing.T, s *StanServer, channelName, groupName string, expectedExist bool, expectedSize int) {
+	cs := s.store.LookupChannel(channelName)
+	if cs == nil {
+		stackFatalf(t, "Expected channel store %q to exist", channelName)
+	}
+	s.RLock()
+	groupSize := 0
+	group, exist := cs.UserData.(*subStore).qsubs[groupName]
+	if exist {
+		groupSize = len(group.subs)
+	}
+	s.RUnlock()
+	if expectedExist && !exist {
+		stackFatalf(t, "Expected group to still exist, does not")
+	}
+	if !expectedExist && exist {
+		stackFatalf(t, "Expected group to not exist, it does")
+	}
+	if expectedExist {
+		if groupSize != expectedSize {
+			stackFatalf(t, "Expected group size to be %v, got %v", expectedSize, groupSize)
+		}
+	}
+}
+
+func TestBasicDurableQueueSub(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc1 := NewDefaultConnection(t)
+	defer sc1.Close()
+	if err := sc1.Publish("foo", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	ch := make(chan bool)
+	count := 0
+	cb := func(m *stan.Msg) {
+		count++
+		if count == 1 && m.Sequence == 1 {
+			ch <- true
+		} else if count == 2 && m.Sequence == 2 {
+			ch <- true
+		}
+	}
+	// Create a durable queue subscriber.
+	sc2, err := stan.Connect(clusterName, "sc2cid")
+	if err != nil {
+		stackFatalf(t, "Expected to connect correctly, got err %v", err)
+	}
+	defer sc2.Close()
+	if _, err := sc2.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.DurableName("qsub")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Check group exists
+	checkQueueGroupSize(t, s, "foo", "qsub:group", true, 1)
+	// Wait to receive the message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// For this test, make sure we wait for ack to be processed.
+	waitForAcks(t, s, "sc2cid", 1, 0)
+	// Close the durable queue sub's connection.
+	// This should not close the queue group
+	sc2.Close()
+	// Check queue group still exist, but size 0
+	checkQueueGroupSize(t, s, "foo", "qsub:group", true, 0)
+	// Send another message
+	if err := sc1.Publish("foo", []byte("msg2")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Create a durable queue subscriber on the group.
+	sub, err := sc1.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.DurableName("qsub"))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// It should receive message 2 only
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Now unsubscribe the sole member
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatalf("Error during Unsubscribe: %v", err)
+	}
+	// Group should be gone.
+	checkQueueGroupSize(t, s, "foo", "qsub:group", false, 0)
+}
+
+func TestDurableAndNonDurableQueueSub(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	// Expect failure if durable name contains ':'
+	_, err := sc.QueueSubscribe("foo", "group", func(_ *stan.Msg) {},
+		stan.DurableName("qsub:"))
+	if err == nil {
+		t.Fatal("Expected error on subscribe")
+	}
+	if err.Error() != ErrInvalidDurName.Error() {
+		t.Fatalf("Expected error %v, got %v", ErrInvalidDurName, err)
+	}
+
+	if err := sc.Publish("foo", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	ch := make(chan bool)
+	cb := func(m *stan.Msg) {
+		ch <- true
+	}
+	// Create a durable queue subscriber.
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.DurableName("qsub")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Create a regular one
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Check groups exists
+	checkQueueGroupSize(t, s, "foo", "qsub:group", true, 1)
+	checkQueueGroupSize(t, s, "foo", "group", true, 1)
+	// Wait to receive the messages
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Close connection
+	sc.Close()
+	// Non durable group should be gone
+	checkQueueGroupSize(t, s, "foo", "group", false, 0)
+	// Other should exist, but empty
+	checkQueueGroupSize(t, s, "foo", "qsub:group", true, 0)
+}
+
+func TestDurableQueueSubRedeliveryOnRejoin(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	total := 100
+	for i := 0; i < total; i++ {
+		if err := sc.Publish("foo", []byte("msg1")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	dlv := 0
+	dch := make(chan bool)
+	cb1 := func(m *stan.Msg) {
+		if !m.Redelivered {
+			dlv++
+			if dlv == total {
+				dch <- true
+			}
+		}
+	}
+	rdlv := 0
+	rdch := make(chan bool)
+	sigCh := make(chan bool)
+	signaled := false
+	cb2 := func(m *stan.Msg) {
+		if m.Redelivered && int(m.Sequence) <= total {
+			rdlv++
+			if rdlv == total {
+				rdch <- true
+			}
+		} else if m.Redelivered && int(m.Sequence) > total {
+			if !signaled {
+				signaled = true
+				sigCh <- true
+			}
+		}
+	}
+	// Create a durable queue subscriber with manual ack
+	if _, err := sc.QueueSubscribe("foo", "group", cb1,
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(),
+		stan.MaxInflight(total),
+		stan.DurableName("qsub")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Check group
+	checkQueueGroupSize(t, s, "foo", "qsub:group", true, 1)
+	// Wait for it to receive the message
+	if err := Wait(dch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Create new one
+	sc2, err := stan.Connect(clusterName, "sc2cid")
+	if err != nil {
+		t.Fatalf("Unexpected error during connect: %v", err)
+	}
+	defer sc2.Close()
+	// Rejoin the group
+	if _, err := sc2.QueueSubscribe("foo", "group", cb2,
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(),
+		stan.AckWait(time.Second),
+		stan.DurableName("qsub")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Check group
+	checkQueueGroupSize(t, s, "foo", "qsub:group", true, 2)
+	// Send one more message, which should go to sub2
+	if err := sc.Publish("foo", []byte("last")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Wait for it to be received
+	if err := Wait(sigCh); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Close connection
+	sc.Close()
+	// Check group
+	checkQueueGroupSize(t, s, "foo", "qsub:group", true, 1)
+	// Message should be redelivered
+	if err := Wait(rdch); err != nil {
+		t.Fatal("Did not get our redelivered message")
+	}
+}
+
+func TestFileStoreDurableQueueSub(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc1 := NewDefaultConnection(t)
+	defer sc1.Close()
+	if err := sc1.Publish("foo", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	ch := make(chan bool)
+	count := 0
+	cb := func(m *stan.Msg) {
+		count++
+		if count == 1 && m.Sequence == 1 {
+			ch <- true
+		} else if count == 2 && m.Sequence == 2 {
+			ch <- true
+		}
+	}
+	// Create a durable queue subscriber.
+	sc2, err := stan.Connect(clusterName, "sc2cid")
+	if err != nil {
+		stackFatalf(t, "Expected to connect correctly, got err %v", err)
+	}
+	defer sc2.Close()
+	if _, err := sc2.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.DurableName("qsub")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive the message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// For this test, make sure ack is processed
+	waitForAcks(t, s, "sc2cid", 1, 0)
+	// Close the durable queue sub's connection.
+	// This should not close the queue group
+	sc2.Close()
+	// Check queue group still exist, but size 0
+	checkQueueGroupSize(t, s, "foo", "qsub:group", true, 0)
+	// Send another message
+	if err := sc1.Publish("foo", []byte("msg2")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Stop and restart the server
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+	// Create another client connection
+	sc2, err = stan.Connect(clusterName, "sc2cid")
+	if err != nil {
+		stackFatalf(t, "Expected to connect correctly, got err %v", err)
+	}
+	defer sc2.Close()
+	// Create a durable queue subscriber on the group.
+	if _, err := sc2.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.DurableName("qsub")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// It should receive message 2 only
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+}
+
+func TestFileStoreDurableQueueSubRedeliveryOnRejoin(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	s := RunServerWithOpts(opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	if err := sc.Publish("foo", []byte("msg1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	ch := make(chan bool)
+	count := 0
+	cb := func(m *stan.Msg) {
+		count++
+		if (count == 1 && !m.Redelivered) || (count == 2 && m.Redelivered) {
+			ch <- true
+		}
+	}
+	// Create a durable queue subscriber with manual ack
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(),
+		stan.DurableName("qsub")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Check group
+	checkQueueGroupSize(t, s, "foo", "qsub:group", true, 1)
+	// Wait for it to receive the message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Close connection
+	sc.Close()
+	// Stop server
+	s.Shutdown()
+	// Restart it
+	s = RunServerWithOpts(opts, nil)
+	// Connect
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Rejoin the group
+	if _, err := sc.QueueSubscribe("foo", "group", cb,
+		stan.DeliverAllAvailable(),
+		stan.AckWait(time.Second),
+		stan.DurableName("qsub")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Check group
+	checkQueueGroupSize(t, s, "foo", "qsub:group", true, 1)
+	// Message should be redelivered
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
 	}
 }

@@ -24,6 +24,7 @@ message SubState {
   int32         ackWaitInSecs  = 7;  // Timeout for receiving an ack from the client
   string        durableName    = 8;  // Optional durable name which survives client restarts
   uint64        lastSent       = 9;  // Start position
+  bool          isDurable      =10;  // Indicate durability for this subscriber
 }
 
 // SubStateDelete marks a Subscription as deleted
