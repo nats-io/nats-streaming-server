@@ -183,7 +183,7 @@ For a higher level of message delivery, the server should be configured with a f
 To start the server with a file store, you need to provide two parameters:
 
 ```sh
-nats-streamin-server -store file -dir datastore
+nats-streaming-server -store file -dir datastore
 ```
 The parameter `-store` indicates what type of store to use, in this case `file`. The other (`-dir`) indicates in which directory the state should be stored.
 
