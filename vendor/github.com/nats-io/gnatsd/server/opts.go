@@ -62,6 +62,7 @@ type Options struct {
 	ClusterTLSTimeout  float64       `json:"-"`
 	ClusterTLSConfig   *tls.Config   `json:"-"`
 	ClusterListenStr   string        `json:"-"`
+	ClusterNoAdvertise bool          `json:"-"`
 	ProfPort           int           `json:"-"`
 	PidFile            string        `json:"-"`
 	LogFile            string        `json:"-"`
@@ -308,8 +309,10 @@ func parseCluster(cm map[string]interface{}, opts *Options) error {
 			// as both client and server, so will mirror the rootCA to the
 			// clientCA pool.
 			opts.ClusterTLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
-			opts.ClusterTLSConfig.ClientCAs = opts.ClusterTLSConfig.RootCAs
+			opts.ClusterTLSConfig.RootCAs = opts.ClusterTLSConfig.ClientCAs
 			opts.ClusterTLSTimeout = tc.Timeout
+		case "no_advertise":
+			opts.ClusterNoAdvertise = mv.(bool)
 		}
 	}
 	return nil
@@ -570,7 +573,7 @@ func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 
 	// Require client certificates as needed
 	if tc.Verify {
-		config.ClientAuth = tls.RequireAnyClientCert
+		config.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 	// Add in CAs if applicable.
 	if tc.CaFile != "" {
@@ -583,7 +586,7 @@ func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 		if !ok {
 			return nil, fmt.Errorf("failed to parse root ca certificate")
 		}
-		config.RootCAs = pool
+		config.ClientCAs = pool
 	}
 
 	return &config, nil
@@ -639,6 +642,9 @@ func MergeOptions(fileOpts, flagOpts *Options) *Options {
 	}
 	if flagOpts.ClusterListenStr != "" {
 		opts.ClusterListenStr = flagOpts.ClusterListenStr
+	}
+	if flagOpts.ClusterNoAdvertise {
+		opts.ClusterNoAdvertise = true
 	}
 	if flagOpts.RoutesStr != "" {
 		mergeRoutes(&opts, flagOpts)
@@ -751,6 +757,10 @@ func processOptions(opts *Options) {
 	// Setup non-standard Go defaults
 	if opts.Host == "" {
 		opts.Host = DEFAULT_HOST
+	}
+	if opts.HTTPHost == "" {
+		// Default to same bind from server if left undefined
+		opts.HTTPHost = opts.Host
 	}
 	if opts.Port == 0 {
 		opts.Port = DEFAULT_PORT

@@ -154,7 +154,7 @@ func (c *client) processRouteInfo(info *Info) {
 			s.forwardNewRouteInfoToKnownServers(info)
 		}
 		// If the server Info did not have these URLs, update and send an INFO
-		// protocol to all clients that support it.
+		// protocol to all clients that support it (unless the feature is disabled).
 		if s.updateServerINFO(info.ClientConnectURLs) {
 			s.sendAsyncInfoToClients()
 		}
@@ -575,20 +575,24 @@ func (s *Server) broadcastUnSubscribe(sub *subscription) {
 	}
 	rsid := routeSid(sub)
 	maxStr := _EMPTY_
+	sub.client.mu.Lock()
 	// Set max if we have it set and have not tripped auto-unsubscribe
 	if sub.max > 0 && sub.nm < sub.max {
 		maxStr = fmt.Sprintf(" %d", sub.max)
 	}
+	sub.client.mu.Unlock()
 	proto := fmt.Sprintf(unsubProto, rsid, maxStr)
 	s.broadcastInterestToRoutes(proto)
 }
 
 func (s *Server) routeAcceptLoop(ch chan struct{}) {
-	hp := fmt.Sprintf("%s:%d", s.opts.ClusterHost, s.opts.ClusterPort)
+	hp := net.JoinHostPort(s.opts.ClusterHost, strconv.Itoa(s.opts.ClusterPort))
 	Noticef("Listening for route connections on %s", hp)
 	l, e := net.Listen("tcp", hp)
 	if e != nil {
-		Fatalf("Error listening on router port: %d - %v", s.opts.Port, e)
+		// We need to close this channel to avoid a deadlock
+		close(ch)
+		Fatalf("Error listening on router port: %d - %v", s.opts.ClusterPort, e)
 		return
 	}
 

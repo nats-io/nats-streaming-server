@@ -91,7 +91,7 @@ func New(opts *Options) *Server {
 
 	// Process TLS options, including whether we require client certificates.
 	tlsReq := opts.TLSConfig != nil
-	verify := (tlsReq && opts.TLSConfig.ClientAuth == tls.RequireAnyClientCert)
+	verify := (tlsReq && opts.TLSConfig.ClientAuth == tls.RequireAndVerifyClientCert)
 
 	info := Info{
 		ID:                genID(),
@@ -218,7 +218,11 @@ func (s *Server) Start() {
 	Noticef("Starting nats-server version %s", VERSION)
 	Debugf("Go build version %s", s.info.GoVersion)
 
+	// Avoid RACE between Start() and Shutdown()
+	s.mu.Lock()
 	s.running = true
+	s.mu.Unlock()
+
 	s.grMu.Lock()
 	s.grRunning = true
 	s.grMu.Unlock()
@@ -342,6 +346,14 @@ func (s *Server) Shutdown() {
 
 // AcceptLoop is exported for easier testing.
 func (s *Server) AcceptLoop(clr chan struct{}) {
+	// If we were to exit before the listener is setup properly,
+	// make sure we close the channel.
+	defer func() {
+		if clr != nil {
+			close(clr)
+		}
+	}()
+
 	hp := net.JoinHostPort(s.opts.Host, strconv.Itoa(s.opts.Port))
 	Noticef("Listening for client connections on %s", hp)
 	l, e := net.Listen("tcp", hp)
@@ -384,6 +396,7 @@ func (s *Server) AcceptLoop(clr chan struct{}) {
 
 	// Let the caller know that we are ready
 	close(clr)
+	clr = nil
 
 	tmpDelay := ACCEPT_MIN_SLEEP
 
@@ -614,11 +627,17 @@ func (s *Server) createClient(conn net.Conn) *client {
 
 // updateServerINFO updates the server's Info object with the given
 // array of URLs and re-generate the infoJSON byte array, only if the
-// given URLs were not already recorded.
+// given URLs were not already recorded and if the feature is not
+// disabled.
 // Returns a boolean indicating if server's Info was updated.
 func (s *Server) updateServerINFO(urls []string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Feature disabled, do not update.
+	if s.opts.ClusterNoAdvertise {
+		return false
+	}
 
 	// Will be set to true if we alter the server's Info object.
 	wasUpdated := false
@@ -896,8 +915,8 @@ func (s *Server) getClientConnectURLs() []string {
 				case *net.IPAddr:
 					ip = v.IP
 				}
-				// Skip loopback/localhost
-				if ip.IsLoopback() {
+				// Skip non global unicast addresses
+				if !ip.IsGlobalUnicast() || ip.IsUnspecified() {
 					ip = nil
 					continue
 				}
@@ -908,7 +927,15 @@ func (s *Server) getClientConnectURLs() []string {
 	if err != nil || len(urls) == 0 {
 		// We are here if s.opts.Host is not "0.0.0.0" nor "::", or if for some
 		// reason we could not add any URL in the loop above.
-		urls = append(urls, net.JoinHostPort(s.opts.Host, sPort))
+		// We had a case where a Windows VM was hosed and would have err == nil
+		// and not add any address in the array in the loop above, and we
+		// ended-up returning 0.0.0.0, which is problematic for Windows clients.
+		// Check for 0.0.0.0 or :: specifically, and ignore if that's the case.
+		if s.opts.Host == "0.0.0.0" || s.opts.Host == "::" {
+			Errorf("Address %q can not be resolved properly", s.opts.Host)
+		} else {
+			urls = append(urls, net.JoinHostPort(s.opts.Host, sPort))
+		}
 	}
 	return urls
 }

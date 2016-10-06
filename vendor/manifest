@@ -5,7 +5,7 @@
 			"importpath": "github.com/gogo/protobuf/gogoproto",
 			"repository": "https://github.com/gogo/protobuf",
 			"vcs": "git",
-			"revision": "a4cceea7a401a73fefafd1a21fedbd4694124a82",
+			"revision": "99cb9b23110011cc45571c901ecae6f6f5e65cd3",
 			"branch": "master",
 			"path": "/gogoproto",
 			"notests": true
@@ -14,7 +14,7 @@
 			"importpath": "github.com/gogo/protobuf/proto",
 			"repository": "https://github.com/gogo/protobuf",
 			"vcs": "git",
-			"revision": "a4cceea7a401a73fefafd1a21fedbd4694124a82",
+			"revision": "99cb9b23110011cc45571c901ecae6f6f5e65cd3",
 			"branch": "master",
 			"path": "proto",
 			"notests": true
@@ -23,7 +23,7 @@
 			"importpath": "github.com/golang/protobuf/proto",
 			"repository": "https://github.com/golang/protobuf",
 			"vcs": "git",
-			"revision": "c3cefd437628a0b7d31b34fe44b3a7a540e98527",
+			"revision": "df1d3ca07d2d07bba352d5b73c4313b4e2a6203e",
 			"branch": "master",
 			"path": "/proto",
 			"notests": true
@@ -32,7 +32,7 @@
 			"importpath": "github.com/golang/protobuf/ptypes/any",
 			"repository": "https://github.com/golang/protobuf",
 			"vcs": "git",
-			"revision": "c3cefd437628a0b7d31b34fe44b3a7a540e98527",
+			"revision": "df1d3ca07d2d07bba352d5b73c4313b4e2a6203e",
 			"branch": "master",
 			"path": "ptypes/any",
 			"notests": true
@@ -41,7 +41,7 @@
 			"importpath": "github.com/nats-io/gnatsd/auth",
 			"repository": "https://github.com/nats-io/gnatsd",
 			"vcs": "git",
-			"revision": "62923be357d99504f725ffc2ff27bcfc69f1943e",
+			"revision": "8da901fcd920ba0b1c6e24ea6ce168dfbb1dad0f",
 			"branch": "master",
 			"path": "auth",
 			"notests": true
@@ -50,7 +50,7 @@
 			"importpath": "github.com/nats-io/gnatsd/conf",
 			"repository": "https://github.com/nats-io/gnatsd",
 			"vcs": "git",
-			"revision": "62923be357d99504f725ffc2ff27bcfc69f1943e",
+			"revision": "8da901fcd920ba0b1c6e24ea6ce168dfbb1dad0f",
 			"branch": "master",
 			"path": "conf",
 			"notests": true
@@ -59,7 +59,7 @@
 			"importpath": "github.com/nats-io/gnatsd/logger",
 			"repository": "https://github.com/nats-io/gnatsd",
 			"vcs": "git",
-			"revision": "62923be357d99504f725ffc2ff27bcfc69f1943e",
+			"revision": "8da901fcd920ba0b1c6e24ea6ce168dfbb1dad0f",
 			"branch": "master",
 			"path": "/logger",
 			"notests": true
@@ -68,7 +68,7 @@
 			"importpath": "github.com/nats-io/gnatsd/server",
 			"repository": "https://github.com/nats-io/gnatsd",
 			"vcs": "git",
-			"revision": "62923be357d99504f725ffc2ff27bcfc69f1943e",
+			"revision": "8da901fcd920ba0b1c6e24ea6ce168dfbb1dad0f",
 			"branch": "master",
 			"path": "server",
 			"notests": true
@@ -77,7 +77,7 @@
 			"importpath": "github.com/nats-io/gnatsd/test",
 			"repository": "https://github.com/nats-io/gnatsd",
 			"vcs": "git",
-			"revision": "62923be357d99504f725ffc2ff27bcfc69f1943e",
+			"revision": "8da901fcd920ba0b1c6e24ea6ce168dfbb1dad0f",
 			"branch": "master",
 			"path": "/test",
 			"notests": true
@@ -113,7 +113,7 @@
 			"importpath": "github.com/nats-io/go-nats-streaming",
 			"repository": "https://github.com/nats-io/go-nats-streaming",
 			"vcs": "git",
-			"revision": "8afc6de3c1676de29b56ed9aa67025eb3acd8c12",
+			"revision": "867dcd0863d8e41fa173d7440c7acb2464474caa",
 			"branch": "master",
 			"notests": true
 		},
@@ -121,7 +121,7 @@
 			"importpath": "github.com/nats-io/nats",
 			"repository": "https://github.com/nats-io/nats",
 			"vcs": "git",
-			"revision": "aea64801fab70c44603b524e0a0210c06727c972",
+			"revision": "904e847fa3d16dff97348235a81fc744afa71acf",
 			"branch": "master",
 			"notests": true
 		},
@@ -129,7 +129,7 @@
 			"importpath": "github.com/nats-io/nuid",
 			"repository": "https://github.com/nats-io/nuid",
 			"vcs": "git",
-			"revision": "a5152d67cf63cbfb5d992a395458722a45194715",
+			"revision": "289cccf02c178dc782430d534e3c1f5b72af807f",
 			"branch": "master",
 			"notests": true
 		}
