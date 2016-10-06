@@ -16,7 +16,7 @@ import (
 )
 
 // Version is the NATS Streaming Go Client version
-const Version = "0.2.0"
+const Version = "0.3.0-beta"
 
 const (
 	// DefaultNatsURL is the default URL the client connects to
@@ -38,9 +38,6 @@ type Conn interface {
 	// Publish
 	Publish(subject string, data []byte) error
 	PublishAsync(subject string, data []byte, ah AckHandler) (string, error)
-	// Publish with Reply
-	PublishWithReply(subject, reply string, data []byte) error
-	PublishAsyncWithReply(subject, reply string, data []byte, ah AckHandler) (string, error)
 
 	// Subscribe
 	Subscribe(subject string, cb MsgHandler, opts ...SubscriptionOption) (Subscription, error)
@@ -196,7 +193,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	}
 
 	// Send Request to discover the cluster
-	discoverSubject := fmt.Sprintf("%s.%s", c.opts.DiscoverPrefix, stanClusterID)
+	discoverSubject := c.opts.DiscoverPrefix + "." + stanClusterID
 	req := &pb.ConnectRequest{ClientID: clientID, HeartbeatInbox: hbInbox}
 	b, _ := req.Marshal()
 	reply, err := c.nc.Request(discoverSubject, b, c.opts.ConnectTimeout)
@@ -226,7 +223,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	c.closeRequests = cr.CloseRequests
 
 	// Setup the ACK subscription
-	c.ackSubject = fmt.Sprintf("%s.%s", DefaultACKPrefix, nuid.Next())
+	c.ackSubject = DefaultACKPrefix + "." + nuid.Next()
 	if c.ackSubscription, err = c.nc.Subscribe(c.ackSubject, c.processAck); err != nil {
 		c.Close()
 		return nil, err
@@ -339,33 +336,22 @@ func (sc *conn) processAck(m *nats.Msg) {
 }
 
 // Publish will publish to the cluster and wait for an ACK.
-func (sc *conn) Publish(subject string, data []byte) (e error) {
-	return sc.PublishWithReply(subject, "", data)
-}
-
-// PublishAsync will publish to the cluster on pubPrefix+subject and asynchronously
-// process the ACK or error state. It will return the GUID for the message being sent.
-func (sc *conn) PublishAsync(subject string, data []byte, ah AckHandler) (string, error) {
-	return sc.PublishAsyncWithReply(subject, "", data, ah)
-}
-
-// PublishWithReply will publish to the cluster and wait for an ACK.
-func (sc *conn) PublishWithReply(subject, reply string, data []byte) error {
+func (sc *conn) Publish(subject string, data []byte) error {
 	ch := make(chan error)
-	_, err := sc.publishAsyncWithReply(subject, reply, data, nil, ch)
+	_, err := sc.publishAsync(subject, data, nil, ch)
 	if err == nil {
 		err = <-ch
 	}
 	return err
 }
 
-// PublishAsyncWithReply will publish to the cluster and asynchronously
+// PublishAsync will publish to the cluster on pubPrefix+subject and asynchronously
 // process the ACK or error state. It will return the GUID for the message being sent.
-func (sc *conn) PublishAsyncWithReply(subject, reply string, data []byte, ah AckHandler) (string, error) {
-	return sc.publishAsyncWithReply(subject, reply, data, ah, nil)
+func (sc *conn) PublishAsync(subject string, data []byte, ah AckHandler) (string, error) {
+	return sc.publishAsync(subject, data, ah, nil)
 }
 
-func (sc *conn) publishAsyncWithReply(subject, reply string, data []byte, ah AckHandler, ch chan error) (string, error) {
+func (sc *conn) publishAsync(subject string, data []byte, ah AckHandler, ch chan error) (string, error) {
 	a := &ack{ah: ah, ch: ch}
 	sc.Lock()
 	if sc.nc == nil {
@@ -373,11 +359,11 @@ func (sc *conn) publishAsyncWithReply(subject, reply string, data []byte, ah Ack
 		return "", ErrConnectionClosed
 	}
 
-	subj := fmt.Sprintf("%s.%s", sc.pubPrefix, subject)
+	subj := sc.pubPrefix + "." + subject
 	// This is only what we need from PubMsg in the timer below,
 	// so do this so that pe doesn't escape (and we same on new object)
 	peGUID := nuid.Next()
-	pe := &pb.PubMsg{ClientID: sc.clientID, Guid: peGUID, Subject: subject, Reply: reply, Data: data}
+	pe := &pb.PubMsg{ClientID: sc.clientID, Guid: peGUID, Subject: subject, Data: data}
 	b, _ := pe.Marshal()
 
 	// Map ack to guid.

@@ -68,6 +68,7 @@ func stackFatalf(t tLogger, f string, args ...interface{}) {
 func shutdownRestartedServerOnTestExit(s **StanServer) {
 	srv := *s
 	srv.Shutdown()
+	srv = nil
 }
 
 // Helper function that checks that the number returned by function `f`
@@ -223,6 +224,7 @@ func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) *Stan
 	sOpts.Debug = enableDebug
 	sOpts.Trace = enableTrace
 	nOpts.NoLog = false
+	nOpts.NoSigs = true
 
 	ConfigureLogger(sOpts, &nOpts)
 
@@ -248,6 +250,7 @@ func TestRunServer(t *testing.T) {
 	// Test passing nil stan options, some nats options
 	nOpts := &natsd.Options{}
 	nOpts.NoLog = true
+	nOpts.NoSigs = true
 	s = RunServerWithOpts(nil, nOpts)
 	defer s.Shutdown()
 }
@@ -1004,6 +1007,14 @@ func TestStalledDurableDelivery(t *testing.T) {
 	testStalledDelivery(t, "durable")
 }
 
+func getTestDefaultOptsForFileStore() *Options {
+	opts := GetDefaultOptions()
+	opts.StoreType = stores.TypeFile
+	opts.FilestoreDir = defaultDataStore
+	opts.FileStoreOpts.BufferSize = 1024
+	return opts
+}
+
 func testStalledRedelivery(t *testing.T, typeSub string) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
@@ -1011,9 +1022,7 @@ func testStalledRedelivery(t *testing.T, typeSub string) {
 	// Override maxStalledRedelivery
 	setMaxStalledRedeliveries(1)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -1283,9 +1292,7 @@ func TestRunServerWithFileStore(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -1573,9 +1580,7 @@ func TestRecoveredDurableCanReconnect(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -2358,9 +2363,7 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -2713,9 +2716,7 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -2816,9 +2817,7 @@ func TestFileStoreDurableCanReceiveAfterRestart(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -2867,9 +2866,7 @@ func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -2915,9 +2912,7 @@ func TestFileStoreRedeliveryCbPerSub(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -3003,9 +2998,7 @@ func TestFileStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -3082,9 +3075,7 @@ func TestFileStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -3183,9 +3174,7 @@ func TestFileStoreAutomaticDeliveryOnRestart(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
@@ -3231,8 +3220,9 @@ func TestFileStoreAutomaticDeliveryOnRestart(t *testing.T) {
 
 	// Restart server
 	s.Shutdown()
-	s = RunServerWithOpts(opts, nil)
-	defer s.Shutdown()
+	s = nil
+	s2 := RunServerWithOpts(opts, nil)
+	// defer s.Shutdown()
 
 	// Release 	the consumer
 	close(blocked)
@@ -3240,6 +3230,9 @@ func TestFileStoreAutomaticDeliveryOnRestart(t *testing.T) {
 	if err := Wait(done); err != nil {
 		t.Fatal("Messages were not automatically delivered")
 	}
+	sc.Close()
+	s2.Shutdown()
+	s2 = nil
 }
 
 func TestSubscribeShrink(t *testing.T) {
@@ -3557,7 +3550,7 @@ func TestIOChannel(t *testing.T) {
 			}
 		}
 
-		total := 10000
+		total := s.opts.IOBatchSize + 100
 		msg := []byte("Hello")
 		var err error
 		for i := 0; i < total; i++ {
@@ -3786,9 +3779,7 @@ func TestFileStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
 	gs := natsdTest.RunServer(nil)
 	defer gs.Shutdown()
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	opts.NATSServerURL = nats.DefaultURL
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
@@ -3860,9 +3851,7 @@ func TestFileStoreNoPanicOnShutdown(t *testing.T) {
 	ns := natsdTest.RunDefaultServer()
 	defer ns.Shutdown()
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	opts.NATSServerURL = nats.DefaultURL
 
 	test := func() {
@@ -3908,9 +3897,7 @@ func TestNonDurableRemovedFromStoreOnConnClose(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
@@ -4054,9 +4041,7 @@ func TestFileStoreQueueSubLeavingUpdateQGroupLastSent(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -4365,9 +4350,7 @@ func TestFileStoreDurableQueueSub(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
@@ -4437,9 +4420,7 @@ func TestFileStoreDurableQueueSubRedeliveryOnRejoin(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
+	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
