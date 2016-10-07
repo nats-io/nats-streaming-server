@@ -395,8 +395,13 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 			// Need to update if this member was the one with the last
 			// message of the group.
 			storageUpdate = sub.LastSent == qs.lastSent
-			storedMsgs := makeSortedMsgs(cs.Msgs, sub.acksPending)
-			for _, m := range storedMsgs {
+			sortedSequences := makeSortedSequences(sub.acksPending)
+			for _, seq := range sortedSequences {
+				m := cs.Msgs.Lookup(seq)
+				if m == nil {
+					// Don't need to ack it since we are destroying this subscription
+					continue
+				}
 				// Get one of the remaning queue subscribers.
 				qsub := qs.subs[idx]
 				qsub.Lock()
@@ -1492,27 +1497,26 @@ func (s *StanServer) processMsg(cs *stores.ChannelStore) {
 }
 
 // Used for sorting by sequence
-type bySeq []*pb.MsgProto
+type bySeq []uint64
 
 func (a bySeq) Len() int           { return (len(a)) }
 func (a bySeq) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a bySeq) Less(i, j int) bool { return a[i].Sequence < a[j].Sequence }
+func (a bySeq) Less(i, j int) bool { return a[i] < a[j] }
 
-func makeSortedMsgs(msgStore stores.MsgStore, msgs map[uint64]struct{}) []*pb.MsgProto {
-	results := make([]*pb.MsgProto, 0, len(msgs))
-	for seq := range msgs {
-		mCopy := *(msgStore.Lookup(seq)) // copy since we need to set redelivered flag.
-		results = append(results, &mCopy)
+func makeSortedSequences(sequences map[uint64]struct{}) []uint64 {
+	results := make([]uint64, 0, len(sequences))
+	for seq := range sequences {
+		results = append(results, seq)
 	}
 	sort.Sort(bySeq(results))
 	return results
 }
 
 // Redeliver all outstanding messages to a durable subscriber, used on resubscribe.
-func (s *StanServer) performDurableRedelivery(msgStore stores.MsgStore, sub *subState) {
+func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subState) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.RLock()
-	sortedMsgs := makeSortedMsgs(msgStore, sub.acksPending)
+	sortedSeqs := makeSortedSequences(sub.acksPending)
 	clientID := sub.ClientID
 	sub.RUnlock()
 
@@ -1532,7 +1536,12 @@ func (s *StanServer) performDurableRedelivery(msgStore stores.MsgStore, sub *sub
 		return
 	}
 	// Go through all messages
-	for _, m := range sortedMsgs {
+	for _, seq := range sortedSeqs {
+		m := s.getMsgForRedelivery(cs, sub, seq)
+		if m == nil {
+			continue
+		}
+
 		if s.trace {
 			Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", clientID, m.Sequence)
 		}
@@ -1553,7 +1562,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	sub.RLock()
 	expTime := int64(sub.ackWait)
 	cs := s.store.LookupChannel(sub.subject)
-	sortedMsgs := makeSortedMsgs(cs.Msgs, sub.acksPending)
+	sortedSequences := makeSortedSequences(sub.acksPending)
 	subject := sub.subject
 	qs := sub.qstate
 	clientID := sub.ClientID
@@ -1604,8 +1613,22 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	sent := false
 	sendMore := false
 
+	// The messages from sortedSequences are possibly going to be acknowledged
+	// by the end of this function, but we are going to set the timer based on
+	// the oldest on that list, which is the sooner the timer should fire anyway.
+	// The timer will correctly be adjusted.
+	firstUnacked := int64(0)
+
 	// We will move through acksPending(sorted) and see what needs redelivery.
-	for _, m := range sortedMsgs {
+	for _, seq := range sortedSequences {
+		m := s.getMsgForRedelivery(cs, sub, seq)
+		if m == nil {
+			continue
+		}
+		if firstUnacked == 0 {
+			firstUnacked = m.Timestamp
+		}
+
 		// Ignore messages with a timestamp below our floor
 		if floorTimestamp > 0 && floorTimestamp > m.Timestamp {
 			continue
@@ -1659,21 +1682,24 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 		}
 	}
 
-	// The messages from sortedMsgs above may have all been acknowledged
-	// by now, but we are going to set the timer based on the oldest on
-	// that list, which is the sooner the timer should fire anyway.
-	// The timer will correctly be adjusted.
-
-	firstUnacked := int64(0)
-
-	// Because of locking and timing, it's possible that the sortedMsgs
-	// map was empty even on entry.
-	if len(sortedMsgs) > 0 {
-		firstUnacked = sortedMsgs[0].Timestamp
-	}
-
 	// Adjust the timer
 	sub.adjustAckTimer(firstUnacked)
+}
+
+// getMsgForRedelivery looks up the message from storage. If not found -
+// because it has been removed due to limit - processes an ACK for this
+// sub/sequence number and returns nil, otherwise return a copy of the
+// message (since it is going to be modified: m.Redelivered = true)
+func (s *StanServer) getMsgForRedelivery(cs *stores.ChannelStore, sub *subState, seq uint64) *pb.MsgProto {
+	m := cs.Msgs.Lookup(seq)
+	if m == nil {
+		// Ack it so that it does not reincarnate on restart
+		s.processAck(cs, sub, seq)
+		return nil
+	}
+	// The store implementation does not return a copy, we need one
+	mcopy := *m
+	return &mcopy
 }
 
 // Sends the message to the subscriber
@@ -2365,7 +2391,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// If we are a durable (queue or not) and have state
 	if isDurable {
 		// Redeliver any oustanding.
-		s.performDurableRedelivery(cs.Msgs, sub)
+		s.performDurableRedelivery(cs, sub)
 	}
 
 	// publish messages to this subscriber
@@ -2449,7 +2475,7 @@ func (s *StanServer) sendAvailableMessagesToQueue(cs *stores.ChannelStore, qs *q
 
 	qs.Lock()
 	for nextSeq := qs.lastSent + 1; ; nextSeq++ {
-		nextMsg := cs.Msgs.Lookup(nextSeq)
+		nextMsg := getNextMsg(cs, &nextSeq, &qs.lastSent)
 		if nextMsg == nil {
 			break
 		}
@@ -2464,7 +2490,7 @@ func (s *StanServer) sendAvailableMessagesToQueue(cs *stores.ChannelStore, qs *q
 func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subState) {
 	sub.Lock()
 	for nextSeq := sub.LastSent + 1; ; nextSeq++ {
-		nextMsg := cs.Msgs.Lookup(nextSeq)
+		nextMsg := getNextMsg(cs, &nextSeq, &sub.LastSent)
 		if nextMsg == nil {
 			break
 		}
@@ -2473,6 +2499,36 @@ func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subStat
 		}
 	}
 	sub.Unlock()
+}
+
+func getNextMsg(cs *stores.ChannelStore, nextSeq, lastSent *uint64) *pb.MsgProto {
+	for {
+		nextMsg := cs.Msgs.Lookup(*nextSeq)
+		if nextMsg != nil {
+			return nextMsg
+		}
+		// Reason why we don't call FirstMsg here is that
+		// FirstMsg could be costly (read from disk, etc)
+		// to realize that the message is of lower sequence.
+		// So check with cheaper FirstSequence() first.
+		firstAvail := cs.Msgs.FirstSequence()
+		if firstAvail <= *nextSeq {
+			return nil
+		}
+		// TODO: We may send dataloss advisories to the client
+		// through the use of a subscription created optionally
+		// by the sub and given to the server through the SubscriptionRequest.
+		// For queue group, server would pick one of the member to send
+		// the advisory to.
+
+		// For now, just skip the missing ones.
+		*nextSeq = firstAvail
+		*lastSent = firstAvail - 1
+
+		// Note that the next lookup could still fail because
+		// the first avail message may have been dropped in the
+		// meantime.
+	}
 }
 
 // Check if a startTime is valid.

@@ -4499,3 +4499,175 @@ func TestIsValidSubject(t *testing.T) {
 		}
 	}
 }
+
+func TestDroppedMessagesOnSendToSub(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.MaxMsgs = 3
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Produce 1 message
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Start a durable, it should receive the message
+	ch := make(chan bool)
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {
+		ch <- true
+	}, stan.DurableName("dur"),
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Close connection
+	sc.Close()
+	// Recreate a connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Send messages 2, 3, 4 and 5. Messages 1 and 2 should be dropped.
+	for i := 2; i <= 5; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Start the durable, it should receive messages 3, 4 and 5
+	expectedSeq := uint64(3)
+	good := 0
+	cb := func(m *stan.Msg) {
+		if m.Sequence == expectedSeq {
+			good++
+			if good == 3 {
+				ch <- true
+			}
+		}
+		expectedSeq++
+	}
+	if _, err := sc.Subscribe("foo", cb,
+		stan.DurableName("dur"),
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for messages:
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+}
+
+func TestDroppedMessagesOnSendToQueueSub(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.MaxMsgs = 3
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Produce 1 message
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Start a queue subscriber, it should receive the message
+	ch := make(chan bool)
+	blocked := make(chan bool)
+	if _, err := sc.QueueSubscribe("foo", "bar", func(m *stan.Msg) {
+		ch <- true
+		// Block
+		<-blocked
+		m.Ack()
+	}, stan.MaxInflight(1), stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Send messages 2, 3, 4 and 5. Messages 1 and 2 should be dropped.
+	for i := 2; i <= 5; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Start another member, it should receive messages 3, 4 and 5
+	expectedSeq := uint64(3)
+	good := 0
+	cb := func(m *stan.Msg) {
+		if m.Sequence == expectedSeq {
+			good++
+			if good == 3 {
+				ch <- true
+			}
+		}
+		expectedSeq++
+	}
+	if _, err := sc.QueueSubscribe("foo", "bar", cb,
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for messages:
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+	// Unlock first member
+	close(blocked)
+}
+
+func TestDroppedMessagesOnRedelivery(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.MaxMsgs = 3
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Produce 3 messages
+	for i := 0; i < 3; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Start a subscriber with manual ack, don't ack the first
+	// delivered messages.
+	ch := make(chan bool)
+	ready := make(chan bool)
+	expectedSeq := uint64(2)
+	good := 0
+	cb := func(m *stan.Msg) {
+		if m.Redelivered {
+			m.Ack()
+			if m.Sequence == expectedSeq {
+				good++
+				if good == 3 {
+					ch <- true
+				}
+			}
+			expectedSeq++
+		} else if m.Sequence == 3 {
+			ready <- true
+		}
+	}
+	if _, err := sc.Subscribe("foo", cb,
+		stan.SetManualAckMode(),
+		stan.AckWait(time.Second),
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive 3rd message, then send one more
+	if err := Wait(ready); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Send one more, this should cause 1st message to be dropped
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Wait for redelivery of message 2, 3 and 4.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+}
