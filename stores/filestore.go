@@ -331,6 +331,8 @@ type FileMsgStore struct {
 	writer       io.Writer // this is `bw.buf` or `file` depending if buffer writer is used or not
 	files        [numFiles]*fileSlice
 	currSliceIdx int
+	slCountLim   int
+	slSizeLim    uint64
 	fstore       *FileStore // pointers to file store object
 	cache        bool       // shortcut to fstore.opts.CacheMsgs
 	msgs         map[uint64]*msgRecord
@@ -1067,6 +1069,15 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 	}
 	ms.init(channel, fs.limits)
 
+	ms.slCountLim = ms.limits.MaxNumMsgs / (numFiles - 1)
+	if ms.slCountLim < 1 {
+		ms.slCountLim = 1
+	}
+	ms.slSizeLim = uint64(ms.limits.MaxMsgBytes / (numFiles - 1))
+	if ms.slSizeLim < 1 {
+		ms.slSizeLim = 1
+	}
+
 	maxBufSize := fs.opts.BufferSize
 	if maxBufSize > 0 {
 		ms.bw = newBufferWriter(msgBufMinShrinkSize, maxBufSize)
@@ -1371,8 +1382,8 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	if maxMsgs > 0 || maxBytes > 0 {
 		// Check if we need to move to next file slice
 		if (ms.currSliceIdx < numFiles-1) &&
-			((maxMsgs > 0 && fslice.msgsCount >= maxMsgs/(numFiles-1)) ||
-				(maxBytes > 0 && fslice.msgsSize >= uint64(maxBytes)/(numFiles-1))) {
+			((maxMsgs > 0 && fslice.msgsCount >= ms.slCountLim) ||
+				(maxBytes > 0 && fslice.msgsSize >= ms.slSizeLim)) {
 
 			// Don't change store variable until success...
 			nextSlice := ms.currSliceIdx + 1
@@ -1531,7 +1542,12 @@ func (ms *FileMsgStore) enforceLimits() error {
 
 		// slice we are inspecting, make sure the slice is not
 		// empty.
-		for slice = ms.files[idx]; slice.msgsCount == 0; idx++ {
+		for {
+			slice = ms.files[idx]
+			if slice.msgsCount != 0 {
+				break
+			}
+			idx++
 		}
 		// Size of the first message in this slice
 		firstMsgSize := uint64(ms.msgs[slice.firstSeq].msgSize)
@@ -1620,8 +1636,6 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 			for i := seqStart; i <= seqEnd; i++ {
 				delete(ms.msgs, i)
 			}
-			// Update sequence of first available message
-			ms.first = file2.firstSeq
 		}
 
 		// Copy over values from the next slice

@@ -2867,13 +2867,26 @@ func TestFSRemoveAndShiftFiles(t *testing.T) {
 	defer fs.Close()
 
 	limits := DefaultChannelLimits
-	limits.MaxNumMsgs = 8
+	// Use limit below number of files to test that a slice
+	// will store at least one message.
+	limits.MaxNumMsgs = 3
 	fs.SetChannelLimits(limits)
 
-	total := 12
+	expectedFirst := uint64(5)
+	expectedFirstOnRecovery := uint64(4)
+	total := 7
 	payload := []byte("hello")
 	for i := 0; i < total; i++ {
 		storeMsg(t, fs, "foo", payload)
+	}
+	// Check first and last indexes
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	if ms.FirstMsg().Sequence != expectedFirst {
+		t.Fatalf("Expected message sequence to be %v, got %v", expectedFirst, ms.FirstMsg().Sequence)
+	}
+	if ms.LastMsg().Sequence != uint64(total) {
+		t.Fatalf("Expected message sequence to be %v, got %v", total, ms.LastMsg().Sequence)
 	}
 	// Close store
 	fs.Close()
@@ -2881,10 +2894,10 @@ func TestFSRemoveAndShiftFiles(t *testing.T) {
 	// Reopen
 	fs, _ = openDefaultFileStore(t)
 	defer fs.Close()
-	cs := fs.LookupChannel("foo")
-	ms := cs.Msgs.(*FileMsgStore)
-	if ms.FirstMsg().Sequence != 5 {
-		t.Fatalf("Expected message sequence to be 3, got %v", ms.FirstMsg().Sequence)
+	cs = fs.LookupChannel("foo")
+	ms = cs.Msgs.(*FileMsgStore)
+	if ms.FirstMsg().Sequence != expectedFirstOnRecovery {
+		t.Fatalf("Expected message sequence to be %v, got %v", expectedFirstOnRecovery, ms.FirstMsg().Sequence)
 	}
 	if ms.LastMsg().Sequence != uint64(total) {
 		t.Fatalf("Expected message sequence to be %v, got %v", total, ms.LastMsg().Sequence)
