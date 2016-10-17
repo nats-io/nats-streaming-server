@@ -231,11 +231,12 @@ Run go help for more guidance, and visit http://golang.org/ for tutorials, prese
 
 ## Clients
 
-Currently, there are two NATS Streaming clients, both supported by Apcera. We will be adding additional supported streaming clients in the future, and encourage community-contributed clients.
+Here is the list of NATS Streaming clients, supported by Apcera. We may add additional supported streaming clients in the future, and encourage community-contributed clients.
 
+- [C#](https://github.com/nats-io/csharp-nats-streaming)
 - [Go](https://github.com/nats-io/go-nats-streaming)
 - [Java](https://github.com/nats-io/java-nats-streaming)
-
+- [Node.js](https://github.com/nats-io/node-nats-streaming)
 
 ## License
 
