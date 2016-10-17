@@ -670,6 +670,22 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		debug:             sOpts.Debug,
 	}
 
+	// Ensure that we shutdown the server if there is a panic during startup.
+	// This will ensure that stores are closed (which otherwise would cause
+	// issues during testing) and that the NATS Server (if started) is also
+	// properly shutdown. To do so, we recover from the panic in order to
+	// call Shutdown, then issue the original panic.
+	defer func() {
+		if r := recover(); r != nil {
+			s.Shutdown()
+			// Log the reason for the panic. We use noticef here since
+			// Fatalf() would cause an exit.
+			Noticef("Failed to start: %v", r)
+			// Issue the original panic now that the store is closed.
+			panic(r)
+		}
+	}()
+
 	// Get the store limits
 	limits := &sOpts.StoreLimits
 
@@ -701,19 +717,6 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 
 	// Create clientStore
 	s.clients = &clientStore{store: s.store}
-
-	// Ensure that we shutdown the server if there is a panic during startup.
-	// This will ensure that stores are closed (which otherwise would cause
-	// issues during testing) and that the NATS Server (if started) is also
-	// properly shutdown. Tod do so, we recover from the panic in order to
-	// call Shutdown, then issue the original panic.
-	defer func() {
-		if r := recover(); r != nil {
-			s.Shutdown()
-			// Issue the original panic now that the store is closed.
-			panic(r)
-		}
-	}()
 
 	if recoveredState != nil {
 		// Copy content

@@ -7,6 +7,7 @@ import (
 	natsd "github.com/nats-io/gnatsd/server"
 	"io/ioutil"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -185,4 +186,35 @@ func TestLogOutput(t *testing.T) {
 	// Trace is set so we should have the value
 	Tracef("foo")
 	checkLogger("foo")
+}
+
+func TestRunServerFailureLogsCause(t *testing.T) {
+	defer RemoveLogger()
+
+	// dummy to override the configured logger.
+	d := &dummyLogger{}
+
+	sOpts := GetDefaultOptions()
+	sOpts.NATSServerURL = "nats://localhost:4444"
+	ConfigureLogger(sOpts, nil)
+
+	// override the default logger.
+	stanLog.Lock()
+	stanLog.logger = d
+	stanLog.Unlock()
+
+	// We expect the server to fail to start
+	var s *StanServer
+	defer func() {
+		if s != nil {
+			t.Fatal("Expected no server to be returned")
+		}
+		if r := recover(); r != nil {
+			// We should get a trace in the log_
+			if !strings.Contains(d.msg, "Can't connect to NATS") {
+				t.Fatalf("Expected to get a cause as invalid connection, got: %v", d.msg)
+			}
+		}
+	}()
+	s = RunServerWithOpts(sOpts, nil)
 }
