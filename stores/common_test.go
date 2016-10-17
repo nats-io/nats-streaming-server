@@ -4,22 +4,29 @@ package stores
 
 import (
 	"fmt"
+	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nuid"
-	"reflect"
-	"runtime"
-	"strings"
 )
 
-var testDefaultChannelLimits = ChannelLimits{
-	MaxChannels: 100,
-	MaxNumMsgs:  1000000,
-	MaxMsgBytes: 1000000 * 1024,
-	MaxSubs:     1000,
+var testDefaultStoreLimits = StoreLimits{
+	100,
+	ChannelLimits{
+		MsgStoreLimits{
+			MaxMsgs:  1000000,
+			MaxBytes: 1000000 * 1024,
+		},
+		SubStoreLimits{
+			MaxSubscriptions: 1000,
+		},
+	},
+	nil,
 }
 
 var nuidGen *nuid.NUID
@@ -330,11 +337,12 @@ func testMaxMsgs(t *testing.T, s Store) {
 		}
 	}
 
-	limits := testDefaultChannelLimits
-	limits.MaxNumMsgs = limitCount
-	limits.MaxMsgBytes = int64(expectedBytes)
-
-	s.SetChannelLimits(limits)
+	limits := testDefaultStoreLimits
+	limits.MaxMsgs = limitCount
+	limits.MaxBytes = int64(expectedBytes)
+	if err := s.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
 
 	totalSent := limitCount + 60
 	firstSeqAfterLimitReached := uint64(totalSent - limitCount + 1)
@@ -373,7 +381,7 @@ func testMaxMsgs(t *testing.T, s Store) {
 	// Store a message with a payload larger than the limit.
 	// Make sure that the message is stored, but all others should
 	// be removed.
-	bigMsg := make([]byte, limits.MaxMsgBytes+100)
+	bigMsg := make([]byte, limits.MaxBytes+100)
 	m := storeMsg(t, s, "foo", bigMsg)
 	expectedBytes = uint64(m.Size())
 
@@ -391,9 +399,11 @@ func testMaxMsgs(t *testing.T, s Store) {
 		m := pb.MsgProto{Data: payload, Subject: channelName, Sequence: seq, Timestamp: time.Now().UnixNano()}
 		expectedBytes += uint64(m.Size())
 	}
-	limits.MaxNumMsgs = expectedCount
-	limits.MaxMsgBytes = 0
-	s.SetChannelLimits(limits)
+	limits.MaxMsgs = expectedCount
+	limits.MaxBytes = 0
+	if err := s.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
 	for i := 0; i < expectedCount+10; i++ {
 		storeMsg(t, s, channelName, payload)
 	}
@@ -420,9 +430,11 @@ func testMaxMsgs(t *testing.T, s Store) {
 			break
 		}
 	}
-	limits.MaxNumMsgs = 0
-	limits.MaxMsgBytes = int64(expectedBytes)
-	s.SetChannelLimits(limits)
+	limits.MaxMsgs = 0
+	limits.MaxBytes = int64(expectedBytes)
+	if err := s.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
 	for i := 0; i < expectedCount+10; i++ {
 		storeMsg(t, s, channelName, payload)
 	}
@@ -644,7 +656,7 @@ func testFlush(t *testing.T, s Store) {
 func TestGSNoOps(t *testing.T) {
 	gs := &genericStore{}
 	defer gs.Close()
-	limits := DefaultChannelLimits
+	limits := DefaultStoreLimits
 	gs.init("test generic", &limits)
 	if _, _, err := gs.CreateChannel("foo", nil); err == nil {
 		t.Fatal("Expected to get an error since this should not be implemented for generic store")
@@ -655,7 +667,7 @@ func TestGSNoOps(t *testing.T) {
 
 	gms := &genericMsgStore{}
 	defer gms.Close()
-	gms.init("foo", limits)
+	gms.init("foo", limits.MsgStoreLimits)
 	if gms.Lookup(1) != nil || gms.FirstMsg() != nil || gms.LastMsg() != nil || gms.Flush() != nil ||
 		gms.GetSequenceFromTimestamp(0) != 0 || gms.Close() != nil {
 		t.Fatal("Expected no value since these should not be implemented for generic store")
@@ -663,9 +675,96 @@ func TestGSNoOps(t *testing.T) {
 
 	gss := &genericSubStore{}
 	defer gss.Close()
-	gss.init("foo", limits)
+	gss.init("foo", limits.SubStoreLimits)
 	if gss.AddSeqPending(1, 1) != nil || gss.AckSeqPending(1, 1) != nil || gss.Flush() != nil ||
 		gss.Close() != nil {
 		t.Fatal("Expected no value since these should not be implemented for generic store")
 	}
+}
+
+func testPerChannelLimits(t *testing.T, s Store) {
+	storeLimits := &StoreLimits{MaxChannels: 10}
+	storeLimits.MaxSubscriptions = 10
+	storeLimits.MaxMsgs = 100
+	storeLimits.MaxBytes = 100 * 1024
+
+	fooLimits := ChannelLimits{
+		MsgStoreLimits{
+			MaxMsgs:  3,
+			MaxBytes: 3 * 1024,
+		},
+		SubStoreLimits{
+			MaxSubscriptions: 1,
+		},
+	}
+	barLimits := ChannelLimits{
+		MsgStoreLimits{
+			MaxMsgs:  5,
+			MaxBytes: 5 * 1024,
+		},
+		SubStoreLimits{
+			MaxSubscriptions: 2,
+		},
+	}
+	noSubsOverrideLimits := ChannelLimits{
+		MsgStoreLimits{
+			MaxMsgs:  6,
+			MaxBytes: 6 * 1024,
+		},
+		SubStoreLimits{},
+	}
+	noMaxMsgOverrideLimits := ChannelLimits{
+		MsgStoreLimits{
+			MaxBytes: 7 * 1024,
+		},
+		SubStoreLimits{},
+	}
+	noMaxBytesOverrideLimits := ChannelLimits{
+		MsgStoreLimits{
+			MaxMsgs: 10,
+		},
+		SubStoreLimits{},
+	}
+
+	storeLimits.AddPerChannel("foo", &fooLimits)
+	storeLimits.AddPerChannel("bar", &barLimits)
+	storeLimits.AddPerChannel("baz", &noSubsOverrideLimits)
+	storeLimits.AddPerChannel("abc", &noMaxMsgOverrideLimits)
+	storeLimits.AddPerChannel("def", &noMaxBytesOverrideLimits)
+	if err := s.SetLimits(storeLimits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+
+	checkLimitsForChannel := func(channelName string, maxMsgs, maxSubs int) {
+		cs, _, err := s.CreateChannel(channelName, nil)
+		if err != nil {
+			stackFatalf(t, "Unexpected error on create channel: %v", err)
+		}
+		for i := 0; i < maxMsgs+10; i++ {
+			if _, err := cs.Msgs.Store([]byte("hello")); err != nil {
+				stackFatalf(t, "Unexpected error on store: %v", err)
+			}
+		}
+		n, _, err := cs.Msgs.State()
+		if err != nil {
+			stackFatalf(t, "Unexpected error on State: %v", err)
+		}
+		if n != maxMsgs {
+			stackFatalf(t, "Expected %v messages, got %v", maxMsgs, n)
+		}
+		for i := 0; i < maxSubs+1; i++ {
+			err := cs.Subs.CreateSub(&spb.SubState{})
+			if i < maxSubs && err != nil {
+				stackFatalf(t, "Unexpected error on create sub: %v", err)
+			} else if i == maxSubs && err == nil {
+				stackFatalf(t, "Expected error on createSub, did not get one")
+			}
+		}
+	}
+	checkLimitsForChannel("foo", fooLimits.MaxMsgs, fooLimits.MaxSubscriptions)
+	checkLimitsForChannel("bar", barLimits.MaxMsgs, barLimits.MaxSubscriptions)
+	checkLimitsForChannel("baz", noSubsOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+	checkLimitsForChannel("abc", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+	checkLimitsForChannel("def", noMaxBytesOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+	checkLimitsForChannel("global", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
 }

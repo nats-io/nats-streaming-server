@@ -10,13 +10,13 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
-	"sort"
-	"sync"
 )
 
 const (
@@ -573,8 +573,8 @@ func (w *bufferedWriter) checkShrinkRequest() {
 // NewFileStore returns a factory for stores backed by files, and recovers
 // any state present.
 // If not limits are provided, the store will be created with
-// DefaultChannelLimits.
-func NewFileStore(rootDir string, limits *ChannelLimits, options ...FileStoreOption) (*FileStore, *RecoveredState, error) {
+// DefaultStoreLimits.
+func NewFileStore(rootDir string, limits *StoreLimits, options ...FileStoreOption) (*FileStore, *RecoveredState, error) {
 	fs := &FileStore{
 		rootDir: rootDir,
 		opts:    DefaultFileStoreOptions,
@@ -1067,13 +1067,21 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		bufferedMsgs: make([]uint64, 0, 1),
 		cache:        fs.opts.CacheMsgs,
 	}
-	ms.init(channel, fs.limits)
+	// Defaults to the global limits
+	msgStoreLimits := fs.limits.MsgStoreLimits
+	// See if there is an override
+	thisChannelLimits, exists := fs.limits.PerChannel[channel]
+	if exists {
+		// Use this channel specific limits
+		msgStoreLimits = thisChannelLimits.MsgStoreLimits
+	}
+	ms.init(channel, msgStoreLimits)
 
-	ms.slCountLim = ms.limits.MaxNumMsgs / (numFiles - 1)
+	ms.slCountLim = ms.limits.MaxMsgs / (numFiles - 1)
 	if ms.slCountLim < 1 {
 		ms.slCountLim = 1
 	}
-	ms.slSizeLim = uint64(ms.limits.MaxMsgBytes / (numFiles - 1))
+	ms.slSizeLim = uint64(ms.limits.MaxBytes / (numFiles - 1))
 	if ms.slSizeLim < 1 {
 		ms.slSizeLim = 1
 	}
@@ -1377,8 +1385,8 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 
 	fslice := ms.files[ms.currSliceIdx]
 
-	maxMsgs := ms.limits.MaxNumMsgs
-	maxBytes := ms.limits.MaxMsgBytes
+	maxMsgs := ms.limits.MaxMsgs
+	maxBytes := uint64(ms.limits.MaxBytes)
 	if maxMsgs > 0 || maxBytes > 0 {
 		// Check if we need to move to next file slice
 		if (ms.currSliceIdx < numFiles-1) &&
@@ -1534,8 +1542,8 @@ func (ms *FileMsgStore) enforceLimits() error {
 	// Check if we need to remove any (but leave at least the last added).
 	// Note that we may have to remove more than one msg if we are here
 	// after a restart with smaller limits than originally set.
-	maxMsgs := ms.limits.MaxNumMsgs
-	maxBytes := ms.limits.MaxMsgBytes
+	maxMsgs := ms.limits.MaxMsgs
+	maxBytes := ms.limits.MaxBytes
 	for ms.totalCount > 1 &&
 		((maxMsgs > 0 && ms.totalCount > maxMsgs) ||
 			(maxBytes > 0 && ms.totalBytes > uint64(maxBytes))) {
@@ -1560,7 +1568,7 @@ func (ms *FileMsgStore) enforceLimits() error {
 		// Remove the first message from our cache
 		if !ms.hitLimit {
 			ms.hitLimit = true
-			Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxNumMsgs, ms.totalBytes, ms.limits.MaxMsgBytes)
+			Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs, ms.totalBytes, ms.limits.MaxBytes)
 		}
 		delete(ms.msgs, ms.first)
 
@@ -1910,7 +1918,15 @@ func (fs *FileStore) newFileSubStore(channelDirName, channel string, doRecover b
 		opts:     &fs.opts,
 		crcTable: fs.crcTable,
 	}
-	ss.init(channel, fs.limits)
+	// Defaults to the global limits
+	subStoreLimits := fs.limits.SubStoreLimits
+	// See if there is an override
+	thisChannelLimits, exists := fs.limits.PerChannel[channel]
+	if exists {
+		// Use this channel specific limits
+		subStoreLimits = thisChannelLimits.SubStoreLimits
+	}
+	ss.init(channel, subStoreLimits)
 	// Convert the CompactInterval in time.Duration
 	ss.compactItvl = time.Duration(ss.opts.CompactInterval) * time.Second
 

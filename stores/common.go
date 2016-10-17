@@ -18,13 +18,13 @@ var droppingMsgsFmt = "WARNING: Reached limits for store %q (msgs=%v/%v bytes=%v
 // commonStore contains everything that is common to any type of store
 type commonStore struct {
 	sync.RWMutex
-	limits ChannelLimits
 	closed bool
 }
 
 // genericStore is the generic store implementation with a map of channels.
 type genericStore struct {
 	commonStore
+	limits   StoreLimits
 	name     string
 	channels map[string]*ChannelStore
 	clients  map[string]*Client
@@ -34,6 +34,7 @@ type genericStore struct {
 // for a given channel.
 type genericSubStore struct {
 	commonStore
+	limits    SubStoreLimits
 	subject   string // Can't be wildcard
 	subsCount int
 	maxSubID  uint64
@@ -43,6 +44,7 @@ type genericSubStore struct {
 // for a given channel.
 type genericMsgStore struct {
 	commonStore
+	limits     MsgStoreLimits
 	subject    string // Can't be wildcard
 	first      uint64
 	last       uint64
@@ -56,12 +58,12 @@ type genericMsgStore struct {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes the structure of a generic store
-func (gs *genericStore) init(name string, limits *ChannelLimits) {
+func (gs *genericStore) init(name string, limits *StoreLimits) {
 	gs.name = name
 	if limits == nil {
-		gs.limits = DefaultChannelLimits
+		gs.limits = DefaultStoreLimits
 	} else {
-		gs.limits = *limits
+		gs.setLimits(limits)
 	}
 	// Do not use limits values to create the map.
 	gs.channels = make(map[string]*ChannelStore)
@@ -78,11 +80,31 @@ func (gs *genericStore) Name() string {
 	return gs.name
 }
 
-// SetChannelLimits sets the limit for the messages and subscriptions stores.
-func (gs *genericStore) SetChannelLimits(limits ChannelLimits) {
+// setLimits makes a copy of the given StoreLimits,
+// validates the limits and if ok, applies the inheritance.
+func (gs *genericStore) setLimits(limits *StoreLimits) error {
+	// Make a copy
+	gs.limits = *limits
+	// of the map too
+	if len(limits.PerChannel) > 0 {
+		gs.limits.PerChannel = make(map[string]*ChannelLimits, len(limits.PerChannel))
+		for key, val := range limits.PerChannel {
+			// Make a copy of the values. We want ownership
+			// of those structures
+			gs.limits.PerChannel[key] = &(*val)
+		}
+	}
+	// Build will validate and apply inheritance if no error.
+	sl := &gs.limits
+	return sl.Build()
+}
+
+// SetLimits sets limits for this store
+func (gs *genericStore) SetLimits(limits *StoreLimits) error {
 	gs.Lock()
-	gs.limits = limits
+	err := gs.setLimits(limits)
 	gs.Unlock()
+	return err
 }
 
 // CreateChannel creates a ChannelStore for the given channel, and returns
@@ -232,7 +254,7 @@ func (gs *genericStore) close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes this generic message store
-func (gms *genericMsgStore) init(subject string, limits ChannelLimits) {
+func (gms *genericMsgStore) init(subject string, limits MsgStoreLimits) {
 	gms.subject = subject
 	gms.limits = limits
 }
@@ -309,7 +331,7 @@ func (gms *genericMsgStore) Close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes the structure of a generic sub store
-func (gss *genericSubStore) init(channel string, limits ChannelLimits) {
+func (gss *genericSubStore) init(channel string, limits SubStoreLimits) {
 	gss.subject = channel
 	gss.limits = limits
 }
@@ -332,7 +354,7 @@ func (gss *genericSubStore) UpdateSub(sub *spb.SubState) error {
 // createSub is the unlocked version of CreateSub that can be used by
 // non-generic implementations.
 func (gss *genericSubStore) createSub(sub *spb.SubState) error {
-	if gss.limits.MaxSubs > 0 && gss.subsCount >= gss.limits.MaxSubs {
+	if gss.limits.MaxSubscriptions > 0 && gss.subsCount >= gss.limits.MaxSubscriptions {
 		return ErrTooManySubs
 	}
 

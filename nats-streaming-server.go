@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"reflect"
 	"runtime"
 	"strings"
+	"time"
 
 	natsd "github.com/nats-io/gnatsd/server"
 	stand "github.com/nats-io/nats-streaming-server/server"
@@ -22,11 +24,24 @@ Streaming Server Options:
     -cid, --cluster_id  <cluster ID> Cluster ID (default: test-cluster)
     -st,  --store <type>             Store type: MEMORY|FILE (default: MEMORY)
           --dir <directory>          For FILE store type, this is the root directory
-    -mc,  --max_channels <number>    Max number of channels (aka subjects, topics, etc...)
-    -msu, --max_subs <number>        Max number of subscriptions per channel
-    -mm,  --max_msgs <number>        Max number of messages per channel
-    -mb,  --max_bytes <number>       Max messages total size per channel
+    -mc,  --max_channels <number>    Max number of channels (0 for unlimited)
+    -msu, --max_subs <number>        Max number of subscriptions per channel (0 for unlimited)
+    -mm,  --max_msgs <number>        Max number of messages per channel (0 for unlimited)
+    -mb,  --max_bytes <number>       Max messages total size per channel (0 for unlimited)
+    -ma,  --max_age <seconds>        Max duration a message can be stored ("0s" for unlimited)
     -ns,  --nats_server <url>        Connect to this external NATS Server (embedded otherwise)
+    -sc,  --stan_config <file>       Streaming server configuration file
+
+Streaming Server File Store Options:
+    --file_compact_enabled           Enable file compaction
+    --file_compact_frag              File fragmentation threshold for compaction
+    --file_compact_interval <int>    Minimum interval (in seconds) between file compactions
+    --file_compact_min_size <int>    Minimum file size for compaction
+    --file_buffer_size <int>         File buffer size (in bytes)
+    --file_crc                       Enable file CRC-32 checksum
+    --file_crc_poly <int>            Polynomial used to make the table used for CRC-32 checksum
+    --file_sync                      Enable File.Sync on Flush
+    --file_cache                     Enable messages caching
 
 Streaming Server TLS Options:
     -secure                          Use a TLS connection to the NATS server without
@@ -109,43 +124,55 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 
 	// STAN options
 	var stanDebugAndTrace bool
+	var stanConfigFile string
 
+	// Start with default options
 	stanOpts := stand.GetDefaultOptions()
-	flag.StringVar(&stanOpts.ID, "cluster_id", stand.DefaultClusterID, "Cluster ID.")
-	flag.StringVar(&stanOpts.ID, "cid", stand.DefaultClusterID, "Cluster ID.")
-	flag.StringVar(&stanOpts.StoreType, "store", stores.TypeMemory, fmt.Sprintf("Store type: (%s|%s)", stores.TypeMemory, stores.TypeFile))
-	flag.StringVar(&stanOpts.StoreType, "st", stores.TypeMemory, fmt.Sprintf("Store type: (%s|%s)", stores.TypeMemory, stores.TypeFile))
-	flag.StringVar(&stanOpts.FilestoreDir, "dir", "", "Root directory")
-	flag.IntVar(&stanOpts.MaxChannels, "max_channels", stand.DefaultChannelLimit, "Max number of channels (-1 for unlimited)")
-	flag.IntVar(&stanOpts.MaxChannels, "mc", stand.DefaultChannelLimit, "Max number of channels (-1 for unlimited)")
-	flag.IntVar(&stanOpts.MaxSubscriptions, "max_subs", stand.DefaultSubStoreLimit, "Max number of subscriptions per channel (-1 for unlimited)")
-	flag.IntVar(&stanOpts.MaxSubscriptions, "msu", stand.DefaultSubStoreLimit, "Max number of subscriptions per channel (-1 for unlimited)")
-	flag.IntVar(&stanOpts.MaxMsgs, "max_msgs", stand.DefaultMsgStoreLimit, "Max number of messages per channel (-1 for unlimited)")
-	flag.IntVar(&stanOpts.MaxMsgs, "mm", stand.DefaultMsgStoreLimit, "Max number of messages per channel (-1 for unlimited)")
-	flag.Int64Var(&stanOpts.MaxBytes, "max_bytes", stand.DefaultMsgSizeStoreLimit, "Max messages total size per channel (-1 for unlimited)")
-	flag.Int64Var(&stanOpts.MaxBytes, "mb", stand.DefaultMsgSizeStoreLimit, "Max messages total size per channel (-1 for unlimited)")
-	flag.BoolVar(&stanOpts.Debug, "SD", false, "Enable STAN Debug logging.")
-	flag.BoolVar(&stanOpts.Debug, "stan_debug", false, "Enable STAN Debug logging.")
-	flag.BoolVar(&stanOpts.Trace, "SV", false, "Enable STAN Trace logging.")
-	flag.BoolVar(&stanOpts.Trace, "stan_trace", false, "Enable STAN Trace logging.")
-	flag.BoolVar(&stanDebugAndTrace, "SDV", false, "Enable STAN Debug and Trace logging.")
-	flag.BoolVar(&stanOpts.Secure, "secure", false, "Enables TLS secure connection that skips server verification.")
-	flag.StringVar(&stanOpts.ClientCert, "tls_client_cert", "", "Path to a client certificate file")
-	flag.StringVar(&stanOpts.ClientKey, "tls_client_key", "", "Path to a client key file")
-	flag.StringVar(&stanOpts.ClientCA, "tls_client_cacert", "", "Path to a client CA file")
-	flag.StringVar(&stanOpts.NATSServerURL, "nats_server", "", "URL of the NATS Server to connect to (embedded by default)")
-	flag.StringVar(&stanOpts.NATSServerURL, "ns", "", "URL of the NATS Server to connect to (embedded by default)")
-	flag.BoolVar(&stanOpts.FileStoreOpts.CompactEnabled, "file_compact_enabled", stores.DefaultFileStoreOptions.CompactEnabled, "Enable file compaction")
-	flag.IntVar(&stanOpts.FileStoreOpts.CompactFragmentation, "file_compact_frag", stores.DefaultFileStoreOptions.CompactFragmentation, "File fragmentation threshold for compaction")
-	flag.IntVar(&stanOpts.FileStoreOpts.CompactInterval, "file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "Minimum interval (in seconds) between file compactions")
-	flag.Int64Var(&stanOpts.FileStoreOpts.CompactMinFileSize, "file_compact_min_size", stores.DefaultFileStoreOptions.CompactMinFileSize, "Minimum file size for compaction")
-	flag.IntVar(&stanOpts.FileStoreOpts.BufferSize, "file_buffer_size", stores.DefaultFileStoreOptions.BufferSize, "File buffer size (in bytes)")
-	flag.BoolVar(&stanOpts.FileStoreOpts.DoCRC, "file_crc", stores.DefaultFileStoreOptions.DoCRC, "Enable file CRC-32 checksum")
-	flag.Int64Var(&stanOpts.FileStoreOpts.CRCPolynomial, "file_crc_poly", stores.DefaultFileStoreOptions.CRCPolynomial, "Polynomial used to make the table used for CRC-32 checksum")
-	flag.BoolVar(&stanOpts.FileStoreOpts.DoSync, "file_sync", stores.DefaultFileStoreOptions.DoSync, "Enable File.Sync on Flush")
-	flag.BoolVar(&stanOpts.FileStoreOpts.CacheMsgs, "file_cache", stores.DefaultFileStoreOptions.CacheMsgs, "Enable messages caching")
-	flag.IntVar(&stanOpts.IOBatchSize, "io_batch_size", stand.DefaultIOBatchSize, "# of message to batch in flushing io")
-	flag.Int64Var(&stanOpts.IOSleepTime, "io_sleep_time", stand.DefaultIOSleepTime, "duration the server waits for more messages (in micro-seconds, 0 to disable)")
+
+	// Define the flags for STAN. We use the Usage (last field)
+	// as the actual Options name. We will then use reflection
+	// to apply any command line option to stanOpts, overriding
+	// defaults and options set during file parsing.
+	flag.String("cluster_id", stand.DefaultClusterID, "ID")
+	flag.String("cid", stand.DefaultClusterID, "ID")
+	flag.String("store", stores.TypeMemory, "StoreType")
+	flag.String("st", stores.TypeMemory, "StoreType")
+	flag.String("dir", "", "FilestoreDir")
+	flag.Int("max_channels", stores.DefaultStoreLimits.MaxChannels, "MaxChannels")
+	flag.Int("mc", stores.DefaultStoreLimits.MaxChannels, "MaxChannels")
+	flag.Int("max_subs", stores.DefaultStoreLimits.MaxSubscriptions, "MaxSubscriptions")
+	flag.Int("msu", stores.DefaultStoreLimits.MaxSubscriptions, "MaxSubscriptions")
+	flag.Int("max_msgs", stores.DefaultStoreLimits.MaxMsgs, "MaxMsgs")
+	flag.Int("mm", stores.DefaultStoreLimits.MaxMsgs, "MaxMsgs")
+	flag.Int64("max_bytes", stores.DefaultStoreLimits.MaxBytes, "MaxBytes")
+	flag.Int64("mb", stores.DefaultStoreLimits.MaxBytes, "MaxBytes")
+	flag.String("max_age", "0s", "MaxAge")
+	flag.String("ma", "0s", "MaxAge")
+	flag.Bool("SD", false, "Debug")
+	flag.Bool("stan_debug", false, "Debug")
+	flag.Bool("SV", false, "Trace")
+	flag.Bool("stan_trace", false, "Trace")
+	flag.BoolVar(&stanDebugAndTrace, "SDV", false, "")
+	flag.Bool("secure", false, "Secure")
+	flag.String("tls_client_cert", "", "ClientCert")
+	flag.String("tls_client_key", "", "ClientKey")
+	flag.String("tls_client_cacert", "", "ClientCA")
+	flag.String("nats_server", "", "NATSServerURL")
+	flag.String("ns", "", "NATSServerURL")
+	flag.StringVar(&stanConfigFile, "sc", "", "")
+	flag.StringVar(&stanConfigFile, "stan_config", "", "")
+	flag.Bool("file_compact_enabled", stores.DefaultFileStoreOptions.CompactEnabled, "FileStoreOpts.CompactEnabled")
+	flag.Int("file_compact_frag", stores.DefaultFileStoreOptions.CompactFragmentation, "FileStoreOpts.CompactFragmentation")
+	flag.Int("file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "FileStoreOpts.CompactInterval")
+	flag.Int64("file_compact_min_size", stores.DefaultFileStoreOptions.CompactMinFileSize, "FileStoreOpts.CompactMinFileSize")
+	flag.Int("file_buffer_size", stores.DefaultFileStoreOptions.BufferSize, "FileStoreOpts.BufferSize")
+	flag.Bool("file_crc", stores.DefaultFileStoreOptions.DoCRC, "FileStoreOpts.DoCRC")
+	flag.Int64("file_crc_poly", stores.DefaultFileStoreOptions.CRCPolynomial, "FileStoreOpts.CRCPolynomial")
+	flag.Bool("file_sync", stores.DefaultFileStoreOptions.DoSync, "FileStoreOpts.DoSync")
+	flag.Bool("file_cache", stores.DefaultFileStoreOptions.CacheMsgs, "FileStoreOpts.CacheMsgs")
+	flag.Int("io_batch_size", stand.DefaultIOBatchSize, "IOBatchSize")
+	flag.Int64("io_sleep_time", stand.DefaultIOSleepTime, "IOSleepTime")
+
 	// NATS options
 	var showVersion bool
 	var natsDebugAndTrace bool
@@ -157,47 +184,51 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	// TODO: Expose gnatsd parsing into server options
 	// (cls) This is a development placeholder until gnatsd
 	// options parsing is exposed, if we go that way.
-	flag.IntVar(&natsOpts.Port, "port", 0, "Port to listen on.")
-	flag.IntVar(&natsOpts.Port, "p", 0, "Port to listen on.")
-	flag.StringVar(&natsOpts.Host, "addr", "", "Network host to listen on.")
-	flag.StringVar(&natsOpts.Host, "a", "", "Network host to listen on.")
-	flag.StringVar(&natsOpts.Host, "net", "", "Network host to listen on.")
-	flag.BoolVar(&natsOpts.Debug, "D", false, "Enable Debug logging.")
-	flag.BoolVar(&natsOpts.Debug, "debug", false, "Enable Debug logging.")
-	flag.BoolVar(&natsOpts.Trace, "V", false, "Enable Trace logging.")
-	flag.BoolVar(&natsOpts.Trace, "trace", false, "Enable Trace logging.")
-	flag.BoolVar(&natsDebugAndTrace, "DV", false, "Enable Debug and Trace logging.")
-	flag.BoolVar(&natsOpts.Logtime, "T", true, "Timestamp log entries.")
-	flag.BoolVar(&natsOpts.Logtime, "logtime", true, "Timestamp log entries.")
-	flag.StringVar(&natsOpts.Username, "user", "", "Username required for connection.")
-	flag.StringVar(&natsOpts.Password, "pass", "", "Password required for connection.")
-	flag.StringVar(&natsOpts.Authorization, "auth", "", "Authorization token required for connection.")
-	flag.IntVar(&natsOpts.HTTPPort, "m", 0, "HTTP Port for /varz, /connz endpoints.")
-	flag.IntVar(&natsOpts.HTTPPort, "http_port", 0, "HTTP Port for /varz, /connz endpoints.")
-	flag.IntVar(&natsOpts.HTTPSPort, "ms", 0, "HTTPS Port for /varz, /connz endpoints.")
-	flag.IntVar(&natsOpts.HTTPSPort, "https_port", 0, "HTTPS Port for /varz, /connz endpoints.")
-	flag.StringVar(&configFile, "c", "", "Configuration file.")
-	flag.StringVar(&configFile, "config", "", "Configuration file.")
-	flag.StringVar(&natsOpts.PidFile, "P", "", "File to store process pid.")
-	flag.StringVar(&natsOpts.PidFile, "pid", "", "File to store process pid.")
-	flag.StringVar(&natsOpts.LogFile, "l", "", "File to store logging output.")
-	flag.StringVar(&natsOpts.LogFile, "log", "", "File to store logging output.")
-	flag.BoolVar(&natsOpts.Syslog, "s", false, "Enable syslog as log method.")
-	flag.BoolVar(&natsOpts.Syslog, "syslog", false, "Enable syslog as log method..")
-	flag.StringVar(&natsOpts.RemoteSyslog, "r", "", "Syslog server addr (udp://localhost:514).")
-	flag.StringVar(&natsOpts.RemoteSyslog, "remote_syslog", "", "Syslog server addr (udp://localhost:514).")
-	flag.BoolVar(&showVersion, "version", false, "Print version information.")
-	flag.BoolVar(&showVersion, "v", false, "Print version information.")
-	flag.IntVar(&natsOpts.ProfPort, "profile", 0, "Profiling HTTP port")
-	flag.StringVar(&natsOpts.RoutesStr, "routes", "", "Routes to actively solicit a connection.")
-	flag.StringVar(&natsOpts.ClusterListenStr, "cluster", "", "Cluster url from which members can solicit routes.")
-	flag.StringVar(&natsOpts.ClusterListenStr, "cluster_listen", "", "Cluster url from which members can solicit routes.")
-	flag.BoolVar(&showTLSHelp, "help_tls", false, "TLS help.")
-	flag.BoolVar(&natsOpts.TLS, "tls", false, "Enable TLS.")
-	flag.BoolVar(&natsOpts.TLSVerify, "tlsverify", false, "Enable TLS with client verification.")
-	flag.StringVar(&natsOpts.TLSCert, "tlscert", "", "Server certificate file.")
-	flag.StringVar(&natsOpts.TLSKey, "tlskey", "", "Private key for server certificate.")
-	flag.StringVar(&natsOpts.TLSCaCert, "tlscacert", "", "Client certificate CA for verification.")
+	//
+	// IMPORTANT: Do not use Usage field (last) since this is
+	// used to do reflection. Note that usage is defined in
+	// usageStr anyway.
+	flag.IntVar(&natsOpts.Port, "port", 0, "")
+	flag.IntVar(&natsOpts.Port, "p", 0, "")
+	flag.StringVar(&natsOpts.Host, "addr", "", "")
+	flag.StringVar(&natsOpts.Host, "a", "", "")
+	flag.StringVar(&natsOpts.Host, "net", "", "")
+	flag.BoolVar(&natsOpts.Debug, "D", false, "")
+	flag.BoolVar(&natsOpts.Debug, "debug", false, "")
+	flag.BoolVar(&natsOpts.Trace, "V", false, "")
+	flag.BoolVar(&natsOpts.Trace, "trace", false, "")
+	flag.BoolVar(&natsDebugAndTrace, "DV", false, "")
+	flag.BoolVar(&natsOpts.Logtime, "T", true, "")
+	flag.BoolVar(&natsOpts.Logtime, "logtime", true, "")
+	flag.StringVar(&natsOpts.Username, "user", "", "")
+	flag.StringVar(&natsOpts.Password, "pass", "", "")
+	flag.StringVar(&natsOpts.Authorization, "auth", "", "")
+	flag.IntVar(&natsOpts.HTTPPort, "m", 0, "")
+	flag.IntVar(&natsOpts.HTTPPort, "http_port", 0, "")
+	flag.IntVar(&natsOpts.HTTPSPort, "ms", 0, "")
+	flag.IntVar(&natsOpts.HTTPSPort, "https_port", 0, "")
+	flag.StringVar(&configFile, "c", "", "")
+	flag.StringVar(&configFile, "config", "", "")
+	flag.StringVar(&natsOpts.PidFile, "P", "", "")
+	flag.StringVar(&natsOpts.PidFile, "pid", "", "")
+	flag.StringVar(&natsOpts.LogFile, "l", "", "")
+	flag.StringVar(&natsOpts.LogFile, "log", "", "")
+	flag.BoolVar(&natsOpts.Syslog, "s", false, "")
+	flag.BoolVar(&natsOpts.Syslog, "syslog", false, "")
+	flag.StringVar(&natsOpts.RemoteSyslog, "r", "", "")
+	flag.StringVar(&natsOpts.RemoteSyslog, "remote_syslog", "", "")
+	flag.BoolVar(&showVersion, "version", false, "")
+	flag.BoolVar(&showVersion, "v", false, "")
+	flag.IntVar(&natsOpts.ProfPort, "profile", 0, "")
+	flag.StringVar(&natsOpts.RoutesStr, "routes", "", "")
+	flag.StringVar(&natsOpts.ClusterListenStr, "cluster", "", "")
+	flag.StringVar(&natsOpts.ClusterListenStr, "cluster_listen", "", "")
+	flag.BoolVar(&showTLSHelp, "help_tls", false, "")
+	flag.BoolVar(&natsOpts.TLS, "tls", false, "")
+	flag.BoolVar(&natsOpts.TLSVerify, "tlsverify", false, "")
+	flag.StringVar(&natsOpts.TLSCert, "tlscert", "", "")
+	flag.StringVar(&natsOpts.TLSKey, "tlskey", "", "")
+	flag.StringVar(&natsOpts.TLSCaCert, "tlscacert", "", "")
 
 	flag.Usage = usage
 	flag.Parse()
@@ -215,7 +246,19 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 		natsd.PrintTLSHelpAndDie()
 	}
 
-	// Parse config if given
+	// Parse NATS Streaming configuration file, updating stanOpts with
+	// what is found in the file, possibly overriding the defaults.
+	if stanConfigFile != "" {
+		if err := stand.ProcessConfigFile(stanConfigFile, stanOpts); err != nil {
+			natsd.PrintAndDie(err.Error())
+		}
+	}
+	// Now apply all parameters provided on the command line.
+	if err := overrideWithCmdLineParams(stanOpts); err != nil {
+		natsd.PrintAndDie(err.Error())
+	}
+
+	// Parse NATS config if given
 	if configFile != "" {
 		fileOpts, err := natsd.ProcessConfigFile(configFile)
 		if err != nil {
@@ -265,4 +308,62 @@ func checkStoreOpts(opts *stand.Options) {
 			os.Exit(0)
 		}
 	}
+}
+
+// overrideWithCmdLineParams applies the flags passed in the command line
+// to the given options structure.
+func overrideWithCmdLineParams(opts *stand.Options) error {
+	var err error
+	flag.Visit(func(f *flag.Flag) {
+		if err != nil || f.Usage == "" {
+			return
+		}
+		t := reflect.ValueOf(opts).Elem()
+		var o reflect.Value
+		// Lookup for sub structures, ex: FileStoreOpts.CacheMsgs
+		if strings.Contains(f.Usage, ".") {
+			strs := strings.Split(f.Usage, ".")
+			obj := t.FieldByName(strs[0])
+			for i := 1; i < len(strs); i++ {
+				obj = obj.FieldByName(strs[i])
+			}
+			o = obj
+		} else {
+			o = t.FieldByName(f.Usage)
+		}
+		if !o.IsValid() || !o.CanSet() {
+			return
+		}
+		v, ok := f.Value.(flag.Getter)
+		if !ok {
+			return
+		}
+		val := v.Get()
+		valKind := reflect.ValueOf(val).Kind()
+		switch valKind {
+		case reflect.String:
+			if strings.HasSuffix(f.Usage, "MaxAge") {
+				var dur time.Duration
+				dur, err = time.ParseDuration(val.(string))
+				if err != nil {
+					return
+				}
+				o.SetInt(int64(dur))
+			} else {
+				o.SetString(val.(string))
+			}
+		case reflect.Int:
+			o.SetInt(int64(val.(int)))
+		case reflect.Int64:
+			o.SetInt(val.(int64))
+		case reflect.Uint64:
+			o.SetUint(val.(uint64))
+		case reflect.Bool:
+			o.SetBool(val.(bool))
+		default:
+			panic(fmt.Errorf("Add support for type %v (command line parameter %q)",
+				valKind.String(), f.Name))
+		}
+	})
+	return err
 }

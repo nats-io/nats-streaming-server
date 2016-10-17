@@ -3856,43 +3856,40 @@ func TestFileStoreNoPanicOnShutdown(t *testing.T) {
 	opts := getTestDefaultOptsForFileStore()
 	opts.NATSServerURL = nats.DefaultURL
 
-	test := func() {
-		cleanupDatastore(t, defaultDataStore)
-		defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
-		s := RunServerWithOpts(opts, nil)
-		defer s.Shutdown()
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
 
-		// Start a go routine that keeps sending messages
-		sendQuit := make(chan bool)
-		wg := &sync.WaitGroup{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	// Start a go routine that keeps sending messages
+	sendQuit := make(chan bool)
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 
-			sc, nc := createConnectionWithNatsOpts(t, clientName, nats.NoReconnect())
-			defer sc.Close()
-			defer nc.Close()
-			for {
-				select {
-				case <-sendQuit:
-					return
-				default:
-					sc.PublishAsync("foo", []byte("hello"), nil)
-				}
+		sc, nc := createConnectionWithNatsOpts(t, clientName, nats.NoReconnect())
+		defer sc.Close()
+		defer nc.Close()
+
+		payload := []byte("hello")
+		for {
+			select {
+			case <-sendQuit:
+				return
+			default:
+				sc.PublishAsync("foo", payload, nil)
 			}
-		}()
-		// Wait for some messages to have been sent
-		time.Sleep(500 * time.Millisecond)
-		// Shutdown the server, it should not panic
-		s.Shutdown()
-		// Stop and wait for go routine to end
-		sendQuit <- true
-		wg.Wait()
-	}
-	for i := 0; i < 3; i++ {
-		test()
-	}
+		}
+	}()
+	// Wait for some messages to have been sent
+	time.Sleep(100 * time.Millisecond)
+	// Shutdown the server, it should not panic
+	s.Shutdown()
+	// Stop and wait for go routine to end
+	sendQuit <- true
+	wg.Wait()
 }
 
 func TestNonDurableRemovedFromStoreOnConnClose(t *testing.T) {
@@ -3914,7 +3911,7 @@ func TestNonDurableRemovedFromStoreOnConnClose(t *testing.T) {
 	// Shutdown the server
 	s.Shutdown()
 	// Open the store directly and verify that the sub record is not even found.
-	limits := stores.DefaultChannelLimits
+	limits := stores.DefaultStoreLimits
 	store, recoveredState, err := stores.NewFileStore(defaultDataStore, &limits)
 	if err != nil {
 		t.Fatalf("Error opening file: %v", err)
@@ -4669,5 +4666,79 @@ func TestDroppedMessagesOnRedelivery(t *testing.T) {
 	// Wait for redelivery of message 2, 3 and 4.
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our messages")
+	}
+}
+
+func TestPerChannelLimits(t *testing.T) {
+	f := func(idx int) {
+		opts := GetDefaultOptions()
+		if idx == 1 {
+			cleanupDatastore(t, defaultDataStore)
+			defer cleanupDatastore(t, defaultDataStore)
+
+			opts.FilestoreDir = defaultDataStore
+			opts.StoreType = stores.TypeFile
+		}
+		opts.MaxMsgs = 10
+		opts.MaxAge = time.Hour
+		clfoo := stores.ChannelLimits{}
+		clfoo.MaxMsgs = 2
+		clbar := stores.ChannelLimits{}
+		clbar.MaxBytes = 1000
+		sl := &opts.StoreLimits
+		sl.AddPerChannel("foo", &clfoo)
+		sl.AddPerChannel("bar", &clbar)
+
+		s := RunServerWithOpts(opts, nil)
+		defer s.Shutdown()
+
+		sc := NewDefaultConnection(t)
+		defer sc.Close()
+
+		// Sending on foo should be limited to 2 messages
+		for i := 0; i < 10; i++ {
+			if err := sc.Publish("foo", []byte("hello")); err != nil {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+		}
+		// Check messages count
+		s.RLock()
+		n, _, err := s.store.MsgsState("foo")
+		s.RUnlock()
+		if err != nil {
+			t.Fatalf("Unexpected error getting state: %v", err)
+		}
+		if n != clfoo.MaxMsgs {
+			t.Fatalf("Expected only %v messages, got %v", clfoo.MaxMsgs, n)
+		}
+
+		// Sending on bar should be limited by the size, or the count of global
+		// setting
+		for i := 0; i < 100; i++ {
+			if err := sc.Publish("bar", []byte("hello")); err != nil {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+		}
+		// Check messages count
+		s.RLock()
+		n, b, err := s.store.MsgsState("bar")
+		s.RUnlock()
+		if err != nil {
+			t.Fatalf("Unexpected error getting state: %v", err)
+		}
+		// There should be more than for foo, but no more than opts.MaxMsgs
+		if n <= clfoo.MaxMsgs {
+			t.Fatalf("Expected more messages than %v", n)
+		}
+		if n > opts.MaxMsgs {
+			t.Fatalf("Should be limited by parent MaxMsgs of %v, got %v", opts.MaxMsgs, n)
+		}
+		// The size should be lower than clbar.MaxBytes
+		if b > uint64(clbar.MaxBytes) {
+			t.Fatalf("Expected less than %v bytes, got %v", clbar.MaxBytes, b)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		f(i)
 	}
 }

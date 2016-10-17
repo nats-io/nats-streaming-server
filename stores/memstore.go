@@ -31,8 +31,8 @@ type MemoryMsgStore struct {
 
 // NewMemoryStore returns a factory for stores held in memory.
 // If not limits are provided, the store will be created with
-// DefaultChannelLimits.
-func NewMemoryStore(limits *ChannelLimits) (*MemoryStore, error) {
+// DefaultStoreLimits.
+func NewMemoryStore(limits *StoreLimits) (*MemoryStore, error) {
 	ms := &MemoryStore{}
 	ms.init(TypeMemory, limits)
 	return ms, nil
@@ -52,11 +52,22 @@ func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*Cha
 		return nil, false, err
 	}
 
+	// Defaults to the global limits
+	msgStoreLimits := ms.limits.MsgStoreLimits
+	subStoreLimits := ms.limits.SubStoreLimits
+	// See if there is an override
+	thisChannelLimits, exists := ms.limits.PerChannel[channel]
+	if exists {
+		// Use this channel specific limits
+		msgStoreLimits = thisChannelLimits.MsgStoreLimits
+		subStoreLimits = thisChannelLimits.SubStoreLimits
+	}
+
 	msgStore := &MemoryMsgStore{msgs: make(map[uint64]*pb.MsgProto, 64)}
-	msgStore.init(channel, ms.limits)
+	msgStore.init(channel, msgStoreLimits)
 
 	subStore := &MemorySubStore{}
-	subStore.init(channel, ms.limits)
+	subStore.init(channel, subStoreLimits)
 
 	channelStore = &ChannelStore{
 		Subs:     subStore,
@@ -93,8 +104,8 @@ func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
 	ms.totalBytes += uint64(m.Size())
 
 	// Check if we need to remove any (but leave at least the last added)
-	maxMsgs := ms.limits.MaxNumMsgs
-	maxBytes := ms.limits.MaxMsgBytes
+	maxMsgs := ms.limits.MaxMsgs
+	maxBytes := ms.limits.MaxBytes
 	if maxMsgs > 0 || maxBytes > 0 {
 		for ms.totalCount > 1 &&
 			((maxMsgs > 0 && ms.totalCount > maxMsgs) ||
@@ -104,7 +115,7 @@ func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
 			ms.totalCount--
 			if !ms.hitLimit {
 				ms.hitLimit = true
-				Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxNumMsgs, ms.totalBytes, ms.limits.MaxMsgBytes)
+				Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs, ms.totalBytes, ms.limits.MaxBytes)
 			}
 			delete(ms.msgs, ms.first)
 			ms.first++

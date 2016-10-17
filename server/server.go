@@ -5,6 +5,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"regexp"
@@ -38,15 +39,6 @@ const (
 	DefaultUnSubPrefix    = "_STAN.unsub"
 	DefaultClosePrefix    = "_STAN.close"
 	DefaultStoreType      = stores.TypeMemory
-
-	// DefaultChannelLimit defines how many channels (literal subjects) we allow
-	DefaultChannelLimit = 100
-	// DefaultSubStoreLimit defines how many subscriptions per channel we allow
-	DefaultSubStoreLimit = 1000
-	// DefaultMsgStoreLimit defines how many messages per channel we allow
-	DefaultMsgStoreLimit = 1000000
-	// DefaultMsgSizeStoreLimit defines how many bytes per channel we allow
-	DefaultMsgSizeStoreLimit = DefaultMsgStoreLimit * 1024
 
 	// Heartbeat intervals.
 	DefaultHeartBeatInterval   = 30 * time.Second
@@ -83,6 +75,13 @@ var maxStalledRedeliveries = int32(defaultMaxStalledRedeliveries)
 func setMaxStalledRedeliveries(val int) {
 	atomic.StoreInt32(&maxStalledRedeliveries, int32(val))
 }
+
+// Used for display of limits
+const (
+	limitCount = iota
+	limitBytes
+	limitDuration
+)
 
 // Errors.
 var (
@@ -476,24 +475,21 @@ func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 
 // Options for STAN Server
 type Options struct {
-	ID               string
-	DiscoverPrefix   string
-	StoreType        string
-	FilestoreDir     string
-	FileStoreOpts    stores.FileStoreOptions
-	MaxChannels      int
-	MaxMsgs          int    // Maximum number of messages per channel
-	MaxBytes         int64  // Maximum number of bytes used by messages per channel
-	MaxSubscriptions int    // Maximum number of subscriptions per channel
-	Trace            bool   // Verbose trace
-	Debug            bool   // Debug trace
-	Secure           bool   // Create a TLS enabled connection w/o server verification
-	ClientCert       string // Client Certificate for TLS
-	ClientKey        string // Client Key for TLS
-	ClientCA         string // Client CAs for TLS
-	IOBatchSize      int    // Number of messages we collect from clients before processing them.
-	IOSleepTime      int64  // Duration (in micro-seconds) the server waits for more message to fill up a batch.
-	NATSServerURL    string // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
+	ID                 string
+	DiscoverPrefix     string
+	StoreType          string
+	FilestoreDir       string
+	FileStoreOpts      stores.FileStoreOptions
+	stores.StoreLimits        // Store limits (MaxChannels, etc..)
+	Trace              bool   // Verbose trace
+	Debug              bool   // Debug trace
+	Secure             bool   // Create a TLS enabled connection w/o server verification
+	ClientCert         string // Client Certificate for TLS
+	ClientKey          string // Client Key for TLS
+	ClientCA           string // Client CAs for TLS
+	IOBatchSize        int    // Number of messages we collect from clients before processing them.
+	IOSleepTime        int64  // Duration (in micro-seconds) the server waits for more message to fill up a batch.
+	NATSServerURL      string // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
 }
 
 // DefaultOptions are default options for the STAN server
@@ -510,6 +506,7 @@ var defaultOptions = Options{
 // GetDefaultOptions returns default options for the STAN server
 func GetDefaultOptions() (o *Options) {
 	opts := defaultOptions
+	opts.StoreLimits = stores.DefaultStoreLimits
 	return &opts
 }
 
@@ -673,16 +670,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		debug:             sOpts.Debug,
 	}
 
-	// Set limits
-	limits := &stores.ChannelLimits{
-		MaxChannels: DefaultChannelLimit,
-		MaxNumMsgs:  DefaultMsgStoreLimit,
-		MaxMsgBytes: DefaultMsgStoreLimit * 1024,
-		MaxSubs:     DefaultSubStoreLimit,
-	}
-
-	// Override with Options if needed
-	overrideLimits(limits, sOpts)
+	// Get the store limits
+	limits := &sOpts.StoreLimits
 
 	var err error
 	var recoveredState *stores.RecoveredState
@@ -784,11 +773,19 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	}
 
 	Noticef("STAN: Message store is %s", s.store.Name())
-	if limits.MaxNumMsgs > 0 {
-		Noticef("STAN: Maximum of %d will be stored", limits.MaxNumMsgs)
-	} else {
-		Noticef("STAN: No limit in number of messages stored")
+	Noticef("STAN: --------- Store Limits ---------")
+	Noticef("STAN: Channels:        %s",
+		getLimitStr(true, int64(limits.MaxChannels),
+			int64(stores.DefaultStoreLimits.MaxChannels),
+			limitCount))
+	Noticef("STAN: -------- channels limits -------")
+	printLimits(true, &limits.ChannelLimits,
+		&stores.DefaultStoreLimits.ChannelLimits)
+	for cn, cl := range limits.PerChannel {
+		Noticef("STAN: Channel: %q", cn)
+		printLimits(false, cl, &limits.ChannelLimits)
 	}
+	Noticef("STAN: --------------------------------")
 
 	// Execute (in a go routine) redelivery of unacknowledged messages,
 	// and release newOnHold
@@ -798,19 +795,53 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	return &s
 }
 
-func overrideLimits(limits *stores.ChannelLimits, opts *Options) {
-	if opts.MaxChannels != 0 {
-		limits.MaxChannels = opts.MaxChannels
+func printLimits(isGlobal bool, limits, parentLimits *stores.ChannelLimits) {
+	plMaxSubs := int64(parentLimits.MaxSubscriptions)
+	plMaxMsgs := int64(parentLimits.MaxMsgs)
+	plMaxBytes := parentLimits.MaxBytes
+	plMaxAge := parentLimits.MaxAge
+	Noticef("STAN:   Subscriptions: %s", getLimitStr(isGlobal, int64(limits.MaxSubscriptions), plMaxSubs, limitCount))
+	Noticef("STAN:   Messages     : %s", getLimitStr(isGlobal, int64(limits.MaxMsgs), plMaxMsgs, limitCount))
+	Noticef("STAN:   Bytes        : %s", getLimitStr(isGlobal, limits.MaxBytes, plMaxBytes, limitBytes))
+	Noticef("STAN:   Age          : %s", getLimitStr(isGlobal, int64(limits.MaxAge), int64(plMaxAge), limitDuration))
+}
+
+func getLimitStr(isGlobal bool, val, parentVal int64, limitType int) string {
+	valStr := ""
+	inherited := ""
+	if !isGlobal && val == 0 {
+		val = parentVal
 	}
-	if opts.MaxMsgs != 0 {
-		limits.MaxNumMsgs = opts.MaxMsgs
+	if val == parentVal {
+		inherited = " *"
 	}
-	if opts.MaxBytes != 0 {
-		limits.MaxMsgBytes = opts.MaxBytes
+	if val == 0 {
+		valStr = "unlimited"
+	} else {
+		switch limitType {
+		case limitBytes:
+			valStr = friendlyBytes(val)
+		case limitDuration:
+			valStr = fmt.Sprintf("%v", time.Duration(val))
+		default:
+			valStr = fmt.Sprintf("%v", val)
+		}
 	}
-	if opts.MaxSubscriptions != 0 {
-		limits.MaxSubs = opts.MaxSubscriptions
+	return fmt.Sprintf("%13s%s", valStr, inherited)
+}
+
+func friendlyBytes(msgbytes int64) string {
+	bytes := float64(msgbytes)
+	base := 1024
+	pre := []string{"K", "M", "G", "T", "P", "E"}
+	var post = "B"
+	if bytes < float64(base) {
+		return fmt.Sprintf("%v B", bytes)
 	}
+	exp := int(math.Log(bytes) / math.Log(float64(base)))
+	index := exp - 1
+	units := pre[index] + post
+	return fmt.Sprintf("%.2f %s", bytes/math.Pow(float64(base), float64(exp)), units)
 }
 
 // TODO:  Explore parameter passing in gnatsd.  Keep seperate for now.
