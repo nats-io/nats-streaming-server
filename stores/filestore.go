@@ -306,6 +306,7 @@ type fileSlice struct {
 	idxFName  string
 	firstSeq  uint64
 	lastSeq   uint64
+	rmCount   int // Count of messages "removed" from the slice due to limits.
 	msgsCount int
 	msgsSize  uint64
 	file      *os.File // Used during lookups.
@@ -344,6 +345,7 @@ type FileMsgStore struct {
 	timeTick     int64       // time captured in background task
 	lastShrink   int64       // last time we checked for opportunity to shrink
 	timerReset   bool
+	ageTimer     *time.Timer
 	allDone      sync.WaitGroup
 }
 
@@ -1075,7 +1077,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		// Use this channel specific limits
 		msgStoreLimits = thisChannelLimits.MsgStoreLimits
 	}
-	ms.init(channel, msgStoreLimits)
+	ms.init(channel, &msgStoreLimits)
 
 	ms.slCountLim = ms.limits.MaxMsgs / (numFiles - 1)
 	if ms.slCountLim < 1 {
@@ -1124,6 +1126,23 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		// Should we try to recover (startup case)
 		if err == nil && doRecover {
 			done, err = ms.recoverOneMsgFile(useIdxFile, i)
+		}
+	}
+	if err == nil {
+		// Apply message limits (no need to check if there are limits
+		// defined, the call won't do anything if they aren't).
+		err = ms.enforceLimits(false)
+		// If there is at least one message and age limit is present...
+		if err == nil && ms.totalCount > 0 && ms.limits.MaxAge > time.Duration(0) {
+			ms.Lock()
+			ms.allDone.Add(1)
+			// Create the timer with any duration.
+			ms.ageTimer = time.AfterFunc(time.Hour, ms.expireMsgs)
+			ms.Unlock()
+			// And now force the execution of the expireMsgs callback.
+			// This will take care of expiring messages that should
+			// already be expired, and will set properly the timer.
+			ms.expireMsgs()
 		}
 	}
 	if err == nil && maxBufSize > 0 {
@@ -1489,6 +1508,12 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	fslice.msgsCount++
 	fslice.msgsSize += uint64(msgSize)
 
+	// If there is an age limit and no timer yet created, do so now
+	if ms.limits.MaxAge > time.Duration(0) && ms.ageTimer == nil {
+		ms.allDone.Add(1)
+		ms.ageTimer = time.AfterFunc(ms.limits.MaxAge, ms.expireMsgs)
+	}
+
 	// Save references to first and last sequences for this slice
 	if fslice.firstSeq == 0 {
 		fslice.firstSeq = seq
@@ -1497,7 +1522,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 
 	if maxMsgs > 0 || maxBytes > 0 {
 		// Enfore limits and update file slice if needed.
-		if err := ms.enforceLimits(); err != nil {
+		if err := ms.enforceLimits(true); err != nil {
 			return 0, err
 		}
 	}
@@ -1533,63 +1558,90 @@ func (ms *FileMsgStore) processBufferedMsgs() error {
 	return nil
 }
 
+// expireMsgs ensures that messages don't stay in the log longer than the
+// limit's MaxAge.
+func (ms *FileMsgStore) expireMsgs() {
+	ms.Lock()
+	if ms.closed {
+		ms.Unlock()
+		ms.allDone.Done()
+		return
+	}
+	defer ms.Unlock()
+
+	now := time.Now().UnixNano()
+	maxAge := int64(ms.limits.MaxAge)
+	for {
+		m, ok := ms.msgs[ms.first]
+		if !ok {
+			ms.ageTimer = nil
+			ms.allDone.Done()
+			return
+		}
+		diff := now - m.timestamp
+		if diff >= maxAge {
+			ms.removeFirstMsg()
+		} else {
+			ms.ageTimer.Reset(time.Duration(maxAge - now))
+			return
+		}
+	}
+}
+
 // enforceLimits checks total counts with current msg store's limits,
 // removing a file slice and/or updating slices' count as necessary.
-func (ms *FileMsgStore) enforceLimits() error {
-	// We may inspect several slices, start with the first at index 0.
-	idx := 0
-	var slice *fileSlice
+func (ms *FileMsgStore) enforceLimits(reportHitLimit bool) error {
 	// Check if we need to remove any (but leave at least the last added).
 	// Note that we may have to remove more than one msg if we are here
-	// after a restart with smaller limits than originally set.
+	// after a restart with smaller limits than originally set, or if
+	// message is quite big, etc...
 	maxMsgs := ms.limits.MaxMsgs
 	maxBytes := ms.limits.MaxBytes
 	for ms.totalCount > 1 &&
 		((maxMsgs > 0 && ms.totalCount > maxMsgs) ||
 			(maxBytes > 0 && ms.totalBytes > uint64(maxBytes))) {
 
-		// slice we are inspecting, make sure the slice is not
-		// empty.
-		for {
-			slice = ms.files[idx]
-			if slice.msgsCount != 0 {
-				break
-			}
-			idx++
-		}
-		// Size of the first message in this slice
-		firstMsgSize := uint64(ms.msgs[slice.firstSeq].msgSize)
-		// Update slice and total counts
-		slice.msgsCount--
-		slice.msgsSize -= firstMsgSize
-		ms.totalCount--
-		ms.totalBytes -= firstMsgSize
-
-		// Remove the first message from our cache
-		if !ms.hitLimit {
+		// Remove first message from first slice, potentially removing
+		// the slice, etc...
+		ms.removeFirstMsg()
+		if reportHitLimit && !ms.hitLimit {
 			ms.hitLimit = true
 			Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs, ms.totalBytes, ms.limits.MaxBytes)
 		}
-		delete(ms.msgs, ms.first)
+	}
+	return nil
+}
 
-		// Messages sequence is incremental with no gap on a given msgstore.
-		ms.first++
-		// Invalidate ms.firstMsg, it will be looked-up on demand.
-		ms.firstMsg = nil
-		// Is file slice "empty"
-		if slice.msgsCount == 0 {
-			if err := ms.removeAndShiftFiles(); err != nil {
-				return err
-			}
-			// Decrement the current slice. It will be bumped if needed
-			// before storing the next message.
-			ms.currSliceIdx--
-			// The first slice is gone, go back to 0.
-			idx = 0
-		} else {
-			// This is the new first message in this slice.
-			slice.firstSeq = ms.first
+// removeFirstMsg "removes" the first message of the first slice.
+// If the slice is "empty" and not the current slice, the file
+// slice is removed and files are shifted.
+func (ms *FileMsgStore) removeFirstMsg() error {
+	// Work with the first slice
+	slice := ms.files[0]
+	// Size of the first message in this slice
+	firstMsgSize := uint64(ms.msgs[slice.firstSeq].msgSize)
+	// Keep track of number of "removed" messages in this slice
+	slice.rmCount++
+	// Update total counts
+	ms.totalCount--
+	ms.totalBytes -= firstMsgSize
+	// Remove the first message from our cache
+	delete(ms.msgs, ms.first)
+	// Messages sequence is incremental with no gap on a given msgstore.
+	ms.first++
+	// Invalidate ms.firstMsg, it will be looked-up on demand.
+	ms.firstMsg = nil
+	// Is file slice "empty", and not the current slice
+	if slice.msgsCount == slice.rmCount && ms.currSliceIdx > 0 {
+		if err := ms.removeAndShiftFiles(); err != nil {
+			return err
 		}
+		// Decrement the current slice. It will be bumped if needed
+		// before storing the next message.
+		ms.currSliceIdx--
+	} else {
+		// This is the new first message in this slice.
+		slice.firstSeq = ms.first
 	}
 	return nil
 }
@@ -1626,6 +1678,7 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 		file1.lastSeq = file2.lastSeq
 		file1.msgsCount = file2.msgsCount
 		file1.msgsSize = file2.msgsSize
+		file1.rmCount = file2.rmCount
 	}
 
 	// Reset the last slice's counts.
@@ -1634,6 +1687,7 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 	fslice.lastSeq = 0
 	fslice.msgsCount = 0
 	fslice.msgsSize = uint64(0)
+	fslice.rmCount = 0
 
 	// Now re-open the slice we were on before, which has shifted to currSlice-1.
 	if err := ms.openDataAndIndexFiles(
@@ -1835,6 +1889,11 @@ func (ms *FileMsgStore) Close() error {
 			ms.allDone.Done()
 		}
 	}
+	if ms.ageTimer != nil {
+		if ms.ageTimer.Stop() {
+			ms.allDone.Done()
+		}
+	}
 
 	ms.Unlock()
 
@@ -1892,7 +1951,7 @@ func (fs *FileStore) newFileSubStore(channelDirName, channel string, doRecover b
 		// Use this channel specific limits
 		subStoreLimits = thisChannelLimits.SubStoreLimits
 	}
-	ss.init(channel, subStoreLimits)
+	ss.init(channel, &subStoreLimits)
 	// Convert the CompactInterval in time.Duration
 	ss.compactItvl = time.Duration(ss.opts.CompactInterval) * time.Second
 

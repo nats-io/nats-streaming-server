@@ -489,7 +489,7 @@ func TestFSBasicRecovery(t *testing.T) {
 	}
 }
 
-func TestFSRecoveryLimitsNotApplied(t *testing.T) {
+func TestFSLimitsOnRecovery(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
@@ -501,7 +501,6 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	msgCount := 50
 	subsCount := 3
 	payload := []byte("hello")
-	expectedMsgCount := chanCount * msgCount
 	expectedMsgBytes := uint64(0)
 	maxMsgsAfterRecovery := 4
 	expectedMsgBytesAfterRecovery := uint64(0)
@@ -553,16 +552,16 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 			t.Fatalf("Unexpected count of recovered subs. Expected %v, got %v", subsCount, len(recoveredSubs))
 		}
 	}
-	// Make sure that all messages are recovered
+	// Messages limits, however, are enforced on restart.
 	recMsg, recBytes, err := fs.MsgsState(AllChannels)
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
-	if recMsg != expectedMsgCount {
-		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", expectedMsgCount, recMsg)
+	if recMsg != maxMsgsAfterRecovery {
+		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", maxMsgsAfterRecovery, recMsg)
 	}
-	if recBytes != expectedMsgBytes {
-		t.Fatalf("Unexpected count of recovered bytes: Expected %v, got %v", expectedMsgBytes, recBytes)
+	if recBytes != expectedMsgBytesAfterRecovery {
+		t.Fatalf("Unexpected count of recovered bytes: Expected %v, got %v", expectedMsgBytesAfterRecovery, recBytes)
 	}
 
 	// Now check that any new addition would be rejected
@@ -620,8 +619,34 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	}
 	// The first slice should have the new limit msgs count - 1.
 	firstSlice := msgStore.files[0]
-	if firstSlice.msgsCount != limit.MaxMsgs-1 {
-		t.Fatalf("Expected first slice to have %v msgs, got %v", limit.MaxMsgs-1, firstSlice.msgsCount)
+	left := firstSlice.msgsCount - firstSlice.rmCount
+	if left != limit.MaxMsgs-1 {
+		t.Fatalf("Expected first slice to have %v msgs, got %v", limit.MaxMsgs-1, left)
+	}
+
+	// Close the store
+	fs.Close()
+
+	// We are going to add an age limit (of 1ms for test purposes) and since
+	// messages were stored before, if we wait say 5ms, no message should be
+	// recovered.
+	time.Sleep(5 * time.Millisecond)
+
+	// Now re-open with limits below all the above counts
+	limit = testDefaultStoreLimits
+	limit.MaxMsgs = maxMsgsAfterRecovery
+	limit.MaxAge = time.Millisecond
+	fs, _, err = newFileStore(t, defaultDataStore, &limit)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+	recMsg, recBytes, err = fs.MsgsState(AllChannels)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if recMsg != 0 || recBytes != 0 {
+		t.Fatalf("There should be no message recovered, got %v, %v bytes", recMsg, recBytes)
 	}
 }
 
@@ -782,6 +807,27 @@ func TestFSMaxSubs(t *testing.T) {
 	// Now try to test the limit against
 	// any value, it should not fail
 	testMaxSubs(t, fs, "bar", 0)
+}
+
+func TestFSMaxAge(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	testMaxAge(t, fs)
+
+	// Store a message
+	storeMsg(t, fs, "foo", []byte("msg"))
+	// Verify timer is set
+	fs.RLock()
+	cs := fs.LookupChannel("foo")
+	timerSet := cs.Msgs.(*FileMsgStore).ageTimer != nil
+	fs.RUnlock()
+	if !timerSet {
+		t.Fatal("Timer should have been set")
+	}
 }
 
 func TestFSBasicSubStore(t *testing.T) {

@@ -61,10 +61,9 @@ type genericMsgStore struct {
 func (gs *genericStore) init(name string, limits *StoreLimits) {
 	gs.name = name
 	if limits == nil {
-		gs.limits = DefaultStoreLimits
-	} else {
-		gs.setLimits(limits)
+		limits = &DefaultStoreLimits
 	}
+	gs.setLimits(limits)
 	// Do not use limits values to create the map.
 	gs.channels = make(map[string]*ChannelStore)
 	gs.clients = make(map[string]*Client)
@@ -254,9 +253,9 @@ func (gs *genericStore) close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes this generic message store
-func (gms *genericMsgStore) init(subject string, limits MsgStoreLimits) {
+func (gms *genericMsgStore) init(subject string, limits *MsgStoreLimits) {
 	gms.subject = subject
-	gms.limits = limits
+	gms.limits = *limits
 }
 
 // State returns some statistics related to this store
@@ -331,9 +330,9 @@ func (gms *genericMsgStore) Close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes the structure of a generic sub store
-func (gss *genericSubStore) init(channel string, limits SubStoreLimits) {
+func (gss *genericSubStore) init(channel string, limits *SubStoreLimits) {
 	gss.subject = channel
-	gss.limits = limits
+	gss.limits = *limits
 }
 
 // CreateSub records a new subscription represented by SubState. On success,

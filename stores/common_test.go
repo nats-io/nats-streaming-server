@@ -506,6 +506,39 @@ func testMaxSubs(t *testing.T, s Store, channel string, maxSubs int) {
 	}
 }
 
+func testMaxAge(t *testing.T, s Store) {
+	sl := testDefaultStoreLimits
+	sl.MaxAge = 250 * time.Millisecond
+	s.SetLimits(&sl)
+
+	msg := []byte("hello")
+	for i := 0; i < 10; i++ {
+		storeMsg(t, s, "foo", msg)
+	}
+	// Wait a bit
+	time.Sleep(200 * time.Millisecond)
+	// Send more
+	for i := 0; i < 5; i++ {
+		storeMsg(t, s, "foo", msg)
+	}
+	// Wait a bit
+	time.Sleep(100 * time.Millisecond)
+	// We should have the first 10 expired and 5 left.
+	cs := s.LookupChannel("foo")
+	expectedFirst := uint64(11)
+	expectedLast := uint64(15)
+	first, last := cs.Msgs.FirstAndLastSequence()
+	if first != expectedFirst || last != expectedLast {
+		t.Fatalf("Expected first/last to be %v/%v, got %v/%v",
+			expectedFirst, expectedLast, first, last)
+	}
+	// Wait more and all should be gone.
+	time.Sleep(sl.MaxAge)
+	if n, _, _ := cs.Msgs.State(); n != 0 {
+		t.Fatalf("All messages should have expired, got %v", n)
+	}
+}
+
 func testBasicSubStore(t *testing.T, s Store) {
 	cs, _, err := s.CreateChannel("foo", nil)
 	if err != nil {
@@ -667,7 +700,7 @@ func TestGSNoOps(t *testing.T) {
 
 	gms := &genericMsgStore{}
 	defer gms.Close()
-	gms.init("foo", limits.MsgStoreLimits)
+	gms.init("foo", &limits.MsgStoreLimits)
 	if gms.Lookup(1) != nil || gms.FirstMsg() != nil || gms.LastMsg() != nil || gms.Flush() != nil ||
 		gms.GetSequenceFromTimestamp(0) != 0 || gms.Close() != nil {
 		t.Fatal("Expected no value since these should not be implemented for generic store")
@@ -675,7 +708,7 @@ func TestGSNoOps(t *testing.T) {
 
 	gss := &genericSubStore{}
 	defer gss.Close()
-	gss.init("foo", limits.SubStoreLimits)
+	gss.init("foo", &limits.SubStoreLimits)
 	if gss.AddSeqPending(1, 1) != nil || gss.AckSeqPending(1, 1) != nil || gss.Flush() != nil ||
 		gss.Close() != nil {
 		t.Fatal("Expected no value since these should not be implemented for generic store")

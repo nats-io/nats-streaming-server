@@ -150,6 +150,24 @@ func TestMSMaxSubs(t *testing.T) {
 	testMaxSubs(t, ms, "bar", 0)
 }
 
+func TestMSMaxAge(t *testing.T) {
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+
+	testMaxAge(t, ms)
+
+	// Store a message
+	storeMsg(t, ms, "foo", []byte("msg"))
+	// Verify timer is set
+	ms.RLock()
+	cs := ms.LookupChannel("foo")
+	timerSet := cs.Msgs.(*MemoryMsgStore).ageTimer != nil
+	ms.RUnlock()
+	if !timerSet {
+		t.Fatal("Timer should have been set")
+	}
+}
+
 func TestMSBasicSubStore(t *testing.T) {
 	ms := createDefaultMemStore(t)
 	defer ms.Close()

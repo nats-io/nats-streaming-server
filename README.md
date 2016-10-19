@@ -256,9 +256,6 @@ file: {
 
 ### Store Limits
 
-:warning: Although it is possible to configure *Maximum Age* limits, those limits
-are currently not implemented in the server.
-
 The `store_limits` section in the configuration file (or the command line parameters
 `-mc`, `-mm`, etc..) allow you to configure the global limits.
 

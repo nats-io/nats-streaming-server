@@ -4,6 +4,7 @@ package stores
 
 import (
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
@@ -22,7 +23,9 @@ type MemorySubStore struct {
 // MemoryMsgStore is a per channel message store in memory
 type MemoryMsgStore struct {
 	genericMsgStore
-	msgs map[uint64]*pb.MsgProto
+	msgs     map[uint64]*pb.MsgProto
+	ageTimer *time.Timer
+	wg       sync.WaitGroup
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -64,10 +67,10 @@ func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*Cha
 	}
 
 	msgStore := &MemoryMsgStore{msgs: make(map[uint64]*pb.MsgProto, 64)}
-	msgStore.init(channel, msgStoreLimits)
+	msgStore.init(channel, &msgStoreLimits)
 
 	subStore := &MemorySubStore{}
-	subStore.init(channel, subStoreLimits)
+	subStore.init(channel, &subStoreLimits)
 
 	channelStore = &ChannelStore{
 		Subs:     subStore,
@@ -102,6 +105,11 @@ func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
 	ms.msgs[ms.last] = m
 	ms.totalCount++
 	ms.totalBytes += uint64(m.Size())
+	// If there is an age limit and no timer yet created, do so now
+	if ms.limits.MaxAge > time.Duration(0) && ms.ageTimer == nil {
+		ms.wg.Add(1)
+		ms.ageTimer = time.AfterFunc(ms.limits.MaxAge, ms.expireMsgs)
+	}
 
 	// Check if we need to remove any (but leave at least the last added)
 	maxMsgs := ms.limits.MaxMsgs
@@ -110,15 +118,11 @@ func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
 		for ms.totalCount > 1 &&
 			((maxMsgs > 0 && ms.totalCount > maxMsgs) ||
 				(maxBytes > 0 && (ms.totalBytes > uint64(maxBytes)))) {
-			firstMsg := ms.msgs[ms.first]
-			ms.totalBytes -= uint64(firstMsg.Size())
-			ms.totalCount--
+			ms.removeFirstMsg()
 			if !ms.hitLimit {
 				ms.hitLimit = true
 				Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs, ms.totalBytes, ms.limits.MaxBytes)
 			}
-			delete(ms.msgs, ms.first)
-			ms.first++
 		}
 	}
 
@@ -164,6 +168,64 @@ func (ms *MemoryMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
 	})
 
 	return uint64(index) + ms.first
+}
+
+// expireMsgs ensures that messages don't stay in the log longer than the
+// limit's MaxAge.
+func (ms *MemoryMsgStore) expireMsgs() {
+	ms.Lock()
+	if ms.closed {
+		ms.Unlock()
+		ms.wg.Done()
+		return
+	}
+	defer ms.Unlock()
+
+	now := time.Now().UnixNano()
+	maxAge := int64(ms.limits.MaxAge)
+	for {
+		m, ok := ms.msgs[ms.first]
+		if !ok {
+			ms.ageTimer = nil
+			ms.wg.Done()
+			return
+		}
+		diff := now - m.Timestamp
+		if diff >= maxAge {
+			ms.removeFirstMsg()
+		} else {
+			ms.ageTimer.Reset(time.Duration(maxAge - now))
+			return
+		}
+	}
+}
+
+// removeFirstMsg removes the first message and updates totals.
+func (ms *MemoryMsgStore) removeFirstMsg() {
+	firstMsg := ms.msgs[ms.first]
+	ms.totalBytes -= uint64(firstMsg.Size())
+	ms.totalCount--
+	delete(ms.msgs, ms.first)
+	ms.first++
+}
+
+// Close implements the MsgStore interface
+func (ms *MemoryMsgStore) Close() error {
+	ms.Lock()
+	if ms.closed {
+		ms.Unlock()
+		return nil
+	}
+	ms.closed = true
+	if ms.ageTimer != nil {
+		if ms.ageTimer.Stop() {
+			ms.wg.Done()
+		}
+	}
+	ms.Unlock()
+
+	ms.wg.Wait()
+	return nil
 }
 
 ////////////////////////////////////////////////////////////////////////////
