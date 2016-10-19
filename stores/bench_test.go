@@ -19,7 +19,7 @@ func benchCleanupDatastore(b *testing.B, dir string) {
 }
 
 func benchCreateDefaultFileStore(t *testing.B) *FileStore {
-	fs, state, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+	fs, state, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits)
 	if err != nil {
 		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 	}
@@ -34,11 +34,11 @@ func benchCreateDefaultFileStore(t *testing.B) *FileStore {
 }
 
 func benchStoreMsg(b *testing.B, ms MsgStore, data []byte) *pb.MsgProto {
-	m, err := ms.Store("", data)
+	seq, err := ms.Store(data)
 	if err != nil {
 		stackFatalf(b, "Error storing message: %v", err)
 	}
-	return m
+	return ms.Lookup(seq)
 }
 
 func BenchmarkRecoverMsgs(b *testing.B) {
@@ -127,7 +127,7 @@ func BenchmarkRecoverSubs(b *testing.B) {
 	// Measure recovery
 	b.N = count * numSubs
 	b.StartTimer()
-	s, state, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+	s, state, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits)
 	b.StopTimer()
 	if err != nil {
 		b.Fatalf("Unable to create a FileStore instance: %v", err)

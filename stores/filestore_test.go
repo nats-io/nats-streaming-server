@@ -3,6 +3,8 @@
 package stores
 
 import (
+	"bufio"
+	"flag"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -29,6 +31,8 @@ var testDefaultServerInfo = spb.ServerInfo{
 }
 
 var defaultDataStore string
+var disableMsgsCaching bool
+var disableBufferWriters bool
 
 func init() {
 	tmpDir, err := ioutil.TempDir(".", "data_stores_")
@@ -41,14 +45,45 @@ func init() {
 	defaultDataStore = tmpDir
 }
 
+func TestMain(m *testing.M) {
+	flag.BoolVar(&disableMsgsCaching, "no_cache", false, "Disable message caching")
+	flag.BoolVar(&disableBufferWriters, "no_buffer", false, "Disable use of buffer writers")
+	flag.Parse()
+	os.Exit(m.Run())
+}
+
 func cleanupDatastore(t *testing.T, dir string) {
 	if err := os.RemoveAll(dir); err != nil {
 		stackFatalf(t, "Error cleaning up datastore: %v", err)
 	}
 }
 
-func createDefaultFileStore(t *testing.T) *FileStore {
-	fs, state, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+func newFileStore(t *testing.T, dataStore string, limits *StoreLimits, options ...FileStoreOption) (*FileStore, *RecoveredState, error) {
+	opts := DefaultFileStoreOptions
+	// Set those options based on command line parameters.
+	// Each test may override those.
+	if disableMsgsCaching {
+		opts.CacheMsgs = false
+	}
+	if disableBufferWriters {
+		opts.BufferSize = 0
+	}
+	// Apply the provided options
+	for _, opt := range options {
+		if err := opt(&opts); err != nil {
+			return nil, nil, err
+		}
+	}
+	fs, state, err := NewFileStore(dataStore, limits, AllOptions(&opts))
+	if err != nil {
+		return nil, nil, err
+	}
+	return fs, state, nil
+}
+
+func createDefaultFileStore(t *testing.T, options ...FileStoreOption) *FileStore {
+	limits := testDefaultStoreLimits
+	fs, state, err := newFileStore(t, defaultDataStore, &limits, options...)
 	if err != nil {
 		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 	}
@@ -62,8 +97,9 @@ func createDefaultFileStore(t *testing.T) *FileStore {
 	return fs
 }
 
-func openDefaultFileStore(t *testing.T) (*FileStore, *RecoveredState) {
-	fs, state, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+func openDefaultFileStore(t *testing.T, options ...FileStoreOption) (*FileStore, *RecoveredState) {
+	limits := testDefaultStoreLimits
+	fs, state, err := newFileStore(t, defaultDataStore, &limits, options...)
 	if err != nil {
 		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 	}
@@ -71,7 +107,8 @@ func openDefaultFileStore(t *testing.T) (*FileStore, *RecoveredState) {
 }
 
 func expectedErrorOpeningDefaultFileStore(t *testing.T) error {
-	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits)
+	limits := testDefaultStoreLimits
+	fs, _, err := newFileStore(t, defaultDataStore, &limits)
 	if err == nil {
 		fs.Close()
 		stackFatalf(t, "Expected an error opening the FileStore, got none")
@@ -121,12 +158,12 @@ func TestFSInit(t *testing.T) {
 }
 
 func TestFSUseDefaultLimits(t *testing.T) {
-	fs, _, err := NewFileStore(defaultDataStore, nil)
+	fs, _, err := newFileStore(t, defaultDataStore, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	defer fs.Close()
-	if !reflect.DeepEqual(fs.limits, DefaultChannelLimits) {
+	if !reflect.DeepEqual(fs.limits, DefaultStoreLimits) {
 		t.Fatalf("Default limits are not used: %v\n", fs.limits)
 	}
 }
@@ -199,6 +236,12 @@ func TestFSOptions(t *testing.T) {
 		}
 	}
 	expected := DefaultFileStoreOptions
+	if disableMsgsCaching {
+		expected.CacheMsgs = false
+	}
+	if disableBufferWriters {
+		expected.BufferSize = 0
+	}
 	checkOpts(expected, opts)
 
 	fs.CreateChannel("foo", nil)
@@ -224,9 +267,10 @@ func TestFSOptions(t *testing.T) {
 		DoCRC:                false,
 		CRCPolynomial:        int64(crc32.Castagnoli),
 		DoSync:               false,
+		CacheMsgs:            false,
 	}
 	// Create the file with custom options
-	fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits,
+	fs, _, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits,
 		BufferSize(expected.BufferSize),
 		CompactEnabled(expected.CompactEnabled),
 		CompactFragmentation(expected.CompactFragmentation),
@@ -234,7 +278,8 @@ func TestFSOptions(t *testing.T) {
 		CompactMinFileSize(expected.CompactMinFileSize),
 		DoCRC(expected.DoCRC),
 		CRCPolynomial(expected.CRCPolynomial),
-		DoSync(expected.DoSync))
+		DoSync(expected.DoSync),
+		CacheMsgs(expected.CacheMsgs))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
@@ -256,7 +301,7 @@ func TestFSOptions(t *testing.T) {
 	fs.Close()
 	cleanupDatastore(t, defaultDataStore)
 	// Create the file with custom options, pass all of them at once
-	fs, _, err = NewFileStore(defaultDataStore, &testDefaultChannelLimits, AllOptions(&expected))
+	fs, _, err = NewFileStore(defaultDataStore, &testDefaultStoreLimits, AllOptions(&expected))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
@@ -378,9 +423,9 @@ func TestFSBasicRecovery(t *testing.T) {
 			if subID != sub1 {
 				t.Fatalf("Invalid subscription id. Expected %v, got %v", sub1, subID)
 			}
-			for _, m := range recSub.Pending {
-				if m.Sequence != foo2.Sequence {
-					t.Fatalf("Unexpected recovered pending seqno for sub1: %v", m.Sequence)
+			for seq := range recSub.Pending {
+				if seq != foo2.Sequence {
+					t.Fatalf("Unexpected recovered pending seqno for sub1: %v", seq)
 				}
 			}
 			break
@@ -388,9 +433,9 @@ func TestFSBasicRecovery(t *testing.T) {
 			if subID != sub2 {
 				t.Fatalf("Invalid subscription id. Expected %v, got %v", sub2, subID)
 			}
-			for _, m := range recSub.Pending {
-				if m.Sequence != bar1.Sequence && m.Sequence != bar2.Sequence && m.Sequence != bar3.Sequence {
-					t.Fatalf("Unexpected recovered pending seqno for sub2: %v", m.Sequence)
+			for seq := range recSub.Pending {
+				if seq != bar1.Sequence && seq != bar2.Sequence && seq != bar3.Sequence {
+					t.Fatalf("Unexpected recovered pending seqno for sub2: %v", seq)
 				}
 			}
 			break
@@ -444,7 +489,7 @@ func TestFSBasicRecovery(t *testing.T) {
 	}
 }
 
-func TestFSRecoveryLimitsNotApplied(t *testing.T) {
+func TestFSLimitsOnRecovery(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
@@ -452,22 +497,29 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	defer fs.Close()
 
 	// Store some messages in various channels
-	chanCount := 10
+	chanCount := 1
 	msgCount := 50
-	subsCount := 5
+	subsCount := 3
 	payload := []byte("hello")
-	expectedMsgCount := chanCount * msgCount
-	expectedMsgBytes := uint64(expectedMsgCount * len(payload))
+	expectedMsgBytes := uint64(0)
+	maxMsgsAfterRecovery := 4
+	expectedMsgBytesAfterRecovery := uint64(0)
 	for c := 0; c < chanCount; c++ {
 		channelName := fmt.Sprintf("channel.%d", (c + 1))
 
-		// Create a several subscriptions per channel.
+		// Create several subscriptions per channel.
 		for s := 0; s < subsCount; s++ {
 			storeSub(t, fs, channelName)
 		}
 
 		for m := 0; m < msgCount; m++ {
-			storeMsg(t, fs, channelName, payload)
+			msg := storeMsg(t, fs, channelName, payload)
+			expectedMsgBytes += uint64(msg.Size())
+			if c == 0 {
+				if m < maxMsgsAfterRecovery {
+					expectedMsgBytesAfterRecovery += uint64(msg.Size())
+				}
+			}
 		}
 	}
 
@@ -475,11 +527,11 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	fs.Close()
 
 	// Now re-open with limits below all the above counts
-	limit := testDefaultChannelLimits
+	limit := testDefaultStoreLimits
 	limit.MaxChannels = 1
-	limit.MaxNumMsgs = 4
-	limit.MaxSubs = 1
-	fs, state, err := NewFileStore(defaultDataStore, &limit)
+	limit.MaxMsgs = maxMsgsAfterRecovery
+	limit.MaxSubscriptions = 1
+	fs, state, err := newFileStore(t, defaultDataStore, &limit)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -500,16 +552,16 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 			t.Fatalf("Unexpected count of recovered subs. Expected %v, got %v", subsCount, len(recoveredSubs))
 		}
 	}
-	// Make sure that all messages are recovered
+	// Messages limits, however, are enforced on restart.
 	recMsg, recBytes, err := fs.MsgsState(AllChannels)
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
-	if recMsg != expectedMsgCount {
-		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", expectedMsgCount, recMsg)
+	if recMsg != maxMsgsAfterRecovery {
+		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", maxMsgsAfterRecovery, recMsg)
 	}
-	if recBytes != expectedMsgBytes {
-		t.Fatalf("Unexpected count of recovered bytes: Expected %v, got %v", expectedMsgBytes, recBytes)
+	if recBytes != expectedMsgBytesAfterRecovery {
+		t.Fatalf("Unexpected count of recovered bytes: Expected %v, got %v", expectedMsgBytesAfterRecovery, recBytes)
 	}
 
 	// Now check that any new addition would be rejected
@@ -538,11 +590,10 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
-	if recMsg != limit.MaxNumMsgs {
-		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", limit.MaxNumMsgs, recMsg)
+	if recMsg != limit.MaxMsgs {
+		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", limit.MaxMsgs, recMsg)
 	}
-	expectedMsgBytes = uint64(limit.MaxNumMsgs * len(payload))
-	if recBytes != expectedMsgBytes {
+	if recBytes != expectedMsgBytesAfterRecovery {
 		t.Fatalf("Unexpected count of recovered bytes: Expected %v, got %v", expectedMsgBytes, recBytes)
 	}
 
@@ -550,7 +601,7 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	msgStore := cs.Msgs.(*FileMsgStore)
 
 	// Check first avail message sequence
-	expectedNewFirstSeq := uint64((msgCount + 1 - limit.MaxNumMsgs) + 1)
+	expectedNewFirstSeq := uint64((msgCount + 1 - limit.MaxMsgs) + 1)
 	if msgStore.first != expectedNewFirstSeq {
 		t.Fatalf("Expected first sequence to be %v, got %v", expectedNewFirstSeq, msgStore.first)
 	}
@@ -563,13 +614,39 @@ func TestFSRecoveryLimitsNotApplied(t *testing.T) {
 	if secondSlice.msgsCount != 1 {
 		t.Fatalf("Expected second slice to have 1 mesage, got %v", secondSlice.msgsCount)
 	}
-	if secondSlice.firstMsg != lastMsg {
-		t.Fatalf("Expected last message to be %v, got %v", lastMsg, secondSlice.firstMsg)
+	if secondSlice.firstSeq != lastMsg.Sequence {
+		t.Fatalf("Expected last message seq to be %v, got %v", lastMsg.Sequence, secondSlice.firstSeq)
 	}
 	// The first slice should have the new limit msgs count - 1.
 	firstSlice := msgStore.files[0]
-	if firstSlice.msgsCount != limit.MaxNumMsgs-1 {
-		t.Fatalf("Expected first slice to have %v msgs, got %v", limit.MaxNumMsgs-1, firstSlice.msgsCount)
+	left := firstSlice.msgsCount - firstSlice.rmCount
+	if left != limit.MaxMsgs-1 {
+		t.Fatalf("Expected first slice to have %v msgs, got %v", limit.MaxMsgs-1, left)
+	}
+
+	// Close the store
+	fs.Close()
+
+	// We are going to add an age limit (of 1ms for test purposes) and since
+	// messages were stored before, if we wait say 5ms, no message should be
+	// recovered.
+	time.Sleep(5 * time.Millisecond)
+
+	// Now re-open with limits below all the above counts
+	limit = testDefaultStoreLimits
+	limit.MaxMsgs = maxMsgsAfterRecovery
+	limit.MaxAge = time.Millisecond
+	fs, _, err = newFileStore(t, defaultDataStore, &limit)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+	recMsg, recBytes, err = fs.MsgsState(AllChannels)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if recMsg != 0 || recBytes != 0 {
+		t.Fatalf("There should be no message recovered, got %v, %v bytes", recMsg, recBytes)
 	}
 }
 
@@ -580,9 +657,9 @@ func TestFSRecoveryFileSlices(t *testing.T) {
 	fs := createDefaultFileStore(t)
 	fs.Close()
 
-	limit := testDefaultChannelLimits
-	limit.MaxNumMsgs = 4
-	fs, state, err := NewFileStore(defaultDataStore, &limit)
+	limit := testDefaultStoreLimits
+	limit.MaxMsgs = 4
+	fs, state, err := newFileStore(t, defaultDataStore, &limit)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -610,6 +687,49 @@ func TestFSRecoveryFileSlices(t *testing.T) {
 	// We should have moved to the second slice
 	if msgStore.currSliceIdx != 1 {
 		t.Fatalf("Expected file slice to be the second one, got %v", msgStore.currSliceIdx)
+	}
+}
+
+func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	fs.Close()
+
+	limit := testDefaultStoreLimits
+	limit.MaxMsgs = 100
+	fs, _, err := NewFileStore(defaultDataStore, &limit)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	msg := []byte("hello")
+	for i := 0; i < 50; i++ {
+		storeMsg(t, fs, "foo", msg)
+	}
+
+	fs.Close()
+
+	limit.MaxMsgs = 10
+	fs, _, err = NewFileStore(defaultDataStore, &limit)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	for i := 0; i < 10; i++ {
+		storeMsg(t, fs, "foo", msg)
+	}
+
+	cs := fs.LookupChannel("foo")
+	first, last := cs.Msgs.FirstAndLastSequence()
+	expectedFirst := uint64(51)
+	expectedLast := uint64(60)
+	if first != expectedFirst || last != expectedLast {
+		t.Fatalf("Expected first/last to be %v/%v, got %v/%v",
+			expectedFirst, expectedLast, first, last)
 	}
 }
 
@@ -642,12 +762,23 @@ func TestFSMaxChannels(t *testing.T) {
 
 	limitCount := 2
 
-	limits := testDefaultChannelLimits
+	limits := testDefaultStoreLimits
 	limits.MaxChannels = limitCount
 
-	fs.SetChannelLimits(limits)
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
 
 	testMaxChannels(t, fs, limitCount)
+
+	// Set the limit to 0
+	limits.MaxChannels = 0
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+	// Now try to test the limit against
+	// any value, it should not fail
+	testMaxChannels(t, fs, 0)
 }
 
 func TestFSMaxSubs(t *testing.T) {
@@ -659,12 +790,44 @@ func TestFSMaxSubs(t *testing.T) {
 
 	limitCount := 2
 
-	limits := testDefaultChannelLimits
-	limits.MaxSubs = limitCount
+	limits := testDefaultStoreLimits
+	limits.MaxSubscriptions = limitCount
 
-	fs.SetChannelLimits(limits)
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
 
-	testMaxSubs(t, fs, limitCount)
+	testMaxSubs(t, fs, "foo", limitCount)
+
+	// Set the limit to 0
+	limits.MaxSubscriptions = 0
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+	// Now try to test the limit against
+	// any value, it should not fail
+	testMaxSubs(t, fs, "bar", 0)
+}
+
+func TestFSMaxAge(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	testMaxAge(t, fs)
+
+	// Store a message
+	storeMsg(t, fs, "foo", []byte("msg"))
+	// Verify timer is set
+	fs.RLock()
+	cs := fs.LookupChannel("foo")
+	timerSet := cs.Msgs.(*FileMsgStore).ageTimer != nil
+	fs.RUnlock()
+	if !timerSet {
+		t.Fatal("Timer should have been set")
+	}
 }
 
 func TestFSBasicSubStore(t *testing.T) {
@@ -707,9 +870,9 @@ func TestFSRecoverSubUpdatesForDeleteSubOK(t *testing.T) {
 	fs.Close()
 
 	// Recovers now, should not have any error
-	limits := testDefaultChannelLimits
-	limits.MaxSubs = 1
-	fs, state, err := NewFileStore(defaultDataStore, &limits)
+	limits := testDefaultStoreLimits
+	limits.MaxSubscriptions = 1
+	fs, state, err := newFileStore(t, defaultDataStore, &limits)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1044,7 +1207,7 @@ func TestFSBadClientFile(t *testing.T) {
 	//
 	file = resetToValidFile()
 	// First write a valid addClient
-	writeRecord(file, nil, addClient, &cli, crc32.IEEETable)
+	writeRecord(file, nil, addClient, &cli, cli.Size(), crc32.IEEETable)
 	// Then write an invalid delClient
 	delCli := spb.ClientDelete{ID: clientID}
 	b, _ = delCli.Marshal()
@@ -1299,9 +1462,46 @@ func TestFSBadMsgFile(t *testing.T) {
 	}
 	msgStore := cs.Msgs.(*FileMsgStore)
 	firstSliceFileName := msgStore.files[0].fileName
+	firstIdxFileName := msgStore.files[0].idxFName
 
 	// Close it
 	fs.Close()
+
+	//
+	// INVALID INDEX FILE CONTENT
+	//
+	idxFile, err := openFile(firstIdxFileName, os.O_RDWR)
+	if err != nil {
+		t.Fatalf("Error creating index file: %v", err)
+	}
+	if _, err := idxFile.Write([]byte("abcdefg")); err != nil {
+		t.Fatalf("Error writing content: %v", err)
+	}
+	// Close the file
+	if err := idxFile.Close(); err != nil {
+		t.Fatalf("Unexpected error closing index file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	// Delete the file
+	if err := os.Remove(firstIdxFileName); err != nil {
+		t.Fatalf("Unable to delete the index file %q: %v", firstIdxFileName, err)
+	}
+	// This will create the file without the file version
+	if file, err := os.OpenFile(firstIdxFileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666); err != nil {
+		t.Fatalf("Error creating client file: %v", err)
+	} else {
+		file.Close()
+	}
+	// So we should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	// Now for all other tests below, remove the index file so that
+	// the server recovers the data file.
+	if err := os.Remove(firstIdxFileName); err != nil {
+		t.Fatalf("Unexpected error removing index file: %v", err)
+	}
 
 	// First delete the file...
 	if err := os.Remove(firstSliceFileName); err != nil {
@@ -1319,12 +1519,14 @@ func TestFSBadMsgFile(t *testing.T) {
 	resetToValidFile := func() *os.File {
 		// First remove the file
 		if err := os.Remove(firstSliceFileName); err != nil {
-			t.Fatalf("Unexpected error removing file: %v", err)
+			stackFatalf(t, "Unexpected error removing file: %v", err)
 		}
+		// If present, remove the index file
+		os.Remove(firstIdxFileName)
 		// Create the file with proper file version
 		file, err := openFile(firstSliceFileName)
 		if err != nil {
-			t.Fatalf("Error creating file: %v", err)
+			stackFatalf(t, "Error creating file: %v", err)
 		}
 		return file
 	}
@@ -2109,7 +2311,7 @@ func TestFSFlush(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs := createDefaultFileStore(t)
+	fs := createDefaultFileStore(t, DoSync(true))
 	defer fs.Close()
 
 	testFlush(t, fs)
@@ -2140,6 +2342,40 @@ func TestFSFlush(t *testing.T) {
 	if err := cs.Subs.Flush(); err == nil {
 		t.Fatal("Expected Flush to fail, did not")
 	}
+
+	// Close and re-open
+	fs.Close()
+	fs, _ = openDefaultFileStore(t, DoSync(true))
+	defer fs.Close()
+
+	// Check that Flush() is still doing Sync even if
+	// buf writer is empty
+	cs = fs.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Channel foo should exist")
+	}
+	// Close the underlying file
+	ms = cs.Msgs.(*FileMsgStore)
+	ms.Lock()
+	ms.file.Close()
+	ms.Unlock()
+	// Expect Flush to fail
+	if err := cs.Msgs.Flush(); err == nil {
+		t.Fatal("Expected Flush to fail, did not")
+	}
+	// Close the underlying file
+	ss = cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.file.Close()
+	// Simulate that there was activity (alternatively,
+	// we would need a buffer size smaller than a sub record
+	// being written so that buffer writer is by-passed).
+	ss.activity = true
+	ss.Unlock()
+	// Expect Flush to fail
+	if err := cs.Subs.Flush(); err == nil {
+		t.Fatal("Expected Flush to fail, did not")
+	}
 }
 
 func TestFSDoSync(t *testing.T) {
@@ -2155,7 +2391,7 @@ func TestFSDoSync(t *testing.T) {
 		if i == 1 {
 			sOpts.DoSync = false
 		}
-		fs, _, err := NewFileStore(defaultDataStore, &testDefaultChannelLimits, AllOptions(&sOpts))
+		fs, _, err := newFileStore(t, defaultDataStore, &testDefaultStoreLimits, AllOptions(&sOpts))
 		if err != nil {
 			stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 		}
@@ -2383,7 +2619,7 @@ func TestFSWriteRecord(t *testing.T) {
 	cli := &spb.ClientInfo{ID: "me", HbInbox: "inbox"}
 	cliBuf, _ := cli.Marshal()
 
-	retBuf, size, err = writeRecord(w, buf, addClient, cli, crc32.IEEETable)
+	retBuf, size, err = writeRecord(w, buf, addClient, cli, cli.Size(), crc32.IEEETable)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -2408,7 +2644,7 @@ func TestFSWriteRecord(t *testing.T) {
 
 	// Check with no type
 	w.reset()
-	retBuf, size, err = writeRecord(w, buf, recNoType, cli, crc32.IEEETable)
+	retBuf, size, err = writeRecord(w, buf, recNoType, cli, cli.Size(), crc32.IEEETable)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -2435,7 +2671,7 @@ func TestFSWriteRecord(t *testing.T) {
 	w.reset()
 	errReturned := fmt.Errorf("Fake error")
 	corruptRec := &recordProduceErrorOnMarshal{errToReturn: errReturned}
-	retBuf, size, err = writeRecord(w, buf, recNoType, corruptRec, crc32.IEEETable)
+	retBuf, size, err = writeRecord(w, buf, recNoType, corruptRec, corruptRec.Size(), crc32.IEEETable)
 	if err != errReturned {
 		t.Fatalf("Expected error %v, got %v", errReturned, err)
 	}
@@ -2448,49 +2684,38 @@ func TestFSWriteRecord(t *testing.T) {
 }
 
 func TestFSNoPartialWriteDueToBuffering(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	// We could use any record type here, using MsgProto
+	m1 := &pb.MsgProto{Sequence: 1, Subject: "foo", Data: []byte("msg1")}
+	m2 := &pb.MsgProto{Sequence: 2, Subject: "foo", Data: []byte("msg2")}
 
-	// Make this big enough so that msg payload (50%) with MsgProto overhead is
-	// less than the buffer size. As this time of writting, 100 works ok.
-	bufferSize := 100
-	s, _, err := NewFileStore(defaultDataStore, nil, BufferSize(bufferSize))
-	if err != nil {
-		t.Fatalf("Error creating store: %v", err)
+	w := &testWriter{}
+	size := m1.Size() + recordHeaderSize + 2
+	bw := bufio.NewWriterSize(w, size)
+
+	// Write first record
+	m1buf, _, _ := writeRecord(bw, nil, recNoType, m1, m1.Size(), crc32.IEEETable)
+	// Now add m2
+	writeRecord(bw, nil, recNoType, m2, m2.Size(), crc32.IEEETable)
+	// Check that w's buf only contains m2 (no partial)
+	if bw.Buffered() != m2.Size()+recordHeaderSize {
+		t.Fatalf("Expected buffer to contain %v bytes, got %v", m2.Size()+recordHeaderSize, bw.Buffered())
 	}
-	defer s.Close()
-	info := testDefaultServerInfo
-	if err := s.Init(&info); err != nil {
-		t.Fatalf("Error during init: %v", err)
+	if len(w.buf) != m1.Size()+recordHeaderSize {
+		t.Fatalf("Expected backend buffer to contain %v bytes, got %v", m1.Size()+recordHeaderSize, len(w.buf))
+	}
+	if !reflect.DeepEqual(w.buf, m1buf) {
+		t.Fatal("Backend buffer does not contain what we expected")
 	}
 
-	// Write a message that is less than buffer size
-	msgSize := (bufferSize * 5) / 10
-	msg := make([]byte, msgSize)
-	for i := 0; i < len(msg); i++ {
-		msg[i] = byte('A' + (i % 26))
-	}
-	storeMsg(t, s, "foo", msg)
-	// Store 2nd message
-	storeMsg(t, s, "foo", msg)
-	// At this point manually close and remove the reference of the msg store file
-	// so that on file store close, no flush is done.
-	cs := s.LookupChannel("foo")
-	msgStore := cs.Msgs.(*FileMsgStore)
-	if err := msgStore.file.Close(); err != nil {
-		t.Fatalf("Error on close: %v", err)
-	}
-	msgStore.file = nil
-	// Close the file store
-	s.Close()
-	// Reopen, there should be no error due to partials
-	s, _ = openDefaultFileStore(t)
-	defer s.Close()
-	// And there should be only 1 message
-	cs = s.LookupChannel("foo")
-	msgStore = cs.Msgs.(*FileMsgStore)
-	if n, _, _ := msgStore.State(); n != 1 {
-		t.Fatalf("Expected 1 message, got: %v", n)
+	w.reset()
+	errThrown := fmt.Errorf("On purpose")
+	w.setErrToReturn(errThrown)
+	// Write first record
+	writeRecord(bw, nil, recNoType, m1, m1.Size(), crc32.IEEETable)
+	// Now add m2
+	_, _, err := writeRecord(bw, nil, recNoType, m2, m2.Size(), crc32.IEEETable)
+	if err != errThrown {
+		t.Fatalf("Expected error %v, got %v", errThrown, err)
 	}
 }
 
@@ -2566,4 +2791,577 @@ func TestFSCompactSubsUpdateLastSent(t *testing.T) {
 	if rsub.Sub.LastSent != uint64(expectedLastSent) {
 		t.Fatalf("Expected recovered subscription LastSent to be %v, got %v", expectedLastSent, rsub.Sub.LastSent)
 	}
+}
+
+func TestFSFileSlicesClosed(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	limits := testDefaultStoreLimits
+	limits.MaxMsgs = 50
+	fs, _, err := NewFileStore(defaultDataStore, &limits, CacheMsgs(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer fs.Close()
+	payload := []byte("hello")
+	for i := 0; i < limits.MaxMsgs; i++ {
+		storeMsg(t, fs, "foo", payload)
+	}
+	cs := fs.LookupChannel("foo")
+	msgStore := cs.Msgs
+	for i := 0; i < limits.MaxMsgs; i++ {
+		msgStore.Lookup(uint64(i + 1))
+	}
+	time.Sleep(1500 * time.Millisecond)
+	ms := msgStore.(*FileMsgStore)
+	ms.RLock()
+	for i, s := range ms.files {
+		if s.file != nil {
+			ms.RUnlock()
+			t.Fatalf("File slice %v should be closed", i)
+		}
+	}
+	ms.RUnlock()
+}
+
+func TestFSRecoverWithoutIndexFiles(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	limits := testDefaultStoreLimits
+	limits.MaxMsgs = 8
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+
+	total := limits.MaxMsgs + 1
+	payload := []byte("hello")
+	msgs := make([]*pb.MsgProto, 0, total)
+	for i := 0; i < total; i++ {
+		msgs = append(msgs, storeMsg(t, fs, "foo", payload))
+	}
+	cs := fs.LookupChannel("foo")
+	msgStore := cs.Msgs.(*FileMsgStore)
+	// Get the index file names
+	fs.RLock()
+	idxFileNames := make([]string, len(msgStore.files))
+	for i := 0; i < len(msgStore.files); i++ {
+		idxFileNames[i] = msgStore.files[i].idxFName
+	}
+	fs.RUnlock()
+	// Close store
+	fs.Close()
+
+	// Remove the index files
+	for _, fn := range idxFileNames {
+		if err := os.Remove(fn); err != nil {
+			t.Fatalf("Error removing file %q: %v", fn, err)
+		}
+	}
+	// Restart store
+	fs, _ = openDefaultFileStore(t)
+	defer fs.Close()
+	cs = fs.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Expected channel foo to be recovered")
+	}
+	for i := 0; i < total; i++ {
+		m := cs.Msgs.Lookup(uint64(i + 1))
+		if !reflect.DeepEqual(m, msgs[i]) {
+			t.Fatalf("Expected to get message %v, got %v", msgs[i], m)
+		}
+	}
+}
+
+func TestFSEmptySlice(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	m := storeMsg(t, fs, "foo", []byte("hello"))
+
+	fs.Close()
+
+	// Add an empty slice
+	file, err := openFile(filepath.Join(defaultDataStore, "foo", "msgs.2.dat"))
+	if err != nil {
+		t.Fatalf("Error creating file: %v", err)
+	}
+	file.Close()
+
+	// Recover
+	fs, _ = openDefaultFileStore(t)
+	defer fs.Close()
+
+	cs := fs.LookupChannel("foo")
+	if cs == nil {
+		t.Fatalf("Expected to recover foo channel")
+	}
+	lm := cs.Msgs.Lookup(1)
+	if !reflect.DeepEqual(m, lm) {
+		t.Fatalf("Expected recovered message to be %v, got %v", m, lm)
+	}
+}
+
+func TestFSStoreMsgCausesFlush(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t, BufferSize(50))
+	defer fs.Close()
+
+	m1 := storeMsg(t, fs, "foo", []byte("hello"))
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	buffered := ms.bw.buf.Buffered()
+	bufferedMsgs := len(ms.bufferedMsgs)
+	ms.RUnlock()
+	if buffered != m1.Size()+recordHeaderSize {
+		t.Fatalf("Expected buffered to be %v, got %v", m1.Size()+recordHeaderSize, buffered)
+	}
+	if bufferedMsgs != 1 {
+		t.Fatalf("Expected 1 buffered message, got %v", bufferedMsgs)
+	}
+
+	m2 := storeMsg(t, fs, "foo", []byte("hello again!"))
+	ms.RLock()
+	buffered = ms.bw.buf.Buffered()
+	bufferedMsgs = len(ms.bufferedMsgs)
+	ms.RUnlock()
+	if buffered != m2.Size()+recordHeaderSize {
+		t.Fatalf("Expected buffered to be %v, got %v", m2.Size()+recordHeaderSize, buffered)
+	}
+	if bufferedMsgs != 1 {
+		t.Fatalf("Expected 1 buffered message, got %v", bufferedMsgs)
+	}
+
+	// Now store a message that is bigger than the buffer, it should be
+	// directly written to file
+	payload := make([]byte, 200)
+	storeMsg(t, fs, "foo", payload)
+	ms.RLock()
+	buffered = ms.bw.buf.Buffered()
+	bufferedMsgs = len(ms.bufferedMsgs)
+	ms.RUnlock()
+	if buffered != 0 {
+		t.Fatalf("Expected buffered to be 0, got %v", buffered)
+	}
+	if bufferedMsgs != 0 {
+		t.Fatalf("Expected 0 buffered message, got %v", bufferedMsgs)
+	}
+}
+
+func TestFSRemoveAndShiftFiles(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	limits := DefaultStoreLimits
+	// Use limit below number of files to test that a slice
+	// will store at least one message.
+	limits.MaxMsgs = 3
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+
+	expectedFirst := uint64(5)
+	total := 7
+	payload := []byte("hello")
+	for i := 0; i < total; i++ {
+		storeMsg(t, fs, "foo", payload)
+	}
+	// Check first and last indexes
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	if ms.FirstMsg().Sequence != expectedFirst {
+		t.Fatalf("Expected message sequence to be %v, got %v", expectedFirst, ms.FirstMsg().Sequence)
+	}
+	if ms.LastMsg().Sequence != uint64(total) {
+		t.Fatalf("Expected message sequence to be %v, got %v", total, ms.LastMsg().Sequence)
+	}
+	// Close store
+	fs.Close()
+
+	// Reopen
+	fs, _ = openDefaultFileStore(t)
+	defer fs.Close()
+	cs = fs.LookupChannel("foo")
+	ms = cs.Msgs.(*FileMsgStore)
+	if ms.FirstMsg().Sequence != expectedFirst {
+		t.Fatalf("Expected message sequence to be %v, got %v", expectedFirst, ms.FirstMsg().Sequence)
+	}
+	if ms.LastMsg().Sequence != uint64(total) {
+		t.Fatalf("Expected message sequence to be %v, got %v", total, ms.LastMsg().Sequence)
+	}
+}
+
+func TestFSSubStoreVariousBufferSizes(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	sizes := []int{0, subBufMinShrinkSize - subBufMinShrinkSize/10, subBufMinShrinkSize, 3*subBufMinShrinkSize + subBufMinShrinkSize/2}
+	for _, size := range sizes {
+
+		// Create a store with buffer writer of the given size
+		fs := createDefaultFileStore(t, BufferSize(size))
+		defer fs.Close()
+
+		m := storeMsg(t, fs, "foo", []byte("hello"))
+
+		// Perform some activities on subscriptions file
+		subID := storeSub(t, fs, "foo")
+
+		// Get FileSubStore
+		cs := fs.LookupChannel("foo")
+		ss := cs.Subs.(*FileSubStore)
+
+		// Cause a flush to empty the buffer
+		ss.Flush()
+
+		// Check that bw is not nil and writer points to the buffer writer
+		ss.RLock()
+		bw := ss.bw
+		writer := ss.writer
+		file := ss.file
+		bufSize := 0
+		if ss.bw != nil {
+			bufSize = ss.bw.buf.Available()
+		}
+		ss.RUnlock()
+		if size == 0 {
+			if bw != nil {
+				t.Fatal("FileSubStore's buffer writer should be nil")
+			}
+		} else if bw == nil {
+			t.Fatal("FileSubStore's buffer writer should not be nil")
+		}
+		if size == 0 {
+			if writer != file {
+				t.Fatal("FileSubStore's writer should be set to file")
+			}
+		} else if writer != bw.buf {
+			t.Fatal("FileSubStore's writer should be set to the buffer writer")
+		}
+		initialSize := size
+		if size > subBufMinShrinkSize {
+			initialSize = subBufMinShrinkSize
+		}
+		if bufSize != initialSize {
+			t.Fatalf("Incorrect initial size, should be %v, got %v", initialSize, bufSize)
+		}
+
+		// Fill up the buffer (meaningfull only when buffer is used)
+		fillBuffer := func() {
+			total := 0
+			for i := 0; i < 1000; i++ {
+				ss.RLock()
+				before := ss.bw.buf.Buffered()
+				ss.RUnlock()
+				storeSubPending(t, fs, "foo", subID, m.Sequence)
+				ss.RLock()
+				if ss.bw.buf.Buffered() > before {
+					total += ss.bw.buf.Buffered() - before
+				} else {
+					total += ss.bw.buf.Buffered()
+				}
+				ss.RUnlock()
+				// Stop when we have persisted at least 2 times the max buffer size
+				if total >= 2*size {
+					// We should have caused buffer to be flushed by now
+					break
+				}
+			}
+			if total < 2*size {
+				t.Fatalf("Did not reach target total (%v, got %v) after limit iterations", 2*size, total)
+			}
+		}
+		if size > 0 {
+			fillBuffer()
+		} else {
+			// Just write a bunch of stuff
+			for i := 0; i < 50; i++ {
+				storeSubPending(t, fs, "foo", subID, m.Sequence)
+			}
+		}
+
+		ss.RLock()
+		bufSize = 0
+		if size > 0 {
+			bufSize = ss.bw.bufSize
+		}
+		ss.RUnlock()
+		if size == 0 {
+			if bufSize != 0 {
+				t.Fatalf("BufferSize is 0, so ss.bufSize should be 0, got %v", bufSize)
+			}
+		} else if size <= subBufMinShrinkSize {
+			// If size is smaller than min shrink size, the buffer should not have
+			// increased in size
+			if bufSize > subBufMinShrinkSize {
+				t.Fatalf("BufferSize=%v - ss.bw size should at or below %v, got %v", size, subBufMinShrinkSize, bufSize)
+			}
+		} else {
+			// We should have started at min size, and now size should have been increased.
+			if bufSize <= subBufMinShrinkSize || bufSize > size {
+				t.Fatalf("BufferSize=%v - ss.bw size should have increased but no more than %v, got %v", size, size, bufSize)
+			}
+		}
+
+		// Delete subscription
+		storeSubDelete(t, fs, "foo", subID)
+		// Compact
+		ss.Lock()
+		err := ss.compact()
+		ss.Unlock()
+		if err != nil {
+			t.Fatalf("Error during compact: %v", err)
+		}
+		ss.RLock()
+		bw = ss.bw
+		writer = ss.writer
+		file = ss.file
+		shrinkTimerOn := ss.shrinkTimer != nil
+		ss.RUnlock()
+		if size == 0 {
+			if bw != nil {
+				t.Fatal("FileSubStore's buffer writer should be nil")
+			}
+		} else if bw == nil {
+			t.Fatal("FileSubStore's buffer writer should not be nil")
+		}
+		if size == 0 {
+			if writer != file {
+				t.Fatal("FileSubStore's writer should be set to file")
+			}
+		} else if writer != bw.buf {
+			t.Fatal("FileSubStore's writer should be set to the buffer writer")
+		}
+		// When buffer size is greater than min size, see if it shrinks
+		if size > subBufMinShrinkSize {
+			if !shrinkTimerOn {
+				t.Fatal("Timer should have been created to try shrink the buffer")
+			}
+			// Invoke the timer callback manually (so we don't have to wait)
+			// Call many times and make sure size never goes down too low.
+			for i := 0; i < 14; i++ {
+				ss.shrinkBuffer()
+			}
+			// Now check
+			ss.RLock()
+			bufSizeNow := ss.bw.bufSize
+			ss.RUnlock()
+			if bufSizeNow >= bufSize {
+				t.Fatalf("BufferSize=%v - Buffer size expected to decrease, got: %v", size, bufSizeNow)
+			}
+			if bufSizeNow < subBufMinShrinkSize {
+				t.Fatalf("BufferSize=%v - Buffer should not go below %v, got %v", size, subBufMinShrinkSize, bufSizeNow)
+			}
+
+			// Check that the request to shrink is canceled if more data arrive
+			// First make buffer expand.
+			fillBuffer()
+			// Flush to empty it
+			ss.Flush()
+			// Invoke shrink
+			ss.shrinkBuffer()
+			// Check that request is set
+			ss.RLock()
+			shrinkReq := ss.bw.shrinkReq
+			ss.RUnlock()
+			if !shrinkReq {
+				t.Fatal("Shrink request should be true")
+			}
+			// Cause buffer to expand again
+			fillBuffer()
+			// Check that request should have been cancelled.
+			ss.RLock()
+			shrinkReq = ss.bw.shrinkReq
+			ss.RUnlock()
+			if shrinkReq {
+				t.Fatal("Shrink request should be false")
+			}
+		}
+		fs.Close()
+		cleanupDatastore(t, defaultDataStore)
+	}
+}
+
+func TestFSMsgStoreVariousBufferSizes(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	sizes := []int{0, msgBufMinShrinkSize - msgBufMinShrinkSize/10, msgBufMinShrinkSize, 3*msgBufMinShrinkSize + msgBufMinShrinkSize/2}
+	for _, size := range sizes {
+
+		// Create a store with buffer writer of the given size
+		fs := createDefaultFileStore(t, BufferSize(size))
+		defer fs.Close()
+
+		storeMsg(t, fs, "foo", []byte("hello"))
+
+		// Get FileMsgStore
+		cs := fs.LookupChannel("foo")
+		ms := cs.Msgs.(*FileMsgStore)
+
+		// Cause a flush to empty the buffer
+		ms.Flush()
+
+		// Check that bw is not nil and writer points to the buffer writer
+		ms.RLock()
+		bw := ms.bw
+		writer := ms.writer
+		file := ms.file
+		bufSize := 0
+		if ms.bw != nil {
+			bufSize = ms.bw.buf.Available()
+		}
+		ms.RUnlock()
+		if size == 0 {
+			if bw != nil {
+				t.Fatal("FileMsgStore's buffer writer should be nil")
+			}
+		} else if bw == nil {
+			t.Fatal("FileMsgStore's buffer writer should not be nil")
+		}
+		if size == 0 {
+			if writer != file {
+				t.Fatal("FileMsgStore's writer should be set to file")
+			}
+		} else if writer != bw.buf {
+			t.Fatal("FileMsgStore's writer should be set to the buffer writer")
+		}
+		initialSize := size
+		if size > msgBufMinShrinkSize {
+			initialSize = msgBufMinShrinkSize
+		}
+		if bufSize != initialSize {
+			t.Fatalf("Incorrect initial size, should be %v, got %v", initialSize, bufSize)
+		}
+
+		// Fill up the buffer (meaningfull only when buffer is used)
+		fillBuffer := func() {
+			total := 0
+			for i := 0; i < 1000; i++ {
+				ms.RLock()
+				before := ms.bw.buf.Buffered()
+				ms.RUnlock()
+				storeMsg(t, fs, "foo", []byte("hello"))
+				ms.RLock()
+				if ms.bw.buf.Buffered() > before {
+					total += ms.bw.buf.Buffered() - before
+				} else {
+					total += ms.bw.buf.Buffered()
+				}
+				ms.RUnlock()
+				// Stop when we have persisted at least 2 times the max buffer size
+				if total >= 2*size {
+					// We should have caused buffer to be flushed by now
+					break
+				}
+			}
+			if total < 2*size {
+				t.Fatalf("Did not reach target total (%v, got %v) after limit iterations", 2*size, total)
+			}
+		}
+		if size > 0 {
+			fillBuffer()
+		} else {
+			// Just write a bunch of stuff
+			for i := 0; i < 50; i++ {
+				storeMsg(t, fs, "foo", []byte("hello"))
+			}
+		}
+
+		ms.RLock()
+		bufSize = 0
+		if size > 0 {
+			bufSize = ms.bw.bufSize
+		}
+		ms.RUnlock()
+		if size == 0 {
+			if bufSize != 0 {
+				t.Fatalf("BufferSize is 0, so ss.bufSize should be 0, got %v", bufSize)
+			}
+		} else if size < msgBufMinShrinkSize {
+			// If size is smaller than min shrink size, the buffer should not have
+			// increased in size
+			if bufSize > msgBufMinShrinkSize {
+				t.Fatalf("BufferSize=%v - ss.bw size should at or below %v, got %v", size, msgBufMinShrinkSize, bufSize)
+			}
+		} else {
+			// We should have started at min size, and now size should have been increased.
+			if bufSize < msgBufMinShrinkSize || bufSize > size {
+				t.Fatalf("BufferSize=%v - ss.bw size should have increased but no more than %v, got %v", size, size, bufSize)
+			}
+		}
+
+		// When buffer size is greater than min size, see if it shrinks
+		if size > msgBufMinShrinkSize {
+			// Invoke the timer callback manually (so we don't have to wait)
+			// Call many times and make sure size never goes down too low.
+			for i := 0; i < 14; i++ {
+				ms.Lock()
+				ms.bw.tryShrinkBuffer(ms.file)
+				ms.writer = ms.bw.buf
+				ms.Unlock()
+			}
+			// Now check
+			ms.RLock()
+			bufSizeNow := ms.bw.bufSize
+			ms.RUnlock()
+			if bufSizeNow >= bufSize {
+				t.Fatalf("Buffer size expected to decrease, got: %v", bufSizeNow)
+			}
+			if bufSizeNow < msgBufMinShrinkSize {
+				t.Fatalf("Buffer should not go below %v, got %v", msgBufMinShrinkSize, bufSizeNow)
+			}
+
+			// Check that the request to shrink is canceled if more data arrive
+			// First make buffer expand.
+			fillBuffer()
+			// Flush to empty it
+			ms.Flush()
+			// Invoke shrink
+			ms.Lock()
+			ms.bw.tryShrinkBuffer(ms.file)
+			ms.Unlock()
+			// Check that request is set
+			ms.RLock()
+			shrinkReq := ms.bw.shrinkReq
+			ms.RUnlock()
+			if !shrinkReq {
+				t.Fatal("Shrink request should be true")
+			}
+			// Cause buffer to expand again
+			fillBuffer()
+			// Check that request should have been cancelled.
+			ms.RLock()
+			shrinkReq = ms.bw.shrinkReq
+			ms.RUnlock()
+			if shrinkReq {
+				t.Fatal("Shrink request should be false")
+			}
+		}
+		fs.Close()
+		cleanupDatastore(t, defaultDataStore)
+	}
+}
+
+func TestFSPerChannelLimits(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	testPerChannelLimits(t, fs)
 }

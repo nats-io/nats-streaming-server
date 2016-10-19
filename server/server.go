@@ -5,6 +5,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"regexp"
@@ -29,7 +30,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.2.3"
+	VERSION = "0.3.0"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -38,15 +39,6 @@ const (
 	DefaultUnSubPrefix    = "_STAN.unsub"
 	DefaultClosePrefix    = "_STAN.close"
 	DefaultStoreType      = stores.TypeMemory
-
-	// DefaultChannelLimit defines how many channels (literal subjects) we allow
-	DefaultChannelLimit = 100
-	// DefaultSubStoreLimit defines how many subscriptions per channel we allow
-	DefaultSubStoreLimit = 1000
-	// DefaultMsgStoreLimit defines how many messages per channel we allow
-	DefaultMsgStoreLimit = 1000000
-	// DefaultMsgSizeStoreLimit defines how many bytes per channel we allow
-	DefaultMsgSizeStoreLimit = DefaultMsgStoreLimit * 1024
 
 	// Heartbeat intervals.
 	DefaultHeartBeatInterval   = 30 * time.Second
@@ -84,6 +76,13 @@ func setMaxStalledRedeliveries(val int) {
 	atomic.StoreInt32(&maxStalledRedeliveries, int32(val))
 }
 
+// Used for display of limits
+const (
+	limitCount = iota
+	limitBytes
+	limitDuration
+)
+
 // Errors.
 var (
 	ErrInvalidSubject  = errors.New("stan: invalid subject")
@@ -115,9 +114,14 @@ func init() {
 	}
 }
 
+// ioPendingMsg is a record that embeds the pointer to the incoming
+// NATS Message, the PubMsg and PubAck structures so we reduce the
+// number of memory allocations to 1 when processing a message from
+// producer.
 type ioPendingMsg struct {
-	pm *pb.PubMsg
 	m  *nats.Msg
+	pm pb.PubMsg
+	pa pb.PubAck
 }
 
 // Constant that defines the size of the channel that feeds the IO thread.
@@ -206,7 +210,7 @@ type subState struct {
 	ackTimer     *time.Timer
 	ackTimeFloor int64
 	ackSub       *nats.Subscription
-	acksPending  map[uint64]*pb.MsgProto
+	acksPending  map[uint64]struct{}
 	stalledRdlv  int32 // number of times the redelivery cb ended with a stalled subscriber (due to MaxInFlight)
 	stalled      bool
 	newOnHold    bool            // Prevents delivery of new msgs until old are redelivered (on restart)
@@ -312,7 +316,7 @@ func (ss *subStore) updateState(sub *subState) {
 
 // Remove a subscriber from the subscription store, leaving durable
 // subscriptions unless `unsubscribe` is true.
-func (ss *subStore) Remove(sub *subState, unsubscribe bool) {
+func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe bool) {
 	if sub == nil {
 		return
 	}
@@ -390,7 +394,13 @@ func (ss *subStore) Remove(sub *subState, unsubscribe bool) {
 			// Need to update if this member was the one with the last
 			// message of the group.
 			storageUpdate = sub.LastSent == qs.lastSent
-			for _, m := range sub.acksPending {
+			sortedSequences := makeSortedSequences(sub.acksPending)
+			for _, seq := range sortedSequences {
+				m := cs.Msgs.Lookup(seq)
+				if m == nil {
+					// Don't need to ack it since we are destroying this subscription
+					continue
+				}
 				// Get one of the remaning queue subscribers.
 				qsub := qs.subs[idx]
 				qsub.Lock()
@@ -411,12 +421,12 @@ func (ss *subStore) Remove(sub *subState, unsubscribe bool) {
 					qsub.LastSent = m.Sequence
 				}
 				// Store in ackPending.
-				qsub.acksPending[m.Sequence] = m
+				qsub.acksPending[m.Sequence] = struct{}{}
 				// Make sure we set its ack timer if none already set, otherwise
 				// adjust the ackTimer floor as needed.s
 				if qsub.ackTimer == nil {
 					ss.stan.setupAckTimer(qsub, qsub.ackWait)
-				} else if qsub.ackTimeFloor == 0 || m.Timestamp < qsub.ackTimeFloor {
+				} else if qsub.ackTimeFloor > 0 && m.Timestamp < qsub.ackTimeFloor {
 					qsub.ackTimeFloor = m.Timestamp
 				}
 				qsub.Unlock()
@@ -465,24 +475,21 @@ func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 
 // Options for STAN Server
 type Options struct {
-	ID               string
-	DiscoverPrefix   string
-	StoreType        string
-	FilestoreDir     string
-	FileStoreOpts    stores.FileStoreOptions
-	MaxChannels      int
-	MaxMsgs          int    // Maximum number of messages per channel
-	MaxBytes         uint64 // Maximum number of bytes used by messages per channel
-	MaxSubscriptions int    // Maximum number of subscriptions per channel
-	Trace            bool   // Verbose trace
-	Debug            bool   // Debug trace
-	Secure           bool   // Create a TLS enabled connection w/o server verification
-	ClientCert       string // Client Certificate for TLS
-	ClientKey        string // Client Key for TLS
-	ClientCA         string // Client CAs for TLS
-	IOBatchSize      int    // Number of messages we collect from clients before processing them.
-	IOSleepTime      int64  // Duration (in micro-seconds) the server waits for more message to fill up a batch.
-	NATSServerURL    string // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
+	ID                 string
+	DiscoverPrefix     string
+	StoreType          string
+	FilestoreDir       string
+	FileStoreOpts      stores.FileStoreOptions
+	stores.StoreLimits        // Store limits (MaxChannels, etc..)
+	Trace              bool   // Verbose trace
+	Debug              bool   // Debug trace
+	Secure             bool   // Create a TLS enabled connection w/o server verification
+	ClientCert         string // Client Certificate for TLS
+	ClientKey          string // Client Key for TLS
+	ClientCA           string // Client CAs for TLS
+	IOBatchSize        int    // Number of messages we collect from clients before processing them.
+	IOSleepTime        int64  // Duration (in micro-seconds) the server waits for more message to fill up a batch.
+	NATSServerURL      string // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
 }
 
 // DefaultOptions are default options for the STAN server
@@ -499,6 +506,7 @@ var defaultOptions = Options{
 // GetDefaultOptions returns default options for the STAN server
 func GetDefaultOptions() (o *Options) {
 	opts := defaultOptions
+	opts.StoreLimits = stores.DefaultStoreLimits
 	return &opts
 }
 
@@ -662,16 +670,24 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		debug:             sOpts.Debug,
 	}
 
-	// Set limits
-	limits := &stores.ChannelLimits{
-		MaxChannels: DefaultChannelLimit,
-		MaxNumMsgs:  DefaultMsgStoreLimit,
-		MaxMsgBytes: DefaultMsgStoreLimit * 1024,
-		MaxSubs:     DefaultSubStoreLimit,
-	}
+	// Ensure that we shutdown the server if there is a panic during startup.
+	// This will ensure that stores are closed (which otherwise would cause
+	// issues during testing) and that the NATS Server (if started) is also
+	// properly shutdown. To do so, we recover from the panic in order to
+	// call Shutdown, then issue the original panic.
+	defer func() {
+		if r := recover(); r != nil {
+			s.Shutdown()
+			// Log the reason for the panic. We use noticef here since
+			// Fatalf() would cause an exit.
+			Noticef("Failed to start: %v", r)
+			// Issue the original panic now that the store is closed.
+			panic(r)
+		}
+	}()
 
-	// Override with Options if needed
-	overrideLimits(limits, sOpts)
+	// Get the store limits
+	limits := &sOpts.StoreLimits
 
 	var err error
 	var recoveredState *stores.RecoveredState
@@ -701,19 +717,6 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 
 	// Create clientStore
 	s.clients = &clientStore{store: s.store}
-
-	// Ensure that we shutdown the server if there is a panic during startup.
-	// This will ensure that stores are closed (which otherwise would cause
-	// issues during testing) and that the NATS Server (if started) is also
-	// properly shutdown. Tod do so, we recover from the panic in order to
-	// call Shutdown, then issue the original panic.
-	defer func() {
-		if r := recover(); r != nil {
-			s.Shutdown()
-			// Issue the original panic now that the store is closed.
-			panic(r)
-		}
-	}()
 
 	if recoveredState != nil {
 		// Copy content
@@ -773,7 +776,19 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	}
 
 	Noticef("STAN: Message store is %s", s.store.Name())
-	Noticef("STAN: Maximum of %d will be stored", limits.MaxNumMsgs)
+	Noticef("STAN: --------- Store Limits ---------")
+	Noticef("STAN: Channels:        %s",
+		getLimitStr(true, int64(limits.MaxChannels),
+			int64(stores.DefaultStoreLimits.MaxChannels),
+			limitCount))
+	Noticef("STAN: -------- channels limits -------")
+	printLimits(true, &limits.ChannelLimits,
+		&stores.DefaultStoreLimits.ChannelLimits)
+	for cn, cl := range limits.PerChannel {
+		Noticef("STAN: Channel: %q", cn)
+		printLimits(false, cl, &limits.ChannelLimits)
+	}
+	Noticef("STAN: --------------------------------")
 
 	// Execute (in a go routine) redelivery of unacknowledged messages,
 	// and release newOnHold
@@ -783,19 +798,53 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	return &s
 }
 
-func overrideLimits(limits *stores.ChannelLimits, opts *Options) {
-	if opts.MaxChannels != 0 {
-		limits.MaxChannels = opts.MaxChannels
+func printLimits(isGlobal bool, limits, parentLimits *stores.ChannelLimits) {
+	plMaxSubs := int64(parentLimits.MaxSubscriptions)
+	plMaxMsgs := int64(parentLimits.MaxMsgs)
+	plMaxBytes := parentLimits.MaxBytes
+	plMaxAge := parentLimits.MaxAge
+	Noticef("STAN:   Subscriptions: %s", getLimitStr(isGlobal, int64(limits.MaxSubscriptions), plMaxSubs, limitCount))
+	Noticef("STAN:   Messages     : %s", getLimitStr(isGlobal, int64(limits.MaxMsgs), plMaxMsgs, limitCount))
+	Noticef("STAN:   Bytes        : %s", getLimitStr(isGlobal, limits.MaxBytes, plMaxBytes, limitBytes))
+	Noticef("STAN:   Age          : %s", getLimitStr(isGlobal, int64(limits.MaxAge), int64(plMaxAge), limitDuration))
+}
+
+func getLimitStr(isGlobal bool, val, parentVal int64, limitType int) string {
+	valStr := ""
+	inherited := ""
+	if !isGlobal && val == 0 {
+		val = parentVal
 	}
-	if opts.MaxMsgs != 0 {
-		limits.MaxNumMsgs = opts.MaxMsgs
+	if val == parentVal {
+		inherited = " *"
 	}
-	if opts.MaxBytes != 0 {
-		limits.MaxMsgBytes = opts.MaxBytes
+	if val == 0 {
+		valStr = "unlimited"
+	} else {
+		switch limitType {
+		case limitBytes:
+			valStr = friendlyBytes(val)
+		case limitDuration:
+			valStr = fmt.Sprintf("%v", time.Duration(val))
+		default:
+			valStr = fmt.Sprintf("%v", val)
+		}
 	}
-	if opts.MaxSubscriptions != 0 {
-		limits.MaxSubs = opts.MaxSubscriptions
+	return fmt.Sprintf("%13s%s", valStr, inherited)
+}
+
+func friendlyBytes(msgbytes int64) string {
+	bytes := float64(msgbytes)
+	base := 1024
+	pre := []string{"K", "M", "G", "T", "P", "E"}
+	var post = "B"
+	if bytes < float64(base) {
+		return fmt.Sprintf("%v B", bytes)
 	}
+	exp := int(math.Log(bytes) / math.Log(float64(base)))
+	index := exp - 1
+	units := pre[index] + post
+	return fmt.Sprintf("%.2f %s", bytes/math.Pow(float64(base), float64(exp)), units)
 }
 
 // TODO:  Explore parameter passing in gnatsd.  Keep seperate for now.
@@ -962,16 +1011,15 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 		for _, recSub := range recoveredSubs {
 			// Create a subState
 			sub := &subState{
-				subject:     channelName,
-				ackWait:     time.Duration(recSub.Sub.AckWaitInSecs) * time.Second,
-				acksPending: recSub.Pending,
-				store:       channel.Subs,
+				subject: channelName,
+				ackWait: time.Duration(recSub.Sub.AckWaitInSecs) * time.Second,
+				store:   channel.Subs,
 			}
-			// Ensure acksPending is not nil
-			if sub.acksPending == nil {
-				// Create an empty map
-				sub.acksPending = make(map[uint64]*pb.MsgProto)
-			} else if len(sub.acksPending) > 0 {
+			sub.acksPending = make(map[uint64]struct{}, len(recSub.Pending))
+			for seq := range recSub.Pending {
+				sub.acksPending[seq] = struct{}{}
+			}
+			if len(sub.acksPending) > 0 {
 				// Prevent delivery of new messages until resent of old ones
 				sub.newOnHold = true
 				// We may not need to set this because this would be set
@@ -1025,6 +1073,7 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 				sub.Unlock()
 				return err
 			}
+			sub.ackSub.SetPendingLimits(-1, -1)
 		}
 		sub.Unlock()
 	}
@@ -1382,7 +1431,8 @@ func (s *StanServer) sendCloseErr(subj, err string) {
 
 // processClientPublish process inbound messages from clients.
 func (s *StanServer) processClientPublish(m *nats.Msg) {
-	pm := &pb.PubMsg{}
+	iopm := &ioPendingMsg{m: m}
+	pm := &iopm.pm
 	pm.Unmarshal(m.Data)
 
 	// TODO (cls) error check.
@@ -1394,8 +1444,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 		return
 	}
 
-	// add the message to the IO channel for batching
-	s.addMessageToIOChannel(pm, m)
+	s.ioChannel <- iopm
 }
 
 func (s *StanServer) sendPublishErr(subj, guid string, err error) {
@@ -1482,27 +1531,26 @@ func (s *StanServer) processMsg(cs *stores.ChannelStore) {
 }
 
 // Used for sorting by sequence
-type bySeq []*pb.MsgProto
+type bySeq []uint64
 
 func (a bySeq) Len() int           { return (len(a)) }
 func (a bySeq) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a bySeq) Less(i, j int) bool { return a[i].Sequence < a[j].Sequence }
+func (a bySeq) Less(i, j int) bool { return a[i] < a[j] }
 
-func makeSortedMsgs(msgs map[uint64]*pb.MsgProto) []*pb.MsgProto {
-	results := make([]*pb.MsgProto, 0, len(msgs))
-	for _, m := range msgs {
-		mCopy := *m // copy since we need to set redelivered flag.
-		results = append(results, &mCopy)
+func makeSortedSequences(sequences map[uint64]struct{}) []uint64 {
+	results := make([]uint64, 0, len(sequences))
+	for seq := range sequences {
+		results = append(results, seq)
 	}
 	sort.Sort(bySeq(results))
 	return results
 }
 
 // Redeliver all outstanding messages to a durable subscriber, used on resubscribe.
-func (s *StanServer) performDurableRedelivery(sub *subState) {
+func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subState) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.RLock()
-	sortedMsgs := makeSortedMsgs(sub.acksPending)
+	sortedSeqs := makeSortedSequences(sub.acksPending)
 	clientID := sub.ClientID
 	sub.RUnlock()
 
@@ -1522,7 +1570,12 @@ func (s *StanServer) performDurableRedelivery(sub *subState) {
 		return
 	}
 	// Go through all messages
-	for _, m := range sortedMsgs {
+	for _, seq := range sortedSeqs {
+		m := s.getMsgForRedelivery(cs, sub, seq)
+		if m == nil {
+			continue
+		}
+
 		if s.trace {
 			Tracef("STAN: [Client:%s] Redelivery, sending seqno=%d", clientID, m.Sequence)
 		}
@@ -1542,7 +1595,8 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.RLock()
 	expTime := int64(sub.ackWait)
-	sortedMsgs := makeSortedMsgs(sub.acksPending)
+	cs := s.store.LookupChannel(sub.subject)
+	sortedSequences := makeSortedSequences(sub.acksPending)
 	subject := sub.subject
 	qs := sub.qstate
 	clientID := sub.ClientID
@@ -1579,13 +1633,6 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			clientID, subject, inbox)
 	}
 
-	var cs *stores.ChannelStore
-
-	// If we are dealing with a queue subscriber, get the subStore here.
-	if qs != nil {
-		cs = s.store.LookupChannel(subject)
-	}
-
 	now := time.Now().UnixNano()
 
 	// Check if we should force redelivery, even if subscriber is stalled.
@@ -1600,8 +1647,22 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	sent := false
 	sendMore := false
 
+	// The messages from sortedSequences are possibly going to be acknowledged
+	// by the end of this function, but we are going to set the timer based on
+	// the oldest on that list, which is the sooner the timer should fire anyway.
+	// The timer will correctly be adjusted.
+	firstUnacked := int64(0)
+
 	// We will move through acksPending(sorted) and see what needs redelivery.
-	for _, m := range sortedMsgs {
+	for _, seq := range sortedSequences {
+		m := s.getMsgForRedelivery(cs, sub, seq)
+		if m == nil {
+			continue
+		}
+		if firstUnacked == 0 {
+			firstUnacked = m.Timestamp
+		}
+
 		// Ignore messages with a timestamp below our floor
 		if floorTimestamp > 0 && floorTimestamp > m.Timestamp {
 			continue
@@ -1655,21 +1716,24 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 		}
 	}
 
-	// The messages from sortedMsgs above may have all been acknowledged
-	// by now, but we are going to set the timer based on the oldest on
-	// that list, which is the sooner the timer should fire anyway.
-	// The timer will correctly be adjusted.
-
-	firstUnacked := int64(0)
-
-	// Because of locking and timing, it's possible that the sortedMsgs
-	// map was empty even on entry.
-	if len(sortedMsgs) > 0 {
-		firstUnacked = sortedMsgs[0].Timestamp
-	}
-
 	// Adjust the timer
 	sub.adjustAckTimer(firstUnacked)
+}
+
+// getMsgForRedelivery looks up the message from storage. If not found -
+// because it has been removed due to limit - processes an ACK for this
+// sub/sequence number and returns nil, otherwise return a copy of the
+// message (since it is going to be modified: m.Redelivered = true)
+func (s *StanServer) getMsgForRedelivery(cs *stores.ChannelStore, sub *subState, seq uint64) *pb.MsgProto {
+	m := cs.Msgs.Lookup(seq)
+	if m == nil {
+		// Ack it so that it does not reincarnate on restart
+		s.processAck(cs, sub, seq)
+		return nil
+	}
+	// The store implementation does not return a copy, we need one
+	mcopy := *m
+	return &mcopy
 }
 
 // Sends the message to the subscriber
@@ -1713,7 +1777,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	}
 
 	// If this message is already pending, nothing else to do.
-	if sub.acksPending[m.Sequence] != nil {
+	if _, present := sub.acksPending[m.Sequence]; present {
 		return true, true
 	}
 	// Store in storage
@@ -1729,7 +1793,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	}
 
 	// Store in ackPending.
-	sub.acksPending[m.Sequence] = m
+	sub.acksPending[m.Sequence] = struct{}{}
 
 	// Now that we have added to acksPending, check again if we
 	// have reached the max and tell the caller that it should not
@@ -1779,7 +1843,7 @@ func (s *StanServer) storeIOLoop() {
 	var pendingMsgs = _pendingMsgs[:0]
 
 	storeIOPendingMsg := func(iopm *ioPendingMsg) {
-		cs, err := s.assignAndStore(iopm.pm)
+		cs, err := s.assignAndStore(&iopm.pm)
 		if err != nil {
 			Errorf("STAN: [Client:%s] Error processing message for subject %q: %v", iopm.pm.ClientID, iopm.m.Subject, err)
 			s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, err)
@@ -1856,7 +1920,7 @@ func (s *StanServer) storeIOLoop() {
 
 			// Ack our messages back to the publisher
 			for _, iopm := range pendingMsgs {
-				s.ackPublisher(iopm.pm, iopm.m.Reply)
+				s.ackPublisher(iopm)
 			}
 
 			// clear out pending messages and store map
@@ -1868,35 +1932,30 @@ func (s *StanServer) storeIOLoop() {
 	}
 }
 
-// addMessageToIOChannel passes the message to the IO go routine
-func (s *StanServer) addMessageToIOChannel(publishMsg *pb.PubMsg, natsMsg *nats.Msg) {
-	// TODO:  Pool/Preallocate here?
-	iopm := ioPendingMsg{pm: publishMsg, m: natsMsg}
-	s.ioChannel <- &iopm
-}
-
 // assignAndStore will assign a sequence ID and then store the message.
 func (s *StanServer) assignAndStore(pm *pb.PubMsg) (*stores.ChannelStore, error) {
 	cs, err := s.lookupOrCreateChannel(pm.Subject)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := cs.Msgs.Store(pm.Reply, pm.Data); err != nil {
+	if _, err := cs.Msgs.Store(pm.Data); err != nil {
 		return nil, err
 	}
 	return cs, nil
 }
 
 // ackPublisher sends the ack for a message.
-func (s *StanServer) ackPublisher(pm *pb.PubMsg, reply string) {
-	msgAck := &pb.PubAck{Guid: pm.Guid}
+func (s *StanServer) ackPublisher(iopm *ioPendingMsg) {
+	msgAck := &iopm.pa
+	msgAck.Guid = iopm.pm.Guid
 	var buf [32]byte
 	b := buf[:]
 	n, _ := msgAck.MarshalTo(b)
 	if s.trace {
+		pm := &iopm.pm
 		Tracef("STAN: [Client:%s] Acking Publisher subj=%s guid=%s", pm.ClientID, pm.Subject, pm.Guid)
 	}
-	s.nc.Publish(reply, b[:n])
+	s.nc.Publish(iopm.m.Reply, b[:n])
 }
 
 // Delete a sub from a given list.
@@ -1947,7 +2006,7 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 		// Get the subStore from the ChannelStore
 		ss := cs.UserData.(*subStore)
 		// Don't remove durables
-		ss.Remove(sub, false)
+		ss.Remove(cs, sub, false)
 	}
 }
 
@@ -1988,7 +2047,7 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 	}
 
 	// Remove the subscription, force removal if durable.
-	ss.Remove(sub, true)
+	ss.Remove(cs, sub, true)
 
 	Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", req.ClientID, sub.subject)
 
@@ -2006,12 +2065,12 @@ func (s *StanServer) sendSubscriptionResponseErr(reply string, err error) {
 
 // Check for valid subjects
 func isValidSubject(subject string) bool {
-	tokens := strings.Split(subject, ".")
-	if len(tokens) == 0 {
+	if subject == "" {
 		return false
 	}
-	for _, token := range tokens {
-		if strings.ContainsAny(token, ">*") {
+	for i := 0; i < len(subject); i++ {
+		c := subject[i]
+		if c == '*' || c == '>' {
 			return false
 		}
 	}
@@ -2325,7 +2384,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			},
 			subject:     sr.Subject,
 			ackWait:     time.Duration(sr.AckWaitInSecs) * time.Second,
-			acksPending: make(map[uint64]*pb.MsgProto),
+			acksPending: make(map[uint64]struct{}),
 			store:       cs.Subs,
 		}
 
@@ -2339,7 +2398,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 	if err != nil {
 		// Try to undo what has been done.
-		ss.Remove(sub, false)
+		ss.Remove(cs, sub, false)
 		Errorf("STAN: Unable to add subscription for %s: %v", sr.Subject, err)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
@@ -2355,6 +2414,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		sub.Unlock()
 		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
 	}
+	sub.ackSub.SetPendingLimits(-1, -1)
 	sub.Unlock()
 
 	// Create a non-error response
@@ -2365,7 +2425,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// If we are a durable (queue or not) and have state
 	if isDurable {
 		// Redeliver any oustanding.
-		s.performDurableRedelivery(sub)
+		s.performDurableRedelivery(cs, sub)
 	}
 
 	// publish messages to this subscriber
@@ -2449,7 +2509,7 @@ func (s *StanServer) sendAvailableMessagesToQueue(cs *stores.ChannelStore, qs *q
 
 	qs.Lock()
 	for nextSeq := qs.lastSent + 1; ; nextSeq++ {
-		nextMsg := cs.Msgs.Lookup(nextSeq)
+		nextMsg := getNextMsg(cs, &nextSeq, &qs.lastSent)
 		if nextMsg == nil {
 			break
 		}
@@ -2464,7 +2524,7 @@ func (s *StanServer) sendAvailableMessagesToQueue(cs *stores.ChannelStore, qs *q
 func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subState) {
 	sub.Lock()
 	for nextSeq := sub.LastSent + 1; ; nextSeq++ {
-		nextMsg := cs.Msgs.Lookup(nextSeq)
+		nextMsg := getNextMsg(cs, &nextSeq, &sub.LastSent)
 		if nextMsg == nil {
 			break
 		}
@@ -2473,6 +2533,36 @@ func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subStat
 		}
 	}
 	sub.Unlock()
+}
+
+func getNextMsg(cs *stores.ChannelStore, nextSeq, lastSent *uint64) *pb.MsgProto {
+	for {
+		nextMsg := cs.Msgs.Lookup(*nextSeq)
+		if nextMsg != nil {
+			return nextMsg
+		}
+		// Reason why we don't call FirstMsg here is that
+		// FirstMsg could be costly (read from disk, etc)
+		// to realize that the message is of lower sequence.
+		// So check with cheaper FirstSequence() first.
+		firstAvail := cs.Msgs.FirstSequence()
+		if firstAvail <= *nextSeq {
+			return nil
+		}
+		// TODO: We may send dataloss advisories to the client
+		// through the use of a subscription created optionally
+		// by the sub and given to the server through the SubscriptionRequest.
+		// For queue group, server would pick one of the member to send
+		// the advisory to.
+
+		// For now, just skip the missing ones.
+		*nextSeq = firstAvail
+		*lastSent = firstAvail - 1
+
+		// Note that the next lookup could still fail because
+		// the first avail message may have been dropped in the
+		// meantime.
+	}
 }
 
 // Check if a startTime is valid.
@@ -2556,7 +2646,7 @@ func (s *StanServer) ClusterID() string {
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.
 func (s *StanServer) Shutdown() {
-	Debugf("STAN: Shutting down.")
+	Noticef("STAN: Shutting down.")
 
 	s.Lock()
 	if s.shutdown {

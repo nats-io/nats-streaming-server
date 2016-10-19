@@ -4,21 +4,29 @@ package stores
 
 import (
 	"fmt"
+	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nuid"
-	"runtime"
-	"strings"
 )
 
-var testDefaultChannelLimits = ChannelLimits{
-	MaxChannels: 100,
-	MaxNumMsgs:  1000000,
-	MaxMsgBytes: 1000000 * 1024,
-	MaxSubs:     1000,
+var testDefaultStoreLimits = StoreLimits{
+	100,
+	ChannelLimits{
+		MsgStoreLimits{
+			MaxMsgs:  1000000,
+			MaxBytes: 1000000 * 1024,
+		},
+		SubStoreLimits{
+			MaxSubscriptions: 1000,
+		},
+	},
+	nil,
 }
 
 var nuidGen *nuid.NUID
@@ -60,11 +68,11 @@ func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
 		}
 	}
 	ms := cs.Msgs
-	m, err := ms.Store("", data)
+	seq, err := ms.Store(data)
 	if err != nil {
 		stackFatalf(t, "Error storing message into channel [%v]: %v", channel, err)
 	}
-	return m
+	return ms.Lookup(seq)
 }
 
 func storeSub(t *testing.T, s Store, channel string) uint64 {
@@ -245,12 +253,12 @@ func testBasicMsgStore(t *testing.T, s Store) {
 		t.Fatalf("Unexpected payload: %v", string(m1.Data))
 	}
 
-	if ms.FirstMsg() != m1 {
+	if !reflect.DeepEqual(ms.FirstMsg(), m1) {
 		t.Fatalf("Unexpected first message: %v vs %v", ms.FirstMsg(), m1)
 	}
 
-	if ms.LastMsg() != m2 {
-		t.Fatalf("Unexpected first message: %v vs %v", ms.LastMsg(), m2)
+	if !reflect.DeepEqual(ms.LastMsg(), m2) {
+		t.Fatalf("Unexpected last message: %v vs %v", ms.LastMsg(), m2)
 	}
 
 	if ms.FirstSequence() != m1.Sequence {
@@ -265,11 +273,13 @@ func testBasicMsgStore(t *testing.T, s Store) {
 		t.Fatalf("Unexpected sequences: %v,%v", s1, s2)
 	}
 
-	if lm1 := ms.Lookup(m1.Sequence); lm1 != m1 {
+	lm1 := ms.Lookup(m1.Sequence)
+	if !reflect.DeepEqual(lm1, m1) {
 		t.Fatalf("Unexpected lookup result: %v instead of %v", lm1, m1)
 	}
 
-	if lm2 := ms.Lookup(m2.Sequence); lm2 != m2 {
+	lm2 := ms.Lookup(m2.Sequence)
+	if !reflect.DeepEqual(lm2, m2) {
 		t.Fatalf("Unexpected lookup result: %v instead of %v", lm2, m2)
 	}
 
@@ -277,45 +287,62 @@ func testBasicMsgStore(t *testing.T, s Store) {
 	if err != nil {
 		t.Fatalf("Unexpected error getting state: %v", err)
 	}
-	expectedBytes := uint64(len(payload1) + len(payload2))
+	expectedBytes := uint64(m1.Size() + m2.Size())
 	if count != 2 || bytes != expectedBytes {
 		t.Fatalf("Unexpected counts: %v, %v vs %v, %v", count, bytes, 2, expectedBytes)
+	}
+
+	// Store one more mesasge to check that LastMsg is correctly updated
+	m3 := storeMsg(t, s, "foo", []byte("last"))
+	if !reflect.DeepEqual(ms.LastMsg(), m3) {
+		t.Fatalf("Expected last message to be %v, got %v", m3, ms.LastMsg())
 	}
 }
 
 func testMsgsState(t *testing.T, s Store) {
 	payload := []byte("hello")
-	lenPayload := uint64(len(payload))
 
-	storeMsg(t, s, "foo", payload)
-	storeMsg(t, s, "bar", payload)
+	m1 := storeMsg(t, s, "foo", payload)
+	m2 := storeMsg(t, s, "bar", payload)
 
 	count, bytes, err := s.MsgsState("foo")
-	if count != 1 || bytes != lenPayload || err != nil {
-		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, lenPayload, err)
+	if count != 1 || bytes != uint64(m1.Size()) || err != nil {
+		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, m1.Size(), err)
 	}
 
 	count, bytes, err = s.MsgsState("bar")
-	if count != 1 || bytes != lenPayload || err != nil {
-		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, lenPayload, err)
+	if count != 1 || bytes != uint64(m2.Size()) || err != nil {
+		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, m2.Size(), err)
 	}
 
 	count, bytes, err = s.MsgsState(AllChannels)
-	if count != 2 || bytes != 2*lenPayload || err != nil {
-		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, 2*lenPayload, err)
+	if count != 2 || bytes != uint64(m1.Size()+m2.Size()) || err != nil {
+		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, m1.Size()+m2.Size(), err)
 	}
 }
 
 func testMaxMsgs(t *testing.T, s Store) {
 	payload := []byte("hello")
 
-	limitCount := 100
+	limitCount := 0
+	stopBytes := uint64(500)
+	expectedBytes := uint64(0)
+	for i := 0; ; i++ {
+		seq := uint64(i + 1)
+		m := pb.MsgProto{Data: payload, Subject: "foo", Sequence: seq, Timestamp: time.Now().UnixNano()}
+		expectedBytes += uint64(m.Size())
+		limitCount++
+		if expectedBytes >= stopBytes {
+			break
+		}
+	}
 
-	limits := testDefaultChannelLimits
-	limits.MaxNumMsgs = limitCount
-	limits.MaxMsgBytes = uint64(limitCount * len(payload))
-
-	s.SetChannelLimits(limits)
+	limits := testDefaultStoreLimits
+	limits.MaxMsgs = limitCount
+	limits.MaxBytes = int64(expectedBytes)
+	if err := s.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
 
 	totalSent := limitCount + 60
 	firstSeqAfterLimitReached := uint64(totalSent - limitCount + 1)
@@ -323,8 +350,6 @@ func testMaxMsgs(t *testing.T, s Store) {
 	for i := 0; i < totalSent; i++ {
 		storeMsg(t, s, "foo", payload)
 	}
-
-	expectedBytes := uint64(limitCount * len(payload))
 
 	count, bytes, err := s.MsgsState("foo")
 	if count != limitCount || bytes != expectedBytes || err != nil {
@@ -356,52 +381,161 @@ func testMaxMsgs(t *testing.T, s Store) {
 	// Store a message with a payload larger than the limit.
 	// Make sure that the message is stored, but all others should
 	// be removed.
-	bigMsg := make([]byte, limits.MaxMsgBytes+100)
-	storeMsg(t, s, "foo", bigMsg)
+	bigMsg := make([]byte, limits.MaxBytes+100)
+	m := storeMsg(t, s, "foo", bigMsg)
+	expectedBytes = uint64(m.Size())
 
 	count, bytes, err = s.MsgsState("foo")
-	if count != 1 || bytes != uint64(len(bigMsg)) || err != nil {
-		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, len(bigMsg), err)
+	if count != 1 || bytes != expectedBytes || err != nil {
+		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, expectedBytes, err)
+	}
+
+	// Test that we check only on non-zero limits
+	expectedCount := 10
+	expectedBytes = uint64(0)
+	channelName := "maxcount"
+	for i := 0; i < expectedCount; i++ {
+		seq := uint64(i + 1)
+		m := pb.MsgProto{Data: payload, Subject: channelName, Sequence: seq, Timestamp: time.Now().UnixNano()}
+		expectedBytes += uint64(m.Size())
+	}
+	limits.MaxMsgs = expectedCount
+	limits.MaxBytes = 0
+	if err := s.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+	for i := 0; i < expectedCount+10; i++ {
+		storeMsg(t, s, channelName, payload)
+	}
+	n, b, err := s.MsgsState(channelName)
+	if err != nil {
+		t.Fatalf("Unexpected error on MsgsState: %v", err)
+	}
+	if n != expectedCount {
+		t.Fatalf("Expected %v messages, got %v", expectedCount, n)
+	}
+	if b != expectedBytes {
+		t.Fatalf("Expected %v bytes, got %v", expectedBytes, b)
+	}
+
+	expectedCount = 0
+	expectedBytes = uint64(0)
+	channelName = "maxbytes"
+	for i := 0; ; i++ {
+		seq := uint64(i + 1)
+		m := pb.MsgProto{Data: payload, Subject: channelName, Sequence: seq, Timestamp: time.Now().UnixNano()}
+		expectedBytes += uint64(m.Size())
+		expectedCount++
+		if expectedBytes >= 1000 {
+			break
+		}
+	}
+	limits.MaxMsgs = 0
+	limits.MaxBytes = int64(expectedBytes)
+	if err := s.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+	for i := 0; i < expectedCount+10; i++ {
+		storeMsg(t, s, channelName, payload)
+	}
+	n, b, err = s.MsgsState(channelName)
+	if err != nil {
+		t.Fatalf("Unexpected error on MsgsState: %v", err)
+	}
+	if n != expectedCount {
+		t.Fatalf("Expected %d messages, got %v", expectedCount, n)
+	}
+	if b != expectedBytes {
+		t.Fatalf("Expected %v bytes, got %v", expectedBytes, b)
 	}
 }
 
 func testMaxChannels(t *testing.T, s Store, maxChannels int) {
+	total := maxChannels + 1
+	if maxChannels == 0 {
+		total = 10
+	}
 	var err error
 	numCh := 0
-	for i := 0; i < maxChannels+1; i++ {
+	for i := 0; i < total; i++ {
 		_, _, err = s.CreateChannel(fmt.Sprintf("foo.%d", i), nil)
 		if err != nil {
 			break
 		}
 		numCh++
 	}
-	if err == nil || err != ErrTooManyChannels {
-		t.Fatalf("Error should have been ErrTooManyChannels, got %v", err)
-	}
-	if numCh != maxChannels {
-		t.Fatalf("Wrong number of channels: %v vs %v", numCh, maxChannels)
+	if maxChannels == 0 && err != nil {
+		t.Fatalf("Should not have failed, got %v", err)
+	} else if maxChannels > 0 {
+		if err == nil || err != ErrTooManyChannels {
+			t.Fatalf("Error should have been ErrTooManyChannels, got %v", err)
+		}
+		if numCh != maxChannels {
+			t.Fatalf("Wrong number of channels: %v vs %v", numCh, maxChannels)
+		}
 	}
 }
 
-func testMaxSubs(t *testing.T, s Store, maxSubs int) {
-	cs, _, err := s.CreateChannel("foo", nil)
+func testMaxSubs(t *testing.T, s Store, channel string, maxSubs int) {
+	total := maxSubs + 1
+	if maxSubs == 0 {
+		total = 10
+	}
+	cs, _, err := s.CreateChannel(channel, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error creating channel: %v", err)
 	}
 	sub := &spb.SubState{}
 	numSubs := 0
-	for i := 0; i < maxSubs+1; i++ {
+	for i := 0; i < total; i++ {
 		err = cs.Subs.CreateSub(sub)
 		if err != nil {
 			break
 		}
 		numSubs++
 	}
-	if err == nil || err != ErrTooManySubs {
-		t.Fatalf("Error should have been ErrTooManySubs, got %v", err)
+	if maxSubs == 0 && err != nil {
+		t.Fatalf("Should not have failed, got %v", err)
+	} else if maxSubs > 0 {
+		if err == nil || err != ErrTooManySubs {
+			t.Fatalf("Error should have been ErrTooManySubs, got %v", err)
+		}
+		if numSubs != maxSubs {
+			t.Fatalf("Wrong number of subs: %v vs %v", numSubs, maxSubs)
+		}
 	}
-	if numSubs != maxSubs {
-		t.Fatalf("Wrong number of subs: %v vs %v", numSubs, maxSubs)
+}
+
+func testMaxAge(t *testing.T, s Store) {
+	sl := testDefaultStoreLimits
+	sl.MaxAge = 250 * time.Millisecond
+	s.SetLimits(&sl)
+
+	msg := []byte("hello")
+	for i := 0; i < 10; i++ {
+		storeMsg(t, s, "foo", msg)
+	}
+	// Wait a bit
+	time.Sleep(200 * time.Millisecond)
+	// Send more
+	for i := 0; i < 5; i++ {
+		storeMsg(t, s, "foo", msg)
+	}
+	// Wait a bit
+	time.Sleep(100 * time.Millisecond)
+	// We should have the first 10 expired and 5 left.
+	cs := s.LookupChannel("foo")
+	expectedFirst := uint64(11)
+	expectedLast := uint64(15)
+	first, last := cs.Msgs.FirstAndLastSequence()
+	if first != expectedFirst || last != expectedLast {
+		t.Fatalf("Expected first/last to be %v/%v, got %v/%v",
+			expectedFirst, expectedLast, first, last)
+	}
+	// Wait more and all should be gone.
+	time.Sleep(sl.MaxAge)
+	if n, _, _ := cs.Msgs.State(); n != 0 {
+		t.Fatalf("All messages should have expired, got %v", n)
 	}
 }
 
@@ -533,7 +667,7 @@ func testFlush(t *testing.T, s Store) {
 	if err != nil {
 		t.Fatalf("Unexpected error creating channel: %v", err)
 	}
-	msg, err := cs.Msgs.Store("", []byte("hello"))
+	seq, err := cs.Msgs.Store([]byte("hello"))
 	if err != nil {
 		t.Fatalf("Unexpected error on store: %v", err)
 	}
@@ -544,10 +678,126 @@ func testFlush(t *testing.T, s Store) {
 	if err := cs.Subs.CreateSub(&sub); err != nil {
 		t.Fatalf("Unexpected error creating sub: %v", err)
 	}
-	if err := cs.Subs.AddSeqPending(sub.ID, msg.Sequence); err != nil {
+	if err := cs.Subs.AddSeqPending(sub.ID, seq); err != nil {
 		t.Fatalf("Unexpected error adding sequence to substore: %v", err)
 	}
 	if err := cs.Subs.Flush(); err != nil {
 		t.Fatalf("Unexpected error on flush: %v", err)
 	}
+}
+
+func TestGSNoOps(t *testing.T) {
+	gs := &genericStore{}
+	defer gs.Close()
+	limits := DefaultStoreLimits
+	gs.init("test generic", &limits)
+	if _, _, err := gs.CreateChannel("foo", nil); err == nil {
+		t.Fatal("Expected to get an error since this should not be implemented for generic store")
+	}
+	if err := gs.Close(); err != nil {
+		t.Fatalf("Expected nil, got %v", err)
+	}
+
+	gms := &genericMsgStore{}
+	defer gms.Close()
+	gms.init("foo", &limits.MsgStoreLimits)
+	if gms.Lookup(1) != nil || gms.FirstMsg() != nil || gms.LastMsg() != nil || gms.Flush() != nil ||
+		gms.GetSequenceFromTimestamp(0) != 0 || gms.Close() != nil {
+		t.Fatal("Expected no value since these should not be implemented for generic store")
+	}
+
+	gss := &genericSubStore{}
+	defer gss.Close()
+	gss.init("foo", &limits.SubStoreLimits)
+	if gss.AddSeqPending(1, 1) != nil || gss.AckSeqPending(1, 1) != nil || gss.Flush() != nil ||
+		gss.Close() != nil {
+		t.Fatal("Expected no value since these should not be implemented for generic store")
+	}
+}
+
+func testPerChannelLimits(t *testing.T, s Store) {
+	storeLimits := &StoreLimits{MaxChannels: 10}
+	storeLimits.MaxSubscriptions = 10
+	storeLimits.MaxMsgs = 100
+	storeLimits.MaxBytes = 100 * 1024
+
+	fooLimits := ChannelLimits{
+		MsgStoreLimits{
+			MaxMsgs:  3,
+			MaxBytes: 3 * 1024,
+		},
+		SubStoreLimits{
+			MaxSubscriptions: 1,
+		},
+	}
+	barLimits := ChannelLimits{
+		MsgStoreLimits{
+			MaxMsgs:  5,
+			MaxBytes: 5 * 1024,
+		},
+		SubStoreLimits{
+			MaxSubscriptions: 2,
+		},
+	}
+	noSubsOverrideLimits := ChannelLimits{
+		MsgStoreLimits{
+			MaxMsgs:  6,
+			MaxBytes: 6 * 1024,
+		},
+		SubStoreLimits{},
+	}
+	noMaxMsgOverrideLimits := ChannelLimits{
+		MsgStoreLimits{
+			MaxBytes: 7 * 1024,
+		},
+		SubStoreLimits{},
+	}
+	noMaxBytesOverrideLimits := ChannelLimits{
+		MsgStoreLimits{
+			MaxMsgs: 10,
+		},
+		SubStoreLimits{},
+	}
+
+	storeLimits.AddPerChannel("foo", &fooLimits)
+	storeLimits.AddPerChannel("bar", &barLimits)
+	storeLimits.AddPerChannel("baz", &noSubsOverrideLimits)
+	storeLimits.AddPerChannel("abc", &noMaxMsgOverrideLimits)
+	storeLimits.AddPerChannel("def", &noMaxBytesOverrideLimits)
+	if err := s.SetLimits(storeLimits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+
+	checkLimitsForChannel := func(channelName string, maxMsgs, maxSubs int) {
+		cs, _, err := s.CreateChannel(channelName, nil)
+		if err != nil {
+			stackFatalf(t, "Unexpected error on create channel: %v", err)
+		}
+		for i := 0; i < maxMsgs+10; i++ {
+			if _, err := cs.Msgs.Store([]byte("hello")); err != nil {
+				stackFatalf(t, "Unexpected error on store: %v", err)
+			}
+		}
+		n, _, err := cs.Msgs.State()
+		if err != nil {
+			stackFatalf(t, "Unexpected error on State: %v", err)
+		}
+		if n != maxMsgs {
+			stackFatalf(t, "Expected %v messages, got %v", maxMsgs, n)
+		}
+		for i := 0; i < maxSubs+1; i++ {
+			err := cs.Subs.CreateSub(&spb.SubState{})
+			if i < maxSubs && err != nil {
+				stackFatalf(t, "Unexpected error on create sub: %v", err)
+			} else if i == maxSubs && err == nil {
+				stackFatalf(t, "Expected error on createSub, did not get one")
+			}
+		}
+	}
+	checkLimitsForChannel("foo", fooLimits.MaxMsgs, fooLimits.MaxSubscriptions)
+	checkLimitsForChannel("bar", barLimits.MaxMsgs, barLimits.MaxSubscriptions)
+	checkLimitsForChannel("baz", noSubsOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+	checkLimitsForChannel("abc", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+	checkLimitsForChannel("def", noMaxBytesOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+	checkLimitsForChannel("global", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
 }

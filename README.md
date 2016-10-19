@@ -25,12 +25,19 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[73781] 2016/06/20 21:06:52.753188 [INF] Starting nats-streaming-server[test-cluster] version 0.0.1.alpha
-[73781] 2016/06/20 21:06:52.754773 [INF] Starting nats-server version 0.8.2
-[73781] 2016/06/20 21:06:52.754782 [INF] Listening for client connections on localhost:4222
-[73781] 2016/06/20 21:06:52.757134 [INF] Server is ready
-[73781] 2016/06/20 21:06:53.094875 [INF] STAN: Message store is MEMORY
-[73781] 2016/06/20 21:06:53.094887 [INF] STAN: Maximum of 1000000 will be stored
+[53638] 2016/10/18 10:05:15.718693 [INF] Starting nats-streaming-server[test-cluster] version 0.3.0
+[53638] 2016/10/18 10:05:15.721356 [INF] Starting nats-server version 0.9.4
+[53638] 2016/10/18 10:05:15.721366 [INF] Listening for client connections on 0.0.0.0:4222
+[53638] 2016/10/18 10:05:15.721941 [INF] Server is ready
+[53638] 2016/10/18 10:05:16.063714 [INF] STAN: Message store is MEMORY
+[53638] 2016/10/18 10:05:16.063726 [INF] STAN: --------- Store Limits ---------
+[53638] 2016/10/18 10:05:16.063732 [INF] STAN: Channels:                  100 *
+[53638] 2016/10/18 10:05:16.063734 [INF] STAN: -------- channels limits -------
+[53638] 2016/10/18 10:05:16.063738 [INF] STAN:   Subscriptions:          1000 *
+[53638] 2016/10/18 10:05:16.063741 [INF] STAN:   Messages     :       1000000 *
+[53638] 2016/10/18 10:05:16.063786 [INF] STAN:   Bytes        :     976.56 MB *
+[53638] 2016/10/18 10:05:16.063789 [INF] STAN:   Age          :     unlimited *
+[53638] 2016/10/18 10:05:16.063791 [INF] STAN: --------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
@@ -39,29 +46,47 @@ Note that you do not need to start the embedded NATS Server. It is started autom
 
 ## Configuring
 
+### Command line arguments
+
 The NATS Streaming Server accepts command line arguments to control its behavior. There is a set of parameters specific to the NATS Streaming Server and some to the embedded NATS Server.
 
 ```
+Usage: nats-streaming-server [options]
+
 Streaming Server Options:
-    -cluster_id  <cluster ID>    Cluster ID (default: test-cluster)
-    -store <type>                Store type: MEMORY|FILE (default: MEMORY)
-    -dir <directory>             For FILE store type, this is the root directory
-    -max_channels <number>       Max number of channels
-    -max_subs <number>           Max number of subscriptions per channel
-    -max_msgs <number>           Max number of messages per channel
-    -max_bytes <number>          Max messages total size per channel
+    -cid, --cluster_id  <cluster ID> Cluster ID (default: test-cluster)
+    -st,  --store <type>             Store type: MEMORY|FILE (default: MEMORY)
+          --dir <directory>          For FILE store type, this is the root directory
+    -mc,  --max_channels <number>    Max number of channels (0 for unlimited)
+    -msu, --max_subs <number>        Max number of subscriptions per channel (0 for unlimited)
+    -mm,  --max_msgs <number>        Max number of messages per channel (0 for unlimited)
+    -mb,  --max_bytes <number>       Max messages total size per channel (0 for unlimited)
+    -ma,  --max_age <seconds>        Max duration a message can be stored ("0s" for unlimited)
+    -ns,  --nats_server <url>        Connect to this external NATS Server (embedded otherwise)
+    -sc,  --stan_config <file>       Streaming server configuration file
+
+Streaming Server File Store Options:
+    --file_compact_enabled           Enable file compaction
+    --file_compact_frag              File fragmentation threshold for compaction
+    --file_compact_interval <int>    Minimum interval (in seconds) between file compactions
+    --file_compact_min_size <int>    Minimum file size for compaction
+    --file_buffer_size <int>         File buffer size (in bytes)
+    --file_crc                       Enable file CRC-32 checksum
+    --file_crc_poly <int>            Polynomial used to make the table used for CRC-32 checksum
+    --file_sync                      Enable File.Sync on Flush
+    --file_cache                     Enable messages caching
 
 Streaming Server TLS Options:
-    -secure                      Use a TLS connection to the NATS server without
-	                             verification; weaker than specifying certificates.
-    -tls_client_key              Client key for the streaming server
-    -tls_client_cert             Client certificate for the streaming server
-    -tls_client_cacert           Client certificate CA for the streaming server
+    -secure                          Use a TLS connection to the NATS server without
+                                     verification; weaker than specifying certificates.
+    -tls_client_key                  Client key for the streaming server
+    -tls_client_cert                 Client certificate for the streaming server
+    -tls_client_cacert               Client certificate CA for the streaming server
 
 Streaming Server Logging Options:
-    -SD, --stan_debug            Enable STAN debugging output
-    -SV, --stan_trace            Trace the raw STAN protocol
-    -SDV                         Debug and trace STAN
+    -SD, --stan_debug                Enable STAN debugging output
+    -SV, --stan_trace                Trace the raw STAN protocol
+    -SDV                             Debug and trace STAN
     (See additional NATS logging options below)
 
 Embedded NATS Server Options:
@@ -102,6 +127,209 @@ Common Options:
     -v, --version                    Show version
         --help_tls                   TLS help.
 ```
+
+### Configuration file
+
+You can use a configuration file to configure the options specific to the NATS Streaming server.
+
+Use the `-sc` or `-stan_config` command line parameter to specify the file to use.
+
+Note the order in which options are applied during the start of a NATS Streaming server:
+
+1. Start with some reasonable default options.
+2. If a configuration file is specified, override those options
+  with all options defined in the file. This include options that are defined
+  but have no value specified. In this case, the zero value for the type of the
+  option will be used.
+3. Any command line parameter override all of the previous set options.
+
+In general the configuration parameters are the same as the command line arguments.
+But see an example configuration file below for more details:
+
+```
+# Define the cluster name.
+# Can be id, cid or cluster_id
+id: "my_cluster_name"
+
+# Store type
+# Can be st, store, store_type or StoreType
+# Possible values are file or memory (case insensitive)
+store: "file"
+
+# When using a file store, need to provide the root directory.
+# Can be dir or datastore
+dir: "/path/to/storage"
+
+# Debug flag.
+# Can be sd or stand_debug
+sd: false
+
+# Trace flag.
+# Can be sv or stan_trace
+sv: false
+
+# If specified, connects to an external NATS server, otherwise
+# starts and embedded server.
+# Can be ns, nats_server or nats_server_url
+ns: "nats://localhost:4222"
+
+# This flag creates a TLS connection to the server but without
+# the need to use a TLS configuration (no NATS server certificate verification).
+secure: false
+
+# Define store limits.
+# Can be limits, store_limits or StoreLimits.
+# See Store Limits chapter below for more details.
+store_limits: {
+    # Define maximum number of channels.
+    # Can be mc, max_channels or MaxChannels
+    max_channels: 100
+
+    # Define maximum number of subscriptions per channel.
+    # Can be msu, max_sybs, max_subscriptions or MaxSubscriptions
+    max_subs: 100
+
+    # Define maximum number of messages per channel.
+    # Can be mm, max_msgs, MaxMsgs, max_count or MaxCount
+    max_msgs: 10000
+
+    # Define total size of messages per channel.
+    # Can be mb, max_bytes or MaxBytes. Expressed in bytes
+    max_bytes: 10240000
+
+    # Define how long messages can stay in the log, expressed
+    # as a duration, for example: "24h" or "1h15m", etc...
+    # Can be ma, max_age, MaxAge.
+    max_age: "24h"
+}
+
+# TLS configuration.
+tls: {
+    client_cert: "/path/to/client/cert_file"
+    client_key: "/path/to/client/key_file"
+    # Can be client_ca or client_cacert
+    client_ca: "/path/to/client/ca_file"
+}
+
+# Configure file store specific options.
+# Can be file or file_options
+file: {
+    # Enable/disable file compaction.
+    # Can be compact or compact_enabled
+    compact: true
+
+    # Define compaction threshold (in percentage)
+    # Can be compact_frag or compact_fragmemtation
+    compact_frag: 50
+
+    # Define minimum interval between attempts to compact files.
+    # Expressed in seconds
+    compact_interval: 300
+
+    # Define minimum size of a file before compaction can be attempted
+    # Expressed in bytes
+    compact_min_size: 10485760
+
+    # Define the size of buffers that can be used to buffer write operations.
+    # Expressed in bytes
+    buffer_size: 2097152
+
+    # Define if CRC of records should be computed on reads.
+    # Can be crc or do_crc
+    crc: true
+
+    # You can select the CRC polynomial. Note that changing the value
+    # after records have been persisted would result in server failing
+    # to start complaining about data corruption.
+    crc_poly: 3988292384
+
+    # Define if server should perform "file sync" operations during a flush.
+    # Can be sync, do_sync, sync_on_flush
+    sync: true
+
+    # Enable/disable caching of messages once stored. If enabled, it saves
+    # on disk reads (improved performance at the expense of memory).
+    # Can be cache, do_cache, cache_msgs
+    cache: true
+}
+```
+
+### Store Limits
+
+The `store_limits` section in the configuration file (or the command line parameters
+`-mc`, `-mm`, etc..) allow you to configure the global limits.
+
+These limits somewhat offer some upper bound on the size of the storage. By multiplying
+the limits per channel with the maximum number of channels, you will get a total limit.
+
+It is also possible to define specific limits per channel. Here is how:
+
+```
+...
+store_limits: {
+    # Override some global limits
+    max_channels: 10
+    max_msgs: 10000
+    max_bytes: 10485760
+    max_age: "1h"
+
+    # Per channel configuration.
+    # Can be channels, channels_limits, per_channel, per_channel_limits or ChannelsLimits
+    channels: {
+        # Configuration for channel "foo"
+        "foo": {
+            # Possible options are the same than in the store_limits section
+            # except for max_channels.
+            max_msgs: 300
+            max_subs: 50
+        }
+        "bar": {
+            max_msgs:50
+            max_bytes:1000
+        }
+    }
+}
+...
+```
+
+Note the following restrictions:
+- The total of channels configured must be less than the store's maximum number of channels.
+- No limit can be negative.
+- No limit can be greater than its corresponding global limit.
+
+### Limits inheritance
+
+Global limits that are not specified (configuration file or command line parameters)
+are inherited from default limits selected by the server.
+
+Per-channel limits that are not explicitly configured inherit from the corresponding
+global limit (which can itself be inherited from default limit).
+
+On startup the server displays the store limits. Notice the `*` at the right of a
+limit to indicate that the limit was inherited (either from global or default limits).
+This is what would be displayed with the above store limits configuration:
+
+```
+[53904] 2016/10/18 10:10:50.581799 [INF] STAN: --------- Store Limits ---------
+[53904] 2016/10/18 10:10:50.581807 [INF] STAN: Channels:                   10
+[53904] 2016/10/18 10:10:50.581810 [INF] STAN: -------- channels limits -------
+[53904] 2016/10/18 10:10:50.581816 [INF] STAN:   Subscriptions:          1000 *
+[53904] 2016/10/18 10:10:50.581821 [INF] STAN:   Messages     :         10000
+[53904] 2016/10/18 10:10:50.581846 [INF] STAN:   Bytes        :      10.00 MB
+[53904] 2016/10/18 10:10:50.581859 [INF] STAN:   Age          :        1h0m0s
+[53904] 2016/10/18 10:10:50.581867 [INF] STAN: Channel: "foo"
+[53904] 2016/10/18 10:10:50.581872 [INF] STAN:   Subscriptions:            50
+[53904] 2016/10/18 10:10:50.581877 [INF] STAN:   Messages     :           300
+[53904] 2016/10/18 10:10:50.581883 [INF] STAN:   Bytes        :      10.00 MB *
+[53904] 2016/10/18 10:10:50.581889 [INF] STAN:   Age          :        1h0m0s *
+[53904] 2016/10/18 10:10:50.581893 [INF] STAN: Channel: "bar"
+[53904] 2016/10/18 10:10:50.581897 [INF] STAN:   Subscriptions:          1000 *
+[53904] 2016/10/18 10:10:50.581902 [INF] STAN:   Messages     :            50
+[53904] 2016/10/18 10:10:50.581916 [INF] STAN:   Bytes        :        1000 B
+[53904] 2016/10/18 10:10:50.581926 [INF] STAN:   Age          :        1h0m0s *
+[53904] 2016/10/18 10:10:50.581930 [INF] STAN: --------------------------------
+```
+
 
 ## Securing NATS Streaming Server
 

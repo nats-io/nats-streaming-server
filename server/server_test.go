@@ -1260,9 +1260,11 @@ func TestMaxMsgs(t *testing.T) {
 
 func TestMaxBytes(t *testing.T) {
 	payload := []byte("hello")
+	m := pb.MsgProto{Data: payload, Subject: "foo", Sequence: 1, Timestamp: time.Now().UnixNano()}
+	msgSize := m.Size()
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
-	sOpts.MaxBytes = uint64(len(payload) * 10)
+	sOpts.MaxBytes = int64(msgSize * 10)
 	s := RunServerWithOpts(sOpts, nil)
 	defer s.Shutdown()
 
@@ -1283,7 +1285,7 @@ func TestMaxBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error getting state: %v", err)
 	}
-	if b != sOpts.MaxBytes {
+	if b != uint64(sOpts.MaxBytes) {
 		t.Fatalf("Expected msgs size to be %v, got %v", sOpts.MaxBytes, b)
 	}
 }
@@ -3854,43 +3856,40 @@ func TestFileStoreNoPanicOnShutdown(t *testing.T) {
 	opts := getTestDefaultOptsForFileStore()
 	opts.NATSServerURL = nats.DefaultURL
 
-	test := func() {
-		cleanupDatastore(t, defaultDataStore)
-		defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 
-		s := RunServerWithOpts(opts, nil)
-		defer s.Shutdown()
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
 
-		// Start a go routine that keeps sending messages
-		sendQuit := make(chan bool)
-		wg := &sync.WaitGroup{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	// Start a go routine that keeps sending messages
+	sendQuit := make(chan bool)
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 
-			sc, nc := createConnectionWithNatsOpts(t, clientName, nats.NoReconnect())
-			defer sc.Close()
-			defer nc.Close()
-			for {
-				select {
-				case <-sendQuit:
-					return
-				default:
-					sc.PublishAsync("foo", []byte("hello"), nil)
-				}
+		sc, nc := createConnectionWithNatsOpts(t, clientName, nats.NoReconnect())
+		defer sc.Close()
+		defer nc.Close()
+
+		payload := []byte("hello")
+		for {
+			select {
+			case <-sendQuit:
+				return
+			default:
+				sc.PublishAsync("foo", payload, nil)
 			}
-		}()
-		// Wait for some messages to have been sent
-		time.Sleep(500 * time.Millisecond)
-		// Shutdown the server, it should not panic
-		s.Shutdown()
-		// Stop and wait for go routine to end
-		sendQuit <- true
-		wg.Wait()
-	}
-	for i := 0; i < 3; i++ {
-		test()
-	}
+		}
+	}()
+	// Wait for some messages to have been sent
+	time.Sleep(100 * time.Millisecond)
+	// Shutdown the server, it should not panic
+	s.Shutdown()
+	// Stop and wait for go routine to end
+	sendQuit <- true
+	wg.Wait()
 }
 
 func TestNonDurableRemovedFromStoreOnConnClose(t *testing.T) {
@@ -3912,7 +3911,7 @@ func TestNonDurableRemovedFromStoreOnConnClose(t *testing.T) {
 	// Shutdown the server
 	s.Shutdown()
 	// Open the store directly and verify that the sub record is not even found.
-	limits := stores.DefaultChannelLimits
+	limits := stores.DefaultStoreLimits
 	store, recoveredState, err := stores.NewFileStore(defaultDataStore, &limits)
 	if err != nil {
 		t.Fatalf("Error opening file: %v", err)
@@ -4471,5 +4470,275 @@ func TestFileStoreDurableQueueSubRedeliveryOnRejoin(t *testing.T) {
 	// Message should be redelivered
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our message")
+	}
+}
+
+func TestIsValidSubject(t *testing.T) {
+	subject := ""
+	for i := 0; i < 100; i++ {
+		subject += "foo."
+	}
+	subject += "foo"
+	if !isValidSubject(subject) {
+		t.Fatalf("Subject %q should be valid", subject)
+	}
+	subjects := []string{
+		"foo.bar*",
+		"foo.bar>",
+		"foo.bar.*",
+		"foo.bar.>",
+		"foo*.bar",
+		"foo>.bar",
+	}
+	for _, s := range subjects {
+		if isValidSubject(s) {
+			t.Fatalf("Subject %q expected to be invalid", s)
+		}
+	}
+}
+
+func TestDroppedMessagesOnSendToSub(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.MaxMsgs = 3
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Produce 1 message
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Start a durable, it should receive the message
+	ch := make(chan bool)
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {
+		ch <- true
+	}, stan.DurableName("dur"),
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Close connection
+	sc.Close()
+	// Recreate a connection
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Send messages 2, 3, 4 and 5. Messages 1 and 2 should be dropped.
+	for i := 2; i <= 5; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Start the durable, it should receive messages 3, 4 and 5
+	expectedSeq := uint64(3)
+	good := 0
+	cb := func(m *stan.Msg) {
+		if m.Sequence == expectedSeq {
+			good++
+			if good == 3 {
+				ch <- true
+			}
+		}
+		expectedSeq++
+	}
+	if _, err := sc.Subscribe("foo", cb,
+		stan.DurableName("dur"),
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for messages:
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+}
+
+func TestDroppedMessagesOnSendToQueueSub(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.MaxMsgs = 3
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Produce 1 message
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Start a queue subscriber, it should receive the message
+	ch := make(chan bool)
+	blocked := make(chan bool)
+	if _, err := sc.QueueSubscribe("foo", "bar", func(m *stan.Msg) {
+		ch <- true
+		// Block
+		<-blocked
+		m.Ack()
+	}, stan.MaxInflight(1), stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Send messages 2, 3, 4 and 5. Messages 1 and 2 should be dropped.
+	for i := 2; i <= 5; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Start another member, it should receive messages 3, 4 and 5
+	expectedSeq := uint64(3)
+	good := 0
+	cb := func(m *stan.Msg) {
+		if m.Sequence == expectedSeq {
+			good++
+			if good == 3 {
+				ch <- true
+			}
+		}
+		expectedSeq++
+	}
+	if _, err := sc.QueueSubscribe("foo", "bar", cb,
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for messages:
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+	// Unlock first member
+	close(blocked)
+}
+
+func TestDroppedMessagesOnRedelivery(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.MaxMsgs = 3
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Produce 3 messages
+	for i := 0; i < 3; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Start a subscriber with manual ack, don't ack the first
+	// delivered messages.
+	ch := make(chan bool)
+	ready := make(chan bool)
+	expectedSeq := uint64(2)
+	good := 0
+	cb := func(m *stan.Msg) {
+		if m.Redelivered {
+			m.Ack()
+			if m.Sequence == expectedSeq {
+				good++
+				if good == 3 {
+					ch <- true
+				}
+			}
+			expectedSeq++
+		} else if m.Sequence == 3 {
+			ready <- true
+		}
+	}
+	if _, err := sc.Subscribe("foo", cb,
+		stan.SetManualAckMode(),
+		stan.AckWait(time.Second),
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait to receive 3rd message, then send one more
+	if err := Wait(ready); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Send one more, this should cause 1st message to be dropped
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Wait for redelivery of message 2, 3 and 4.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+}
+
+func TestPerChannelLimits(t *testing.T) {
+	f := func(idx int) {
+		opts := GetDefaultOptions()
+		if idx == 1 {
+			cleanupDatastore(t, defaultDataStore)
+			defer cleanupDatastore(t, defaultDataStore)
+
+			opts.FilestoreDir = defaultDataStore
+			opts.StoreType = stores.TypeFile
+		}
+		opts.MaxMsgs = 10
+		opts.MaxAge = time.Hour
+		clfoo := stores.ChannelLimits{}
+		clfoo.MaxMsgs = 2
+		clbar := stores.ChannelLimits{}
+		clbar.MaxBytes = 1000
+		sl := &opts.StoreLimits
+		sl.AddPerChannel("foo", &clfoo)
+		sl.AddPerChannel("bar", &clbar)
+
+		s := RunServerWithOpts(opts, nil)
+		defer s.Shutdown()
+
+		sc := NewDefaultConnection(t)
+		defer sc.Close()
+
+		// Sending on foo should be limited to 2 messages
+		for i := 0; i < 10; i++ {
+			if err := sc.Publish("foo", []byte("hello")); err != nil {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+		}
+		// Check messages count
+		s.RLock()
+		n, _, err := s.store.MsgsState("foo")
+		s.RUnlock()
+		if err != nil {
+			t.Fatalf("Unexpected error getting state: %v", err)
+		}
+		if n != clfoo.MaxMsgs {
+			t.Fatalf("Expected only %v messages, got %v", clfoo.MaxMsgs, n)
+		}
+
+		// Sending on bar should be limited by the size, or the count of global
+		// setting
+		for i := 0; i < 100; i++ {
+			if err := sc.Publish("bar", []byte("hello")); err != nil {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+		}
+		// Check messages count
+		s.RLock()
+		n, b, err := s.store.MsgsState("bar")
+		s.RUnlock()
+		if err != nil {
+			t.Fatalf("Unexpected error getting state: %v", err)
+		}
+		// There should be more than for foo, but no more than opts.MaxMsgs
+		if n <= clfoo.MaxMsgs {
+			t.Fatalf("Expected more messages than %v", n)
+		}
+		if n > opts.MaxMsgs {
+			t.Fatalf("Should be limited by parent MaxMsgs of %v, got %v", opts.MaxMsgs, n)
+		}
+		// The size should be lower than clbar.MaxBytes
+		if b > uint64(clbar.MaxBytes) {
+			t.Fatalf("Expected less than %v bytes, got %v", clbar.MaxBytes, b)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		f(i)
 	}
 }

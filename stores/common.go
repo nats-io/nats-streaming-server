@@ -3,7 +3,7 @@
 package stores
 
 import (
-	"sort"
+	"fmt"
 	"sync"
 
 	"github.com/nats-io/go-nats-streaming/pb"
@@ -18,13 +18,13 @@ var droppingMsgsFmt = "WARNING: Reached limits for store %q (msgs=%v/%v bytes=%v
 // commonStore contains everything that is common to any type of store
 type commonStore struct {
 	sync.RWMutex
-	limits ChannelLimits
 	closed bool
 }
 
 // genericStore is the generic store implementation with a map of channels.
 type genericStore struct {
 	commonStore
+	limits   StoreLimits
 	name     string
 	channels map[string]*ChannelStore
 	clients  map[string]*Client
@@ -34,6 +34,7 @@ type genericStore struct {
 // for a given channel.
 type genericSubStore struct {
 	commonStore
+	limits    SubStoreLimits
 	subject   string // Can't be wildcard
 	subsCount int
 	maxSubID  uint64
@@ -43,10 +44,10 @@ type genericSubStore struct {
 // for a given channel.
 type genericMsgStore struct {
 	commonStore
+	limits     MsgStoreLimits
 	subject    string // Can't be wildcard
 	first      uint64
 	last       uint64
-	msgs       map[uint64]*pb.MsgProto
 	totalCount int
 	totalBytes uint64
 	hitLimit   bool // indicates if store had to drop messages due to limit
@@ -57,13 +58,12 @@ type genericMsgStore struct {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes the structure of a generic store
-func (gs *genericStore) init(name string, limits *ChannelLimits) {
+func (gs *genericStore) init(name string, limits *StoreLimits) {
 	gs.name = name
 	if limits == nil {
-		gs.limits = DefaultChannelLimits
-	} else {
-		gs.limits = *limits
+		limits = &DefaultStoreLimits
 	}
+	gs.setLimits(limits)
 	// Do not use limits values to create the map.
 	gs.channels = make(map[string]*ChannelStore)
 	gs.clients = make(map[string]*Client)
@@ -79,11 +79,38 @@ func (gs *genericStore) Name() string {
 	return gs.name
 }
 
-// SetChannelLimits sets the limit for the messages and subscriptions stores.
-func (gs *genericStore) SetChannelLimits(limits ChannelLimits) {
+// setLimits makes a copy of the given StoreLimits,
+// validates the limits and if ok, applies the inheritance.
+func (gs *genericStore) setLimits(limits *StoreLimits) error {
+	// Make a copy
+	gs.limits = *limits
+	// of the map too
+	if len(limits.PerChannel) > 0 {
+		gs.limits.PerChannel = make(map[string]*ChannelLimits, len(limits.PerChannel))
+		for key, val := range limits.PerChannel {
+			// Make a copy of the values. We want ownership
+			// of those structures
+			gs.limits.PerChannel[key] = &(*val)
+		}
+	}
+	// Build will validate and apply inheritance if no error.
+	sl := &gs.limits
+	return sl.Build()
+}
+
+// SetLimits sets limits for this store
+func (gs *genericStore) SetLimits(limits *StoreLimits) error {
 	gs.Lock()
-	gs.limits = limits
+	err := gs.setLimits(limits)
 	gs.Unlock()
+	return err
+}
+
+// CreateChannel creates a ChannelStore for the given channel, and returns
+// `true` to indicate that the channel is new, false if it already exists.
+func (gs *genericStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, bool, error) {
+	// no-op
+	return nil, false, fmt.Errorf("Generic store, feature not implemented")
 }
 
 // LookupChannel returns a ChannelStore for the given channel.
@@ -134,7 +161,7 @@ func (gs *genericStore) MsgsState(channel string) (numMessages int, byteSize uin
 // canAddChannel returns true if the current number of channels is below the limit.
 // Store lock is assumed to be locked.
 func (gs *genericStore) canAddChannel() error {
-	if len(gs.channels) >= gs.limits.MaxChannels {
+	if gs.limits.MaxChannels > 0 && len(gs.channels) >= gs.limits.MaxChannels {
 		return ErrTooManyChannels
 	}
 	return nil
@@ -226,15 +253,9 @@ func (gs *genericStore) close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes this generic message store
-func (gms *genericMsgStore) init(subject string, limits ChannelLimits) {
+func (gms *genericMsgStore) init(subject string, limits *MsgStoreLimits) {
 	gms.subject = subject
-	gms.limits = limits
-	// FIXME(ik) - Long term, msgs map should probably not be part of the
-	// generic store.
-	// We could use limits.MaxNumMsgs for the size of the map, but that
-	// may be too big if there is lots of channels with only few messages.
-	// The map will grow as needed.
-	gms.msgs = make(map[uint64]*pb.MsgProto, 64)
+	gms.limits = *limits
 }
 
 // State returns some statistics related to this store
@@ -271,26 +292,20 @@ func (gms *genericMsgStore) FirstAndLastSequence() (uint64, uint64) {
 
 // Lookup returns the stored message with given sequence number.
 func (gms *genericMsgStore) Lookup(seq uint64) *pb.MsgProto {
-	gms.RLock()
-	m := gms.msgs[seq]
-	gms.RUnlock()
-	return m
+	// no-op
+	return nil
 }
 
 // FirstMsg returns the first message stored.
 func (gms *genericMsgStore) FirstMsg() *pb.MsgProto {
-	gms.RLock()
-	m := gms.msgs[gms.first]
-	gms.RUnlock()
-	return m
+	// no-op
+	return nil
 }
 
 // LastMsg returns the last message stored.
 func (gms *genericMsgStore) LastMsg() *pb.MsgProto {
-	gms.RLock()
-	m := gms.msgs[gms.last]
-	gms.RUnlock()
-	return m
+	// no-op
+	return nil
 }
 
 func (gms *genericMsgStore) Flush() error {
@@ -301,18 +316,8 @@ func (gms *genericMsgStore) Flush() error {
 // GetSequenceFromTimestamp returns the sequence of the first message whose
 // timestamp is greater or equal to given timestamp.
 func (gms *genericMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
-	gms.RLock()
-	defer gms.RUnlock()
-
-	index := sort.Search(len(gms.msgs), func(i int) bool {
-		m := gms.msgs[uint64(i)+gms.first]
-		if m.Timestamp >= timestamp {
-			return true
-		}
-		return false
-	})
-
-	return uint64(index) + gms.first
+	// no-op
+	return 0
 }
 
 // Close closes this store.
@@ -325,9 +330,9 @@ func (gms *genericMsgStore) Close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes the structure of a generic sub store
-func (gss *genericSubStore) init(channel string, limits ChannelLimits) {
+func (gss *genericSubStore) init(channel string, limits *SubStoreLimits) {
 	gss.subject = channel
-	gss.limits = limits
+	gss.limits = *limits
 }
 
 // CreateSub records a new subscription represented by SubState. On success,
@@ -348,7 +353,7 @@ func (gss *genericSubStore) UpdateSub(sub *spb.SubState) error {
 // createSub is the unlocked version of CreateSub that can be used by
 // non-generic implementations.
 func (gss *genericSubStore) createSub(sub *spb.SubState) error {
-	if gss.subsCount >= gss.limits.MaxSubs {
+	if gss.limits.MaxSubscriptions > 0 && gss.subsCount >= gss.limits.MaxSubscriptions {
 		return ErrTooManySubs
 	}
 

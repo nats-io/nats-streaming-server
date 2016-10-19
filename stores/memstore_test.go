@@ -3,13 +3,14 @@
 package stores
 
 import (
-	"github.com/nats-io/nats-streaming-server/spb"
 	"reflect"
 	"testing"
+
+	"github.com/nats-io/nats-streaming-server/spb"
 )
 
 func createDefaultMemStore(t *testing.T) *MemoryStore {
-	ms, err := NewMemoryStore(&testDefaultChannelLimits)
+	ms, err := NewMemoryStore(&testDefaultStoreLimits)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -52,7 +53,7 @@ func TestMSUseDefaultLimits(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	defer ms.Close()
-	if !reflect.DeepEqual(ms.limits, DefaultChannelLimits) {
+	if !reflect.DeepEqual(ms.limits, DefaultStoreLimits) {
 		t.Fatalf("Default limits are not used: %v\n", ms.limits)
 	}
 }
@@ -105,12 +106,23 @@ func TestMSMaxChannels(t *testing.T) {
 
 	limitCount := 2
 
-	limits := testDefaultChannelLimits
+	limits := testDefaultStoreLimits
 	limits.MaxChannels = limitCount
 
-	ms.SetChannelLimits(limits)
+	if err := ms.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
 
 	testMaxChannels(t, ms, limitCount)
+
+	// Set the limit to 0
+	limits.MaxChannels = 0
+	if err := ms.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+	// Now try to test the limit against
+	// any value, it should not fail
+	testMaxChannels(t, ms, 0)
 }
 
 func TestMSMaxSubs(t *testing.T) {
@@ -119,12 +131,41 @@ func TestMSMaxSubs(t *testing.T) {
 
 	limitCount := 2
 
-	limits := testDefaultChannelLimits
-	limits.MaxSubs = limitCount
+	limits := testDefaultStoreLimits
+	limits.MaxSubscriptions = limitCount
 
-	ms.SetChannelLimits(limits)
+	if err := ms.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
 
-	testMaxSubs(t, ms, limitCount)
+	testMaxSubs(t, ms, "foo", limitCount)
+
+	// Set the limit to 0
+	limits.MaxSubscriptions = 0
+	if err := ms.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+	// Now try to test the limit against
+	// any value, it should not fail
+	testMaxSubs(t, ms, "bar", 0)
+}
+
+func TestMSMaxAge(t *testing.T) {
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+
+	testMaxAge(t, ms)
+
+	// Store a message
+	storeMsg(t, ms, "foo", []byte("msg"))
+	// Verify timer is set
+	ms.RLock()
+	cs := ms.LookupChannel("foo")
+	timerSet := cs.Msgs.(*MemoryMsgStore).ageTimer != nil
+	ms.RUnlock()
+	if !timerSet {
+		t.Fatal("Timer should have been set")
+	}
 }
 
 func TestMSBasicSubStore(t *testing.T) {
@@ -153,4 +194,11 @@ func TestMSFlush(t *testing.T) {
 	defer ms.Close()
 
 	testFlush(t, ms)
+}
+
+func TestMSPerChannelLimits(t *testing.T) {
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+
+	testPerChannelLimits(t, ms)
 }

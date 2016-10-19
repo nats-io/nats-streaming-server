@@ -34,28 +34,59 @@ func Noticef(format string, v ...interface{}) {
 	server.Noticef(format, v...)
 }
 
-// ChannelLimits defines some limits on the store interface
-type ChannelLimits struct {
+// StoreLimits define limits for a store.
+type StoreLimits struct {
 	// How many channels are allowed.
 	MaxChannels int
-	// How many messages per channel are allowed.
-	MaxNumMsgs int
-	// How many bytes (messages payloads) per channel are allowed.
-	MaxMsgBytes uint64
-	// How old messages on a channel can be before being removed.
-	MaxMsgAge time.Duration
-	// How many subscriptions per channel are allowed.
-	MaxSubs int
+	// Global limits. Any 0 value means that the limit is ignored (unlimited).
+	ChannelLimits
+	// Per-channel limits. If a limit for a channel in this map is 0,
+	// the corresponding global limit (specified above) is used.
+	PerChannel map[string]*ChannelLimits
 }
 
-// DefaultChannelLimits are the channel limits that a Store must
+// ChannelLimits defines limits for a given channel
+type ChannelLimits struct {
+	// Limits for message stores
+	MsgStoreLimits
+	// Limits for subscriptions stores
+	SubStoreLimits
+}
+
+// MsgStoreLimits defines limits for a MsgStore.
+// For global limits, a value of 0 means "unlimited".
+// For per-channel limits, it means that the corresponding global
+// limit is used.
+type MsgStoreLimits struct {
+	// How many messages are allowed.
+	MaxMsgs int
+	// How many bytes are allowed.
+	MaxBytes int64
+	// How long messages are kept in the log (unit is seconds)
+	MaxAge time.Duration
+}
+
+// SubStoreLimits defines limits for a SubStore
+type SubStoreLimits struct {
+	// How many subscriptions are allowed.
+	MaxSubscriptions int
+}
+
+// DefaultStoreLimits are the limits that a Store must
 // use when none are specified to the Store constructor.
-// Store limits can be changed with the Store.SetChannelLimits() method.
-var DefaultChannelLimits = ChannelLimits{
-	MaxChannels: 100,
-	MaxNumMsgs:  1000000,
-	MaxMsgBytes: 1000000 * 1024,
-	MaxSubs:     1000,
+// Store limits can be changed with the Store.SetLimits() method.
+var DefaultStoreLimits = StoreLimits{
+	100,
+	ChannelLimits{
+		MsgStoreLimits{
+			MaxMsgs:  1000000,
+			MaxBytes: 1000000 * 1024,
+		},
+		SubStoreLimits{
+			MaxSubscriptions: 1000,
+		},
+	},
+	nil,
 }
 
 // RecoveredState allows the server to reconstruct its state after a restart.
@@ -75,9 +106,8 @@ type Client struct {
 // RecoveredSubscriptions is a map of recovered subscriptions, keyed by channel name.
 type RecoveredSubscriptions map[string][]*RecoveredSubState
 
-// PendingAcks is a map of messages waiting to be acknowledged, keyed by
-// message sequence number.
-type PendingAcks map[uint64]*pb.MsgProto
+// PendingAcks is a set of message sequences waiting to be acknowledged.
+type PendingAcks map[uint64]struct{}
 
 // RecoveredSubState represents a recovered Subscription with a map
 // of pending messages.
@@ -96,9 +126,9 @@ type ChannelStore struct {
 	Msgs MsgStore
 }
 
-// Store is the storage interface for STAN servers.
+// Store is the storage interface for NATS Streaming servers.
 //
-// If an implementation has a Store constructor with ChannelLimits, it should be
+// If an implementation has a Store constructor with StoreLimits, it should be
 // noted that the limits don't apply to any state being recovered, for Store
 // implementations supporting recovery.
 //
@@ -109,12 +139,17 @@ type Store interface {
 	// Name returns the name type of this store (e.g: MEMORY, FILESTORE, etc...).
 	Name() string
 
-	// SetChannelLimits sets limits per channel. The action is not expected
+	// SetLimits sets limits for this store. The action is not expected
 	// to be retroactive.
-	SetChannelLimits(limits ChannelLimits)
+	// The store implementation should make a deep copy as to not change
+	// the content of the structure passed by the caller.
+	// This call may return an error due to limits validation errors.
+	SetLimits(limits *StoreLimits) error
 
 	// CreateChannel creates a ChannelStore for the given channel, and returns
 	// `true` to indicate that the channel is new, false if it already exists.
+	// Limits defined for this channel in StoreLimits.PeChannel map, if present,
+	// will apply. Otherwise, the global limits in StoreLimits will apply.
 	CreateChannel(channel string, userData interface{}) (*ChannelStore, bool, error)
 
 	// LookupChannel returns a ChannelStore for the given channel, nil if channel
@@ -190,8 +225,8 @@ type MsgStore interface {
 	// State returns some statistics related to this store.
 	State() (numMessages int, byteSize uint64, err error)
 
-	// Store stores a message.
-	Store(reply string, data []byte) (*pb.MsgProto, error)
+	// Store stores a message and returns the message sequence.
+	Store(data []byte) (uint64, error)
 
 	// Lookup returns the stored message with given sequence number.
 	Lookup(seq uint64) *pb.MsgProto
