@@ -1578,28 +1578,14 @@ func (ms *FileMsgStore) enforceLimits() error {
 		ms.firstMsg = nil
 		// Is file slice "empty"
 		if slice.msgsCount == 0 {
-			// If we are at the last file slice, remove the first.
-			if ms.currSliceIdx == numFiles-1 {
-				if err := ms.removeAndShiftFiles(); err != nil {
-					return err
-				}
-				// Decrement the current slice. It will be bumped if needed
-				// before storing the next message.
-				ms.currSliceIdx--
-				// The first slice is gone, go back to 0.
-				idx = 0
-			} else {
-				// No more message...
-				slice.firstSeq = 0
-				slice.lastSeq = 0
-
-				// We move the index to check the other slices if needed.
-				idx++
-				// This should not happen, but just in case...
-				if idx > ms.currSliceIdx {
-					break
-				}
+			if err := ms.removeAndShiftFiles(); err != nil {
+				return err
 			}
+			// Decrement the current slice. It will be bumped if needed
+			// before storing the next message.
+			ms.currSliceIdx--
+			// The first slice is gone, go back to 0.
+			idx = 0
 		} else {
 			// This is the new first message in this slice.
 			slice.firstSeq = ms.first
@@ -1623,7 +1609,8 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 	}
 
 	// Rename msgs.2.dat to msgs.1.dat, refresh state, etc...
-	for i := 0; i < numFiles-1; i++ {
+	currSlice := ms.currSliceIdx
+	for i := 0; i < currSlice; i++ {
 		file1 := ms.files[i]
 		file2 := ms.files[i+1]
 
@@ -1633,18 +1620,6 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 		if err := os.Rename(file2.idxFName, file1.idxFName); err != nil {
 			return err
 		}
-		// Update total stats for the first store being removed
-		if i == 0 {
-			ms.totalCount -= file1.msgsCount
-			ms.totalBytes -= file1.msgsSize
-
-			// Remove all messages from first file from our cache
-			seqStart := file1.firstSeq
-			seqEnd := file1.lastSeq
-			for i := seqStart; i <= seqEnd; i++ {
-				delete(ms.msgs, i)
-			}
-		}
 
 		// Copy over values from the next slice
 		file1.firstSeq = file2.firstSeq
@@ -1653,26 +1628,17 @@ func (ms *FileMsgStore) removeAndShiftFiles() error {
 		file1.msgsSize = file2.msgsSize
 	}
 
-	// Create new files for the last slice.
-	fslice := ms.files[numFiles-1]
-	if err := ms.openDataAndIndexFiles(fslice.fileName, fslice.idxFName); err != nil {
-		return err
-	}
-	// Close them now
-	if err := ms.closeDataAndIndexFiles(); err != nil {
-		return err
-	}
 	// Reset the last slice's counts.
+	fslice := ms.files[currSlice]
 	fslice.firstSeq = 0
 	fslice.lastSeq = 0
 	fslice.msgsCount = 0
 	fslice.msgsSize = uint64(0)
 
-	// Now re-open the file we closed at the beginning, which is the one
-	// before last.
+	// Now re-open the slice we were on before, which has shifted to currSlice-1.
 	if err := ms.openDataAndIndexFiles(
-		ms.files[numFiles-2].fileName,
-		ms.files[numFiles-2].idxFName); err != nil {
+		ms.files[currSlice-1].fileName,
+		ms.files[currSlice-1].idxFName); err != nil {
 		return err
 	}
 	return nil

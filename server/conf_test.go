@@ -5,6 +5,7 @@ package server
 import (
 	"io/ioutil"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,9 @@ func TestParseConfig(t *testing.T) {
 }
 
 func TestParsePermError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.SkipNow()
+	}
 	tmpDir, err := ioutil.TempDir("", "streaming")
 	if err != nil {
 		t.Fatalf("Could not create tmp dir: %v", err)

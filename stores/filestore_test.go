@@ -665,6 +665,49 @@ func TestFSRecoveryFileSlices(t *testing.T) {
 	}
 }
 
+func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	fs.Close()
+
+	limit := testDefaultStoreLimits
+	limit.MaxMsgs = 100
+	fs, _, err := NewFileStore(defaultDataStore, &limit)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	msg := []byte("hello")
+	for i := 0; i < 50; i++ {
+		storeMsg(t, fs, "foo", msg)
+	}
+
+	fs.Close()
+
+	limit.MaxMsgs = 10
+	fs, _, err = NewFileStore(defaultDataStore, &limit)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	for i := 0; i < 10; i++ {
+		storeMsg(t, fs, "foo", msg)
+	}
+
+	cs := fs.LookupChannel("foo")
+	first, last := cs.Msgs.FirstAndLastSequence()
+	expectedFirst := uint64(51)
+	expectedLast := uint64(60)
+	if first != expectedFirst || last != expectedLast {
+		t.Fatalf("Expected first/last to be %v/%v, got %v/%v",
+			expectedFirst, expectedLast, first, last)
+	}
+}
+
 func TestFSMsgsState(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
@@ -2885,7 +2928,6 @@ func TestFSRemoveAndShiftFiles(t *testing.T) {
 	}
 
 	expectedFirst := uint64(5)
-	expectedFirstOnRecovery := uint64(4)
 	total := 7
 	payload := []byte("hello")
 	for i := 0; i < total; i++ {
@@ -2908,8 +2950,8 @@ func TestFSRemoveAndShiftFiles(t *testing.T) {
 	defer fs.Close()
 	cs = fs.LookupChannel("foo")
 	ms = cs.Msgs.(*FileMsgStore)
-	if ms.FirstMsg().Sequence != expectedFirstOnRecovery {
-		t.Fatalf("Expected message sequence to be %v, got %v", expectedFirstOnRecovery, ms.FirstMsg().Sequence)
+	if ms.FirstMsg().Sequence != expectedFirst {
+		t.Fatalf("Expected message sequence to be %v, got %v", expectedFirst, ms.FirstMsg().Sequence)
 	}
 	if ms.LastMsg().Sequence != uint64(total) {
 		t.Fatalf("Expected message sequence to be %v, got %v", total, ms.LastMsg().Sequence)
