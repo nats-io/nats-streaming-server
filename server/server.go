@@ -323,6 +323,11 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 
 	sub.Lock()
 	sub.clearAckTimer()
+	durableKey := ""
+	// Do this before clearing the sub.ClientID since this is part of the key!!!
+	if sub.isDurableSubscriber() {
+		durableKey = sub.durableKey()
+	}
 	// Clear the subscriptions clientID
 	sub.ClientID = ""
 	if sub.ackSub != nil {
@@ -331,10 +336,6 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 	}
 	ackInbox := sub.AckInbox
 	qs := sub.qstate
-	durableKey := ""
-	if sub.isDurableSubscriber() {
-		durableKey = sub.durableKey()
-	}
 	isDurable := sub.IsDurable
 	subid := sub.ID
 	store := sub.store

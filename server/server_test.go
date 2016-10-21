@@ -1768,6 +1768,50 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 	}
 }
 
+func TestDurableRemovedOnUnsubscribe(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	cb := func(_ *stan.Msg) {}
+
+	durName := "mydur"
+	sr := &pb.SubscriptionRequest{
+		ClientID:    clientName,
+		Subject:     "foo",
+		DurableName: durName,
+	}
+	durKey := durableKey(sr)
+
+	// Create durable
+	sub, err := sc.Subscribe("foo", cb, stan.DurableName(durName))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Check durable is created
+	checkDurable(t, s, "foo", durName, durKey)
+
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatalf("Unexpected error on unsubscribe: %v", err)
+	}
+
+	// Check that durable is removed
+	cs := s.store.LookupChannel("foo")
+	if cs == nil {
+		t.Fatal("Expected channel foo to be created")
+	}
+	ss := cs.UserData.(*subStore)
+	ss.RLock()
+	durInSS := ss.durables[durKey]
+	ss.RUnlock()
+	if durInSS != nil {
+		t.Fatal("Durable should have been removed")
+	}
+}
+
 func checkDurableNoPendingAck(t *testing.T, s *StanServer, isSame bool,
 	ackInbox string, ackSub *nats.Subscription, expectedSeq uint64) {
 	// When called, we know that there is 1 sub, and the sub is a durable.
