@@ -141,8 +141,13 @@ type StanServer struct {
 	info       spb.ServerInfo // Contains cluster ID and subjects
 	natsServer *server.Server
 	opts       *Options
-	nc         *nats.Conn
-	wg         sync.WaitGroup // Wait on go routines during shutdown
+
+	// For scalability, a dedicated connection is used to publish
+	// messages to subscribers.
+	nc  *nats.Conn // used for most protocol messages
+	ncs *nats.Conn // used solely for publishing to subscribers
+
+	wg sync.WaitGroup // Wait on go routines during shutdown
 
 	// For now, these will be set to the constants DefaultHeartBeatInterval, etc...
 	// but allow to override in tests.
@@ -521,20 +526,23 @@ var DefaultNatsServerOptions = server.Options{
 
 func stanDisconnectedHandler(nc *nats.Conn) {
 	if nc.LastError() != nil {
-		Errorf("STAN: connection has been disconnected: %v", nc.LastError())
+		Errorf("STAN: connection %q has been disconnected: %v",
+			nc.Opts.Name, nc.LastError())
 	}
 }
 
 func stanReconnectedHandler(nc *nats.Conn) {
-	Noticef("STAN: reconnected to NATS Server at %q", nc.ConnectedUrl())
+	Noticef("STAN: connection %q reconnected to NATS Server at %q",
+		nc.Opts.Name, nc.ConnectedUrl())
 }
 
-func stanClosedHandler(_ *nats.Conn) {
-	Debugf("STAN: connection has been closed")
+func stanClosedHandler(nc *nats.Conn) {
+	Debugf("STAN: connection %q has been closed", nc.Opts.Name)
 }
 
-func stanErrorHandler(_ *nats.Conn, sub *nats.Subscription, err error) {
-	Errorf("STAN: Asynchronous error on subject %s: %s", sub.Subject, err)
+func stanErrorHandler(nc *nats.Conn, sub *nats.Subscription, err error) {
+	Errorf("STAN: Asynchronous error on connection %s, subject %s: %s",
+		nc.Opts.Name, sub.Subject, err)
 }
 
 func (s *StanServer) buildServerURLs(sOpts *Options, opts *server.Options) ([]string, error) {
@@ -586,7 +594,7 @@ func (s *StanServer) buildServerURLs(sOpts *Options, opts *server.Options) ([]st
 // createNatsClientConn creates a connection to the NATS server, using
 // TLS if configured.  Pass in the NATS server options to derive a
 // connection url, and for other future items (e.g. auth)
-func (s *StanServer) createNatsClientConn(sOpts *Options, nOpts *server.Options) (*nats.Conn, error) {
+func (s *StanServer) createNatsClientConn(name string, sOpts *Options, nOpts *server.Options) (*nats.Conn, error) {
 	var err error
 	ncOpts := nats.DefaultOptions
 
@@ -594,7 +602,7 @@ func (s *StanServer) createNatsClientConn(sOpts *Options, nOpts *server.Options)
 	if err != nil {
 		return nil, err
 	}
-	ncOpts.Name = fmt.Sprintf("NATS-Streaming-Server-%s", sOpts.ID)
+	ncOpts.Name = fmt.Sprintf("_NSS-%s-%s", sOpts.ID, name)
 
 	if err = nats.ErrorHandler(stanErrorHandler)(&ncOpts); err != nil {
 		return nil, err
@@ -631,6 +639,16 @@ func (s *StanServer) createNatsClientConn(sOpts *Options, nOpts *server.Options)
 		return nil, err
 	}
 	return nc, err
+}
+
+func (s *StanServer) createNatsConnections(sOpts *Options, nOpts *server.Options) {
+	var err error
+	if s.ncs, err = s.createNatsClientConn("general", sOpts, nOpts); err != nil {
+		panic(fmt.Sprintf("Can't connect to NATS server (send): %v\n", err))
+	}
+	if s.nc, err = s.createNatsClientConn("subsend", sOpts, nOpts); err != nil {
+		panic(fmt.Sprintf("Can't connect to NATS server (recv): %v\n", err))
+	}
 }
 
 // RunServer will startup an embedded STAN server and a nats-server to support it.
@@ -754,9 +772,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		s.startNATSServer(nOpts)
 	}
 
-	if s.nc, err = s.createNatsClientConn(sOpts, nOpts); err != nil {
-		panic(fmt.Sprintf("Can't connect to NATS server: %v\n", err))
-	}
+	s.createNatsConnections(sOpts, nOpts)
 
 	s.ensureRunningStandAlone()
 
@@ -1764,7 +1780,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	}
 
 	b, _ := m.Marshal()
-	if err := s.nc.Publish(sub.Inbox, b); err != nil {
+	if err := s.ncs.Publish(sub.Inbox, b); err != nil {
 		Errorf("STAN: [Client:%s] Failed Sending msgseq %s:%d to %s (%s).",
 			sub.ClientID, m.Subject, m.Sequence, sub.Inbox, err)
 		return false, false
@@ -2665,9 +2681,12 @@ func (s *StanServer) Shutdown() {
 	// Capture under lock
 	store := s.store
 	ns := s.natsServer
-	// Do not set s.nc to nil since it is used in many place without locking.
-	// Once closed, s.nc.xxx() calls will simply fail, but we won't panic.
+	// Do not close and nil the connections here, they are used in many places
+	// without locking. Once closed, s.nc.xxx() calls will simply fail, but
+	// we won't panic.
+	ncs := s.ncs
 	nc := s.nc
+
 	if s.ioChannel != nil {
 		// Notify the IO channel that we are shutting down
 		s.ioChannelQuit <- true
@@ -2686,6 +2705,9 @@ func (s *StanServer) Shutdown() {
 	// not be nil.
 	if store != nil {
 		store.Close()
+	}
+	if ncs != nil {
+		ncs.Close()
 	}
 	if nc != nil {
 		nc.Close()
