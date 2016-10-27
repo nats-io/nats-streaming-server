@@ -145,7 +145,7 @@ type StanServer struct {
 	// For scalability, a dedicated connection is used to publish
 	// messages to subscribers.
 	nc  *nats.Conn // used for most protocol messages
-	ncs *nats.Conn // used solely for publishing to subscribers
+	ncs *nats.Conn // used for sending to subscribers and acking publishers
 
 	wg sync.WaitGroup // Wait on go routines during shutdown
 
@@ -643,11 +643,11 @@ func (s *StanServer) createNatsClientConn(name string, sOpts *Options, nOpts *se
 
 func (s *StanServer) createNatsConnections(sOpts *Options, nOpts *server.Options) {
 	var err error
-	if s.ncs, err = s.createNatsClientConn("general", sOpts, nOpts); err != nil {
+	if s.ncs, err = s.createNatsClientConn("send", sOpts, nOpts); err != nil {
 		panic(fmt.Sprintf("Can't connect to NATS server (send): %v\n", err))
 	}
-	if s.nc, err = s.createNatsClientConn("subsend", sOpts, nOpts); err != nil {
-		panic(fmt.Sprintf("Can't connect to NATS server (recv): %v\n", err))
+	if s.nc, err = s.createNatsClientConn("general", sOpts, nOpts); err != nil {
+		panic(fmt.Sprintf("Can't connect to NATS server (general): %v\n", err))
 	}
 }
 
@@ -1972,7 +1972,7 @@ func (s *StanServer) ackPublisher(iopm *ioPendingMsg) {
 		pm := &iopm.pm
 		Tracef("STAN: [Client:%s] Acking Publisher subj=%s guid=%s", pm.ClientID, pm.Subject, pm.Guid)
 	}
-	s.nc.Publish(iopm.m.Reply, b[:n])
+	s.ncs.Publish(iopm.m.Reply, b[:n])
 }
 
 // Delete a sub from a given list.
