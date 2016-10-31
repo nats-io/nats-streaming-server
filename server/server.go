@@ -1467,7 +1467,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 func (s *StanServer) sendPublishErr(subj, guid string, err error) {
 	badMsgAck := &pb.PubAck{Guid: guid, Error: err.Error()}
 	if b, err := badMsgAck.Marshal(); err == nil {
-		s.nc.Publish(subj, b)
+		s.ncs.Publish(subj, b)
 	}
 }
 
@@ -2071,13 +2071,13 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 	// Create a non-error response
 	resp := &pb.SubscriptionResponse{AckInbox: req.Inbox}
 	b, _ := resp.Marshal()
-	s.nc.Publish(m.Reply, b)
+	s.ncs.Publish(m.Reply, b)
 }
 
 func (s *StanServer) sendSubscriptionResponseErr(reply string, err error) {
 	resp := &pb.SubscriptionResponse{Error: err.Error()}
 	b, _ := resp.Marshal()
-	s.nc.Publish(reply, b)
+	s.ncs.Publish(reply, b)
 }
 
 // Check for valid subjects
@@ -2437,7 +2437,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// Create a non-error response
 	resp := &pb.SubscriptionResponse{AckInbox: ackInbox}
 	b, _ := resp.Marshal()
-	s.nc.Publish(m.Reply, b)
+	s.ncs.Publish(m.Reply, b)
 
 	// If we are a durable (queue or not) and have state
 	if isDurable {
