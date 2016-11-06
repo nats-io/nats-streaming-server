@@ -185,6 +185,18 @@ func parseChannelLimits(cl *stores.ChannelLimits, k, name string, v interface{})
 			return err
 		}
 		cl.MaxAge = dur
+	case "min_per_file":
+		if err := checkType(k, reflect.Int64, v); err != nil {
+			return err
+		}
+		cl.RotateEveryMins = int(v.(int64))
+	case "num_files":
+		if err := checkType(k, reflect.Int64, v); err != nil {
+			return err
+		}
+		cl.NumberOfFiles = int(v.(int64))
+	case "archive_script":
+		cl.ArchiveScript = v.(string)
 	}
 	return nil
 }

@@ -64,6 +64,12 @@ type MsgStoreLimits struct {
 	MaxBytes int64
 	// How long messages are kept in the log (unit is seconds)
 	MaxAge time.Duration
+	// FileStore only - Each file covers n minutes
+	RotateEveryMins int
+	// FileStore only - How many files to use
+	NumberOfFiles int
+	// Filestore only - Archive "old" files?
+	ArchiveScript string
 }
 
 // SubStoreLimits defines limits for a SubStore
@@ -79,8 +85,11 @@ var DefaultStoreLimits = StoreLimits{
 	100,
 	ChannelLimits{
 		MsgStoreLimits{
-			MaxMsgs:  1000000,
-			MaxBytes: 1000000 * 1024,
+			MaxMsgs:         1000000,
+			MaxBytes:        1000000 * 1024,
+			RotateEveryMins: 2,
+			NumberOfFiles:   5,
+			ArchiveScript:   "",
 		},
 		SubStoreLimits{
 			MaxSubscriptions: 1000,
