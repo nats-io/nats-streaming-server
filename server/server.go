@@ -1381,7 +1381,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 	if _, err := s.nc.Request(hbInbox, nil, hbTimeout); err != nil {
 		client.fhb++
 		if client.fhb > maxFailedHB {
-			Debugf("STAN: [Client:%s]  Timed out on hearbeats.", clientID)
+			Debugf("STAN: [Client:%s] Timed out on heartbeats.", clientID)
 			client.Unlock()
 			s.closeClient(clientID)
 			return
