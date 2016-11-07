@@ -1475,7 +1475,8 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 				cmdOut, err := exec.Command("sh", "-c", fmt.Sprintf("%s %s %s %s", ms.slArchScript, subject, datFile.Name(), idxFile.Name())).Output()
 
 				if err == nil {
-					Noticef("STAN: Archiving --> %s", string(cmdOut))
+					Noticef("STAN: Archiving: %s --> %s, %s", subject, datFile.Name(), idxFile.Name())
+					Noticef("STAN: Output:    %s", string(cmdOut))
 				} else {
 					Noticef("STAN: Archiving --> error: %s", err)
 				}
