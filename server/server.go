@@ -98,7 +98,7 @@ var (
 	ErrInvalidCloseReq = errors.New("stan: invalid close request")
 	ErrDupDurable      = errors.New("stan: duplicate durable registration")
 	ErrInvalidDurName  = errors.New("stan: durable name of a durable queue subscriber can't contain the character ':'")
-	ErrUnknownClient   = errors.New("stan: unkwown clientID")
+	ErrUnknownClient   = errors.New("stan: unknown clientID")
 )
 
 // Shared regular expression to check clientID validity.
@@ -1381,7 +1381,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 	if _, err := s.nc.Request(hbInbox, nil, hbTimeout); err != nil {
 		client.fhb++
 		if client.fhb > maxFailedHB {
-			Debugf("STAN: [Client:%s]  Timed out on hearbeats.", clientID)
+			Debugf("STAN: [Client:%s] Timed out on heartbeats.", clientID)
 			client.Unlock()
 			s.closeClient(clientID)
 			return
