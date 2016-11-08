@@ -2090,42 +2090,81 @@ func TestStartPositionFirstSequence(t *testing.T) {
 }
 
 func TestStartPositionSequenceStart(t *testing.T) {
-	s := RunServer(clusterName)
+	opts := GetDefaultOptions()
+	opts.ID = clusterName
+	opts.MaxMsgs = 10
+	s := RunServerWithOpts(opts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
 
+	// Send more messages than max so that first is not 1
+	for i := 0; i < opts.MaxMsgs+10; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Check first/last
+	firstSeq, lastSeq := s.store.LookupChannel("foo").Msgs.FirstAndLastSequence()
+	if firstSeq != uint64(opts.MaxMsgs+1) {
+		t.Fatalf("Expected first sequence to be %v, got %v", uint64(opts.MaxMsgs+1), firstSeq)
+	}
+	if lastSeq != uint64(opts.MaxMsgs+10) {
+		t.Fatalf("Expected last sequence to be %v, got %v", uint64(opts.MaxMsgs+10), lastSeq)
+	}
+
 	rch := make(chan bool)
-
-	cb := func(_ *stan.Msg) {
-		rch <- true
-	}
-
-	// Start a subscriber with "Sequence" as start position.
-	// As of now, since there is no message, the call will fail.
-	sub, err := sc.Subscribe("foo", cb, stan.StartAtSequence(0))
-	if err == nil {
-		sub.Unsubscribe()
-		t.Fatal("Expected error on subscribe, got none")
-	}
-
-	// Send a message now.
-	if err := sc.Publish("foo", []byte("hello")); err != nil {
-		t.Fatalf("Unexpected error on publish: %v", err)
-	}
-
-	// Create a new subscriber with "Sequence" 1
-	sub2, err := sc.Subscribe("foo", cb, stan.StartAtSequence(1))
+	// Create subscriber with sequence below firstSeq, it should not fail
+	// and receive message with sequence == firstSeq
+	sub, err := sc.Subscribe("foo", func(m *stan.Msg) {
+		if m.Sequence == firstSeq {
+			rch <- true
+		}
+	}, stan.StartAtSequence(1), stan.SetManualAckMode(), stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
-	defer sub2.Unsubscribe()
-
-	// Message should be received
+	// Make sure correct msg is received
 	if err := Wait(rch); err != nil {
-		t.Fatal("Did not receive our message")
+		t.Fatal("Did not get our message")
 	}
+	sub.Unsubscribe()
+
+	// Create subscriber with sequence higher than lastSeq, it should not
+	// fail, but not receive until we send a new message.
+	sub, err = sc.Subscribe("foo", func(m *stan.Msg) {
+		if m.Sequence == lastSeq+1 {
+			rch <- true
+		}
+	}, stan.StartAtSequence(lastSeq+1), stan.SetManualAckMode(), stan.MaxInflight(1))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Make sure correct msg is received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	sub.Unsubscribe()
+
+	// Create a subscriber with sequence somewhere in range.
+	// It should receive that message.
+	sub, err = sc.Subscribe("foo", func(m *stan.Msg) {
+		if m.Sequence == firstSeq+3 {
+			rch <- true
+		}
+	}, stan.StartAtSequence(firstSeq+3), stan.SetManualAckMode(), stan.MaxInflight(1))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Make sure correct msg is received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	sub.Unsubscribe()
 }
 
 func TestStartPositionTimeDelta(t *testing.T) {
@@ -2137,39 +2176,68 @@ func TestStartPositionTimeDelta(t *testing.T) {
 
 	rch := make(chan bool)
 
-	cb := func(m *stan.Msg) {
-		if string(m.Data) == "msg2" {
-			rch <- true
-		}
-	}
-
-	//FIXME(ik): As of now, start at a time delta when no message
-	// has been stored would return an error. So test only with
-	// messages present.
 	// Send a message.
 	if err := sc.Publish("foo", []byte("msg1")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
-
 	// Wait 1.5 seconds.
 	time.Sleep(1500 * time.Millisecond)
-
 	// Sends a second message
 	if err := sc.Publish("foo", []byte("msg2")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
-	// Start a subscriber with "TimeDelta" as start position.
-	sub, err := sc.Subscribe("foo", cb, stan.StartAtTimeDelta(1*time.Second))
+	// Create subscriber with TimeDelta in the past, should
+	// not fail and get first message.
+	sub, err := sc.Subscribe("foo", func(m *stan.Msg) {
+		if m.Sequence == 1 {
+			rch <- true
+		}
+	}, stan.StartAtTimeDelta(10*time.Second), stan.SetManualAckMode(), stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
-	defer sub.Unsubscribe()
+	// Message 1 should be received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not receive our message")
+	}
+	sub.Unsubscribe()
 
+	// Start a subscriber with "TimeDelta" as start position.
+	sub, err = sc.Subscribe("foo", func(m *stan.Msg) {
+		if m.Sequence == 2 {
+			rch <- true
+		}
+	}, stan.StartAtTimeDelta(1*time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
 	// Message 2 should be received
 	if err := Wait(rch); err != nil {
 		t.Fatal("Did not receive our message")
 	}
+	sub.Unsubscribe()
+
+	// Wait a bit
+	time.Sleep(250 * time.Millisecond)
+	// Create a subscriber with delta that would point to
+	// after the end of the log.
+	sub, err = sc.Subscribe("foo", func(m *stan.Msg) {
+		if m.Sequence == 3 {
+			rch <- true
+		}
+	}, stan.StartAtTimeDelta(100*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("msg3")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Message 3 should be received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not receive our message")
+	}
+	sub.Unsubscribe()
 }
 
 func TestStartPositionWithDurable(t *testing.T) {
