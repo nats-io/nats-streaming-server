@@ -2560,29 +2560,6 @@ func getNextMsg(cs *stores.ChannelStore, nextSeq, lastSent *uint64) *pb.MsgProto
 	}
 }
 
-// Check if a startTime is valid.
-func (s *StanServer) startTimeValid(cs *stores.ChannelStore, subject string, start int64) bool {
-	firstMsg := cs.Msgs.FirstMsg()
-	// simply no messages to return
-	if firstMsg == nil {
-		return false
-	}
-	lastMsg := cs.Msgs.LastMsg()
-	if start > lastMsg.Timestamp || start < firstMsg.Timestamp {
-		return false
-	}
-	return true
-}
-
-// Check if a startSequence is valid.
-func (s *StanServer) startSequenceValid(cs *stores.ChannelStore, subject string, seq uint64) bool {
-	first, last := cs.Msgs.FirstAndLastSequence()
-	if first == 0 || seq > last || seq < first {
-		return false
-	}
-	return true
-}
-
 func (s *StanServer) getSequenceFromStartTime(cs *stores.ChannelStore, startTime int64) uint64 {
 	return cs.Msgs.GetSequenceFromTimestamp(startTime)
 }
