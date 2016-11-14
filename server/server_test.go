@@ -2115,12 +2115,16 @@ func TestStartPositionSequenceStart(t *testing.T) {
 	}
 
 	rch := make(chan bool)
+	first := int32(1)
 	// Create subscriber with sequence below firstSeq, it should not fail
 	// and receive message with sequence == firstSeq
 	sub, err := sc.Subscribe("foo", func(m *stan.Msg) {
 		if m.Sequence == firstSeq {
 			rch <- true
+		} else if atomic.LoadInt32(&first) == 1 {
+			t.Fatalf("First message should be sequence %v, got %v", firstSeq, m.Sequence)
 		}
+		atomic.StoreInt32(&first, 0)
 	}, stan.StartAtSequence(1), stan.SetManualAckMode(), stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
@@ -2133,10 +2137,14 @@ func TestStartPositionSequenceStart(t *testing.T) {
 
 	// Create subscriber with sequence higher than lastSeq, it should not
 	// fail, but not receive until we send a new message.
+	atomic.StoreInt32(&first, 1)
 	sub, err = sc.Subscribe("foo", func(m *stan.Msg) {
 		if m.Sequence == lastSeq+1 {
 			rch <- true
+		} else if atomic.LoadInt32(&first) == 1 {
+			t.Fatalf("First message should be sequence %v, got %v", lastSeq+1, m.Sequence)
 		}
+		atomic.StoreInt32(&first, 0)
 	}, stan.StartAtSequence(lastSeq+1), stan.SetManualAckMode(), stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
@@ -2152,10 +2160,14 @@ func TestStartPositionSequenceStart(t *testing.T) {
 
 	// Create a subscriber with sequence somewhere in range.
 	// It should receive that message.
+	atomic.StoreInt32(&first, 1)
 	sub, err = sc.Subscribe("foo", func(m *stan.Msg) {
 		if m.Sequence == firstSeq+3 {
 			rch <- true
+		} else if atomic.LoadInt32(&first) == 1 {
+			t.Fatalf("First message should be sequence %v, got %v", firstSeq+3, m.Sequence)
 		}
+		atomic.StoreInt32(&first, 0)
 	}, stan.StartAtSequence(firstSeq+3), stan.SetManualAckMode(), stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
@@ -2189,10 +2201,14 @@ func TestStartPositionTimeDelta(t *testing.T) {
 
 	// Create subscriber with TimeDelta in the past, should
 	// not fail and get first message.
+	first := int32(1)
 	sub, err := sc.Subscribe("foo", func(m *stan.Msg) {
 		if m.Sequence == 1 {
 			rch <- true
+		} else if atomic.LoadInt32(&first) == 1 {
+			t.Fatalf("First message should be sequence %v, got %v", 1, m.Sequence)
 		}
+		atomic.StoreInt32(&first, 0)
 	}, stan.StartAtTimeDelta(10*time.Second), stan.SetManualAckMode(), stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
@@ -2204,10 +2220,14 @@ func TestStartPositionTimeDelta(t *testing.T) {
 	sub.Unsubscribe()
 
 	// Start a subscriber with "TimeDelta" as start position.
+	atomic.StoreInt32(&first, 1)
 	sub, err = sc.Subscribe("foo", func(m *stan.Msg) {
 		if m.Sequence == 2 {
 			rch <- true
+		} else if atomic.LoadInt32(&first) == 1 {
+			t.Fatalf("First message should be sequence %v, got %v", 2, m.Sequence)
 		}
+		atomic.StoreInt32(&first, 0)
 	}, stan.StartAtTimeDelta(1*time.Second))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
@@ -2222,10 +2242,14 @@ func TestStartPositionTimeDelta(t *testing.T) {
 	time.Sleep(250 * time.Millisecond)
 	// Create a subscriber with delta that would point to
 	// after the end of the log.
+	atomic.StoreInt32(&first, 1)
 	sub, err = sc.Subscribe("foo", func(m *stan.Msg) {
 		if m.Sequence == 3 {
 			rch <- true
+		} else if atomic.LoadInt32(&first) == 1 {
+			t.Fatalf("First message should be sequence %v, got %v", 3, m.Sequence)
 		}
+		atomic.StoreInt32(&first, 0)
 	}, stan.StartAtTimeDelta(100*time.Millisecond))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)

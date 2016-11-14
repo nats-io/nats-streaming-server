@@ -2600,7 +2600,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 	case pb.StartPosition_SequenceStart:
 		// If there is no message, firstSeq and lastSeq will be equal to 0.
 		firstSeq, lastSeq := cs.Msgs.FirstAndLastSequence()
-		// StarSequence is an uint64, so can't be lower than 0.
+		// StartSequence is an uint64, so can't be lower than 0.
 		if sr.StartSequence < firstSeq {
 			// That translates to sending the first message available.
 			lastSent = firstSeq - 1
@@ -2612,8 +2612,8 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 			// sequence number.
 			lastSent = sr.StartSequence - 1
 		}
-		Debugf("STAN: [Client:%s] Sending from sequence, subject=%s seq=%d",
-			sub.ClientID, sub.subject, lastSent)
+		Debugf("STAN: [Client:%s] Sending from sequence, subject=%s seq_asked=%d actual_seq=%d",
+			sub.ClientID, sub.subject, sr.StartSequence, lastSent)
 	case pb.StartPosition_First:
 		firstSeq := cs.Msgs.FirstSequence()
 		if firstSeq > 0 {
