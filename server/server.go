@@ -2365,28 +2365,6 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		// subscriber re-joining a group that was left with pending messages.
 		err = s.updateDurable(ss, sub)
 	} else {
-		if setStartPos {
-			// Check SequenceStart out of range
-			if sr.StartPosition == pb.StartPosition_SequenceStart {
-				if !s.startSequenceValid(cs, sr.Subject, sr.StartSequence) {
-					Debugf("STAN: [Client:%s] Invalid start sequence in subscription request from %s.",
-						sr.ClientID, m.Subject)
-					s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSequence)
-					return
-				}
-			}
-			// Check for SequenceTime out of range
-			if sr.StartPosition == pb.StartPosition_TimeDeltaStart {
-				startTime := time.Now().UnixNano() - sr.StartTimeDelta
-				if !s.startTimeValid(cs, sr.Subject, startTime) {
-					Debugf("STAN: [Client:%s] Invalid start time in subscription request from %s.",
-						sr.ClientID, m.Subject)
-					s.sendSubscriptionResponseErr(m.Reply, ErrInvalidTime)
-					return
-				}
-			}
-		}
-
 		// Create sub here (can be plain, durable or queue subscriber)
 		sub = &subState{
 			SubState: spb.SubState{
@@ -2582,29 +2560,6 @@ func getNextMsg(cs *stores.ChannelStore, nextSeq, lastSent *uint64) *pb.MsgProto
 	}
 }
 
-// Check if a startTime is valid.
-func (s *StanServer) startTimeValid(cs *stores.ChannelStore, subject string, start int64) bool {
-	firstMsg := cs.Msgs.FirstMsg()
-	// simply no messages to return
-	if firstMsg == nil {
-		return false
-	}
-	lastMsg := cs.Msgs.LastMsg()
-	if start > lastMsg.Timestamp || start < firstMsg.Timestamp {
-		return false
-	}
-	return true
-}
-
-// Check if a startSequence is valid.
-func (s *StanServer) startSequenceValid(cs *stores.ChannelStore, subject string, seq uint64) bool {
-	first, last := cs.Msgs.FirstAndLastSequence()
-	if first == 0 || seq > last || seq < first {
-		return false
-	}
-	return true
-}
-
 func (s *StanServer) getSequenceFromStartTime(cs *stores.ChannelStore, startTime int64) uint64 {
 	return cs.Msgs.GetSequenceFromTimestamp(startTime)
 }
@@ -2632,18 +2587,33 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 			sub.ClientID, sub.subject)
 	case pb.StartPosition_TimeDeltaStart:
 		startTime := time.Now().UnixNano() - sr.StartTimeDelta
+		// If there is no message, seq will be 0.
 		seq := s.getSequenceFromStartTime(cs, startTime)
 		if seq > 0 {
+			// If the time delta is in the future relative to the last
+			// message in the log, 'seq' will be equal to last sequence + 1,
+			// so this would translate to "new only" semantic.
 			lastSent = seq - 1
 		}
 		Debugf("STAN: [Client:%s] Sending from time, subject=%s time=%d seq=%d",
 			sub.ClientID, sub.subject, startTime, lastSent)
 	case pb.StartPosition_SequenceStart:
-		if sr.StartSequence > 0 {
+		// If there is no message, firstSeq and lastSeq will be equal to 0.
+		firstSeq, lastSeq := cs.Msgs.FirstAndLastSequence()
+		// StartSequence is an uint64, so can't be lower than 0.
+		if sr.StartSequence < firstSeq {
+			// That translates to sending the first message available.
+			lastSent = firstSeq - 1
+		} else if sr.StartSequence > lastSeq {
+			// That translates to "new only"
+			lastSent = lastSeq
+		} else if sr.StartSequence > 0 {
+			// That translates to sending the message with StartSequence
+			// sequence number.
 			lastSent = sr.StartSequence - 1
 		}
-		Debugf("STAN: [Client:%s] Sending from sequence, subject=%s seq=%d",
-			sub.ClientID, sub.subject, lastSent)
+		Debugf("STAN: [Client:%s] Sending from sequence, subject=%s seq_asked=%d actual_seq=%d",
+			sub.ClientID, sub.subject, sr.StartSequence, lastSent)
 	case pb.StartPosition_First:
 		firstSeq := cs.Msgs.FirstSequence()
 		if firstSeq > 0 {
