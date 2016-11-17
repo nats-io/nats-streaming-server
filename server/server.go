@@ -114,18 +114,40 @@ func init() {
 	}
 }
 
-// ioPendingMsg is a record that embeds the pointer to the incoming
-// NATS Message, the PubMsg and PubAck structures so we reduce the
-// number of memory allocations to 1 when processing a message from
-// producer.
+// ioPendingMsg is a record that embeds the PubMsg and PubAck
+// structures so we reduce the number of memory allocations
+// to 1 when processing a message from producer.
 type ioPendingMsg struct {
-	m  *nats.Msg
 	pm pb.PubMsg
 	pa pb.PubAck
 }
 
 // Constant that defines the size of the channel that feeds the IO thread.
 const ioChannelSize = 64 * 1024
+
+// ioProto is a structure that includes the incoming NATS protocol message.
+// Those protocols are chained and processed in the ioLoop. This structure
+// includes a pointer to a ioPendingMsg for (the majority of) cases where
+// the protocol is a published message.
+type ioProto struct {
+	m      *nats.Msg
+	pubmsg *ioPendingMsg
+	next   *ioProto
+}
+
+// ioProtoList is a list of ioProto records.
+type ioProtoList struct {
+	head  *ioProto
+	tail  *ioProto
+	count int
+}
+
+// ioProtoPool is a sync.Pool for ioProto objects.
+var ioProtoPool = sync.Pool{
+	New: func() interface{} {
+		return &ioProto{}
+	},
+}
 
 // StanServer structure represents the STAN server
 type StanServer struct {
@@ -170,9 +192,19 @@ type StanServer struct {
 	store stores.Store
 
 	// IO Channel
-	ioChannel     chan (*ioPendingMsg)
+	ioChannel     chan *nats.Msg
 	ioChannelQuit chan bool
 	ioChannelWG   sync.WaitGroup
+	ioSignal      chan bool
+	ioMutex       sync.RWMutex
+	ioList        ioProtoList
+
+	// Channel subscribers (to identify which subjects message belongs to)
+	connSub  *nats.Subscription
+	pubSub   *nats.Subscription
+	subSub   *nats.Subscription
+	unsubSub *nats.Subscription
+	closeSub *nats.Subscription
 
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
@@ -684,7 +716,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		dupCIDMap:         make(map[string]struct{}),
 		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
 		dupCIDTimeout:     defaultCheckDupCIDTimeout,
-		ioChannelQuit:     make(chan bool, 1),
+		ioSignal:          make(chan bool, 1),
+		ioChannelQuit:     make(chan bool, 2),
 		trace:             sOpts.Trace,
 		debug:             sOpts.Debug,
 	}
@@ -1085,12 +1118,11 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 		// been created (may happen with durables that may reconnect maybe?)
 		if sub.ackSub == nil {
 			// Subscribe to acks
-			sub.ackSub, err = s.nc.Subscribe(sub.AckInbox, s.processAckMsg)
+			sub.ackSub, err = s.nc.ChanSubscribe(sub.AckInbox, s.ioChannel)
 			if err != nil {
 				sub.Unlock()
 				return err
 			}
-			sub.ackSub.SetPendingLimits(-1, -1)
 		}
 		sub.Unlock()
 	}
@@ -1161,31 +1193,35 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 // initSubscriptions will setup initial subscriptions for discovery etc.
 func (s *StanServer) initSubscriptions() {
 
-	s.startStoreIOWriter()
+	s.startIOLoop()
+
+	var err error
+	// We use ChanSubscribe and specify the same channel for all subscriptions.
+	// This gives us connection level ordering.
 
 	// Listen for connection requests.
-	_, err := s.nc.Subscribe(s.info.Discovery, s.connectCB)
+	s.connSub, err = s.nc.ChanSubscribe(s.info.Discovery, s.ioChannel)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to discover subject, %v\n", err))
 	}
 	// Receive published messages from clients.
 	pubSubject := fmt.Sprintf("%s.>", s.info.Publish)
-	_, err = s.nc.Subscribe(pubSubject, s.processClientPublish)
+	s.pubSub, err = s.nc.ChanSubscribe(pubSubject, s.ioChannel)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to publish subject, %v\n", err))
 	}
 	// Receive subscription requests from clients.
-	_, err = s.nc.Subscribe(s.info.Subscribe, s.processSubscriptionRequest)
+	s.subSub, err = s.nc.ChanSubscribe(s.info.Subscribe, s.ioChannel)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to subscribe request subject, %v\n", err))
 	}
 	// Receive unsubscribe requests from clients.
-	_, err = s.nc.Subscribe(s.info.Unsubscribe, s.processUnSubscribeRequest)
+	s.unsubSub, err = s.nc.ChanSubscribe(s.info.Unsubscribe, s.ioChannel)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to unsubscribe request subject, %v\n", err))
 	}
 	// Receive close requests from clients.
-	_, err = s.nc.Subscribe(s.info.Close, s.processCloseRequest)
+	s.closeSub, err = s.nc.ChanSubscribe(s.info.Close, s.ioChannel)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to close request subject, %v\n", err))
 	}
@@ -1447,21 +1483,25 @@ func (s *StanServer) sendCloseErr(subj, err string) {
 }
 
 // processClientPublish process inbound messages from clients.
-func (s *StanServer) processClientPublish(m *nats.Msg) {
-	iopm := &ioPendingMsg{m: m}
+func (s *StanServer) processClientPublish(m *nats.Msg) (*ioPendingMsg, *stores.ChannelStore) {
+	iopm := &ioPendingMsg{}
 	pm := &iopm.pm
 	pm.Unmarshal(m.Data)
-
-	// TODO (cls) error check.
 
 	// Make sure we have a clientID, guid, etc.
 	if pm.Guid == "" || !s.clients.IsValid(pm.ClientID) || !isValidSubject(pm.Subject) {
 		Errorf("STAN: Received invalid client publish message %v", pm)
 		s.sendPublishErr(m.Reply, pm.Guid, ErrInvalidPubReq)
-		return
+		return nil, nil
 	}
 
-	s.ioChannel <- iopm
+	cs, err := s.assignAndStore(&iopm.pm)
+	if err != nil {
+		Errorf("STAN: [Client:%s] Error processing message for subject %q: %v", pm.ClientID, m.Subject, err)
+		s.sendPublishErr(m.Reply, pm.Guid, err)
+		return nil, nil
+	}
+	return iopm, cs
 }
 
 func (s *StanServer) sendPublishErr(subj, guid string, err error) {
@@ -1835,13 +1875,53 @@ func (s *StanServer) setupAckTimer(sub *subState, d time.Duration) {
 	})
 }
 
-func (s *StanServer) startStoreIOWriter() {
-	s.ioChannelWG.Add(1)
-	s.ioChannel = make(chan (*ioPendingMsg), ioChannelSize)
-	go s.storeIOLoop()
+func (s *StanServer) startIOLoop() {
+	s.ioChannelWG.Add(2)
+	s.ioChannel = make(chan *nats.Msg, ioChannelSize)
+	// Use wait group to ensure that those loops are as ready as
+	// possible before we setup the subscriptions and open the door
+	// to incoming NATS messages.
+	ready := &sync.WaitGroup{}
+	ready.Add(2)
+	go s.buildProtocolsList(ready)
+	go s.ioLoop(ready)
+	ready.Wait()
 }
 
-func (s *StanServer) storeIOLoop() {
+func (s *StanServer) buildProtocolsList(ready *sync.WaitGroup) {
+	defer s.ioChannelWG.Done()
+
+	s.ioMutex.RLock()
+	list := &s.ioList
+	s.ioMutex.RUnlock()
+
+	ready.Done()
+	for {
+		select {
+		case m := <-s.ioChannel:
+			iop := ioProtoPool.Get().(*ioProto)
+			iop.m = m
+			iop.pubmsg = nil
+			iop.next = nil
+			s.ioMutex.Lock()
+			if list.tail == nil {
+				list.head = iop
+			} else {
+				list.tail.next = iop
+			}
+			list.tail = iop
+			list.count++
+			s.ioMutex.Unlock()
+			if len(s.ioSignal) == 0 {
+				s.ioSignal <- true
+			}
+		case <-s.ioChannelQuit:
+			return
+		}
+	}
+}
+
+func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 	defer s.ioChannelWG.Done()
 
 	////////////////////////////////////////////////////////////////////////////
@@ -1854,99 +1934,141 @@ func (s *StanServer) storeIOLoop() {
 	// This will be done by a master election within the cluster, for now we
 	// assume we are the master and assign the sequence ID here.
 	////////////////////////////////////////////////////////////////////////////
-	var storesToFlush map[*stores.ChannelStore]struct{}
-
-	var _pendingMsgs [ioChannelSize]*ioPendingMsg
-	var pendingMsgs = _pendingMsgs[:0]
-
-	storeIOPendingMsg := func(iopm *ioPendingMsg) {
-		cs, err := s.assignAndStore(&iopm.pm)
-		if err != nil {
-			Errorf("STAN: [Client:%s] Error processing message for subject %q: %v", iopm.pm.ClientID, iopm.m.Subject, err)
-			s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, err)
-		} else {
-			pendingMsgs = append(pendingMsgs, iopm)
-			storesToFlush[cs] = struct{}{}
-		}
-	}
+	storesToFlush := make(map[*stores.ChannelStore]struct{}, 64)
 
 	batchSize := s.opts.IOBatchSize
 	sleepTime := s.opts.IOSleepTime
 	sleepDur := time.Duration(sleepTime) * time.Microsecond
 	max := 0
+	pubMsgs := ioProtoList{}
 
+	ready.Done()
 	for {
 		select {
-		case iopm := <-s.ioChannel:
-			// Create a new map (probably faster than deleting elements down below)
-			storesToFlush = make(map[*stores.ChannelStore]struct{})
-
-			// store the one we just pulled
-			storeIOPendingMsg(iopm)
-
-			remaining := batchSize - 1
-			// fill the pending messages slice with at most our batch size,
-			// unless the channel is empty.
-			for remaining > 0 {
-				ioChanLen := len(s.ioChannel)
-
-				// if we are empty, wait, check again, and break if nothing.
-				// While this adds some latency, it optimizes batching.
-				if ioChanLen == 0 {
-					if sleepTime > 0 {
-						time.Sleep(sleepDur)
-						ioChanLen = len(s.ioChannel)
-						if ioChanLen == 0 {
-							break
-						}
-					} else {
-						break
-					}
+		case <-s.ioSignal:
+			// If allowed to sleep, to try gather more
+			if sleepTime > 0 {
+				s.ioMutex.RLock()
+				count := s.ioList.count
+				s.ioMutex.RUnlock()
+				if count > 0 && count < batchSize {
+					time.Sleep(sleepDur)
 				}
+			}
+			// Take the list now.
+			s.ioMutex.Lock()
+			// Make a copy of the list object (head/tail/count)
+			list := s.ioList
+			// Reset the server's list so that buildProtocolsList start with
+			// an empty list
+			s.ioList.head, s.ioList.tail, s.ioList.count = nil, nil, 0
+			s.ioMutex.Unlock()
+			// It is possible that current signal was processed by
+			// previous iteration. So if count is 0, we are done.
+			if list.count == 0 {
+				continue
+			}
 
-				// stick to our buffer size
-				if ioChanLen > remaining {
-					ioChanLen = remaining
-				}
-
-				for i := 0; i < ioChanLen; i++ {
-					storeIOPendingMsg(<-s.ioChannel)
+			// Note that the count may be higher than batchSize, so we
+			// will limit processing up to batchSize and repeat until
+			// list is empty.
+			for list.count > 0 {
+				limit := list.count
+				if batchSize > 0 && limit > batchSize {
+					limit = batchSize
 				}
 				// Keep track of max number of messages in a batch
-				if ioChanLen > max {
-					max = ioChanLen
+				if limit > max {
+					max = limit
 					atomic.StoreInt64(&(s.ioChannelStatsMaxBatchSize), int64(max))
 				}
+				for i := 0; i < limit; i++ {
+					proto := list.head
+					list.head = proto.next
+					list.count--
+					proto.next = nil
 
-				remaining -= ioChanLen
-			}
-
-			// flush all the stores with messages written to them...
-			for cs := range storesToFlush {
-				if err := cs.Msgs.Flush(); err != nil {
-					// TODO: Attempt recovery, notify publishers of error.
-					panic(fmt.Errorf("Unable to flush msg store: %v", err))
+					// Process client published messages and add them to the
+					// pubMsgs list.
+					if proto.m.Sub == s.pubSub {
+						iopm, cs := s.processClientPublish(proto.m)
+						if iopm != nil {
+							proto.pubmsg = iopm
+							storesToFlush[cs] = struct{}{}
+							if pubMsgs.tail == nil {
+								pubMsgs.head = proto
+							} else {
+								pubMsgs.tail.next = proto
+							}
+							pubMsgs.tail = proto
+							pubMsgs.count++
+						}
+					} else {
+						// Process any pubMsg that we got up to that point.
+						if pubMsgs.count > 0 {
+							s.processPubMsgs(&pubMsgs, storesToFlush)
+						}
+						switch proto.m.Sub {
+						case s.connSub:
+							s.connectCB(proto.m)
+						case s.subSub:
+							s.processSubscriptionRequest(proto.m)
+						case s.unsubSub:
+							s.processUnSubscribeRequest(proto.m)
+						case s.closeSub:
+							s.processCloseRequest(proto.m)
+						default:
+							// assume this is an ACK
+							ack := &pb.Ack{}
+							if err := ack.Unmarshal(proto.m.Data); err != nil {
+								if s.debug {
+									Debugf("Unknown subject: %q", proto.m.Subject)
+								}
+							} else {
+								s.processAckMsg(ack, proto.m)
+							}
+						}
+						// Put back into pool
+						ioProtoPool.Put(proto)
+					}
 				}
-				// Call this here, so messages are sent to subscribers,
-				// which means that msg seq is added to subscription file
-				s.processMsg(cs)
-				if err := cs.Subs.Flush(); err != nil {
-					panic(fmt.Errorf("Unable to flush sub store: %v", err))
+				// If there are pubMsgs, process them now.
+				if pubMsgs.count > 0 {
+					s.processPubMsgs(&pubMsgs, storesToFlush)
 				}
 			}
-
-			// Ack our messages back to the publisher
-			for _, iopm := range pendingMsgs {
-				s.ackPublisher(iopm)
-			}
-
-			// clear out pending messages and store map
-			pendingMsgs = pendingMsgs[:0]
-
 		case <-s.ioChannelQuit:
 			return
 		}
 	}
+}
+
+func (s *StanServer) processPubMsgs(list *ioProtoList, storesToFlush map[*stores.ChannelStore]struct{}) {
+	// flush all the stores with messages written to them...
+	for cs := range storesToFlush {
+		if err := cs.Msgs.Flush(); err != nil {
+			// TODO: Attempt recovery, notify publishers of error.
+			panic(fmt.Errorf("Unable to flush msg store: %v", err))
+		}
+		// Call this here, so messages are sent to subscribers,
+		// which means that msg seq is added to subscription file
+		s.processMsg(cs)
+		if err := cs.Subs.Flush(); err != nil {
+			panic(fmt.Errorf("Unable to flush sub store: %v", err))
+		}
+		// Remove entry from map (this is safe in Go)
+		delete(storesToFlush, cs)
+	}
+
+	// Ack our messages back to the publisher
+	for i := 0; i < list.count; i++ {
+		proto := list.head
+		list.head = proto.next
+		s.ackPublisher(proto.m, proto.pubmsg)
+		// Put back into pool
+		ioProtoPool.Put(proto)
+	}
+	list.head, list.tail, list.count = nil, nil, 0
 }
 
 // assignAndStore will assign a sequence ID and then store the message.
@@ -1962,7 +2084,7 @@ func (s *StanServer) assignAndStore(pm *pb.PubMsg) (*stores.ChannelStore, error)
 }
 
 // ackPublisher sends the ack for a message.
-func (s *StanServer) ackPublisher(iopm *ioPendingMsg) {
+func (s *StanServer) ackPublisher(m *nats.Msg, iopm *ioPendingMsg) {
 	msgAck := &iopm.pa
 	msgAck.Guid = iopm.pm.Guid
 	var buf [32]byte
@@ -1972,7 +2094,7 @@ func (s *StanServer) ackPublisher(iopm *ioPendingMsg) {
 		pm := &iopm.pm
 		Tracef("STAN: [Client:%s] Acking Publisher subj=%s guid=%s", pm.ClientID, pm.Subject, pm.Guid)
 	}
-	s.ncs.Publish(iopm.m.Reply, b[:n])
+	s.ncs.Publish(m.Reply, b[:n])
 }
 
 // Delete a sub from a given list.
@@ -2403,14 +2525,19 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	// In case this is a durable, sub already exists so we need to protect access
 	sub.Lock()
-	// Subscribe to acks
-	sub.ackSub, err = s.nc.Subscribe(ackInbox, s.processAckMsg)
+	// Subscribe to acks.
+	// We MUST use the same connection than all other chan subscribers
+	// if we want to receive messages in order from NATS server.
+	sub.ackSub, err = s.nc.ChanSubscribe(ackInbox, s.ioChannel)
 	if err != nil {
 		sub.Unlock()
 		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
 	}
-	sub.ackSub.SetPendingLimits(-1, -1)
 	sub.Unlock()
+	// However, we need to flush to ensure that NATS server processes
+	// this subscription request before we return OK and start sending
+	// messages to the client.
+	s.nc.Flush()
 
 	// Create a non-error response
 	resp := &pb.SubscriptionResponse{AckInbox: ackInbox}
@@ -2436,9 +2563,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 }
 
 // processAckMsg processes inbound acks from clients for delivered messages.
-func (s *StanServer) processAckMsg(m *nats.Msg) {
-	ack := &pb.Ack{}
-	ack.Unmarshal(m.Data)
+func (s *StanServer) processAckMsg(ack *pb.Ack, m *nats.Msg) {
 	cs := s.store.LookupChannel(ack.Subject)
 	if cs == nil {
 		Errorf("STAN: [Client:?] Ack received, invalid channel (%s)", ack.Subject)
@@ -2659,6 +2784,8 @@ func (s *StanServer) Shutdown() {
 
 	if s.ioChannel != nil {
 		// Notify the IO channel that we are shutting down
+		s.ioChannelQuit <- true
+		// There is also the loop that gets messages from NATS
 		s.ioChannelQuit <- true
 	} else {
 		waitForIOStoreLoop = false
