@@ -27,5 +27,9 @@ _testmain.go
 .project
 .settings/
 
+# IntelliJ
+.idea/
+*.iml
+
 # MS Visual Code
 .vscode/

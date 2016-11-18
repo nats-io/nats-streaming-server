@@ -495,6 +495,7 @@ type Options struct {
 	ClientCA           string // Client CAs for TLS
 	IOBatchSize        int    // Number of messages we collect from clients before processing them.
 	IOSleepTime        int64  // Duration (in micro-seconds) the server waits for more message to fill up a batch.
+	ForceEmbedded      bool   // Force Embedded NATS Server, even if if there's a NATSServerURL
 	NATSServerURL      string // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
 }
 
@@ -507,6 +508,7 @@ var defaultOptions = Options{
 	IOBatchSize:    DefaultIOBatchSize,
 	IOSleepTime:    DefaultIOSleepTime,
 	NATSServerURL:  "",
+	ForceEmbedded:  false,
 }
 
 // GetDefaultOptions returns default options for the STAN server
@@ -768,7 +770,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	}
 
 	// If no NATS server url is provided, it means that we embed the NATS Server
-	if sOpts.NATSServerURL == "" {
+	if sOpts.NATSServerURL == "" || sOpts.ForceEmbedded {
 		s.startNATSServer(nOpts)
 	}
 

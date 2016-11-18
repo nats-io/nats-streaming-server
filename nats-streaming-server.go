@@ -31,6 +31,7 @@ Streaming Server Options:
     -ma,  --max_age <seconds>        Max duration a message can be stored ("0s" for unlimited)
     -ns,  --nats_server <url>        Connect to this external NATS Server (embedded otherwise)
     -sc,  --stan_config <file>       Streaming server configuration file
+    --embed													 Force embedded NATS server, even if --ns is specified
 
 Streaming Server File Store Options:
     --file_compact_enabled           Enable file compaction
@@ -82,7 +83,7 @@ TLS Options:
         --tls                        Enable TLS, do not verify clients (default: false)
         --tlscert <file>             Server certificate file
         --tlskey <file>              Private key for server certificate
-        --tlsverify                  Enable TLS, very client certificates
+        --tlsverify                  Enable TLS, verify client certificates
         --tlscacert <file>           Client certificate CA for verification
 
 NATS Clustering Options:
@@ -159,6 +160,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.String("tls_client_cacert", "", "ClientCA")
 	flag.String("nats_server", "", "NATSServerURL")
 	flag.String("ns", "", "NATSServerURL")
+	flag.Bool("embed", false, "ForceEmbedded")
 	flag.StringVar(&stanConfigFile, "sc", "", "")
 	flag.StringVar(&stanConfigFile, "stan_config", "", "")
 	flag.Bool("file_compact_enabled", stores.DefaultFileStoreOptions.CompactEnabled, "FileStoreOpts.CompactEnabled")
