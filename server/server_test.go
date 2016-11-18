@@ -255,6 +255,15 @@ func TestRunServer(t *testing.T) {
 	defer s.Shutdown()
 }
 
+func TestForceRunEmbeddedServer(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.ForceEmbedded = true
+	opts.NATSServerURL = "nats://127.0.0.1:4222"
+
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+}
+
 func TestDefaultOptions(t *testing.T) {
 
 	opts := GetDefaultOptions()
