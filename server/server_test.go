@@ -16,9 +16,9 @@ import (
 	"github.com/nats-io/gnatsd/auth"
 	natsd "github.com/nats-io/gnatsd/server"
 	natsdTest "github.com/nats-io/gnatsd/test"
+	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nats"
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 

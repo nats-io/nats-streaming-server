@@ -10,13 +10,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nats"
 	"github.com/nats-io/nuid"
 )
 
 // Version is the NATS Streaming Go Client version
-const Version = "0.3.0-beta"
+const Version = "0.3.1"
 
 const (
 	// DefaultNatsURL is the default URL the client connects to
@@ -58,6 +58,8 @@ type Conn interface {
 var (
 	ErrConnectReqTimeout = errors.New("stan: connect request timeout")
 	ErrCloseReqTimeout   = errors.New("stan: close request timeout")
+	ErrSubReqTimeout     = errors.New("stan: subscribe request timeout")
+	ErrUnsubReqTimeout   = errors.New("stan: unsubscribe request timeout")
 	ErrConnectionClosed  = errors.New("stan: connection closed")
 	ErrTimeout           = errors.New("stan: publish ack timeout")
 	ErrBadAck            = errors.New("stan: malformed ack")
@@ -65,6 +67,7 @@ var (
 	ErrBadConnection     = errors.New("stan: invalid connection")
 	ErrManualAck         = errors.New("stan: cannot manually ack in auto-ack mode")
 	ErrNilMsg            = errors.New("stan: nil message")
+	ErrNoServerSupport   = errors.New("stan: not supported by server")
 )
 
 // AckHandler is used for Async Publishing to provide status of the ack.
@@ -140,21 +143,22 @@ func NatsConn(nc *nats.Conn) Option {
 // A conn represents a bare connection to a stan cluster.
 type conn struct {
 	sync.RWMutex
-	clientID        string
-	serverID        string
-	pubPrefix       string // Publish prefix set by stan, append our subject.
-	subRequests     string // Subject to send subscription requests.
-	unsubRequests   string // Subject to send unsubscribe requests.
-	closeRequests   string // Subject to send close requests.
-	ackSubject      string // publish acks
-	ackSubscription *nats.Subscription
-	hbSubscription  *nats.Subscription
-	subMap          map[string]*subscription
-	pubAckMap       map[string]*ack
-	pubAckChan      chan (struct{})
-	opts            Options
-	nc              *nats.Conn
-	ncOwned         bool // NATS Streaming created the connection, so needs to close it.
+	clientID         string
+	serverID         string
+	pubPrefix        string // Publish prefix set by stan, append our subject.
+	subRequests      string // Subject to send subscription requests.
+	unsubRequests    string // Subject to send unsubscribe requests.
+	subCloseRequests string // Subject to send subscription close requests.
+	closeRequests    string // Subject to send close requests.
+	ackSubject       string // publish acks
+	ackSubscription  *nats.Subscription
+	hbSubscription   *nats.Subscription
+	subMap           map[string]*subscription
+	pubAckMap        map[string]*ack
+	pubAckChan       chan (struct{})
+	opts             Options
+	nc               *nats.Conn
+	ncOwned          bool // NATS Streaming created the connection, so needs to close it.
 }
 
 // Closure for ack contexts.
@@ -183,7 +187,11 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 		}
 		c.nc = nc
 		c.ncOwned = true
+	} else if !c.nc.IsConnected() {
+		// Bail if the custom NATS connection is disconnected
+		return nil, ErrBadConnection
 	}
+
 	// Create a heartbeat inbox
 	hbInbox := nats.NewInbox()
 	var err error
@@ -220,6 +228,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	c.pubPrefix = cr.PubPrefix
 	c.subRequests = cr.SubRequests
 	c.unsubRequests = cr.UnsubRequests
+	c.subCloseRequests = cr.SubCloseRequests
 	c.closeRequests = cr.CloseRequests
 
 	// Setup the ACK subscription

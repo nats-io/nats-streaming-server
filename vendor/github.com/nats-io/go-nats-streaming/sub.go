@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nats"
 )
 
 const (
@@ -30,7 +30,17 @@ type Msg struct {
 // Subscription represents a subscription within the NATS Streaming cluster. Subscriptions
 // will be rate matched and follow at-least delivery semantics.
 type Subscription interface {
+	// Unsubscribe removes interest in the subscription.
+	// For durables, it means that the durable interest is also removed from
+	// the server. Restarting a durable with the same name will not resume
+	// the subscription, it will be considered a new one.
 	Unsubscribe() error
+
+	// Close removes this subscriber from the server, but unlike Unsubscribe(),
+	// the durable interest is not removed. If the client has connected to a server
+	// for which this feature is not available, Close() will return a ErrNoServerSupport
+	// error.
+	Close() error
 }
 
 // A subscription represents a subscription to a stan cluster.
@@ -224,9 +234,12 @@ func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...Subs
 	}
 
 	b, _ := sr.Marshal()
-	reply, err := sc.nc.Request(sc.subRequests, b, 2*time.Second)
+	reply, err := sc.nc.Request(sc.subRequests, b, sc.opts.ConnectTimeout)
 	if err != nil {
 		sub.inboxSub.Unsubscribe()
+		if err == nats.ErrTimeout {
+			err = ErrSubReqTimeout
+		}
 		return nil, err
 	}
 	r := &pb.SubscriptionResponse{}
@@ -243,8 +256,13 @@ func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...Subs
 	return sub, nil
 }
 
-// Unsubscribe removes interest in the subscription
-func (sub *subscription) Unsubscribe() error {
+type marshaller interface {
+	Marshal() ([]byte, error)
+}
+
+// closeOrUnsubscribe performs either close or unsubsribe based on
+// given boolean.
+func (sub *subscription) closeOrUnsubscribe(doClose bool) error {
 	if sub == nil {
 		return ErrBadSubscription
 	}
@@ -258,7 +276,6 @@ func (sub *subscription) Unsubscribe() error {
 	sub.sc = nil
 	sub.inboxSub.Unsubscribe()
 	sub.inboxSub = nil
-	inbox := sub.inbox
 	sub.Unlock()
 
 	if sc == nil {
@@ -271,25 +288,46 @@ func (sub *subscription) Unsubscribe() error {
 		return ErrConnectionClosed
 	}
 
-	delete(sc.subMap, inbox)
+	delete(sc.subMap, sub.inbox)
 	reqSubject := sc.unsubRequests
+	if doClose {
+		reqSubject = sc.subCloseRequests
+		if reqSubject == "" {
+			sc.Unlock()
+			return ErrNoServerSupport
+		}
+	}
+
 	// Snapshot connection to avoid data race, since the connection may be
 	// closing while we try to send the request
 	nc := sc.nc
 	sc.Unlock()
 
-	// Send Unsubscribe to server.
-
-	// FIXME(dlc) - Add in durable?
-	usr := &pb.UnsubscribeRequest{
-		ClientID: sc.clientID,
-		Subject:  sub.subject,
-		Inbox:    sub.ackInbox,
+	var req marshaller
+	if doClose {
+		scr := &pb.SubscriptionCloseRequest{
+			ClientID: sc.clientID,
+			Subject:  sub.subject,
+			Inbox:    sub.ackInbox,
+		}
+		req = scr
+	} else {
+		usr := &pb.UnsubscribeRequest{
+			ClientID: sc.clientID,
+			Subject:  sub.subject,
+			Inbox:    sub.ackInbox,
+		}
+		req = usr
 	}
-	b, _ := usr.Marshal()
-	// FIXME(dlc) - make timeout configurable.
-	reply, err := nc.Request(reqSubject, b, 2*time.Second)
+	b, _ := req.Marshal()
+	reply, err := nc.Request(reqSubject, b, sc.opts.ConnectTimeout)
 	if err != nil {
+		if err == nats.ErrTimeout {
+			if doClose {
+				return ErrCloseReqTimeout
+			}
+			return ErrUnsubReqTimeout
+		}
 		return err
 	}
 	r := &pb.SubscriptionResponse{}
@@ -301,6 +339,16 @@ func (sub *subscription) Unsubscribe() error {
 	}
 
 	return nil
+}
+
+// Unsubscribe implements the Subscription interface
+func (sub *subscription) Unsubscribe() error {
+	return sub.closeOrUnsubscribe(false)
+}
+
+// Close implements the Subscription interface
+func (sub *subscription) Close() error {
+	return sub.closeOrUnsubscribe(true)
 }
 
 // Ack manually acknowledges a message.

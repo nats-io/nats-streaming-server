@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
-	"github.com/nats-io/nats"
-	"github.com/nats-io/nats/bench"
+	"github.com/nats-io/go-nats/bench"
 )
 
 // Some sane defaults
@@ -35,16 +35,16 @@ func usage() {
 var benchmark *bench.Benchmark
 
 func main() {
-	var urls = flag.String("s", nats.DefaultURL, "The nats server URLs (separated by comma)")
-	var tls = flag.Bool("tls", false, "Use TLS Secure Connection")
-	var numPubs = flag.Int("np", DefaultNumPubs, "Number of Concurrent Publishers")
-	var numSubs = flag.Int("ns", DefaultNumSubs, "Number of Concurrent Subscribers")
-	var numMsgs = flag.Int("n", DefaultNumMsgs, "Number of Messages to Publish")
-	var async = flag.Bool("a", DefaultAsync, "Async Message Publishing")
-	var messageSize = flag.Int("ms", DefaultMessageSize, "Message Size in bytes.")
-	var ignoreOld = flag.Bool("io", DefaultIgnoreOld, "Subscribers Ignore Old Messages")
+	var urls = flag.String("s", nats.DefaultURL, "The NATS server URLs (separated by comma")
+	var tls = flag.Bool("tls", false, "Use TLS secure sonnection")
+	var numPubs = flag.Int("np", DefaultNumPubs, "Number of concurrent publishers")
+	var numSubs = flag.Int("ns", DefaultNumSubs, "Number of concurrent subscribers")
+	var numMsgs = flag.Int("n", DefaultNumMsgs, "Number of messages to publish")
+	var async = flag.Bool("a", DefaultAsync, "Async message publishing")
+	var messageSize = flag.Int("ms", DefaultMessageSize, "Message size in bytes.")
+	var ignoreOld = flag.Bool("io", DefaultIgnoreOld, "Subscribers ignore old messages")
 	var maxPubAcks = flag.Int("mpa", DefaultMaxPubAcksInflight, "Max number of published acks in flight")
-	var clientID = flag.String("id", DefaultClientID, "Benchmark process base client ID.")
+	var clientID = flag.String("id", DefaultClientID, "Benchmark process base client ID")
 	var csvFile = flag.String("csv", "", "Save bench data to csv file")
 
 	log.SetFlags(0)
@@ -62,6 +62,7 @@ func main() {
 	for i, s := range opts.Servers {
 		opts.Servers[i] = strings.Trim(s, " ")
 	}
+
 	opts.Secure = *tls
 
 	benchmark = bench.NewBenchmark("NATS Streaming", *numSubs, *numPubs)
@@ -103,8 +104,11 @@ func main() {
 }
 
 func runPublisher(startwg, donewg *sync.WaitGroup, opts nats.Options, numMsgs int, msgSize int, async bool, pubID string, maxPubAcksInflight int) {
-
-	snc, err := stan.Connect("test-cluster", pubID, stan.MaxPubAcksInflight(maxPubAcksInflight))
+	nc, err := opts.Connect()
+	if err != nil {
+		log.Fatalf("Publisher %s can't connect: %v\n", pubID, err)
+	}
+	snc, err := stan.Connect("test-cluster", pubID, stan.MaxPubAcksInflight(maxPubAcksInflight), stan.NatsConn(nc))
 	if err != nil {
 		log.Fatalf("Publisher %s can't connect: %v\n", pubID, err)
 	}
@@ -148,11 +152,16 @@ func runPublisher(startwg, donewg *sync.WaitGroup, opts nats.Options, numMsgs in
 
 	benchmark.AddPubSample(bench.NewSample(numMsgs, msgSize, start, time.Now(), snc.NatsConn()))
 	snc.Close()
+	nc.Close()
 	donewg.Done()
 }
 
 func runSubscriber(startwg, donewg *sync.WaitGroup, opts nats.Options, numMsgs int, msgSize int, ignoreOld bool, subID string) {
-	snc, err := stan.Connect("test-cluster", subID)
+	nc, err := opts.Connect()
+	if err != nil {
+		log.Fatalf("Subscriber %s can't connect: %v\n", subID, err)
+	}
+	snc, err := stan.Connect("test-cluster", subID, stan.NatsConn(nc))
 	if err != nil {
 		log.Fatalf("Subscriber %s can't connect: %v\n", subID, err)
 	}
@@ -180,5 +189,6 @@ func runSubscriber(startwg, donewg *sync.WaitGroup, opts nats.Options, numMsgs i
 	<-ch
 	benchmark.AddSubSample(bench.NewSample(numMsgs, msgSize, start, time.Now(), snc.NatsConn()))
 	snc.Close()
+	nc.Close()
 	donewg.Done()
 }
