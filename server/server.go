@@ -52,10 +52,6 @@ const (
 	// request for a duplicate client ID.
 	defaultCheckDupCIDTimeout = 500 * time.Millisecond
 
-	// Number of times the redelivery callback is allowed to stall, because
-	// the susbcriber hit the MaxInFlight limit, before forcing redelivery.
-	defaultMaxStalledRedeliveries = 3
-
 	// DefaultIOBatchSize is the maximum number of messages to accumulate before flushing a store.
 	DefaultIOBatchSize = 1024
 
@@ -66,15 +62,10 @@ const (
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
 // against MaxInFlight to know if message should be sent out.
-const honorMaxInFlight = false
-
-// Allows to be overriden in tests
-var maxStalledRedeliveries = int32(defaultMaxStalledRedeliveries)
-
-// Used by tests
-func setMaxStalledRedeliveries(val int) {
-	atomic.StoreInt32(&maxStalledRedeliveries, int32(val))
-}
+const (
+	forceDelivery    = true
+	honorMaxInFlight = false
+)
 
 // Used for display of limits
 const (
@@ -1602,7 +1593,7 @@ func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subS
 
 		sub.Lock()
 		// Force delivery
-		s.sendMsgToSub(sub, m, true)
+		s.sendMsgToSub(sub, m, forceDelivery)
 		sub.Unlock()
 	}
 }
@@ -1619,7 +1610,6 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	clientID := sub.ClientID
 	floorTimestamp := sub.ackTimeFloor
 	inbox := sub.Inbox
-	stalledRedeliveries := sub.stalledRdlv
 	sub.RUnlock()
 
 	// If we don't find the client, we are done.
@@ -1652,17 +1642,8 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 
 	now := time.Now().UnixNano()
 
-	// Check if we should force redelivery, even if subscriber is stalled.
-	shouldForce := stalledRedeliveries >= atomic.LoadInt32(&maxStalledRedeliveries)
-	if shouldForce {
-		sub.Lock()
-		sub.stalledRdlv = 0
-		sub.Unlock()
-	}
-
 	var pick *subState
 	sent := false
-	sendMore := false
 
 	// The messages from sortedSequences are possibly going to be acknowledged
 	// by the end of this function, but we are going to set the timer based on
@@ -1708,7 +1689,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 		// to redeliver to, not necessarily the same one.
 		if qs != nil {
 			qs.Lock()
-			pick, sent, sendMore = s.sendMsgToQueueGroup(qs, m, shouldForce)
+			pick, sent, _ = s.sendMsgToQueueGroup(qs, m, forceDelivery)
 			qs.Unlock()
 			if pick == nil {
 				Errorf("STAN: [Client:%s] Unable to find queue subscriber", clientID)
@@ -1723,13 +1704,8 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			}
 		} else {
 			sub.Lock()
-			sent, sendMore = s.sendMsgToSub(sub, m, shouldForce)
+			s.sendMsgToSub(sub, m, forceDelivery)
 			sub.Unlock()
-		}
-		// If we did not send that message or reached the maxInFlight
-		// and we should not force redelivery, then stop.
-		if !shouldForce && (!sent || !sendMore) {
-			break
 		}
 	}
 
@@ -2124,21 +2100,6 @@ func (sub *subState) adjustAckTimer(firstUnackedTimestamp int64) {
 
 	// Check if there are still pending acks
 	if len(sub.acksPending) > 0 {
-		// Check if the subscriber is stalled. If so, consider that the
-		// redelivery stalled too.
-		if sub.stalled {
-			sub.stalledRdlv++
-			if sub.stalledRdlv > atomic.LoadInt32(&maxStalledRedeliveries) {
-				// Reset the timer to a short value
-				sub.ackTimer.Reset(time.Millisecond)
-				return
-			}
-		} else {
-			// Reset the number of stalled redeliveries since we were able
-			// to send messages
-			sub.stalledRdlv = 0
-		}
-
 		// Capture time
 		now := time.Now().UnixNano()
 
