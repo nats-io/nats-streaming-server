@@ -18,6 +18,7 @@
 		SubscriptionRequest
 		SubscriptionResponse
 		UnsubscribeRequest
+		SubscriptionCloseRequest
 		CloseRequest
 		CloseResponse
 */
@@ -127,12 +128,13 @@ func (*ConnectRequest) ProtoMessage()    {}
 
 // Response to a client connect
 type ConnectResponse struct {
-	PubPrefix     string `protobuf:"bytes,1,opt,name=pubPrefix,proto3" json:"pubPrefix,omitempty"`
-	SubRequests   string `protobuf:"bytes,2,opt,name=subRequests,proto3" json:"subRequests,omitempty"`
-	UnsubRequests string `protobuf:"bytes,3,opt,name=unsubRequests,proto3" json:"unsubRequests,omitempty"`
-	CloseRequests string `protobuf:"bytes,4,opt,name=closeRequests,proto3" json:"closeRequests,omitempty"`
-	Error         string `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
-	PublicKey     string `protobuf:"bytes,100,opt,name=publicKey,proto3" json:"publicKey,omitempty"`
+	PubPrefix        string `protobuf:"bytes,1,opt,name=pubPrefix,proto3" json:"pubPrefix,omitempty"`
+	SubRequests      string `protobuf:"bytes,2,opt,name=subRequests,proto3" json:"subRequests,omitempty"`
+	UnsubRequests    string `protobuf:"bytes,3,opt,name=unsubRequests,proto3" json:"unsubRequests,omitempty"`
+	CloseRequests    string `protobuf:"bytes,4,opt,name=closeRequests,proto3" json:"closeRequests,omitempty"`
+	Error            string `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
+	SubCloseRequests string `protobuf:"bytes,6,opt,name=subCloseRequests,proto3" json:"subCloseRequests,omitempty"`
+	PublicKey        string `protobuf:"bytes,100,opt,name=publicKey,proto3" json:"publicKey,omitempty"`
 }
 
 func (m *ConnectResponse) Reset()         { *m = ConnectResponse{} }
@@ -179,6 +181,21 @@ func (m *UnsubscribeRequest) Reset()         { *m = UnsubscribeRequest{} }
 func (m *UnsubscribeRequest) String() string { return proto.CompactTextString(m) }
 func (*UnsubscribeRequest) ProtoMessage()    {}
 
+// Protocol for a client to close a subscription without unsubscribing.
+// For non-durables, this would be equivalent to UnsubscribeRequest,
+// however, for durables, this allow the server to remove the subscriber
+// but keep the durable interest.
+// Will return a SubscriptionResponse
+type SubscriptionCloseRequest struct {
+	ClientID string `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
+	Subject  string `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
+	Inbox    string `protobuf:"bytes,3,opt,name=inbox,proto3" json:"inbox,omitempty"`
+}
+
+func (m *SubscriptionCloseRequest) Reset()         { *m = SubscriptionCloseRequest{} }
+func (m *SubscriptionCloseRequest) String() string { return proto.CompactTextString(m) }
+func (*SubscriptionCloseRequest) ProtoMessage()    {}
+
 // Protocol for a client to close a connection
 type CloseRequest struct {
 	ClientID string `protobuf:"bytes,1,opt,name=clientID,proto3" json:"clientID,omitempty"`
@@ -207,6 +224,7 @@ func init() {
 	proto.RegisterType((*SubscriptionRequest)(nil), "pb.SubscriptionRequest")
 	proto.RegisterType((*SubscriptionResponse)(nil), "pb.SubscriptionResponse")
 	proto.RegisterType((*UnsubscribeRequest)(nil), "pb.UnsubscribeRequest")
+	proto.RegisterType((*SubscriptionCloseRequest)(nil), "pb.SubscriptionCloseRequest")
 	proto.RegisterType((*CloseRequest)(nil), "pb.CloseRequest")
 	proto.RegisterType((*CloseResponse)(nil), "pb.CloseResponse")
 	proto.RegisterEnum("pb.StartPosition", StartPosition_name, StartPosition_value)
@@ -466,6 +484,12 @@ func (m *ConnectResponse) MarshalTo(data []byte) (int, error) {
 		i = encodeVarintProtocol(data, i, uint64(len(m.Error)))
 		i += copy(data[i:], m.Error)
 	}
+	if len(m.SubCloseRequests) > 0 {
+		data[i] = 0x32
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.SubCloseRequests)))
+		i += copy(data[i:], m.SubCloseRequests)
+	}
 	if len(m.PublicKey) > 0 {
 		data[i] = 0xa2
 		i++
@@ -618,6 +642,42 @@ func (m *UnsubscribeRequest) MarshalTo(data []byte) (int, error) {
 		i++
 		i = encodeVarintProtocol(data, i, uint64(len(m.DurableName)))
 		i += copy(data[i:], m.DurableName)
+	}
+	return i, nil
+}
+
+func (m *SubscriptionCloseRequest) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *SubscriptionCloseRequest) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if len(m.ClientID) > 0 {
+		data[i] = 0xa
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.ClientID)))
+		i += copy(data[i:], m.ClientID)
+	}
+	if len(m.Subject) > 0 {
+		data[i] = 0x12
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Subject)))
+		i += copy(data[i:], m.Subject)
+	}
+	if len(m.Inbox) > 0 {
+		data[i] = 0x1a
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.Inbox)))
+		i += copy(data[i:], m.Inbox)
 	}
 	return i, nil
 }
@@ -827,6 +887,10 @@ func (m *ConnectResponse) Size() (n int) {
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
+	l = len(m.SubCloseRequests)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
 	l = len(m.PublicKey)
 	if l > 0 {
 		n += 2 + l + sovProtocol(uint64(l))
@@ -905,6 +969,24 @@ func (m *UnsubscribeRequest) Size() (n int) {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
 	l = len(m.DurableName)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	return n
+}
+
+func (m *SubscriptionCloseRequest) Size() (n int) {
+	var l int
+	_ = l
+	l = len(m.ClientID)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.Subject)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.Inbox)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
@@ -1876,6 +1958,35 @@ func (m *ConnectResponse) Unmarshal(data []byte) error {
 			}
 			m.Error = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
+		case 6:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field SubCloseRequests", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.SubCloseRequests = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
 		case 100:
 			if wireType != 2 {
 				return fmt.Errorf("proto: wrong wireType = %d for field PublicKey", wireType)
@@ -2468,6 +2579,143 @@ func (m *UnsubscribeRequest) Unmarshal(data []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.DurableName = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProtocol(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *SubscriptionCloseRequest) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProtocol
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: SubscriptionCloseRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: SubscriptionCloseRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ClientID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ClientID = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Subject", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Subject = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Inbox", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Inbox = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex

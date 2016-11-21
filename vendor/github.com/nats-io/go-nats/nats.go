@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nats-io/go-nats/util"
 	"github.com/nats-io/nuid"
 )
 
@@ -84,6 +85,9 @@ var DefaultOptions = Options{
 	MaxPingsOut:      DefaultMaxPingOut,
 	SubChanLen:       DefaultMaxChanLen,
 	ReconnectBufSize: DefaultReconnectBufSize,
+	Dialer: &net.Dialer{
+		Timeout: DefaultTimeout,
+	},
 }
 
 // Status represents the state of the connection.
@@ -145,6 +149,9 @@ type Options struct {
 	User     string
 	Password string
 	Token    string
+
+	// Dialer allows users setting a custom Dialer
+	Dialer *net.Dialer
 }
 
 const (
@@ -263,6 +270,7 @@ type srv struct {
 	didConnect  bool
 	reconnects  int
 	lastAttempt time.Time
+	isImplicit  bool
 }
 
 type serverInfo struct {
@@ -480,6 +488,15 @@ func Token(token string) Option {
 	}
 }
 
+// Dialer is an Option to set the dialer which will be used when
+// attempting to establish a connection.
+func Dialer(dialer *net.Dialer) Option {
+	return func(o *Options) error {
+		o.Dialer = dialer
+		return nil
+	}
+}
+
 // Handler processing
 
 // SetDisconnectHandler will set the disconnect event handler.
@@ -551,6 +568,13 @@ func (o Options) Connect() (*Conn, error) {
 	// Ensure that Timeout is not 0
 	if nc.Opts.Timeout == 0 {
 		nc.Opts.Timeout = DefaultTimeout
+	}
+
+	// Allow custom Dialer for connecting using DialTimeout by default
+	if nc.Opts.Dialer == nil {
+		nc.Opts.Dialer = &net.Dialer{
+			Timeout: nc.Opts.Timeout,
+		}
 	}
 
 	if err := nc.setupServerPool(); err != nil {
@@ -661,7 +685,7 @@ func (nc *Conn) setupServerPool() error {
 	// Create srv objects from each url string in nc.Opts.Servers
 	// and add them to the pool
 	for _, urlString := range nc.Opts.Servers {
-		if err := nc.addURLToPool(urlString); err != nil {
+		if err := nc.addURLToPool(urlString, false); err != nil {
 			return err
 		}
 	}
@@ -675,7 +699,7 @@ func (nc *Conn) setupServerPool() error {
 	// but we always allowed that, so continue to do so.
 	if nc.Opts.Url != _EMPTY_ {
 		// Add to the end of the array
-		if err := nc.addURLToPool(nc.Opts.Url); err != nil {
+		if err := nc.addURLToPool(nc.Opts.Url, false); err != nil {
 			return err
 		}
 		// Then swap it with first to guarantee that Options.Url is tried first.
@@ -685,7 +709,7 @@ func (nc *Conn) setupServerPool() error {
 		}
 	} else if len(nc.srvPool) <= 0 {
 		// Place default URL if pool is empty.
-		if err := nc.addURLToPool(DefaultURL); err != nil {
+		if err := nc.addURLToPool(DefaultURL, false); err != nil {
 			return err
 		}
 	}
@@ -705,12 +729,12 @@ func (nc *Conn) setupServerPool() error {
 }
 
 // addURLToPool adds an entry to the server pool
-func (nc *Conn) addURLToPool(sURL string) error {
+func (nc *Conn) addURLToPool(sURL string, implicit bool) error {
 	u, err := url.Parse(sURL)
 	if err != nil {
 		return err
 	}
-	s := &srv{url: u}
+	s := &srv{url: u, isImplicit: implicit}
 	nc.srvPool = append(nc.srvPool, s)
 	nc.urls[u.Host] = struct{}{}
 	return nil
@@ -741,7 +765,9 @@ func (nc *Conn) createConn() (err error) {
 	} else {
 		cur.lastAttempt = time.Now()
 	}
-	nc.conn, err = net.DialTimeout("tcp", nc.url.Host, nc.Opts.Timeout)
+
+	dialer := nc.Opts.Dialer
+	nc.conn, err = dialer.Dial("tcp", nc.url.Host)
 	if err != nil {
 		return err
 	}
@@ -766,13 +792,13 @@ func (nc *Conn) makeTLSConn() {
 	// default to InsecureSkipVerify.
 	// TODO(dlc) - We should make the more secure version the default.
 	if nc.Opts.TLSConfig != nil {
-		tlsCopy := *nc.Opts.TLSConfig
+		tlsCopy := util.CloneTLSConfig(nc.Opts.TLSConfig)
 		// If its blank we will override it with the current host
 		if tlsCopy.ServerName == _EMPTY_ {
 			h, _, _ := net.SplitHostPort(nc.url.Host)
 			tlsCopy.ServerName = h
 		}
-		nc.conn = tls.Client(nc.conn, &tlsCopy)
+		nc.conn = tls.Client(nc.conn, tlsCopy)
 	} else {
 		nc.conn = tls.Client(nc.conn, &tls.Config{InsecureSkipVerify: true})
 	}
@@ -1419,7 +1445,7 @@ func (nc *Conn) waitForMsgs(s *Subscription) {
 		}
 
 		// Deliver the message.
-		if m != nil && (max <= 0 || delivered <= max) {
+		if m != nil && (max == 0 || delivered <= max) {
 			mcb(m)
 		}
 		// If we have hit the max for delivered msgs, remove sub.
@@ -1612,7 +1638,7 @@ func (nc *Conn) processOK() {
 
 // processInfo is used to parse the info messages sent
 // from the server.
-// This function May update the server pool.
+// This function may update the server pool.
 func (nc *Conn) processInfo(info string) error {
 	if info == _EMPTY_ {
 		return nil
@@ -1624,7 +1650,7 @@ func (nc *Conn) processInfo(info string) error {
 	urls := nc.info.ConnectURLs
 	for _, curl := range urls {
 		if _, present := nc.urls[curl]; !present {
-			if err := nc.addURLToPool(fmt.Sprintf("nats://%s", curl)); err != nil {
+			if err := nc.addURLToPool(fmt.Sprintf("nats://%s", curl), true); err != nil {
 				continue
 			}
 			updated = true
@@ -2510,6 +2536,39 @@ func (nc *Conn) IsConnected() bool {
 	nc.mu.Lock()
 	defer nc.mu.Unlock()
 	return nc.isConnected()
+}
+
+// caller must lock
+func (nc *Conn) getServers(implicitOnly bool) []string {
+	poolSize := len(nc.srvPool)
+	var servers = make([]string, 0)
+	for i := 0; i < poolSize; i++ {
+		if implicitOnly && !nc.srvPool[i].isImplicit {
+			continue
+		}
+		url := nc.srvPool[i].url
+		servers = append(servers, fmt.Sprintf("%s://%s", url.Scheme, url.Host))
+	}
+	return servers
+}
+
+// Servers returns the list of known server urls, including additional
+// servers discovered after a connection has been established.  If
+// authentication is enabled, use UserInfo or Token when connecting with
+// these urls.
+func (nc *Conn) Servers() []string {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+	return nc.getServers(false)
+}
+
+// DiscoveredServers returns only the server urls that have been discovered
+// after a connection has been established. If authentication is enabled,
+// use UserInfo or Token when connecting with these urls.
+func (nc *Conn) DiscoveredServers() []string {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+	return nc.getServers(true)
 }
 
 // Status returns the current state of the connection.

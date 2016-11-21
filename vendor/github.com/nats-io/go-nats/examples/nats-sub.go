@@ -6,19 +6,18 @@ package main
 import (
 	"flag"
 	"log"
-	"os"
 	"runtime"
 
-	"github.com/nats-io/nats"
+	"github.com/nats-io/go-nats"
 )
 
-// NOTE: Use tls scheme for TLS, e.g. nats-qsub -s tls://demo.nats.io:4443 foo
+// NOTE: Use tls scheme for TLS, e.g. nats-sub -s tls://demo.nats.io:4443 foo
 func usage() {
-	log.Fatalf("Usage: nats-qsub [-s server] [-t] <subject> <queue-group>\n")
+	log.Fatalf("Usage: nats-sub [-s server] [-t] <subject> \n")
 }
 
 func printMsg(m *nats.Msg, i int) {
-	log.Printf("[#%d] Received on [%s] Queue[%s] Pid[%d]: '%s'\n", i, m.Subject, m.Sub.Queue, os.Getpid(), string(m.Data))
+	log.Printf("[#%d] Received on [%s]: '%s'\n", i, m.Subject, string(m.Data))
 }
 
 func main() {
@@ -30,7 +29,7 @@ func main() {
 	flag.Parse()
 
 	args := flag.Args()
-	if len(args) < 2 {
+	if len(args) < 1 {
 		usage()
 	}
 
@@ -39,10 +38,10 @@ func main() {
 		log.Fatalf("Can't connect: %v\n", err)
 	}
 
-	subj, queue, i := args[0], args[1], 0
+	subj, i := args[0], 0
 
-	nc.QueueSubscribe(subj, queue, func(msg *nats.Msg) {
-		i++
+	nc.Subscribe(subj, func(msg *nats.Msg) {
+		i += 1
 		printMsg(msg, i)
 	})
 	nc.Flush()
