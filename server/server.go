@@ -193,9 +193,9 @@ type StanServer struct {
 
 	// IO Channel
 	ioChannel     chan *nats.Msg
-	ioChannelQuit chan bool
+	ioChannelQuit chan struct{}
 	ioChannelWG   sync.WaitGroup
-	ioSignal      chan bool
+	ioSignal      chan struct{}
 	ioMutex       sync.RWMutex
 	ioList        ioProtoList
 
@@ -716,8 +716,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		dupCIDMap:         make(map[string]struct{}),
 		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
 		dupCIDTimeout:     defaultCheckDupCIDTimeout,
-		ioSignal:          make(chan bool, 1),
-		ioChannelQuit:     make(chan bool, 2),
+		ioSignal:          make(chan struct{}, 1),
+		ioChannelQuit:     make(chan struct{}, 2),
 		trace:             sOpts.Trace,
 		debug:             sOpts.Debug,
 	}
@@ -1913,7 +1913,7 @@ func (s *StanServer) buildProtocolsList(ready *sync.WaitGroup) {
 			list.count++
 			s.ioMutex.Unlock()
 			if len(s.ioSignal) == 0 {
-				s.ioSignal <- true
+				s.ioSignal <- struct{}{}
 			}
 		case <-s.ioChannelQuit:
 			return
@@ -2784,9 +2784,9 @@ func (s *StanServer) Shutdown() {
 
 	if s.ioChannel != nil {
 		// Notify the IO channel that we are shutting down
-		s.ioChannelQuit <- true
+		s.ioChannelQuit <- struct{}{}
 		// There is also the loop that gets messages from NATS
-		s.ioChannelQuit <- true
+		s.ioChannelQuit <- struct{}{}
 	} else {
 		waitForIOStoreLoop = false
 	}
