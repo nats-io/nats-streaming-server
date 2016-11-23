@@ -256,22 +256,22 @@ file: {
     # Can be cache, do_cache, cache_msgs
     cache: true
 
-    # Define the file slice maximum number of messages. If a channel limit
-    # is set, the lowest of "channel limit max messages / 4" and this value
-    # will be used.
+    # Define the file slice maximum number of messages. If set to 0 and a
+    # channel count limit is set, then the server will set a slice count
+    # limit automatically.
     # Can be slice_max_msgs, slice_max_count, slice_msgs, slice_count
     slice_max_msgs: 10000
 
     # Define the file slice maximum size (including the size of index file).
-    # If a channel limit is set, the lowest of "channel limit max bytes / 4"
-    # and this value will be used.
+    # If set to 0 and a channel size limit is set, then the server will
+    # set a slice bytes limit automatically.
     # Expressed in bytes.
     # Can be slice_max_bytes, slice_max_size, slice_bytes, slice_size
     slice_max_bytes: 67108864
 
     # Define the period of time covered by a file slice, starting at when
-    # the first message is stored. If a channel limit is set, the lowest
-    # of "channel limit max age / 4" and this value will be used.
+    # the first message is stored. If set to 0 and a channel age limit
+    # is set, then the server will set a slice age limit automatically.
     # Expressed as a duration, such as "24h", etc..
     # Can be  slice_max_age, slice_age, slice_max_time, slice_time_limit
     slice_max_age: "24h"
@@ -468,13 +468,8 @@ those slices by number of messages it can contain (`--file_slice_max_msgs`), the
 (`--file_slice_max_bytes`), or the period of time that a file slice should cover - starting at the time the first message is stored in
 that slice (`--file_slice_max_age`). The default file store options are defined such that only the slice size is configured to 64MB.
 
-If you set channel limits, and if those limits are smaller than the slice configuration, then appropriate values will
-be selected by the server.<br>
-For instance, the default channel limits set 1,000,000 as the maximum number of messages per channel.
-The server picks a slice limit to `max_msgs/4` which is `1,000,000/4 = 250,000` messages per slice.<br>
-If messages are small, it is possible that the server will move to a new slice before the combined size of the data
-and index file reaches 64MB. This is because the file slice will have reached the number of messages (250,000) before
-reaching the size limit of 64MB.
+Note: If you don't configure any slice limit but you do configure channel limits, then the server will automatically
+set some limits for file slices.
 
 When messages accumulate in a channel, and limits are reached, older messages are removed. When the first file slice
 becomes empty, the server removes this file slice (and corresponding index file).

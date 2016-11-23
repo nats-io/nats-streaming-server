@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -19,7 +20,6 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
-	"os/exec"
 )
 
 const (
@@ -348,8 +348,8 @@ type fileSlice struct {
 	rmCount    int // Count of messages "removed" from the slice due to limits.
 	msgsCount  int
 	msgsSize   uint64
-	firstWrite time.Time // Time the first message was added to this slice (used for slice age limit)
-	file       *os.File  // Used during lookups.
+	firstWrite int64    // Time the first message was added to this slice (used for slice age limit)
+	file       *os.File // Used during lookups.
 	lastUsed   int64
 }
 
@@ -377,7 +377,7 @@ type FileMsgStore struct {
 	lastFSlSeq   int // Last file slice sequence number
 	slCountLim   int
 	slSizeLim    uint64
-	slAgeLim     time.Duration
+	slAgeLim     int64
 	slHasLimits  bool
 	fstore       *FileStore // pointers to file store object
 	cache        bool       // shortcut to fstore.opts.CacheMsgs
@@ -386,10 +386,11 @@ type FileMsgStore struct {
 	firstMsg     *pb.MsgProto
 	lastMsg      *pb.MsgProto
 	bufferedMsgs []uint64
-	tasksTimer   *time.Timer // close file slices not recently used, etc...
+	bufferedMRec map[uint64]*msgRecord
+	tasksTimer   *time.Timer // get time, close file slices not recently used, etc...
 	timeTick     int64       // time captured in background task
 	lastShrink   int64       // last time we checked for opportunity to shrink
-	timerReset   bool
+	checkSlices  bool
 	ageTimer     *time.Timer
 	allDone      sync.WaitGroup
 }
@@ -1109,6 +1110,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		msgs:         make(map[uint64]*msgRecord, 64),
 		wOffset:      int64(4), // The very first record starts after the file version record
 		bufferedMsgs: make([]uint64, 0, 1),
+		bufferedMRec: make(map[uint64]*msgRecord),
 		cache:        fs.opts.CacheMsgs,
 		files:        make(map[int]*fileSlice),
 		rootDir:      channelDirName,
@@ -1184,9 +1186,10 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 			}
 		}
 	}
-	if err == nil && maxBufSize > 0 {
+	if err == nil {
 		ms.Lock()
 		ms.allDone.Add(1)
+		ms.timeTick = time.Now().UnixNano()
 		ms.tasksTimer = time.AfterFunc(time.Second, ms.backgroundTasks)
 		ms.Unlock()
 	}
@@ -1301,8 +1304,8 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 			// For size, add the message record size, the record header and the size
 			// required for the corresponding index record.
 			fslice.msgsSize += uint64(mrec.msgSize + msgRecordOverhead)
-			if fslice.firstWrite.IsZero() {
-				fslice.firstWrite = time.Unix(0, mrec.timestamp)
+			if fslice.firstWrite == 0 {
+				fslice.firstWrite = mrec.timestamp
 			}
 
 			if ms.first == 0 {
@@ -1343,8 +1346,8 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 			// For size, add the message record size, the record header and the size
 			// required for the corresponding index record.
 			fslice.msgsSize += uint64(msgSize + msgRecordOverhead)
-			if fslice.firstWrite.IsZero() {
-				fslice.firstWrite = time.Unix(0, msg.Timestamp)
+			if fslice.firstWrite == 0 {
+				fslice.firstWrite = msg.Timestamp
 			}
 
 			if ms.first == 0 {
@@ -1428,42 +1431,42 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 // setSliceLimits sets the limits of a file slice based on options and/or
 // channel limits.
 func (ms *FileMsgStore) setSliceLimits() {
-	// If there are channel limits defined, ensure that file slice limits
-	// (if specified) are not higher than those.
+	// First set slice limits based on slice configuration.
 	ms.slCountLim = ms.fstore.opts.SliceMaxMsgs
+	ms.slSizeLim = uint64(ms.fstore.opts.SliceMaxBytes)
+	ms.slAgeLim = int64(ms.fstore.opts.SliceMaxAge)
+	// Did we configure any of the "dimension"?
+	ms.slHasLimits = ms.slCountLim > 0 || ms.slSizeLim > 0 || ms.slAgeLim > 0
+
+	// If so, we are done. We will use those limits to decide
+	// when to move to a new slice.
+	if ms.slHasLimits {
+		return
+	}
+
+	// Slices limits were not configured. We will set a limit based on channel limits.
 	if ms.limits.MaxMsgs > 0 {
-		// Expect at least 5 slices with 25% above limit.
 		limit := ms.limits.MaxMsgs / 4
 		if limit == 0 {
 			limit = 1
 		}
-		if ms.slCountLim == 0 || ms.slCountLim > limit {
-			ms.slCountLim = limit
-		}
+		ms.slCountLim = limit
 	}
-
-	ms.slSizeLim = uint64(ms.fstore.opts.SliceMaxBytes)
 	if ms.limits.MaxBytes > 0 {
 		limit := uint64(ms.limits.MaxBytes) / 4
 		if limit == 0 {
 			limit = 1
 		}
-		if ms.slSizeLim == 0 || ms.slSizeLim > limit {
-			ms.slSizeLim = limit
-		}
+		ms.slSizeLim = limit
 	}
-
-	ms.slAgeLim = ms.fstore.opts.SliceMaxAge
 	if ms.limits.MaxAge > 0 {
 		limit := time.Duration(int64(ms.limits.MaxAge) / 4)
 		if limit < time.Second {
 			limit = time.Second
 		}
-		if ms.slAgeLim == 0 || ms.slAgeLim > limit {
-			ms.slAgeLim = limit
-		}
+		ms.slAgeLim = int64(limit)
 	}
-
+	// Refresh our view of slices having limits.
 	ms.slHasLimits = ms.slCountLim > 0 || ms.slSizeLim > 0 || ms.slAgeLim > 0
 }
 
@@ -1517,21 +1520,12 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 
 	fslice := ms.currSlice
 
-	now := time.Now()
-	seq := ms.last + 1
-	m := &pb.MsgProto{
-		Sequence:  seq,
-		Subject:   ms.subject,
-		Data:      data,
-		Timestamp: now.UnixNano(),
-	}
-
-	if ms.slHasLimits {
-		// Check if we need to move to next file slice
+	// Check if we need to move to next file slice
+	if fslice == nil || ms.slHasLimits {
 		if fslice == nil ||
 			(ms.slSizeLim > 0 && fslice.msgsSize >= ms.slSizeLim) ||
 			(ms.slCountLim > 0 && fslice.msgsCount >= ms.slCountLim) ||
-			(ms.slAgeLim > 0 && now.Sub(fslice.firstWrite) >= ms.slAgeLim) {
+			(ms.slAgeLim > 0 && ms.timeTick-fslice.firstWrite >= ms.slAgeLim) {
 
 			// Don't change store variable until success...
 			newSliceSeq := ms.lastFSlSeq + 1
@@ -1569,6 +1563,14 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 		}
 	}
 
+	seq := ms.last + 1
+	m := &pb.MsgProto{
+		Sequence:  seq,
+		Subject:   ms.subject,
+		Data:      data,
+		Timestamp: time.Now().UnixNano(),
+	}
+
 	pinMsg := false
 
 	var recSize int
@@ -1596,6 +1598,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	mrec := &msgRecord{offset: ms.wOffset, timestamp: m.Timestamp, msgSize: uint32(msgSize)}
 	if bwBuf != nil {
 		// Check to see if we should cancel a buffer shrink request
 		if ms.bw.shrinkReq {
@@ -1604,6 +1607,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 		// If message was added to the buffer we need to pin the message.
 		if bwBuf.Buffered() >= recSize {
 			ms.bufferedMsgs = append(ms.bufferedMsgs, seq)
+			ms.bufferedMRec[seq] = mrec
 			pinMsg = true
 		}
 	}
@@ -1621,7 +1625,6 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	}
 	ms.last = seq
 	ms.lastMsg = m
-	mrec := &msgRecord{offset: ms.wOffset, timestamp: m.Timestamp, msgSize: uint32(msgSize)}
 	ms.msgs[ms.last] = mrec
 	if ms.cache || pinMsg {
 		mrec.msg = m
@@ -1639,8 +1642,8 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	// Stats per file slice
 	fslice.msgsCount++
 	fslice.msgsSize += size
-	if fslice.firstWrite.IsZero() {
-		fslice.firstWrite = now
+	if fslice.firstWrite == 0 {
+		fslice.firstWrite = m.Timestamp
 	}
 
 	// If there is an age limit and no timer yet created, do so now
@@ -1674,7 +1677,7 @@ func (ms *FileMsgStore) processBufferedMsgs() error {
 	ms.tmpMsgBuf = util.EnsureBufBigEnough(ms.tmpMsgBuf, idxBufferSize)
 	bufOffset := 0
 	for _, pseq := range ms.bufferedMsgs {
-		mrec := ms.msgs[pseq]
+		mrec := ms.bufferedMRec[pseq]
 		if mrec != nil {
 			// We add the index info for this flushed message
 			ms.addIndex(ms.tmpMsgBuf[bufOffset:], pseq, mrec.offset, mrec.timestamp, int(mrec.msgSize))
@@ -1682,6 +1685,7 @@ func (ms *FileMsgStore) processBufferedMsgs() error {
 			if !ms.cache {
 				mrec.msg = nil
 			}
+			delete(ms.bufferedMRec, pseq)
 		}
 	}
 	if bufOffset > 0 {
@@ -1868,15 +1872,8 @@ func (ms *FileMsgStore) getFileForSeq(seq uint64) (*os.File, error) {
 					return nil, fmt.Errorf("unable to open file %q: %v", slice.fileName, err)
 				}
 				slice.file = file
-				if ms.tasksTimer == nil {
-					ms.allDone.Add(1)
-					ms.timeTick = time.Now().UnixNano()
-					ms.tasksTimer = time.AfterFunc(time.Second, ms.backgroundTasks)
-				} else if !ms.timerReset {
-					ms.timerReset = true
-					// Fire sooner than the regular interval
-					ms.tasksTimer.Reset(time.Second)
-				}
+				// Let the background task know that we have opened a slice
+				ms.checkSlices = true
 			}
 			slice.lastUsed = ms.timeTick
 			return file, nil
@@ -1900,16 +1897,15 @@ func (ms *FileMsgStore) backgroundTasks() {
 	ms.timeTick = time.Now().UnixNano()
 
 	// Close unused file slices
-	for _, slice := range ms.files {
-		if slice.file != nil && time.Duration(ms.timeTick-slice.lastUsed) >= time.Second {
-			slice.file.Close()
-			slice.file = nil
+	if ms.checkSlices {
+		for _, slice := range ms.files {
+			if slice.file != nil && time.Duration(ms.timeTick-slice.lastUsed) >= time.Second {
+				slice.file.Close()
+				slice.file = nil
+			}
 		}
+		ms.checkSlices = false
 	}
-	// Let the lookup know that if a file slice is opened,
-	// it should reset the timer to a shorter interval so this
-	// callback can close the files.
-	ms.timerReset = false
 
 	// Shrink the buffer if applicable
 	if ms.bw != nil && time.Duration(ms.timeTick-ms.lastShrink) >= bufShrinkTimerInterval {
@@ -1917,9 +1913,8 @@ func (ms *FileMsgStore) backgroundTasks() {
 		ms.writer, _ = ms.bw.tryShrinkBuffer(ms.file)
 	}
 
-	// Fire again. Set it to the shrink buffer interval, if slices are opened,
-	// the timer will be reset to fire sooner.
-	ms.tasksTimer.Reset(bufShrinkTimerInterval)
+	// Fire again in one second.
+	ms.tasksTimer.Reset(time.Second)
 }
 
 // lookup returns the message for the given sequence number, possibly
