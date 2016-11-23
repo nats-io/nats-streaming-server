@@ -266,6 +266,30 @@ func parseFileOptions(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.FileStoreOpts.CacheMsgs = v.(bool)
+		case "slice_max_msgs", "slice_max_count", "slice_msgs", "slice_count":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.FileStoreOpts.SliceMaxMsgs = int(v.(int64))
+		case "slice_max_bytes", "slice_max_size", "slice_bytes", "slice_size":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.FileStoreOpts.SliceMaxBytes = v.(int64)
+		case "slice_max_age", "slice_age", "slice_max_time", "slice_time_limit":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			dur, err := time.ParseDuration(v.(string))
+			if err != nil {
+				return err
+			}
+			opts.FileStoreOpts.SliceMaxAge = dur
+		case "slice_archive_script", "slice_archive", "slice_script":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.FileStoreOpts.SliceArchiveScript = v.(string)
 		}
 	}
 	return nil

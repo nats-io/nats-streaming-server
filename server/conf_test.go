@@ -86,6 +86,18 @@ func TestParseConfig(t *testing.T) {
 	if opts.FileStoreOpts.CRCPolynomial != 5 {
 		t.Fatalf("Expected CRCPolynomial to be 5, got %v", opts.FileStoreOpts.CRCPolynomial)
 	}
+	if opts.FileStoreOpts.SliceMaxMsgs != 6 {
+		t.Fatalf("Expected SliceMaxMsgs to be 6, got %v", opts.FileStoreOpts.SliceMaxMsgs)
+	}
+	if opts.FileStoreOpts.SliceMaxBytes != 7 {
+		t.Fatalf("Expected SliceMaxBytes to be 7, got %v", opts.FileStoreOpts.SliceMaxBytes)
+	}
+	if opts.FileStoreOpts.SliceMaxAge != 8*time.Second {
+		t.Fatalf("Expected SliceMaxMsgs to be 8s, got %v", opts.FileStoreOpts.SliceMaxAge)
+	}
+	if opts.FileStoreOpts.SliceArchiveScript != "myArchiveScript" {
+		t.Fatalf("Expected SliceArchiveScript to be myArchiveScript, got %v", opts.FileStoreOpts.SliceArchiveScript)
+	}
 	if opts.MaxChannels != 11 {
 		t.Fatalf("Expected MaxChannels to be 11, got %v", opts.MaxChannels)
 	}
@@ -239,6 +251,11 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "file:{crc_poly:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{sync:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{cache:123}", wrongTypeErr)
+	expectFailureFor(t, "file:{slice_max_msgs:true}", wrongTypeErr)
+	expectFailureFor(t, "file:{slice_max_bytes:false}", wrongTypeErr)
+	expectFailureFor(t, "file:{slice_max_age:123}", wrongTypeErr)
+	expectFailureFor(t, "file:{slice_max_age:\"1h:0m\"}", wrongTimeErr)
+	expectFailureFor(t, "file:{slice_archive_script:123}", wrongTypeErr)
 }
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {

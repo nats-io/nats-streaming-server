@@ -288,6 +288,10 @@ func testBasicMsgStore(t *testing.T, s Store) {
 		t.Fatalf("Unexpected error getting state: %v", err)
 	}
 	expectedBytes := uint64(m1.Size() + m2.Size())
+	if _, ok := s.(*FileStore); ok {
+		// FileStore counts more toward the number of bytes
+		expectedBytes += 2 * (msgRecordOverhead)
+	}
 	if count != 2 || bytes != expectedBytes {
 		t.Fatalf("Unexpected counts: %v, %v vs %v, %v", count, bytes, 2, expectedBytes)
 	}
@@ -305,24 +309,40 @@ func testMsgsState(t *testing.T, s Store) {
 	m1 := storeMsg(t, s, "foo", payload)
 	m2 := storeMsg(t, s, "bar", payload)
 
+	_, isFileStore := s.(*FileStore)
+
 	count, bytes, err := s.MsgsState("foo")
-	if count != 1 || bytes != uint64(m1.Size()) || err != nil {
-		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, m1.Size(), err)
+	expectedBytes := uint64(m1.Size())
+	if isFileStore {
+		expectedBytes += msgRecordOverhead
+	}
+	if count != 1 || bytes != expectedBytes || err != nil {
+		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, expectedBytes, err)
 	}
 
 	count, bytes, err = s.MsgsState("bar")
-	if count != 1 || bytes != uint64(m2.Size()) || err != nil {
-		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, m2.Size(), err)
+	expectedBytes = uint64(m2.Size())
+	if isFileStore {
+		expectedBytes += msgRecordOverhead
+	}
+	if count != 1 || bytes != expectedBytes || err != nil {
+		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, expectedBytes, err)
 	}
 
 	count, bytes, err = s.MsgsState(AllChannels)
-	if count != 2 || bytes != uint64(m1.Size()+m2.Size()) || err != nil {
-		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, m1.Size()+m2.Size(), err)
+	expectedBytes = uint64(m1.Size() + m2.Size())
+	if isFileStore {
+		expectedBytes += 2 * (msgRecordOverhead)
+	}
+	if count != 2 || bytes != expectedBytes || err != nil {
+		t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v err=%v vs nil", count, 1, bytes, expectedBytes, err)
 	}
 }
 
 func testMaxMsgs(t *testing.T, s Store) {
 	payload := []byte("hello")
+
+	_, isFileStore := s.(*FileStore)
 
 	limitCount := 0
 	stopBytes := uint64(500)
@@ -331,6 +351,9 @@ func testMaxMsgs(t *testing.T, s Store) {
 		seq := uint64(i + 1)
 		m := pb.MsgProto{Data: payload, Subject: "foo", Sequence: seq, Timestamp: time.Now().UnixNano()}
 		expectedBytes += uint64(m.Size())
+		if isFileStore {
+			expectedBytes += msgRecordOverhead
+		}
 		limitCount++
 		if expectedBytes >= stopBytes {
 			break
@@ -384,6 +407,9 @@ func testMaxMsgs(t *testing.T, s Store) {
 	bigMsg := make([]byte, limits.MaxBytes+100)
 	m := storeMsg(t, s, "foo", bigMsg)
 	expectedBytes = uint64(m.Size())
+	if isFileStore {
+		expectedBytes += msgRecordOverhead
+	}
 
 	count, bytes, err = s.MsgsState("foo")
 	if count != 1 || bytes != expectedBytes || err != nil {
@@ -398,6 +424,9 @@ func testMaxMsgs(t *testing.T, s Store) {
 		seq := uint64(i + 1)
 		m := pb.MsgProto{Data: payload, Subject: channelName, Sequence: seq, Timestamp: time.Now().UnixNano()}
 		expectedBytes += uint64(m.Size())
+		if isFileStore {
+			expectedBytes += msgRecordOverhead
+		}
 	}
 	limits.MaxMsgs = expectedCount
 	limits.MaxBytes = 0
@@ -425,6 +454,9 @@ func testMaxMsgs(t *testing.T, s Store) {
 		seq := uint64(i + 1)
 		m := pb.MsgProto{Data: payload, Subject: channelName, Sequence: seq, Timestamp: time.Now().UnixNano()}
 		expectedBytes += uint64(m.Size())
+		if isFileStore {
+			expectedBytes += msgRecordOverhead
+		}
 		expectedCount++
 		if expectedBytes >= 1000 {
 			break

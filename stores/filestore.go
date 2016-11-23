@@ -11,20 +11,20 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
+	"os/exec"
 )
 
 const (
 	// Our file version.
 	fileVersion = 1
-
-	// Number of files for a MsgStore on a given channel.
-	numFiles = 5
 
 	// Name of the subscriptions file.
 	subsFileName = "subs.dat"
@@ -50,6 +50,11 @@ const (
 	// Size of an message index record
 	// Seq - Offset - Timestamp - Size - CRC
 	msgIndexRecSize = 8 + 8 + 8 + 4 + crcSize
+
+	// msgRecordOverhead is the number of bytes to count toward the size
+	// of a serialized message so that file slice size is closer to
+	// channels and/or file slice limits.
+	msgRecordOverhead = recordHeaderSize + msgIndexRecSize
 
 	// Percentage of buffer usage to decide if the buffer should shrink
 	bufShrinkThreshold = 50
@@ -105,6 +110,27 @@ type FileStoreOptions struct {
 	// CacheMsgs allows MsgStore objects to keep messages in memory after being
 	// written to disk. This allows fast lookups at the expense of memory usage.
 	CacheMsgs bool
+
+	// Regardless of channel limits, the options below allow to split a message
+	// log in smaller file chunks. If all those options were to be set to 0,
+	// some file slice limit will be selected automatically based on the channel
+	// limits.
+	// SliceMaxMsgs defines how many messages can fit in a file slice (0 means
+	// count is not checked).
+	SliceMaxMsgs int
+	// SliceMaxBytes defines how many bytes can fit in a file slice, including
+	// the corresponding index file (0 means size is not checked).
+	SliceMaxBytes int64
+	// SliceMaxAge defines the period of time covered by a slice starting when
+	// the first message is stored (0 means time is not checked).
+	SliceMaxAge time.Duration
+	// SliceArchiveScript is the path to a script to be invoked when a file
+	// slice (and the corresponding index file) is going to be removed.
+	// The script will be invoked with the channel name and names of data and
+	// index files (which both have been previously renamed with a '.bak'
+	// extension). It is the responsability of the script to move/remove
+	// those files.
+	SliceArchiveScript string
 }
 
 // DefaultFileStoreOptions defines the default options for a File Store.
@@ -118,6 +144,7 @@ var DefaultFileStoreOptions = FileStoreOptions{
 	CRCPolynomial:        int64(crc32.IEEE),
 	DoSync:               true,
 	CacheMsgs:            true,
+	SliceMaxBytes:        64 * 1024 * 1024, // 64MB
 }
 
 // BufferSize is a FileStore option that sets the size of the buffer used
@@ -202,6 +229,18 @@ func DoSync(enableFileSync bool) FileStoreOption {
 func CacheMsgs(cache bool) FileStoreOption {
 	return func(o *FileStoreOptions) error {
 		o.CacheMsgs = cache
+		return nil
+	}
+}
+
+// SliceConfig is a FileStore option that allows the configuration of
+// file slice limits and optional archive script file name.
+func SliceConfig(maxMsgs int, maxBytes int64, maxAge time.Duration, script string) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.SliceMaxMsgs = maxMsgs
+		o.SliceMaxBytes = maxBytes
+		o.SliceMaxAge = maxAge
+		o.SliceArchiveScript = script
 		return nil
 	}
 }
@@ -302,15 +341,16 @@ type FileSubStore struct {
 // fileSlice represents one of the message store file (there are a number
 // of files for a MsgStore on a given channel).
 type fileSlice struct {
-	fileName  string
-	idxFName  string
-	firstSeq  uint64
-	lastSeq   uint64
-	rmCount   int // Count of messages "removed" from the slice due to limits.
-	msgsCount int
-	msgsSize  uint64
-	file      *os.File // Used during lookups.
-	lastUsed  int64
+	fileName   string
+	idxFName   string
+	firstSeq   uint64
+	lastSeq    uint64
+	rmCount    int // Count of messages "removed" from the slice due to limits.
+	msgsCount  int
+	msgsSize   uint64
+	firstWrite time.Time // Time the first message was added to this slice (used for slice age limit)
+	file       *os.File  // Used during lookups.
+	lastUsed   int64
 }
 
 // msgRecord contains data regarding a message that the FileMsgStore needs to
@@ -330,10 +370,15 @@ type FileMsgStore struct {
 	idxFile      *os.File
 	bw           *bufferedWriter
 	writer       io.Writer // this is `bw.buf` or `file` depending if buffer writer is used or not
-	files        [numFiles]*fileSlice
-	currSliceIdx int
+	files        map[int]*fileSlice
+	currSlice    *fileSlice
+	rootDir      string
+	firstFSlSeq  int // First file slice sequence number
+	lastFSlSeq   int // Last file slice sequence number
 	slCountLim   int
 	slSizeLim    uint64
+	slAgeLim     time.Duration
+	slHasLimits  bool
 	fstore       *FileStore // pointers to file store object
 	cache        bool       // shortcut to fstore.opts.CacheMsgs
 	msgs         map[uint64]*msgRecord
@@ -1058,9 +1103,6 @@ func (fs *FileStore) Close() error {
 
 // newFileMsgStore returns a new instace of a file MsgStore.
 func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover bool) (*FileMsgStore, error) {
-	var err error
-	var useIdxFile bool
-
 	// Create an instance and initialize
 	ms := &FileMsgStore{
 		fstore:       fs,
@@ -1068,6 +1110,8 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		wOffset:      int64(4), // The very first record starts after the file version record
 		bufferedMsgs: make([]uint64, 0, 1),
 		cache:        fs.opts.CacheMsgs,
+		files:        make(map[int]*fileSlice),
+		rootDir:      channelDirName,
 	}
 	// Defaults to the global limits
 	msgStoreLimits := fs.limits.MsgStoreLimits
@@ -1079,70 +1123,65 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 	}
 	ms.init(channel, &msgStoreLimits)
 
-	ms.slCountLim = ms.limits.MaxMsgs / (numFiles - 1)
-	if ms.slCountLim < 1 {
-		ms.slCountLim = 1
-	}
-	ms.slSizeLim = uint64(ms.limits.MaxBytes / (numFiles - 1))
-	if ms.slSizeLim < 1 {
-		ms.slSizeLim = 1
-	}
+	ms.setSliceLimits()
 
 	maxBufSize := fs.opts.BufferSize
 	if maxBufSize > 0 {
 		ms.bw = newBufferWriter(msgBufMinShrinkSize, maxBufSize)
 	}
-	done := false
-	for i := 0; err == nil && i < numFiles; i++ {
-		// Fully qualified file name.
-		fileName := filepath.Join(channelDirName, fmt.Sprintf("msgs.%d.dat", (i+1)))
-		idxFName := filepath.Join(channelDirName, fmt.Sprintf("msgs.%d.idx", (i+1)))
 
-		// Create slice
-		ms.files[i] = &fileSlice{fileName: fileName, idxFName: idxFName}
+	// Use this variable for all errors below so we can do the cleanup
+	var err error
 
-		if done {
-			continue
-		}
+	// Recovery case
+	if doRecover {
+		var names []string
+		var fseq int64
 
-		// On recovery...
-		if doRecover {
-			// We previously pre-created all files, we don't anymore.
-			// So if a slice is not present, we are done.
-			if s, statErr := os.Stat(fileName); s == nil || statErr != nil {
-				done = true
+		names, err = filepath.Glob(filepath.Join(channelDirName, "msgs.*.dat"))
+		for _, fileName := range names {
+			// Remove suffix
+			fileNameWithoutSuffix := strings.TrimSuffix(fileName, ".dat")
+			// Position of last "."
+			dotPos := strings.LastIndex(fileNameWithoutSuffix, ".")
+			if dotPos == -1 {
 				continue
 			}
-			// If an index file is present, recover only the index file, not the data.
-			if s, statErr := os.Stat(idxFName); s != nil && statErr == nil {
-				useIdxFile = true
+			fseq, err = strconv.ParseInt(fileNameWithoutSuffix[dotPos+1:], 10, 64)
+			if err != nil {
+				continue
+			}
+			idxFName := filepath.Join(channelDirName, fmt.Sprintf("msgs.%v.idx", fseq))
+			// Create the slice
+			fslice := &fileSlice{fileName: fileName, idxFName: idxFName}
+			// Recover the file slice
+			err = ms.recoverOneMsgFile(fslice, int(fseq))
+			if err != nil {
+				break
 			}
 		}
-		// On create, simply create the first file, on recovery we need to recover
-		// each existing file
-		if i == 0 || doRecover {
-			err = ms.openDataAndIndexFiles(fileName, idxFName)
+		if err == nil && ms.lastFSlSeq > 0 {
+			// Now that all file slices have been recovered, we know which
+			// one is the last, so open the corresponding data and index files.
+			ms.currSlice = ms.files[ms.lastFSlSeq]
+			err = ms.openDataAndIndexFiles(ms.currSlice.fileName, ms.currSlice.idxFName)
 		}
-		// Should we try to recover (startup case)
-		if err == nil && doRecover {
-			done, err = ms.recoverOneMsgFile(useIdxFile, i)
-		}
-	}
-	if err == nil {
-		// Apply message limits (no need to check if there are limits
-		// defined, the call won't do anything if they aren't).
-		err = ms.enforceLimits(false)
-		// If there is at least one message and age limit is present...
-		if err == nil && ms.totalCount > 0 && ms.limits.MaxAge > time.Duration(0) {
-			ms.Lock()
-			ms.allDone.Add(1)
-			// Create the timer with any duration.
-			ms.ageTimer = time.AfterFunc(time.Hour, ms.expireMsgs)
-			ms.Unlock()
-			// And now force the execution of the expireMsgs callback.
-			// This will take care of expiring messages that should
-			// already be expired, and will set properly the timer.
-			ms.expireMsgs()
+		if err == nil {
+			// Apply message limits (no need to check if there are limits
+			// defined, the call won't do anything if they aren't).
+			err = ms.enforceLimits(false)
+			// If there is at least one message and age limit is present...
+			if err == nil && ms.totalCount > 0 && ms.limits.MaxAge > time.Duration(0) {
+				ms.Lock()
+				ms.allDone.Add(1)
+				// Create the timer with any duration.
+				ms.ageTimer = time.AfterFunc(time.Hour, ms.expireMsgs)
+				ms.Unlock()
+				// And now force the execution of the expireMsgs callback.
+				// This will take care of expiring messages that should
+				// already be expired, and will set properly the timer.
+				ms.expireMsgs()
+			}
 		}
 	}
 	if err == nil && maxBufSize > 0 {
@@ -1210,16 +1249,25 @@ func (ms *FileMsgStore) setFile(dataFile, idxFile *os.File) {
 }
 
 // recovers one of the file
-func (ms *FileMsgStore) recoverOneMsgFile(useIdxFile bool, numFile int) (bool, error) {
+func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 	var err error
 
 	msgSize := 0
 	var msg *pb.MsgProto
 	var mrec *msgRecord
 	var seq uint64
-	done := false
 
-	fslice := ms.files[numFile]
+	// Check if index file exists
+	useIdxFile := false
+	if s, statErr := os.Stat(fslice.idxFName); s != nil && statErr == nil {
+		useIdxFile = true
+	}
+
+	// Open the files (the idx file will be created if it does not exist)
+	err = ms.openDataAndIndexFiles(fslice.fileName, fslice.idxFName)
+	if err != nil {
+		return err
+	}
 
 	// Select which file to recover based on presence of index file
 	file := ms.file
@@ -1250,7 +1298,12 @@ func (ms *FileMsgStore) recoverOneMsgFile(useIdxFile bool, numFile int) (bool, e
 			}
 			fslice.lastSeq = seq
 			fslice.msgsCount++
-			fslice.msgsSize += uint64(mrec.msgSize)
+			// For size, add the message record size, the record header and the size
+			// required for the corresponding index record.
+			fslice.msgsSize += uint64(mrec.msgSize + msgRecordOverhead)
+			if fslice.firstWrite.IsZero() {
+				fslice.firstWrite = time.Unix(0, mrec.timestamp)
+			}
 
 			if ms.first == 0 {
 				ms.first = seq
@@ -1287,7 +1340,12 @@ func (ms *FileMsgStore) recoverOneMsgFile(useIdxFile bool, numFile int) (bool, e
 			}
 			fslice.lastSeq = msg.Sequence
 			fslice.msgsCount++
-			fslice.msgsSize += uint64(msgSize)
+			// For size, add the message record size, the record header and the size
+			// required for the corresponding index record.
+			fslice.msgsSize += uint64(msgSize + msgRecordOverhead)
+			if fslice.firstWrite.IsZero() {
+				fslice.firstWrite = time.Unix(0, msg.Timestamp)
+			}
 
 			if ms.first == 0 {
 				ms.first = msg.Sequence
@@ -1327,31 +1385,86 @@ func (ms *FileMsgStore) recoverOneMsgFile(useIdxFile bool, numFile int) (bool, e
 		}
 	}
 
-	// Do more accounting and bump the current slice index if we recovered
-	// at least one message on that file.
+	// If no error and slice is not empty...
 	if err == nil && fslice.msgsCount > 0 {
 		ms.last = fslice.lastSeq
 		ms.totalCount += fslice.msgsCount
 		ms.totalBytes += fslice.msgsSize
-		ms.currSliceIdx = numFile
+
 		if useIdxFile {
 			// Take the offset of the end of file
 			ms.wOffset, err = ms.file.Seek(0, 2)
 		} else {
 			ms.wOffset = offset
 		}
-	} else if err == nil {
-		done = true
-		// If we are not at the first slice and we did not recover anything,
-		// close the current data and index files and open the ones from
-		// the previous slice.
-		if numFile > 0 {
-			ms.closeDataAndIndexFiles()
-			err = ms.openDataAndIndexFiles(
-				ms.files[numFile-1].fileName, ms.files[numFile-1].idxFName)
+		// File slices may be recovered in any order. When all slices
+		// are recovered the caller will open the last file slice. So
+		// close the files here since we don't know if this is going
+		// to be the last.
+		if err == nil {
+			err = ms.closeDataAndIndexFiles()
+		}
+		if err == nil {
+			// On success, add to the map of file slices and
+			// update first/last file slice sequence.
+			ms.files[fseq] = fslice
+			if ms.firstFSlSeq == 0 || ms.firstFSlSeq > fseq {
+				ms.firstFSlSeq = fseq
+			}
+			if ms.lastFSlSeq < fseq {
+				ms.lastFSlSeq = fseq
+			}
+		}
+	} else {
+		// We got an error, or this is an empty file slice which we
+		// didn't add to the map.
+		if cerr := ms.closeDataAndIndexFiles(); cerr != nil && err == nil {
+			err = cerr
 		}
 	}
-	return done, err
+	return err
+}
+
+// setSliceLimits sets the limits of a file slice based on options and/or
+// channel limits.
+func (ms *FileMsgStore) setSliceLimits() {
+	// If there are channel limits defined, ensure that file slice limits
+	// (if specified) are not higher than those.
+	ms.slCountLim = ms.fstore.opts.SliceMaxMsgs
+	if ms.limits.MaxMsgs > 0 {
+		// Expect at least 5 slices with 25% above limit.
+		limit := ms.limits.MaxMsgs / 4
+		if limit == 0 {
+			limit = 1
+		}
+		if ms.slCountLim == 0 || ms.slCountLim > limit {
+			ms.slCountLim = limit
+		}
+	}
+
+	ms.slSizeLim = uint64(ms.fstore.opts.SliceMaxBytes)
+	if ms.limits.MaxBytes > 0 {
+		limit := uint64(ms.limits.MaxBytes) / 4
+		if limit == 0 {
+			limit = 1
+		}
+		if ms.slSizeLim == 0 || ms.slSizeLim > limit {
+			ms.slSizeLim = limit
+		}
+	}
+
+	ms.slAgeLim = ms.fstore.opts.SliceMaxAge
+	if ms.limits.MaxAge > 0 {
+		limit := time.Duration(int64(ms.limits.MaxAge) / 4)
+		if limit < time.Second {
+			limit = time.Second
+		}
+		if ms.slAgeLim == 0 || ms.slAgeLim > limit {
+			ms.slAgeLim = limit
+		}
+	}
+
+	ms.slHasLimits = ms.slCountLim > 0 || ms.slSizeLim > 0 || ms.slAgeLim > 0
 }
 
 // writeIndex writes a message index record to the writer `w`
@@ -1402,43 +1515,58 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	ms.Lock()
 	defer ms.Unlock()
 
-	fslice := ms.files[ms.currSliceIdx]
+	fslice := ms.currSlice
 
-	maxMsgs := ms.limits.MaxMsgs
-	maxBytes := uint64(ms.limits.MaxBytes)
-	if maxMsgs > 0 || maxBytes > 0 {
-		// Check if we need to move to next file slice
-		if (ms.currSliceIdx < numFiles-1) &&
-			((maxMsgs > 0 && fslice.msgsCount >= ms.slCountLim) ||
-				(maxBytes > 0 && fslice.msgsSize >= ms.slSizeLim)) {
-
-			// Don't change store variable until success...
-			nextSlice := ms.currSliceIdx + 1
-
-			// Close the file and open the next slice
-			if err := ms.closeDataAndIndexFiles(); err != nil {
-				return 0, err
-			}
-			// Open the new slice
-			if err := ms.openDataAndIndexFiles(
-				ms.files[nextSlice].fileName,
-				ms.files[nextSlice].idxFName); err != nil {
-				return 0, err
-			}
-			// Success, update the store's variables
-			ms.currSliceIdx = nextSlice
-			ms.wOffset = int64(4)
-
-			fslice = ms.files[ms.currSliceIdx]
-		}
-	}
-
+	now := time.Now()
 	seq := ms.last + 1
 	m := &pb.MsgProto{
 		Sequence:  seq,
 		Subject:   ms.subject,
 		Data:      data,
-		Timestamp: time.Now().UnixNano(),
+		Timestamp: now.UnixNano(),
+	}
+
+	if ms.slHasLimits {
+		// Check if we need to move to next file slice
+		if fslice == nil ||
+			(ms.slSizeLim > 0 && fslice.msgsSize >= ms.slSizeLim) ||
+			(ms.slCountLim > 0 && fslice.msgsCount >= ms.slCountLim) ||
+			(ms.slAgeLim > 0 && now.Sub(fslice.firstWrite) >= ms.slAgeLim) {
+
+			// Don't change store variable until success...
+			newSliceSeq := ms.lastFSlSeq + 1
+
+			// Close the current file slice (if applicable) and open the next slice
+			if fslice != nil {
+				if err := ms.closeDataAndIndexFiles(); err != nil {
+					return 0, err
+				}
+			}
+			// Create new slice
+			datFName := filepath.Join(ms.rootDir, fmt.Sprintf("msgs.%v.dat", newSliceSeq))
+			idxFName := filepath.Join(ms.rootDir, fmt.Sprintf("msgs.%v.idx", newSliceSeq))
+			// Open the new slice
+			if err := ms.openDataAndIndexFiles(datFName, idxFName); err != nil {
+				return 0, err
+			}
+			// Success, update the store's variables
+			newSlice := &fileSlice{fileName: datFName, idxFName: idxFName}
+			ms.files[newSliceSeq] = newSlice
+			ms.currSlice = newSlice
+			if ms.firstFSlSeq == 0 {
+				ms.firstFSlSeq = newSliceSeq
+			}
+			ms.lastFSlSeq = newSliceSeq
+			ms.wOffset = int64(4)
+
+			// If we added a second slice and the first slice was empty but not removed
+			// because it was the only one, we remove it now.
+			if len(ms.files) == 2 && fslice.msgsCount == fslice.rmCount {
+				ms.removeFirstSlice()
+			}
+			// Update the fslice reference to new slice for rest of function
+			fslice = ms.currSlice
+		}
 	}
 
 	pinMsg := false
@@ -1500,13 +1628,20 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	}
 	ms.wOffset += int64(recSize)
 
+	// For size, add the message record size, the record header and the size
+	// required for the corresponding index record.
+	size := uint64(msgSize + msgRecordOverhead)
+
 	// Total stats
 	ms.totalCount++
-	ms.totalBytes += uint64(msgSize)
+	ms.totalBytes += size
 
 	// Stats per file slice
 	fslice.msgsCount++
-	fslice.msgsSize += uint64(msgSize)
+	fslice.msgsSize += size
+	if fslice.firstWrite.IsZero() {
+		fslice.firstWrite = now
+	}
 
 	// If there is an age limit and no timer yet created, do so now
 	if ms.limits.MaxAge > time.Duration(0) && ms.ageTimer == nil {
@@ -1520,7 +1655,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	}
 	fslice.lastSeq = seq
 
-	if maxMsgs > 0 || maxBytes > 0 {
+	if ms.limits.MaxMsgs > 0 || ms.limits.MaxBytes > 0 {
 		// Enfore limits and update file slice if needed.
 		if err := ms.enforceLimits(true); err != nil {
 			return 0, err
@@ -1613,103 +1748,117 @@ func (ms *FileMsgStore) enforceLimits(reportHitLimit bool) error {
 }
 
 // removeFirstMsg "removes" the first message of the first slice.
-// If the slice is "empty" and not the current slice, the file
-// slice is removed and files are shifted.
-func (ms *FileMsgStore) removeFirstMsg() error {
+// If the slice is "empty" the file slice is removed.
+func (ms *FileMsgStore) removeFirstMsg() {
 	// Work with the first slice
-	slice := ms.files[0]
+	slice := ms.files[ms.firstFSlSeq]
 	// Size of the first message in this slice
-	firstMsgSize := uint64(ms.msgs[slice.firstSeq].msgSize)
+	firstMsgSize := ms.msgs[slice.firstSeq].msgSize
+	// For size, we count the size of serialized message + record header +
+	// the corresponding index record
+	size := uint64(firstMsgSize + msgRecordOverhead)
 	// Keep track of number of "removed" messages in this slice
 	slice.rmCount++
 	// Update total counts
 	ms.totalCount--
-	ms.totalBytes -= firstMsgSize
+	ms.totalBytes -= size
 	// Remove the first message from our cache
 	delete(ms.msgs, ms.first)
 	// Messages sequence is incremental with no gap on a given msgstore.
 	ms.first++
 	// Invalidate ms.firstMsg, it will be looked-up on demand.
 	ms.firstMsg = nil
-	// Is file slice "empty", and not the current slice
-	if slice.msgsCount == slice.rmCount && ms.currSliceIdx > 0 {
-		if err := ms.removeAndShiftFiles(); err != nil {
-			return err
-		}
-		// Decrement the current slice. It will be bumped if needed
-		// before storing the next message.
-		ms.currSliceIdx--
+	// Is file slice is "empty" and not the last one
+	if slice.msgsCount == slice.rmCount && len(ms.files) > 1 {
+		ms.removeFirstSlice()
 	} else {
 		// This is the new first message in this slice.
 		slice.firstSeq = ms.first
 	}
-	return nil
 }
 
-// removeAndShiftFiles
-func (ms *FileMsgStore) removeAndShiftFiles() error {
-	// Close the currently opened file since it is going to be renamed.
-	if err := ms.closeDataAndIndexFiles(); err != nil {
-		return err
+// removeFirstSlice removes the first file slice.
+// Should not be called if first slice is also last!
+func (ms *FileMsgStore) removeFirstSlice() {
+	sl := ms.files[ms.firstFSlSeq]
+	// Close file that may have been opened due to lookups
+	if sl.file != nil {
+		sl.file.Close()
+		sl.file = nil
 	}
-	// Close all files that may have been opened due to lookups
-	for _, slice := range ms.files {
-		if slice.file != nil {
-			slice.file.Close()
-			slice.file = nil
+	// Assume we will remove the files
+	remove := true
+	// If there is an archive script invoke it first
+	script := ms.fstore.opts.SliceArchiveScript
+	if script != "" {
+		datBak := fmt.Sprintf("%s.bak", sl.fileName)
+		idxBak := fmt.Sprintf("%s.bak", sl.idxFName)
+
+		var err error
+		if err = os.Rename(sl.fileName, datBak); err == nil {
+			if err = os.Rename(sl.idxFName, idxBak); err != nil {
+				// Remove first backup file
+				os.Remove(datBak)
+			}
+		}
+		if err == nil {
+			// Files have been successfully renamed, so don't attempt
+			// to remove the original files.
+			remove = false
+
+			// We run the script in a go routine to not block the server.
+			ms.allDone.Add(1)
+			go func(subj, dat, idx string) {
+				defer ms.allDone.Done()
+				cmd := exec.Command(script, subj, dat, idx)
+				output, err := cmd.CombinedOutput()
+				if err != nil {
+					Noticef("STAN: Error invoking archive script %q: %v (output=%v)", script, err, string(output))
+				} else {
+					Noticef("STAN: Output of archive script for %s (%s and %s): %v", subj, dat, idx, string(output))
+				}
+			}(ms.subject, datBak, idxBak)
 		}
 	}
-
-	// Rename msgs.2.dat to msgs.1.dat, refresh state, etc...
-	currSlice := ms.currSliceIdx
-	for i := 0; i < currSlice; i++ {
-		file1 := ms.files[i]
-		file2 := ms.files[i+1]
-
-		if err := os.Rename(file2.fileName, file1.fileName); err != nil {
-			return err
-		}
-		if err := os.Rename(file2.idxFName, file1.idxFName); err != nil {
-			return err
-		}
-
-		// Copy over values from the next slice
-		file1.firstSeq = file2.firstSeq
-		file1.lastSeq = file2.lastSeq
-		file1.msgsCount = file2.msgsCount
-		file1.msgsSize = file2.msgsSize
-		file1.rmCount = file2.rmCount
+	// Remove files
+	if remove {
+		os.Remove(sl.fileName)
+		os.Remove(sl.idxFName)
 	}
-
-	// Reset the last slice's counts.
-	fslice := ms.files[currSlice]
-	fslice.firstSeq = 0
-	fslice.lastSeq = 0
-	fslice.msgsCount = 0
-	fslice.msgsSize = uint64(0)
-	fslice.rmCount = 0
-
-	// Now re-open the slice we were on before, which has shifted to currSlice-1.
-	if err := ms.openDataAndIndexFiles(
-		ms.files[currSlice-1].fileName,
-		ms.files[currSlice-1].idxFName); err != nil {
-		return err
+	// Remove slice from map
+	delete(ms.files, ms.firstFSlSeq)
+	// Normally, file slices have an incremental sequence number with
+	// no gap. However, we want to support the fact that an user could
+	// copy back some old file slice to be recovered, and so there
+	// may be a gap. So find out what is the new first file sequence.
+	for ms.firstFSlSeq < ms.lastFSlSeq {
+		ms.firstFSlSeq++
+		if _, ok := ms.files[ms.firstFSlSeq]; ok {
+			break
+		}
 	}
-	return nil
+	// This should not happen!
+	if ms.firstFSlSeq > ms.lastFSlSeq {
+		panic("Removed last slice!")
+	}
 }
 
 // getFileForSeq returns the file where the message of the given sequence
 // is stored. If the file is opened, a task is triggered to close this
 // file when no longer used after a period of time.
 func (ms *FileMsgStore) getFileForSeq(seq uint64) (*os.File, error) {
+	if len(ms.files) == 0 {
+		return nil, fmt.Errorf("no file slice for store %q, message seq: %v", ms.subject, seq)
+	}
 	// Start with current slice
-	slice := ms.files[ms.currSliceIdx]
+	slice := ms.currSlice
 	if (slice.firstSeq <= seq) && (seq <= slice.lastSeq) {
 		return ms.file, nil
 	}
-	// Check all previous slices
-	for i := 0; i < ms.currSliceIdx; i++ {
-		slice = ms.files[i]
+	// We want to support possible gaps in file slice sequence, so
+	// no dichotomy, but simple iteration of the map, which in Go is
+	// random.
+	for _, slice := range ms.files {
 		if (slice.firstSeq <= seq) && (seq <= slice.lastSeq) {
 			file := slice.file
 			if file == nil {
@@ -1751,8 +1900,7 @@ func (ms *FileMsgStore) backgroundTasks() {
 	ms.timeTick = time.Now().UnixNano()
 
 	// Close unused file slices
-	for i := 0; i < ms.currSliceIdx; i++ {
-		slice := ms.files[i]
+	for _, slice := range ms.files {
 		if slice.file != nil && time.Duration(ms.timeTick-slice.lastUsed) >= time.Second {
 			slice.file.Close()
 			slice.file = nil
@@ -1870,8 +2018,7 @@ func (ms *FileMsgStore) Close() error {
 	var err error
 	// Close file slices that may have been opened due to
 	// message lookups.
-	for i := 0; i < ms.currSliceIdx; i++ {
-		slice := ms.files[i]
+	for _, slice := range ms.files {
 		if slice.file != nil {
 			if lerr := slice.file.Close(); lerr != nil && err == nil {
 				err = lerr
@@ -1879,8 +2026,10 @@ func (ms *FileMsgStore) Close() error {
 		}
 	}
 	// Flush and close current files
-	if lerr := ms.closeDataAndIndexFiles(); lerr != nil && err == nil {
-		err = lerr
+	if ms.currSlice != nil {
+		if lerr := ms.closeDataAndIndexFiles(); lerr != nil && err == nil {
+			err = lerr
+		}
 	}
 	if ms.tasksTimer != nil {
 		if ms.tasksTimer.Stop() {
@@ -1904,7 +2053,7 @@ func (ms *FileMsgStore) Close() error {
 }
 
 func (ms *FileMsgStore) flush() error {
-	if ms.bw != nil && ms.bw.buf.Buffered() > 0 {
+	if ms.bw != nil && ms.bw.buf != nil && ms.bw.buf.Buffered() > 0 {
 		if err := ms.bw.buf.Flush(); err != nil {
 			return err
 		}
@@ -2056,7 +2205,6 @@ func (ss *FileSubStore) recoverSubscriptions() error {
 				ss.maxSubID = newSub.ID
 			}
 			ss.numRecs++
-			break
 		case subRecUpdate:
 			modifiedSub := &spb.SubState{}
 			if err := modifiedSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
@@ -2080,7 +2228,6 @@ func (ss *FileSubStore) recoverSubscriptions() error {
 				ss.maxSubID = modifiedSub.ID
 			}
 			ss.numRecs++
-			break
 		case subRecDel:
 			delSub := spb.SubStateDelete{}
 			if err := delSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
@@ -2098,7 +2245,6 @@ func (ss *FileSubStore) recoverSubscriptions() error {
 			if delSub.ID > ss.maxSubID {
 				ss.maxSubID = delSub.ID
 			}
-			break
 		case subRecMsg:
 			updateSub := spb.SubStateUpdate{}
 			if err := updateSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
@@ -2114,7 +2260,6 @@ func (ss *FileSubStore) recoverSubscriptions() error {
 				sub.seqnos[seqno] = struct{}{}
 				ss.numRecs++
 			}
-			break
 		case subRecAck:
 			updateSub := spb.SubStateUpdate{}
 			if err := updateSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
@@ -2125,7 +2270,6 @@ func (ss *FileSubStore) recoverSubscriptions() error {
 				// A message is ack'ed
 				ss.delRecs++
 			}
-			break
 		default:
 			return fmt.Errorf("unexpected record type: %v", recType)
 		}

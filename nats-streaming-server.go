@@ -42,6 +42,10 @@ Streaming Server File Store Options:
     --file_crc_poly <int>            Polynomial used to make the table used for CRC-32 checksum
     --file_sync                      Enable File.Sync on Flush
     --file_cache                     Enable messages caching
+    --file_slice_max_msgs            Maximum number of messages per file slice (subject to channel limits)
+    --file_slice_max_bytes           Maximum file slice size - including index file (subject to channel limits)
+    --file_slice_max_age             Maximum file slice duration starting when the first message is stored (subject to channel limits)
+    --file_slice_archive_script      Path to script to use if you want to archive a file slice being removed
 
 Streaming Server TLS Options:
     -secure                          Use a TLS connection to the NATS server without
@@ -170,6 +174,10 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.Int64("file_crc_poly", stores.DefaultFileStoreOptions.CRCPolynomial, "FileStoreOpts.CRCPolynomial")
 	flag.Bool("file_sync", stores.DefaultFileStoreOptions.DoSync, "FileStoreOpts.DoSync")
 	flag.Bool("file_cache", stores.DefaultFileStoreOptions.CacheMsgs, "FileStoreOpts.CacheMsgs")
+	flag.Int("file_slice_max_msgs", stores.DefaultFileStoreOptions.SliceMaxMsgs, "FileStoreOpts.SliceMaxMsgs")
+	flag.Int64("file_slice_max_bytes", stores.DefaultFileStoreOptions.SliceMaxBytes, "FileStoreOpts.SliceMaxBytes")
+	flag.String("file_slice_max_age", "0s", "FileStoreOpts.SliceMaxAge")
+	flag.String("file_slice_archive_script", "", "FileStoreOpts.SliceArchiveScript")
 	flag.Int("io_batch_size", stand.DefaultIOBatchSize, "IOBatchSize")
 	flag.Int64("io_sleep_time", stand.DefaultIOSleepTime, "IOSleepTime")
 

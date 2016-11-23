@@ -611,7 +611,7 @@ func TestInvalidUnsubRequest(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Check that sub's has been removed.
-	subs = checkSubs(t, s, clientName, 0)
+	checkSubs(t, s, clientName, 0)
 }
 
 func TestDuplicateClientIDs(t *testing.T) {
