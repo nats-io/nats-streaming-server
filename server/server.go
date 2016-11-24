@@ -137,9 +137,76 @@ type ioProto struct {
 
 // ioProtoList is a list of ioProto records.
 type ioProtoList struct {
+	sync.RWMutex
 	head  *ioProto
 	tail  *ioProto
 	count int
+}
+
+// append adds a protocol to the end of the list.
+// This call is not thread-safe.
+func (l *ioProtoList) append(proto *ioProto) {
+	if l.tail == nil {
+		l.head = proto
+	} else {
+		l.tail.next = proto
+	}
+	l.tail = proto
+	l.count++
+}
+
+// protectedAppend is similar to ioProtoList.append except that it is thread-safe.
+func (l *ioProtoList) protectedAppend(proto *ioProto) {
+	l.Lock()
+	l.append(proto)
+	l.Unlock()
+}
+
+// popHead removes the head of the list and returns it, or nil if the list is
+// empty.
+// This call is not thread-safe.
+func (l *ioProtoList) popHead() *ioProto {
+	proto := l.head
+	if l.head != nil {
+		l.head = proto.next
+		l.count--
+		if l.count == 0 {
+			l.tail = nil
+		}
+		proto.next = nil
+	}
+	return proto
+}
+
+// getCount returns the number of elements in the list.
+// This call is not thread-safe.
+func (l *ioProtoList) getCount() int {
+	return l.count
+}
+
+// protectedGetCount is similar to ioProtoList.getCount except that it is thread-safe.
+func (l *ioProtoList) protectedGetCount() int {
+	l.RLock()
+	count := l.count
+	l.RUnlock()
+	return count
+}
+
+// isEmpty returns true if the list is empty, false otherwise.
+// This call is not thread-safe.
+func (l *ioProtoList) isEmpty() bool {
+	return l.count == 0
+}
+
+// protectedTransferTo transfers meta data of list `l` into `dst` and
+// clears `l` under lock.
+func (l *ioProtoList) protectedTransferTo(dst *ioProtoList) {
+	l.Lock()
+	dst.head = l.head
+	dst.tail = l.tail
+	dst.count = l.count
+	l.head, l.tail, l.count = nil, nil, 0
+	l.Unlock()
 }
 
 // ioProtoPool is a sync.Pool for ioProto objects.
@@ -196,8 +263,7 @@ type StanServer struct {
 	ioChannelQuit chan struct{}
 	ioChannelWG   sync.WaitGroup
 	ioSignal      chan struct{}
-	ioMutex       sync.RWMutex
-	ioList        ioProtoList
+	ioList        *ioProtoList
 
 	// Channel subscribers (to identify which subjects message belongs to)
 	connSub  *nats.Subscription
@@ -716,6 +782,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		dupCIDMap:         make(map[string]struct{}),
 		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
 		dupCIDTimeout:     defaultCheckDupCIDTimeout,
+		ioList:            &ioProtoList{},
 		ioSignal:          make(chan struct{}, 1),
 		ioChannelQuit:     make(chan struct{}, 2),
 		trace:             sOpts.Trace,
@@ -1891,10 +1958,6 @@ func (s *StanServer) startIOLoop() {
 func (s *StanServer) buildProtocolsList(ready *sync.WaitGroup) {
 	defer s.ioChannelWG.Done()
 
-	s.ioMutex.RLock()
-	list := &s.ioList
-	s.ioMutex.RUnlock()
-
 	ready.Done()
 	for {
 		select {
@@ -1903,15 +1966,7 @@ func (s *StanServer) buildProtocolsList(ready *sync.WaitGroup) {
 			iop.m = m
 			iop.pubmsg = nil
 			iop.next = nil
-			s.ioMutex.Lock()
-			if list.tail == nil {
-				list.head = iop
-			} else {
-				list.tail.next = iop
-			}
-			list.tail = iop
-			list.count++
-			s.ioMutex.Unlock()
+			s.ioList.protectedAppend(iop)
 			if len(s.ioSignal) == 0 {
 				s.ioSignal <- struct{}{}
 			}
@@ -1940,7 +1995,8 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 	sleepTime := s.opts.IOSleepTime
 	sleepDur := time.Duration(sleepTime) * time.Microsecond
 	max := 0
-	pubMsgs := ioProtoList{}
+	pubMsgs := &ioProtoList{}
+	list := &ioProtoList{}
 
 	ready.Done()
 	for {
@@ -1948,45 +2004,36 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 		case <-s.ioSignal:
 			// If allowed to sleep, to try gather more
 			if sleepTime > 0 {
-				s.ioMutex.RLock()
-				count := s.ioList.count
-				s.ioMutex.RUnlock()
+				count := s.ioList.protectedGetCount()
 				if count > 0 && count < batchSize {
 					time.Sleep(sleepDur)
 				}
 			}
-			// Take the list now.
-			s.ioMutex.Lock()
-			// Make a copy of the list object (head/tail/count)
-			list := s.ioList
-			// Reset the server's list so that buildProtocolsList start with
-			// an empty list
-			s.ioList.head, s.ioList.tail, s.ioList.count = nil, nil, 0
-			s.ioMutex.Unlock()
+			// Transfer the global list meta data into this local list,
+			// and clear the global list at the same time.
+			s.ioList.protectedTransferTo(list)
+
 			// It is possible that current signal was processed by
 			// previous iteration. So if count is 0, we are done.
-			if list.count == 0 {
+			count := list.getCount()
+			if count == 0 {
 				continue
 			}
 
 			// Note that the count may be higher than batchSize, so we
 			// will limit processing up to batchSize and repeat until
 			// list is empty.
-			for list.count > 0 {
-				limit := list.count
-				if batchSize > 0 && limit > batchSize {
-					limit = batchSize
+			for count > 0 {
+				if batchSize > 0 && count > batchSize {
+					count = batchSize
 				}
 				// Keep track of max number of messages in a batch
-				if limit > max {
-					max = limit
+				if count > max {
+					max = count
 					atomic.StoreInt64(&(s.ioChannelStatsMaxBatchSize), int64(max))
 				}
-				for i := 0; i < limit; i++ {
-					proto := list.head
-					list.head = proto.next
-					list.count--
-					proto.next = nil
+				for i := 0; i < count; i++ {
+					proto := list.popHead()
 
 					// Process client published messages and add them to the
 					// pubMsgs list.
@@ -1995,18 +2042,12 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 						if iopm != nil {
 							proto.pubmsg = iopm
 							storesToFlush[cs] = struct{}{}
-							if pubMsgs.tail == nil {
-								pubMsgs.head = proto
-							} else {
-								pubMsgs.tail.next = proto
-							}
-							pubMsgs.tail = proto
-							pubMsgs.count++
+							pubMsgs.append(proto)
 						}
 					} else {
 						// Process any pubMsg that we got up to that point.
-						if pubMsgs.count > 0 {
-							s.processPubMsgs(&pubMsgs, storesToFlush)
+						if !pubMsgs.isEmpty() {
+							s.processPubMsgs(pubMsgs, storesToFlush)
 						}
 						switch proto.m.Sub {
 						case s.connSub:
@@ -2033,9 +2074,11 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 					}
 				}
 				// If there are pubMsgs, process them now.
-				if pubMsgs.count > 0 {
-					s.processPubMsgs(&pubMsgs, storesToFlush)
+				if !pubMsgs.isEmpty() {
+					s.processPubMsgs(pubMsgs, storesToFlush)
 				}
+				// Refresh count
+				count = list.getCount()
 			}
 		case <-s.ioChannelQuit:
 			return
@@ -2061,14 +2104,12 @@ func (s *StanServer) processPubMsgs(list *ioProtoList, storesToFlush map[*stores
 	}
 
 	// Ack our messages back to the publisher
-	for i := 0; i < list.count; i++ {
-		proto := list.head
-		list.head = proto.next
+	for !list.isEmpty() {
+		proto := list.popHead()
 		s.ackPublisher(proto.m, proto.pubmsg)
 		// Put back into pool
 		ioProtoPool.Put(proto)
 	}
-	list.head, list.tail, list.count = nil, nil, 0
 }
 
 // assignAndStore will assign a sequence ID and then store the message.
