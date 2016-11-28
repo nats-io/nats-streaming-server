@@ -3707,10 +3707,13 @@ func TestIOChannel(t *testing.T) {
 			n, _, _ := s.store.MsgsState("foo")
 			return "Messages", n
 		})
-		// Check that the server's ioChannel did not grow bigger than expected
-		ioChannelSize := int(atomic.LoadInt64(&(s.ioChannelStatsMaxBatchSize)))
-		if ioChannelSize > opts.IOBatchSize {
-			stackFatalf(t, "Expected max channel size to be smaller than %v, got %v", opts.IOBatchSize, ioChannelSize)
+		// For IOBatchSize > 0, check that the actual limit was never crossed.
+		if opts.IOBatchSize > 0 {
+			// Check that the server's ioChannel did not grow bigger than expected
+			ioChannelSize := int(atomic.LoadInt64(&(s.ioChannelStatsMaxBatchSize)))
+			if ioChannelSize > opts.IOBatchSize {
+				stackFatalf(t, "Expected max channel size to be smaller than %v, got %v", opts.IOBatchSize, ioChannelSize)
+			}
 		}
 	}
 
@@ -4876,5 +4879,112 @@ func TestPerChannelLimits(t *testing.T) {
 	}
 	for i := 0; i < 2; i++ {
 		f(i)
+	}
+}
+
+func TestProtocolOrder(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Unsubscribe should not be processed before Subscribe
+	for i := 0; i < 100; i++ {
+		sub, err := sc.Subscribe("foo", nil)
+		if err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		if err := sub.Unsubscribe(); err != nil {
+			t.Fatalf("Unexpected error on unsubscribe: %v", err)
+		}
+	}
+
+	// Mix pub and subscribe calls
+	ch := make(chan bool)
+	errCh := make(chan error)
+	startSubAt := 50
+	var sub stan.Subscription
+	var err error
+	for i := 1; i <= 100; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+		if i == startSubAt {
+			sub, err = sc.Subscribe("foo", func(m *stan.Msg) {
+				if m.Sequence == uint64(startSubAt)+1 {
+					ch <- true
+				} else if len(errCh) == 0 {
+					errCh <- fmt.Errorf("Received message %v instead of %v", m.Sequence, startSubAt+1)
+				}
+			})
+			if err != nil {
+				t.Fatalf("Unexpected error on subscribe: %v", err)
+			}
+		}
+	}
+	// Wait confirmation of received message
+	select {
+	case <-ch:
+	case e := <-errCh:
+		t.Fatal(e)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timed-out waiting for messages")
+	}
+	sub.Unsubscribe()
+
+	// Acks should be processed before Connection close
+	for i := 0; i < 100; i++ {
+		rcv := int32(0)
+		sc2, err := stan.Connect(clusterName, "otherclient")
+		if err != nil {
+			t.Fatalf("Expected to connect correctly, got err %v", err)
+		}
+		// Create durable and close connection in cb when
+		// receiving 10th message.
+		if _, err := sc2.Subscribe("foo", func(m *stan.Msg) {
+			if atomic.AddInt32(&rcv, 1) == 10 {
+				sc2.Close()
+				ch <- true
+			}
+		}, stan.DurableName("dur"), stan.DeliverAllAvailable()); err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		if err := Wait(ch); err != nil {
+			t.Fatal("Did not get our messages")
+		}
+		// Connection is closed at this point. Recreate one
+		sc2, err = stan.Connect(clusterName, "otherclient")
+		if err != nil {
+			t.Fatalf("Expected to connect correctly, got err %v", err)
+		}
+		// Recreate durable and first message should be 10.
+		first := true
+		sub, err = sc2.Subscribe("foo", func(m *stan.Msg) {
+			if first {
+				if m.Redelivered && m.Sequence == 10 {
+					ch <- true
+				} else {
+					errCh <- fmt.Errorf("Unexpected message: %v", m)
+				}
+				first = false
+			}
+		}, stan.DurableName("dur"), stan.DeliverAllAvailable(),
+			stan.MaxInflight(1), stan.SetManualAckMode())
+		if err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		// Wait for ok or error
+		select {
+		case <-ch:
+		case e := <-errCh:
+			t.Fatalf("Error: %v", e)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timed-out waiting for messages")
+		}
+		if err := sub.Unsubscribe(); err != nil {
+			t.Fatalf("Unexpected error on unsubscribe: %v", err)
+		}
+		sc2.Close()
 	}
 }
