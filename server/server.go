@@ -36,6 +36,7 @@ const (
 	DefaultDiscoverPrefix = "_STAN.discover"
 	DefaultPubPrefix      = "_STAN.pub"
 	DefaultSubPrefix      = "_STAN.sub"
+	DefaultSubClosePrefix = "_STAN.subclose"
 	DefaultUnSubPrefix    = "_STAN.unsub"
 	DefaultClosePrefix    = "_STAN.close"
 	DefaultStoreType      = stores.TypeMemory
@@ -266,11 +267,12 @@ type StanServer struct {
 	ioList        *ioProtoList
 
 	// Channel subscribers (to identify which subjects message belongs to)
-	connSub  *nats.Subscription
-	pubSub   *nats.Subscription
-	subSub   *nats.Subscription
-	unsubSub *nats.Subscription
-	closeSub *nats.Subscription
+	connSub     *nats.Subscription
+	pubSub      *nats.Subscription
+	subSub      *nats.Subscription
+	unsubSub    *nats.Subscription
+	subCloseSub *nats.Subscription
+	closeSub    *nats.Subscription
 
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
@@ -837,6 +839,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	// Create clientStore
 	s.clients = &clientStore{store: s.store}
 
+	callStoreInit := false
 	if recoveredState != nil {
 		// Copy content
 		s.info = *recoveredState.Info
@@ -844,6 +847,14 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		if s.opts.ID != s.info.ClusterID {
 			panic(fmt.Errorf("Cluster ID %q does not match recovered value of %q",
 				s.opts.ID, s.info.ClusterID))
+		}
+		// Check to see if SubClose subject is present or not.
+		// If not, it means we recovered from an older server, so
+		// need to update.
+		if s.info.SubClose == "" {
+			s.info.SubClose = fmt.Sprintf("%s.%s", DefaultSubClosePrefix, nuid.Next())
+			// Update the store with the server info
+			callStoreInit = true
 		}
 
 		// Restore clients state
@@ -858,9 +869,13 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		s.info.Discovery = fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.info.ClusterID)
 		s.info.Publish = fmt.Sprintf("%s.%s", DefaultPubPrefix, nuid.Next())
 		s.info.Subscribe = fmt.Sprintf("%s.%s", DefaultSubPrefix, nuid.Next())
+		s.info.SubClose = fmt.Sprintf("%s.%s", DefaultSubClosePrefix, nuid.Next())
 		s.info.Unsubscribe = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
 		s.info.Close = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
 
+		callStoreInit = true
+	}
+	if callStoreInit {
 		// Initialize the store with the server info
 		if err := s.store.Init(&s.info); err != nil {
 			panic(fmt.Errorf("Unable to initialize the store: %v", err))
@@ -1287,6 +1302,11 @@ func (s *StanServer) initSubscriptions() {
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to unsubscribe request subject, %v\n", err))
 	}
+	// Receive subscription close requests from clients.
+	s.subCloseSub, err = s.nc.ChanSubscribe(s.info.SubClose, s.ioChannel)
+	if err != nil {
+		panic(fmt.Sprintf("Could not subscribe to subscription close request subject, %v\n", err))
+	}
 	// Receive close requests from clients.
 	s.closeSub, err = s.nc.ChanSubscribe(s.info.Close, s.ioChannel)
 	if err != nil {
@@ -1380,10 +1400,11 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 
 func (s *StanServer) finishConnectRequest(sc *stores.Client, req *pb.ConnectRequest, replyInbox string) {
 	cr := &pb.ConnectResponse{
-		PubPrefix:     s.info.Publish,
-		SubRequests:   s.info.Subscribe,
-		UnsubRequests: s.info.Unsubscribe,
-		CloseRequests: s.info.Close,
+		PubPrefix:        s.info.Publish,
+		SubRequests:      s.info.Subscribe,
+		UnsubRequests:    s.info.Unsubscribe,
+		SubCloseRequests: s.info.SubClose,
+		CloseRequests:    s.info.Close,
 	}
 	b, _ := cr.Marshal()
 	s.nc.Publish(replyInbox, b)
@@ -2056,6 +2077,8 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 							s.processSubscriptionRequest(proto.m)
 						case s.unsubSub:
 							s.processUnSubscribeRequest(proto.m)
+						case s.subCloseSub:
+							s.processSubscriptionCloseRequest(proto.m)
 						case s.closeSub:
 							s.processCloseRequest(proto.m)
 						default:
@@ -2199,11 +2222,31 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidUnsubReq)
 		return
 	}
+	s.processCloseOrUnSubscribeRequest(false, req.ClientID, req.Subject, req.Inbox, m)
+}
 
-	cs := s.store.LookupChannel(req.Subject)
+// processSubCloseRequest will process a subscription close request.
+func (s *StanServer) processSubscriptionCloseRequest(m *nats.Msg) {
+	req := &pb.UnsubscribeRequest{}
+	err := req.Unmarshal(m.Data)
+	if err != nil {
+		Errorf("STAN: Invalid unsub request from %s.", m.Subject)
+		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidUnsubReq)
+		return
+	}
+	s.processCloseOrUnSubscribeRequest(true, req.ClientID, req.Subject, req.Inbox, m)
+}
+
+// processCloseOrUnSubscribeRequest will process a close or unsubscribe request.
+func (s *StanServer) processCloseOrUnSubscribeRequest(doClose bool, clientID, subject, inbox string, m *nats.Msg) {
+	action := "unsub"
+	if doClose {
+		action = "sub close"
+	}
+	cs := s.store.LookupChannel(subject)
 	if cs == nil {
-		Errorf("STAN: [Client:%s] unsub request missing subject %s.",
-			req.ClientID, req.Subject)
+		Errorf("STAN: [Client:%s] %s request missing subject %s.",
+			clientID, action, subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
 	}
@@ -2211,28 +2254,35 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 	// Get the subStore
 	ss := cs.UserData.(*subStore)
 
-	sub := ss.LookupByAckInbox(req.Inbox)
+	sub := ss.LookupByAckInbox(inbox)
 	if sub == nil {
-		Errorf("STAN: [Client:%s] unsub request for missing inbox %s.",
-			req.ClientID, req.Inbox)
+		Errorf("STAN: [Client:%s] %s request for missing inbox %s.",
+			clientID, action, inbox)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
 	}
 
 	// Remove from Client
-	if !s.clients.RemoveSub(req.ClientID, sub) {
-		Errorf("STAN: [Client:%s] unsub request for missing client", req.ClientID)
+	if !s.clients.RemoveSub(clientID, sub) {
+		Errorf("STAN: [Client:%s] %s request for missing client", clientID, action)
 		s.sendSubscriptionResponseErr(m.Reply, ErrUnknownClient)
 		return
 	}
 
-	// Remove the subscription, force removal if durable.
-	ss.Remove(cs, sub, true)
+	// Remove the subscription
+	unsubscribe := !doClose
+	ss.Remove(cs, sub, unsubscribe)
 
-	Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", req.ClientID, sub.subject)
+	if s.debug {
+		if doClose {
+			Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", clientID, subject)
+		} else {
+			Debugf("STAN: [Client:%s] Closing subscription subject=%s.", clientID, subject)
+		}
+	}
 
 	// Create a non-error response
-	resp := &pb.SubscriptionResponse{AckInbox: req.Inbox}
+	resp := &pb.SubscriptionResponse{AckInbox: inbox}
 	b, _ := resp.Marshal()
 	s.ncs.Publish(m.Reply, b)
 }

@@ -41,11 +41,12 @@ message SubStateUpdate {
 // ServerInfo contains basic information regarding the Server
 message ServerInfo {
   string ClusterID   = 1; // Cluster ID
-	string Discovery   = 2; // Subject server receives connect requests on.
-	string Publish     = 3; // Subject prefix server receives published messages on.
-	string Subscribe   = 4; // Subject server receives subscription requests on.
-	string Unsubscribe = 5; // Subject server receives unsubscribe requests on.
-	string Close       = 6; // Subject server receives close requests on.
+  string Discovery   = 2; // Subject server receives connect requests on.
+  string Publish     = 3; // Subject prefix server receives published messages on.
+  string Subscribe   = 4; // Subject server receives subscription requests on.
+  string Unsubscribe = 5; // Subject server receives unsubscribe requests on.
+  string Close       = 6; // Subject server receives close requests on.
+  string SubClose    = 7; // Subject server receives subscription close requests on.
 }
 
 // ClientInfo contains information related to a Client
