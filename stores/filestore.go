@@ -9,10 +9,13 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"strings"
 
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
@@ -24,7 +27,7 @@ const (
 	fileVersion = 1
 
 	// Number of files for a MsgStore on a given channel.
-	numFiles = 5
+	//numFiles = 5
 
 	// Name of the subscriptions file.
 	subsFileName = "subs.dat"
@@ -311,6 +314,7 @@ type fileSlice struct {
 	msgsSize  uint64
 	file      *os.File // Used during lookups.
 	lastUsed  int64
+	lastWrite int64
 }
 
 // msgRecord contains data regarding a message that the FileMsgStore needs to
@@ -330,10 +334,12 @@ type FileMsgStore struct {
 	idxFile      *os.File
 	bw           *bufferedWriter
 	writer       io.Writer // this is `bw.buf` or `file` depending if buffer writer is used or not
-	files        [numFiles]*fileSlice
+	files        []*fileSlice
 	currSliceIdx int
 	slCountLim   int
 	slSizeLim    uint64
+	slMinLimit   int
+	slArchScript string
 	fstore       *FileStore // pointers to file store object
 	cache        bool       // shortcut to fstore.opts.CacheMsgs
 	msgs         map[uint64]*msgRecord
@@ -1061,14 +1067,6 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 	var err error
 	var useIdxFile bool
 
-	// Create an instance and initialize
-	ms := &FileMsgStore{
-		fstore:       fs,
-		msgs:         make(map[uint64]*msgRecord, 64),
-		wOffset:      int64(4), // The very first record starts after the file version record
-		bufferedMsgs: make([]uint64, 0, 1),
-		cache:        fs.opts.CacheMsgs,
-	}
 	// Defaults to the global limits
 	msgStoreLimits := fs.limits.MsgStoreLimits
 	// See if there is an override
@@ -1077,23 +1075,39 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		// Use this channel specific limits
 		msgStoreLimits = thisChannelLimits.MsgStoreLimits
 	}
+
+	// Create an instance and initialize
+	ms := &FileMsgStore{
+		fstore:       fs,
+		msgs:         make(map[uint64]*msgRecord, 64),
+		wOffset:      int64(4), // The very first record starts after the file version record
+		bufferedMsgs: make([]uint64, 0, 1),
+		cache:        fs.opts.CacheMsgs,
+		files:        make([]*fileSlice, msgStoreLimits.NumberOfFiles, msgStoreLimits.NumberOfFiles),
+	}
+
 	ms.init(channel, &msgStoreLimits)
 
-	ms.slCountLim = ms.limits.MaxMsgs / (numFiles - 1)
+	ms.slCountLim = ms.limits.MaxMsgs / (ms.limits.NumberOfFiles - 1)
 	if ms.slCountLim < 1 {
 		ms.slCountLim = 1
 	}
-	ms.slSizeLim = uint64(ms.limits.MaxBytes / (numFiles - 1))
+	ms.slSizeLim = uint64(ms.limits.MaxBytes / int64(ms.limits.NumberOfFiles-1))
 	if ms.slSizeLim < 1 {
 		ms.slSizeLim = 1
 	}
+	ms.slMinLimit = ms.limits.RotateEveryMins
+	if ms.slMinLimit < 1 {
+		ms.slMinLimit = 1
+	}
+	ms.slArchScript = ms.limits.ArchiveScript
 
 	maxBufSize := fs.opts.BufferSize
 	if maxBufSize > 0 {
 		ms.bw = newBufferWriter(msgBufMinShrinkSize, maxBufSize)
 	}
 	done := false
-	for i := 0; err == nil && i < numFiles; i++ {
+	for i := 0; err == nil && i < ms.limits.NumberOfFiles; i++ {
 		// Fully qualified file name.
 		fileName := filepath.Join(channelDirName, fmt.Sprintf("msgs.%d.dat", (i+1)))
 		idxFName := filepath.Join(channelDirName, fmt.Sprintf("msgs.%d.idx", (i+1)))
@@ -1406,11 +1420,16 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 
 	maxMsgs := ms.limits.MaxMsgs
 	maxBytes := uint64(ms.limits.MaxBytes)
-	if maxMsgs > 0 || maxBytes > 0 {
+
+	doRotate := ms.slMinLimit > 0 &&
+		time.Unix(0, fslice.lastWrite).Minute()/ms.slMinLimit != time.Unix(0, ms.timeTick).Minute()/ms.slMinLimit
+
+	if maxMsgs > 0 || maxBytes > 0 || doRotate {
 		// Check if we need to move to next file slice
-		if (ms.currSliceIdx < numFiles-1) &&
+		if (ms.currSliceIdx < ms.limits.NumberOfFiles-1) &&
 			((maxMsgs > 0 && fslice.msgsCount >= ms.slCountLim) ||
-				(maxBytes > 0 && fslice.msgsSize >= ms.slSizeLim)) {
+				(maxBytes > 0 && fslice.msgsSize >= ms.slSizeLim) ||
+				doRotate) {
 
 			// Don't change store variable until success...
 			nextSlice := ms.currSliceIdx + 1
@@ -1430,6 +1449,46 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 			ms.wOffset = int64(4)
 
 			fslice = ms.files[ms.currSliceIdx]
+		} else if doRotate {
+			// archive the first one off before...
+			datFile, err := ioutil.TempFile(".", "dat")
+			if err != nil {
+				return 0, err
+			}
+			idxFile, err := ioutil.TempFile(".", "idx")
+			if err != nil {
+				return 0, err
+			}
+
+			if err := os.Rename(ms.files[0].fileName, datFile.Name()); err != nil {
+				return 0, err
+			}
+			if err := os.Rename(ms.files[0].idxFName, idxFile.Name()); err != nil {
+				return 0, err
+			}
+
+			datParts := strings.Split(ms.files[0].fileName, "/")
+			subject := datParts[len(datParts)-2]
+
+			// time-based rotation, is there an archive script?
+			if len(ms.slArchScript) > 0 {
+				cmdOut, err := exec.Command("sh", "-c", fmt.Sprintf("%s %s %s %s", ms.slArchScript, subject, datFile.Name(), idxFile.Name())).Output()
+
+				if err == nil {
+					Noticef("STAN: Archiving: %s --> %s, %s", subject, datFile.Name(), idxFile.Name())
+					Noticef("STAN: Output:    %s", string(cmdOut))
+				} else {
+					Noticef("STAN: Archiving --> error: %s", err)
+				}
+			}
+
+			// now remove and shift
+			if err := ms.removeAndShiftFiles(); err != nil {
+				return 0, err
+			}
+			// Decrement the current slice. It will be bumped if needed
+			// before storing the next message.
+			ms.currSliceIdx--
 		}
 	}
 
@@ -1519,6 +1578,8 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 		fslice.firstSeq = seq
 	}
 	fslice.lastSeq = seq
+
+	fslice.lastWrite = ms.timeTick
 
 	if maxMsgs > 0 || maxBytes > 0 {
 		// Enfore limits and update file slice if needed.
