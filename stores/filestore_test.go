@@ -3707,3 +3707,61 @@ func TestFSSliceLimitsBasedOnChannelLimits(t *testing.T) {
 		t.Fatalf("Expected slice limit age to be 5sec, got %v", time.Duration(slAge))
 	}
 }
+
+func TestFSRecoverSlicesOutOfOrder(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// Make a slice hold only 1 message
+	fs := createDefaultFileStore(t, SliceConfig(1, 0, 0, ""))
+	defer fs.Close()
+
+	msg := []byte("msg")
+	total := 200
+	// Create slices
+	for i := 0; i < total; i++ {
+		storeMsg(t, fs, "foo", msg)
+	}
+
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	firstFileSeq, lastFileSeq := ms.firstFSlSeq, ms.lastFSlSeq
+	first, last := ms.first, ms.last
+	wOffset := ms.wOffset
+	ms.RUnlock()
+
+	if first != 1 || last != uint64(total) {
+		t.Fatalf("Expected first and last to be (1,%v), got (%v,%v)", total, first, last)
+	}
+	if firstFileSeq != 1 || lastFileSeq != total {
+		t.Fatalf("Expected first and last file sequence to be (1,%v), got (%v,%v)", total, firstFileSeq, lastFileSeq)
+	}
+
+	fs.Close()
+
+	fs, _ = openDefaultFileStore(t, SliceConfig(1, 0, 0, ""))
+	defer fs.Close()
+
+	cs = fs.LookupChannel("foo")
+	ms = cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	firstFileSeq, lastFileSeq = ms.firstFSlSeq, ms.lastFSlSeq
+	first, last = ms.first, ms.last
+	currSlice := ms.currSlice
+	recoveredWOffset := ms.wOffset
+	ms.RUnlock()
+
+	if first != 1 || last != uint64(total) {
+		t.Fatalf("Expected first and last to be (1,%v), got (%v,%v)", total, first, last)
+	}
+	if firstFileSeq != 1 || lastFileSeq != total {
+		t.Fatalf("Expected first and last file sequence to be (1,%v), got (%v,%v)", total, firstFileSeq, lastFileSeq)
+	}
+	if recoveredWOffset != wOffset {
+		t.Fatalf("Write offset should be %v, got %v", wOffset, recoveredWOffset)
+	}
+	if currSlice == nil || currSlice.firstSeq != uint64(total) {
+		t.Fatalf("Unexpected current slice: %v", currSlice)
+	}
+}

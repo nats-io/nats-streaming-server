@@ -1167,6 +1167,9 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 			// one is the last, so open the corresponding data and index files.
 			ms.currSlice = ms.files[ms.lastFSlSeq]
 			err = ms.openDataAndIndexFiles(ms.currSlice.fileName, ms.currSlice.idxFName)
+			if err == nil {
+				ms.wOffset, err = ms.file.Seek(0, 2)
+			}
 		}
 		if err == nil {
 			// Apply message limits (no need to check if there are limits
@@ -1307,10 +1310,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 			if fslice.firstWrite == 0 {
 				fslice.firstWrite = mrec.timestamp
 			}
-
-			if ms.first == 0 {
-				ms.first = seq
-			}
 		}
 	} else {
 		// Get these from the file store object
@@ -1350,11 +1349,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 				fslice.firstWrite = msg.Timestamp
 			}
 
-			if ms.first == 0 {
-				ms.first = msg.Sequence
-				ms.firstMsg = msg
-			}
-			ms.lastMsg = msg
 			mrec := &msgRecord{offset: offset, timestamp: msg.Timestamp, msgSize: uint32(msgSize)}
 			ms.msgs[msg.Sequence] = mrec
 			if cache {
@@ -1390,16 +1384,15 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 
 	// If no error and slice is not empty...
 	if err == nil && fslice.msgsCount > 0 {
-		ms.last = fslice.lastSeq
+		if ms.first == 0 || ms.first > fslice.firstSeq {
+			ms.first = fslice.firstSeq
+		}
+		if ms.last < fslice.lastSeq {
+			ms.last = fslice.lastSeq
+		}
 		ms.totalCount += fslice.msgsCount
 		ms.totalBytes += fslice.msgsSize
 
-		if useIdxFile {
-			// Take the offset of the end of file
-			ms.wOffset, err = ms.file.Seek(0, 2)
-		} else {
-			ms.wOffset = offset
-		}
 		// File slices may be recovered in any order. When all slices
 		// are recovered the caller will open the last file slice. So
 		// close the files here since we don't know if this is going
