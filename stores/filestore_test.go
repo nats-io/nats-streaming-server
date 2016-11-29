@@ -3044,10 +3044,29 @@ func TestFSFirstEmptySliceRemovedOnCreateNewSlice(t *testing.T) {
 	if ms.currSlice != nil && ms.currSlice.msgsCount == ms.currSlice.rmCount {
 		empty = true
 	}
+	firstWrite := ms.currSlice.firstWrite
 	ms.RUnlock()
 	if !empty || numFiles != 1 || firstFileSeq != 1 {
 		t.Fatalf("Expected slice to be empty, numFiles and firstFileSeq to be 1, got %v, %v and %v",
 			empty, numFiles, firstFileSeq)
+	}
+
+	// Since slice time check uses ms.timeTick, ensure that we wait long enough.
+	timeout = time.Now().Add(5 * time.Second)
+	ok = false
+	for time.Now().Before(timeout) {
+		ms.RLock()
+		timeTick := ms.timeTick
+		ms.RUnlock()
+
+		if timeTick-firstWrite > int64(time.Second) {
+			ok = true
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatalf("Waited too long for timeTick to update")
 	}
 
 	// Send another message...
