@@ -1635,6 +1635,10 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	if ms.first == 0 {
 		ms.first = 1
 		ms.firstMsg = m
+	} else if ms.first == seq {
+		// Happens after all messages expired and this is the
+		// first new message.
+		ms.firstMsg = m
 	}
 	ms.last = seq
 	ms.lastMsg = m
@@ -1785,6 +1789,10 @@ func (ms *FileMsgStore) removeFirstMsg() {
 	ms.first++
 	// Invalidate ms.firstMsg, it will be looked-up on demand.
 	ms.firstMsg = nil
+	// Invalidate ms.lastMsg if it was the last message being removed.
+	if ms.first > ms.last {
+		ms.lastMsg = nil
+	}
 	// Is file slice is "empty" and not the last one
 	if slice.msgsCount == slice.rmCount && len(ms.files) > 1 {
 		ms.removeFirstSlice()

@@ -503,7 +503,7 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 	defer fs.Close()
 
 	// Store some messages in various channels
-	chanCount := 1
+	chanCount := 5
 	msgCount := 50
 	subsCount := 3
 	payload := []byte("hello")
@@ -563,11 +563,11 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
-	if recMsg != maxMsgsAfterRecovery {
-		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", maxMsgsAfterRecovery, recMsg)
+	if recMsg != chanCount*maxMsgsAfterRecovery {
+		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", chanCount*maxMsgsAfterRecovery, recMsg)
 	}
-	if recBytes != expectedMsgBytesAfterRecovery {
-		t.Fatalf("Unexpected count of recovered bytes: Expected %v, got %v", expectedMsgBytesAfterRecovery, recBytes)
+	if recBytes != uint64(chanCount)*expectedMsgBytesAfterRecovery {
+		t.Fatalf("Unexpected count of recovered bytes: Expected %v, got %v", uint64(chanCount)*expectedMsgBytesAfterRecovery, recBytes)
 	}
 
 	// Now check that any new addition would be rejected
@@ -3811,5 +3811,69 @@ func TestFSRecoverSlicesOutOfOrder(t *testing.T) {
 	}
 	if currSlice == nil || currSlice.firstSeq != uint64(total) {
 		t.Fatalf("Unexpected current slice: %v", currSlice)
+	}
+}
+
+func TestFirstAndLastMsg(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	limit := testDefaultStoreLimits
+	limit.MaxAge = time.Second
+	fs, _, err := newFileStore(t, defaultDataStore, &limit)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	msg := []byte("msg")
+	storeMsg(t, fs, "foo", msg)
+	storeMsg(t, fs, "foo", msg)
+
+	cs := fs.LookupChannel("foo")
+	if cs.Msgs.FirstMsg().Sequence != 1 {
+		t.Fatalf("Unexpected first message: %v", cs.Msgs.FirstMsg())
+	}
+	if cs.Msgs.LastMsg().Sequence != 2 {
+		t.Fatalf("Unexpected last message: %v", cs.Msgs.LastMsg())
+	}
+	// Wait for all messages to expire
+	timeout := time.Now().Add(3 * time.Second)
+	ok := false
+	for time.Now().Before(timeout) {
+		if n, _, _ := cs.Msgs.State(); n == 0 {
+			ok = true
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatal("Timed-out waiting for messages to expire")
+	}
+	ms := cs.Msgs.(*FileMsgStore)
+	// By-pass the FirstMsg() and LastMsg() API to make sure that
+	// we don't update based on lookup
+	ms.RLock()
+	firstMsg := ms.firstMsg
+	lastMsg := ms.lastMsg
+	ms.RUnlock()
+	if firstMsg != nil {
+		t.Fatalf("Unexpected first message: %v", firstMsg)
+	}
+	if lastMsg != nil {
+		t.Fatalf("Unexpected last message: %v", lastMsg)
+	}
+	// Store two new messages and check first/last updated correctly
+	storeMsg(t, fs, "foo", msg)
+	storeMsg(t, fs, "foo", msg)
+	ms.RLock()
+	firstMsg = ms.firstMsg
+	lastMsg = ms.lastMsg
+	ms.RUnlock()
+	if firstMsg == nil || firstMsg.Sequence != 3 {
+		t.Fatalf("Unexpected first message: %v", firstMsg)
+	}
+	if lastMsg == nil || lastMsg.Sequence != 4 {
+		t.Fatalf("Unexpected last message: %v", lastMsg)
 	}
 }
