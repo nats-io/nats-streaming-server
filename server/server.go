@@ -811,6 +811,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	var err error
 	var recoveredState *stores.RecoveredState
 	var recoveredSubs []*subState
+	var store stores.Store
 
 	// Ensure store type option is in upper-case
 	sOpts.StoreType = strings.ToUpper(sOpts.StoreType)
@@ -823,16 +824,25 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 			err = fmt.Errorf("for %v stores, root directory must be specified", stores.TypeFile)
 			break
 		}
-		s.store, recoveredState, err = stores.NewFileStore(sOpts.FilestoreDir, limits,
+		store, recoveredState, err = stores.NewFileStore(sOpts.FilestoreDir, limits,
 			stores.AllOptions(&sOpts.FileStoreOpts))
 	case stores.TypeMemory:
-		s.store, err = stores.NewMemoryStore(limits)
+		store, err = stores.NewMemoryStore(limits)
 	default:
 		err = fmt.Errorf("unsupported store type: %v", sOpts.StoreType)
 	}
 	if err != nil {
-		panic(fmt.Sprintf("%v", err))
+		panic(err)
 	}
+	// StanServer.store (s.store here) is of type stores.Store, which is an
+	// interace. If we assign s.store in the call of the constructor and there
+	// is an error, although the call returns "nil" for the store, we can no
+	// longer have a test such as "if s.store != nil" (as we do in shutdown).
+	// This is because the constructors return a store implementention.
+	// We would need to use reflection such as reflect.ValueOf(s.store).IsNil().
+	// So to not do that, we simply delay the setting of s.store when we know
+	// that it was successful.
+	s.store = store
 
 	// Create clientStore
 	s.clients = &clientStore{store: s.store}

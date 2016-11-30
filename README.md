@@ -75,6 +75,10 @@ Streaming Server File Store Options:
     --file_crc_poly <int>            Polynomial used to make the table used for CRC-32 checksum
     --file_sync                      Enable File.Sync on Flush
     --file_cache                     Enable messages caching
+    --file_slice_max_msgs            Maximum number of messages per file slice (subject to channel limits)
+    --file_slice_max_bytes           Maximum file slice size - including index file (subject to channel limits)
+    --file_slice_max_age             Maximum file slice duration starting when the first message is stored (subject to channel limits)
+    --file_slice_archive_script      Path to script to use if you want to archive a file slice being removed
 
 Streaming Server TLS Options:
     -secure                          Use a TLS connection to the NATS server without
@@ -251,6 +255,34 @@ file: {
     # on disk reads (improved performance at the expense of memory).
     # Can be cache, do_cache, cache_msgs
     cache: true
+
+    # Define the file slice maximum number of messages. If set to 0 and a
+    # channel count limit is set, then the server will set a slice count
+    # limit automatically.
+    # Can be slice_max_msgs, slice_max_count, slice_msgs, slice_count
+    slice_max_msgs: 10000
+
+    # Define the file slice maximum size (including the size of index file).
+    # If set to 0 and a channel size limit is set, then the server will
+    # set a slice bytes limit automatically.
+    # Expressed in bytes.
+    # Can be slice_max_bytes, slice_max_size, slice_bytes, slice_size
+    slice_max_bytes: 67108864
+
+    # Define the period of time covered by a file slice, starting at when
+    # the first message is stored. If set to 0 and a channel age limit
+    # is set, then the server will set a slice age limit automatically.
+    # Expressed as a duration, such as "24h", etc..
+    # Can be  slice_max_age, slice_age, slice_max_time, slice_time_limit
+    slice_max_age: "24h"
+
+    # Define the location and name of a script to be invoked when the
+    # server discards a file slice due to limits. The script is invoked
+    # with the name of the channel, the name of data and index files.
+    # It is the responsability of the script to then remove the unused
+    # files.
+    # Can be slice_archive_script, slice_archive, slice_script
+    slice_archive_script: "/home/nats-streaming/archive/script.sh"
 }
 ```
 
@@ -426,6 +458,37 @@ The number of sub-directories, which again correspond to channels, can be limite
 On a given channel, the number of subscriptions can also be limited with the configuration parameter `-max_subs`. A client that tries to create a subscription on a given channel (subject) for which the limit is reached will receive an error.
 
 Finally, the number of stored messages for a given channel can also be limited with the parameter `-max_msgs` and/or `-max_bytes`. However, for messages, the client does not get an error when the limit is reached. The oldest messages are discarded to make room for the new messages.
+
+#### File Store Options
+
+As described in the [Configuring](#Configuring) section, there are several options that you can use to configure a file store.
+
+Regardless of channel limits, you can configure message logs to be split in individual files (called file slices). You can configure
+those slices by number of messages it can contain (`--file_slice_max_msgs`), the size of the file - including the corresponding index file
+(`--file_slice_max_bytes`), or the period of time that a file slice should cover - starting at the time the first message is stored in
+that slice (`--file_slice_max_age`). The default file store options are defined such that only the slice size is configured to 64MB.
+
+Note: If you don't configure any slice limit but you do configure channel limits, then the server will automatically
+set some limits for file slices.
+
+When messages accumulate in a channel, and limits are reached, older messages are removed. When the first file slice
+becomes empty, the server removes this file slice (and corresponding index file).
+
+However, if you specify a script (`--file_slice_archive_script`), then the server will rename the slice files (data and index)
+with a `.bak` extension and invoke the script with the channel name, data and index file names.<br>
+The files are left in the channel's directory and therefore it is the script responsibility to delete those files when done.
+At any rate, those files will not be recovered on a server restart, but having lots of unused files in the directory may slow
+down the server restart.
+
+For instance, suppose the server is about to delete file slice `datastore/foo/msgs.1.dat` (and `datastore/foo/msgs.1.idx`),
+and you have configured the script `/home/nats-streaming/archive_script.sh`. The server will invoke:
+
+``` bash
+/home/nats-streaming/archive_script.sh foo datastore/foo/msgs.1.dat.bak datastore/foo/msgs.2.idx.bak
+```
+Notice how the files have been renamed with the `.bak` extension so that they are not going to be recovered if
+the script leave those files in place.
+
 
 ### Store Interface
 

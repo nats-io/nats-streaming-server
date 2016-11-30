@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
+	"runtime"
 )
 
 var testDefaultServerInfo = spb.ServerInfo{
@@ -181,7 +182,7 @@ func TestFSUnsupportedFileVersion(t *testing.T) {
 	fs.Close()
 
 	// Overwrite the file version of a message store to an unsupported version
-	writeVersion(t, filepath.Join(defaultDataStore, "foo", "msgs.1.dat"), fileVersion+1)
+	writeVersion(t, filepath.Join(defaultDataStore, "foo", msgFilesPrefix+"1"+datSuffix), fileVersion+1)
 
 	var err error
 
@@ -193,10 +194,10 @@ func TestFSUnsupportedFileVersion(t *testing.T) {
 	}
 
 	// Restore the correct version.
-	writeVersion(t, filepath.Join(defaultDataStore, "foo", "msgs.1.dat"), fileVersion)
+	writeVersion(t, filepath.Join(defaultDataStore, "foo", msgFilesPrefix+"1"+datSuffix), fileVersion)
 
 	// Overwrite the file version of the subscriptions store to an unsupported version
-	writeVersion(t, filepath.Join(defaultDataStore, "foo", "subs.dat"), fileVersion+1)
+	writeVersion(t, filepath.Join(defaultDataStore, "foo", subsFileName), fileVersion+1)
 
 	// Recover store (should fail)
 	err = expectedErrorOpeningDefaultFileStore(t)
@@ -268,6 +269,10 @@ func TestFSOptions(t *testing.T) {
 		CRCPolynomial:        int64(crc32.Castagnoli),
 		DoSync:               false,
 		CacheMsgs:            false,
+		SliceMaxMsgs:         100,
+		SliceMaxBytes:        1024 * 1024,
+		SliceMaxAge:          time.Second,
+		SliceArchiveScript:   "myscript.sh",
 	}
 	// Create the file with custom options
 	fs, _, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits,
@@ -279,7 +284,8 @@ func TestFSOptions(t *testing.T) {
 		DoCRC(expected.DoCRC),
 		CRCPolynomial(expected.CRCPolynomial),
 		DoSync(expected.DoSync),
-		CacheMsgs(expected.CacheMsgs))
+		CacheMsgs(expected.CacheMsgs),
+		SliceConfig(100, 1024*1024, time.Second, "myscript.sh"))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
@@ -497,7 +503,7 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 	defer fs.Close()
 
 	// Store some messages in various channels
-	chanCount := 1
+	chanCount := 5
 	msgCount := 50
 	subsCount := 3
 	payload := []byte("hello")
@@ -517,7 +523,7 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 			expectedMsgBytes += uint64(msg.Size())
 			if c == 0 {
 				if m < maxMsgsAfterRecovery {
-					expectedMsgBytesAfterRecovery += uint64(msg.Size())
+					expectedMsgBytesAfterRecovery += uint64(msg.Size() + msgRecordOverhead)
 				}
 			}
 		}
@@ -531,7 +537,7 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 	limit.MaxChannels = 1
 	limit.MaxMsgs = maxMsgsAfterRecovery
 	limit.MaxSubscriptions = 1
-	fs, state, err := newFileStore(t, defaultDataStore, &limit)
+	fs, state, err := newFileStore(t, defaultDataStore, &limit, SliceConfig(1, int64(maxMsgsAfterRecovery), 0, ""))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -557,11 +563,11 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
-	if recMsg != maxMsgsAfterRecovery {
-		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", maxMsgsAfterRecovery, recMsg)
+	if recMsg != chanCount*maxMsgsAfterRecovery {
+		t.Fatalf("Unexpected count of recovered msgs. Expected %v, got %v", chanCount*maxMsgsAfterRecovery, recMsg)
 	}
-	if recBytes != expectedMsgBytesAfterRecovery {
-		t.Fatalf("Unexpected count of recovered bytes: Expected %v, got %v", expectedMsgBytesAfterRecovery, recBytes)
+	if recBytes != uint64(chanCount)*expectedMsgBytesAfterRecovery {
+		t.Fatalf("Unexpected count of recovered bytes: Expected %v, got %v", uint64(chanCount)*expectedMsgBytesAfterRecovery, recBytes)
 	}
 
 	// Now check that any new addition would be rejected
@@ -606,19 +612,19 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 		t.Fatalf("Expected first sequence to be %v, got %v", expectedNewFirstSeq, msgStore.first)
 	}
 	// We should have moved to the second slice
-	if msgStore.currSliceIdx != 1 {
-		t.Fatalf("Expected file slice to be the second one, got %v", msgStore.currSliceIdx)
+	if msgStore.lastFSlSeq != 2 {
+		t.Fatalf("Expected file slice to be the second one, got %v", msgStore.lastFSlSeq)
 	}
 	// Check second slice content
-	secondSlice := msgStore.files[1]
+	secondSlice := msgStore.files[2]
 	if secondSlice.msgsCount != 1 {
-		t.Fatalf("Expected second slice to have 1 mesage, got %v", secondSlice.msgsCount)
+		t.Fatalf("Expected second slice to have 1 message, got %v", secondSlice.msgsCount)
 	}
 	if secondSlice.firstSeq != lastMsg.Sequence {
 		t.Fatalf("Expected last message seq to be %v, got %v", lastMsg.Sequence, secondSlice.firstSeq)
 	}
 	// The first slice should have the new limit msgs count - 1.
-	firstSlice := msgStore.files[0]
+	firstSlice := msgStore.files[1]
 	left := firstSlice.msgsCount - firstSlice.rmCount
 	if left != limit.MaxMsgs-1 {
 		t.Fatalf("Expected first slice to have %v msgs, got %v", limit.MaxMsgs-1, left)
@@ -654,15 +660,7 @@ func TestFSRecoveryFileSlices(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs := createDefaultFileStore(t)
-	fs.Close()
-
-	limit := testDefaultStoreLimits
-	limit.MaxMsgs = 4
-	fs, state, err := newFileStore(t, defaultDataStore, &limit)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs := createDefaultFileStore(t, SliceConfig(1, 0, 0, ""))
 	defer fs.Close()
 
 	storeMsg(t, fs, "foo", []byte("msg1"))
@@ -671,7 +669,8 @@ func TestFSRecoveryFileSlices(t *testing.T) {
 	// Close the store
 	fs.Close()
 
-	fs, state = openDefaultFileStore(t)
+	// Restart the store
+	fs, state := openDefaultFileStore(t)
 	defer fs.Close()
 
 	if state == nil {
@@ -685,8 +684,8 @@ func TestFSRecoveryFileSlices(t *testing.T) {
 	msgStore := cs.Msgs.(*FileMsgStore)
 
 	// We should have moved to the second slice
-	if msgStore.currSliceIdx != 1 {
-		t.Fatalf("Expected file slice to be the second one, got %v", msgStore.currSliceIdx)
+	if msgStore.lastFSlSeq != 2 {
+		t.Fatalf("Expected file slice to be the second one, got %v", msgStore.lastFSlSeq)
 	}
 }
 
@@ -1461,8 +1460,8 @@ func TestFSBadMsgFile(t *testing.T) {
 		t.Fatal("Expected channel foo to exist")
 	}
 	msgStore := cs.Msgs.(*FileMsgStore)
-	firstSliceFileName := msgStore.files[0].fileName
-	firstIdxFileName := msgStore.files[0].idxFName
+	firstSliceFileName := msgStore.files[1].fileName
+	firstIdxFileName := msgStore.files[1].idxFName
 
 	// Close it
 	fs.Close()
@@ -1567,6 +1566,35 @@ func TestFSBadMsgFile(t *testing.T) {
 	// Write content
 	if _, err := file.Write(b); err != nil {
 		t.Fatalf("Error writing info: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	//
+	// ADD INVALID MESSAGE FILE NAME
+	//
+	os.Remove(firstSliceFileName)
+	fileName := filepath.Join(defaultDataStore, "foo", msgFilesPrefix+"a"+datSuffix)
+	file, err = openFile(fileName)
+	if err != nil {
+		t.Fatalf("Error creating file: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+	os.Remove(fileName)
+	// Try with other malformed name
+	fileName = filepath.Join(defaultDataStore, "foo", msgFilesPrefix+datSuffix[1:])
+	file, err = openFile(fileName)
+	if err != nil {
+		t.Fatalf("Error creating file: %v", err)
 	}
 	// Close the file
 	if err := file.Close(); err != nil {
@@ -2799,7 +2827,8 @@ func TestFSFileSlicesClosed(t *testing.T) {
 
 	limits := testDefaultStoreLimits
 	limits.MaxMsgs = 50
-	fs, _, err := NewFileStore(defaultDataStore, &limits, CacheMsgs(false))
+	fs, _, err := NewFileStore(defaultDataStore, &limits,
+		SliceConfig(10, 0, 0, ""), CacheMsgs(false))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -2848,9 +2877,9 @@ func TestFSRecoverWithoutIndexFiles(t *testing.T) {
 	msgStore := cs.Msgs.(*FileMsgStore)
 	// Get the index file names
 	fs.RLock()
-	idxFileNames := make([]string, len(msgStore.files))
-	for i := 0; i < len(msgStore.files); i++ {
-		idxFileNames[i] = msgStore.files[i].idxFName
+	idxFileNames := make([]string, 0, len(msgStore.files))
+	for _, sl := range msgStore.files {
+		idxFileNames = append(idxFileNames, sl.idxFName)
 	}
 	fs.RUnlock()
 	// Close store
@@ -2889,7 +2918,7 @@ func TestFSEmptySlice(t *testing.T) {
 	fs.Close()
 
 	// Add an empty slice
-	file, err := openFile(filepath.Join(defaultDataStore, "foo", "msgs.2.dat"))
+	file, err := openFile(filepath.Join(defaultDataStore, "foo", msgFilesPrefix+"2"+datSuffix))
 	if err != nil {
 		t.Fatalf("Error creating file: %v", err)
 	}
@@ -2958,16 +2987,16 @@ func TestFSStoreMsgCausesFlush(t *testing.T) {
 	}
 }
 
-func TestFSRemoveAndShiftFiles(t *testing.T) {
+func TestFSRemoveFileSlices(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs := createDefaultFileStore(t)
+	// Set config such that each slice store only 1 message
+	fs := createDefaultFileStore(t, SliceConfig(1, 0, 0, ""))
 	defer fs.Close()
 
 	limits := DefaultStoreLimits
-	// Use limit below number of files to test that a slice
-	// will store at least one message.
+	// Ensure that slices will be removed.
 	limits.MaxMsgs = 3
 	if err := fs.SetLimits(&limits); err != nil {
 		t.Fatalf("Unexpected error setting limits: %v", err)
@@ -3001,6 +3030,99 @@ func TestFSRemoveAndShiftFiles(t *testing.T) {
 	}
 	if ms.LastMsg().Sequence != uint64(total) {
 		t.Fatalf("Expected message sequence to be %v, got %v", total, ms.LastMsg().Sequence)
+	}
+}
+
+func TestFSFirstEmptySliceRemovedOnCreateNewSlice(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t, SliceConfig(0, 0, time.Second, ""))
+	defer fs.Close()
+
+	limits := DefaultStoreLimits
+	limits.MaxAge = time.Second
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+
+	// Store a message
+	storeMsg(t, fs, "foo", []byte("test"))
+
+	// Wait for message to expire
+	cs := fs.LookupChannel("foo")
+	timeout := time.Now().Add(5 * time.Second)
+	ok := false
+	for time.Now().Before(timeout) {
+		if n, _, _ := cs.Msgs.State(); n == 0 {
+			ok = true
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatalf("Message should have expired")
+	}
+
+	// First slice should still exist altough empty
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	numFiles := len(ms.files)
+	firstFileSeq := ms.firstFSlSeq
+	empty := false
+	if ms.currSlice != nil && ms.currSlice.msgsCount == ms.currSlice.rmCount {
+		empty = true
+	}
+	firstWrite := ms.currSlice.firstWrite
+	ms.RUnlock()
+	if !empty || numFiles != 1 || firstFileSeq != 1 {
+		t.Fatalf("Expected slice to be empty, numFiles and firstFileSeq to be 1, got %v, %v and %v",
+			empty, numFiles, firstFileSeq)
+	}
+
+	// Since slice time check uses ms.timeTick, ensure that we wait long enough.
+	timeout = time.Now().Add(5 * time.Second)
+	ok = false
+	for time.Now().Before(timeout) {
+		ms.RLock()
+		timeTick := ms.timeTick
+		ms.RUnlock()
+
+		if timeTick-firstWrite > int64(time.Second) {
+			ok = true
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatalf("Waited too long for timeTick to update")
+	}
+
+	// Send another message...
+	storeMsg(t, fs, "foo", []byte("test"))
+
+	timeout = time.Now().Add(5 * time.Second)
+	ok = false
+	for time.Now().Before(timeout) {
+		if n, _, _ := cs.Msgs.State(); n == 1 {
+			ok = true
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatalf("Should have gotten a message")
+	}
+
+	// A new slice should have been created and the first one deleted.
+	ms.RLock()
+	numFiles = len(ms.files)
+	firstFileSeq = ms.firstFSlSeq
+	updatedCurrSlice := ms.currSlice == ms.files[2]
+	ms.RUnlock()
+	if !updatedCurrSlice || numFiles != 1 || firstFileSeq != 2 {
+		t.Fatalf("Expected current slice to be updated to second slice, numFiles to be 1, firstFileSeq to be 2, got %v, %v and %v",
+			updatedCurrSlice, numFiles, firstFileSeq)
 	}
 }
 
@@ -3364,4 +3486,394 @@ func TestFSPerChannelLimits(t *testing.T) {
 	defer fs.Close()
 
 	testPerChannelLimits(t, fs)
+}
+
+func TestFSArchiveScript(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	tmpDir, err := ioutil.TempDir(".", "")
+	if err != nil {
+		t.Fatalf("Unable to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	pwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Unable to get current directory: %v", err)
+	}
+	scriptFile := ""
+	content := ""
+	if runtime.GOOS == "windows" {
+		scriptFile = fmt.Sprintf("%s\\script_%v.bat", pwd, time.Now().UnixNano())
+		content = fmt.Sprintf("mkdir %s\\%s\\%%1\nmove %%2 %s\\%s\\%%1\nmove %%3 %s\\%s\\%%1", pwd, tmpDir, pwd, tmpDir, pwd, tmpDir)
+	} else {
+		scriptFile = fmt.Sprintf("%s/script_%v.sh", pwd, time.Now().UnixNano())
+		content = fmt.Sprintf("#!/bin/bash\nmkdir -p %s/%s/$1\nmv $2 $3 %s/%s/$1\n", pwd, tmpDir, pwd, tmpDir)
+	}
+	if err := ioutil.WriteFile(scriptFile, []byte(content), 0777); err != nil {
+		t.Fatalf("Error creating script: %v", err)
+	}
+	defer os.Remove(scriptFile)
+
+	fs := createDefaultFileStore(t, SliceConfig(0, 0, 0, scriptFile))
+	defer fs.Close()
+	limits := DefaultStoreLimits
+	limits.MaxMsgs = 1
+	fs.SetLimits(&limits)
+
+	// Store one message
+	storeMsg(t, fs, "foo", []byte("msg1"))
+
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	fileName := ms.files[1].fileName
+	ms.RUnlock()
+
+	// Store one more message. Should move to next slice and invoke script
+	// for first slice.
+	storeMsg(t, fs, "foo", []byte("msg2"))
+
+	// Original file should not be present
+	ok := false
+	timeout := time.Now().Add(5 * time.Second)
+	for time.Now().Before(timeout) {
+		if s, serr := os.Stat(fileName); s == nil || serr != nil {
+			ok = true
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatal("File still present in channel directory")
+	}
+
+	// File should have been moved to tmpDir by script
+	ok = false
+	bakFile := fmt.Sprintf("%s/foo/%s1%s%s", tmpDir, msgFilesPrefix, datSuffix, bakSuffix)
+	timeout = time.Now().Add(5 * time.Second)
+	for time.Now().Before(timeout) {
+		if s, serr := os.Stat(bakFile); s != nil && serr == nil {
+			ok = true
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatal("File should have been moved to tmp dir")
+	}
+	// Close store
+	fs.Close()
+	// Cleanup datastore
+	cleanupDatastore(t, defaultDataStore)
+
+	// Create a script that will error out
+	os.Remove(scriptFile)
+	content = "xxx"
+	if err := ioutil.WriteFile(scriptFile, []byte(content), 0777); err != nil {
+		t.Fatalf("Error creating script: %v", err)
+	}
+	defer os.Remove(scriptFile)
+
+	fs = createDefaultFileStore(t, SliceConfig(0, 0, 0, scriptFile))
+	defer fs.Close()
+	fs.SetLimits(&limits)
+
+	// Store one message
+	storeMsg(t, fs, "foo", []byte("msg1"))
+
+	// Store one more message. Should move to next slice and invoke script
+	// for first slice.
+	storeMsg(t, fs, "foo", []byte("msg2"))
+
+	// Original file should not be present
+	ok = false
+	timeout = time.Now().Add(5 * time.Second)
+	for time.Now().Before(timeout) {
+		if s, serr := os.Stat(fileName); s == nil || serr != nil {
+			ok = true
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatal("File still present in channel directory")
+	}
+
+	// Since script should fail, .bak file should still be in channel's directory
+	ok = true
+	timeout = time.Now().Add(time.Second)
+	for time.Now().Before(timeout) {
+		if s, serr := os.Stat(bakFile); s == nil || serr != nil {
+			ok = false
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatal("File still present in channel directory")
+	}
+}
+
+func TestFSNoSliceLimitAndNoChannelLimits(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// No slice limit
+	fs := createDefaultFileStore(t, SliceConfig(0, 0, 0, ""))
+	defer fs.Close()
+
+	// And no channel limit
+	limits := StoreLimits{}
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Error setting file limits: %v", err)
+	}
+
+	total := 1000
+	msg := []byte("msg")
+	for i := 0; i < total; i++ {
+		storeMsg(t, fs, "foo", msg)
+	}
+
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	numFiles := len(ms.files)
+	firstFileSeq := ms.firstFSlSeq
+	lastFileSeq := ms.lastFSlSeq
+	ms.RUnlock()
+
+	if numFiles != 1 || firstFileSeq != 1 || lastFileSeq != 1 {
+		t.Fatalf("Expected numFiles, firstFileSeq and lastFileSeq to be all 1, got %v, %v and %v",
+			numFiles, firstFileSeq, lastFileSeq)
+	}
+}
+
+func TestFSMsgRemovedWhileBuffered(t *testing.T) {
+	// Test is irrelevant if no buffering used
+	if disableBufferWriters {
+		t.SkipNow()
+	}
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	limits := DefaultStoreLimits
+	limits.MaxMsgs = 10
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Error setting limits: %v", &limits)
+	}
+
+	total := 1000
+	msg := []byte("msg")
+	for i := 0; i < total; i++ {
+		storeMsg(t, fs, "foo", msg)
+	}
+
+	fs.Close()
+
+	fs, state, err := newFileStore(t, defaultDataStore, &limits)
+	if err != nil {
+		t.Fatalf("Unexpected error opening store: %v", err)
+	}
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("Expected to recover a state")
+	}
+}
+
+func TestFSSliceLimitsBasedOnChannelLimits(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t, SliceConfig(0, 0, 0, ""))
+	defer fs.Close()
+
+	// First check that with low channel limits, we have at least
+	// a slice of 1.
+	limits := DefaultStoreLimits
+	limits.MaxMsgs = 3
+	limits.MaxBytes = 3
+	limits.MaxAge = 3 * time.Second
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Error setting file limits: %v", err)
+	}
+
+	storeMsg(t, fs, "foo", []byte("msg"))
+
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	slCount := ms.slCountLim
+	slSize := ms.slSizeLim
+	slAge := ms.slAgeLim
+	ms.RUnlock()
+
+	if slCount != 1 {
+		t.Fatalf("Expected slice limit count to be 1, got %v", slCount)
+	}
+	if slSize != 1 {
+		t.Fatalf("Expected slice limit size to be 1, got %v", slSize)
+	}
+	if slAge != int64(time.Second) {
+		t.Fatalf("Expected slice limit age to be 1sec, got %v", time.Duration(slAge))
+	}
+	fs.Close()
+	cleanupDatastore(t, defaultDataStore)
+
+	// Open with different limits
+	limits.MaxMsgs = 100
+	limits.MaxBytes = 100
+	limits.MaxAge = 20 * time.Second
+	fs = createDefaultFileStore(t, SliceConfig(0, 0, 0, ""))
+	defer fs.Close()
+
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Error setting file limits: %v", err)
+	}
+
+	storeMsg(t, fs, "foo", []byte("msg"))
+
+	cs = fs.LookupChannel("foo")
+	ms = cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	slCount = ms.slCountLim
+	slSize = ms.slSizeLim
+	slAge = ms.slAgeLim
+	ms.RUnlock()
+
+	if slCount != 25 {
+		t.Fatalf("Expected slice limit count to be 25, got %v", slCount)
+	}
+	if slSize != 25 {
+		t.Fatalf("Expected slice limit size to be 25, got %v", slSize)
+	}
+	if slAge != int64(5*time.Second) {
+		t.Fatalf("Expected slice limit age to be 5sec, got %v", time.Duration(slAge))
+	}
+}
+
+func TestFSRecoverSlicesOutOfOrder(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// Make a slice hold only 1 message
+	fs := createDefaultFileStore(t, SliceConfig(1, 0, 0, ""))
+	defer fs.Close()
+
+	msg := []byte("msg")
+	total := 200
+	// Create slices
+	for i := 0; i < total; i++ {
+		storeMsg(t, fs, "foo", msg)
+	}
+
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	firstFileSeq, lastFileSeq := ms.firstFSlSeq, ms.lastFSlSeq
+	first, last := ms.first, ms.last
+	wOffset := ms.wOffset
+	ms.RUnlock()
+
+	if first != 1 || last != uint64(total) {
+		t.Fatalf("Expected first and last to be (1,%v), got (%v,%v)", total, first, last)
+	}
+	if firstFileSeq != 1 || lastFileSeq != total {
+		t.Fatalf("Expected first and last file sequence to be (1,%v), got (%v,%v)", total, firstFileSeq, lastFileSeq)
+	}
+
+	fs.Close()
+
+	fs, _ = openDefaultFileStore(t, SliceConfig(1, 0, 0, ""))
+	defer fs.Close()
+
+	cs = fs.LookupChannel("foo")
+	ms = cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	firstFileSeq, lastFileSeq = ms.firstFSlSeq, ms.lastFSlSeq
+	first, last = ms.first, ms.last
+	currSlice := ms.currSlice
+	recoveredWOffset := ms.wOffset
+	ms.RUnlock()
+
+	if first != 1 || last != uint64(total) {
+		t.Fatalf("Expected first and last to be (1,%v), got (%v,%v)", total, first, last)
+	}
+	if firstFileSeq != 1 || lastFileSeq != total {
+		t.Fatalf("Expected first and last file sequence to be (1,%v), got (%v,%v)", total, firstFileSeq, lastFileSeq)
+	}
+	if recoveredWOffset != wOffset {
+		t.Fatalf("Write offset should be %v, got %v", wOffset, recoveredWOffset)
+	}
+	if currSlice == nil || currSlice.firstSeq != uint64(total) {
+		t.Fatalf("Unexpected current slice: %v", currSlice)
+	}
+}
+
+func TestFirstAndLastMsg(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	limit := testDefaultStoreLimits
+	limit.MaxAge = time.Second
+	fs, _, err := newFileStore(t, defaultDataStore, &limit)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	msg := []byte("msg")
+	storeMsg(t, fs, "foo", msg)
+	storeMsg(t, fs, "foo", msg)
+
+	cs := fs.LookupChannel("foo")
+	if cs.Msgs.FirstMsg().Sequence != 1 {
+		t.Fatalf("Unexpected first message: %v", cs.Msgs.FirstMsg())
+	}
+	if cs.Msgs.LastMsg().Sequence != 2 {
+		t.Fatalf("Unexpected last message: %v", cs.Msgs.LastMsg())
+	}
+	// Wait for all messages to expire
+	timeout := time.Now().Add(3 * time.Second)
+	ok := false
+	for time.Now().Before(timeout) {
+		if n, _, _ := cs.Msgs.State(); n == 0 {
+			ok = true
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatal("Timed-out waiting for messages to expire")
+	}
+	ms := cs.Msgs.(*FileMsgStore)
+	// By-pass the FirstMsg() and LastMsg() API to make sure that
+	// we don't update based on lookup
+	ms.RLock()
+	firstMsg := ms.firstMsg
+	lastMsg := ms.lastMsg
+	ms.RUnlock()
+	if firstMsg != nil {
+		t.Fatalf("Unexpected first message: %v", firstMsg)
+	}
+	if lastMsg != nil {
+		t.Fatalf("Unexpected last message: %v", lastMsg)
+	}
+	// Store two new messages and check first/last updated correctly
+	storeMsg(t, fs, "foo", msg)
+	storeMsg(t, fs, "foo", msg)
+	ms.RLock()
+	firstMsg = ms.firstMsg
+	lastMsg = ms.lastMsg
+	ms.RUnlock()
+	if firstMsg == nil || firstMsg.Sequence != 3 {
+		t.Fatalf("Unexpected first message: %v", firstMsg)
+	}
+	if lastMsg == nil || lastMsg.Sequence != 4 {
+		t.Fatalf("Unexpected last message: %v", lastMsg)
+	}
 }
