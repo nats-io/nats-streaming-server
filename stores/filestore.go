@@ -26,14 +26,26 @@ const (
 	// Our file version.
 	fileVersion = 1
 
+	// Prefix for message log files
+	msgFilesPrefix = "msgs."
+
+	// Data files suffix
+	datSuffix = ".dat"
+
+	// Index files suffix
+	idxSuffix = ".idx"
+
+	// Backup file suffix
+	bakSuffix = ".bak"
+
 	// Name of the subscriptions file.
-	subsFileName = "subs.dat"
+	subsFileName = "subs" + datSuffix
 
 	// Name of the clients file.
-	clientsFileName = "clients.dat"
+	clientsFileName = "clients" + datSuffix
 
 	// Name of the server file.
-	serverFileName = "server.dat"
+	serverFileName = "server" + datSuffix
 
 	// Number of bytes required to store a CRC-32 checksum
 	crcSize = crc32.Size
@@ -1137,23 +1149,31 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 
 	// Recovery case
 	if doRecover {
-		var names []string
+		var dirFiles []os.FileInfo
 		var fseq int64
 
-		names, err = filepath.Glob(filepath.Join(channelDirName, "msgs.*.dat"))
-		for _, fileName := range names {
+		dirFiles, err = ioutil.ReadDir(channelDirName)
+		for _, file := range dirFiles {
+			if file.IsDir() {
+				continue
+			}
+			fileName := file.Name()
+			if !strings.HasPrefix(fileName, msgFilesPrefix) || !strings.HasSuffix(fileName, datSuffix) {
+				continue
+			}
 			// Remove suffix
-			fileNameWithoutSuffix := strings.TrimSuffix(fileName, ".dat")
-			// Position of last "."
-			dotPos := strings.LastIndex(fileNameWithoutSuffix, ".")
-			if dotPos == -1 {
-				continue
-			}
-			fseq, err = strconv.ParseInt(fileNameWithoutSuffix[dotPos+1:], 10, 64)
+			fileNameWithoutSuffix := strings.TrimSuffix(fileName, datSuffix)
+			// Remove prefix
+			fileNameWithoutPrefixAndSuffix := strings.TrimPrefix(fileNameWithoutSuffix, msgFilesPrefix)
+			// Get the file sequence number
+			fseq, err = strconv.ParseInt(fileNameWithoutPrefixAndSuffix, 10, 64)
 			if err != nil {
-				continue
+				err = fmt.Errorf("message log has an invalid name: %v", fileName)
+				break
 			}
-			idxFName := filepath.Join(channelDirName, fmt.Sprintf("msgs.%v.idx", fseq))
+			// Need fully qualified names
+			fileName = filepath.Join(channelDirName, fileName)
+			idxFName := filepath.Join(channelDirName, fmt.Sprintf("%s%v%s", msgFilesPrefix, fseq, idxSuffix))
 			// Create the slice
 			fslice := &fileSlice{fileName: fileName, idxFName: idxFName}
 			// Recover the file slice
@@ -1530,8 +1550,8 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 				}
 			}
 			// Create new slice
-			datFName := filepath.Join(ms.rootDir, fmt.Sprintf("msgs.%v.dat", newSliceSeq))
-			idxFName := filepath.Join(ms.rootDir, fmt.Sprintf("msgs.%v.idx", newSliceSeq))
+			datFName := filepath.Join(ms.rootDir, fmt.Sprintf("%s%v%s", msgFilesPrefix, newSliceSeq, datSuffix))
+			idxFName := filepath.Join(ms.rootDir, fmt.Sprintf("%s%v%s", msgFilesPrefix, newSliceSeq, idxSuffix))
 			// Open the new slice
 			if err := ms.openDataAndIndexFiles(datFName, idxFName); err != nil {
 				return 0, err
@@ -1788,8 +1808,8 @@ func (ms *FileMsgStore) removeFirstSlice() {
 	// If there is an archive script invoke it first
 	script := ms.fstore.opts.SliceArchiveScript
 	if script != "" {
-		datBak := fmt.Sprintf("%s.bak", sl.fileName)
-		idxBak := fmt.Sprintf("%s.bak", sl.idxFName)
+		datBak := sl.fileName + bakSuffix
+		idxBak := sl.idxFName + bakSuffix
 
 		var err error
 		if err = os.Rename(sl.fileName, datBak); err == nil {

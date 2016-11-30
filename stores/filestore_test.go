@@ -182,7 +182,7 @@ func TestFSUnsupportedFileVersion(t *testing.T) {
 	fs.Close()
 
 	// Overwrite the file version of a message store to an unsupported version
-	writeVersion(t, filepath.Join(defaultDataStore, "foo", "msgs.1.dat"), fileVersion+1)
+	writeVersion(t, filepath.Join(defaultDataStore, "foo", msgFilesPrefix+"1"+datSuffix), fileVersion+1)
 
 	var err error
 
@@ -194,10 +194,10 @@ func TestFSUnsupportedFileVersion(t *testing.T) {
 	}
 
 	// Restore the correct version.
-	writeVersion(t, filepath.Join(defaultDataStore, "foo", "msgs.1.dat"), fileVersion)
+	writeVersion(t, filepath.Join(defaultDataStore, "foo", msgFilesPrefix+"1"+datSuffix), fileVersion)
 
 	// Overwrite the file version of the subscriptions store to an unsupported version
-	writeVersion(t, filepath.Join(defaultDataStore, "foo", "subs.dat"), fileVersion+1)
+	writeVersion(t, filepath.Join(defaultDataStore, "foo", subsFileName), fileVersion+1)
 
 	// Recover store (should fail)
 	err = expectedErrorOpeningDefaultFileStore(t)
@@ -1573,6 +1573,35 @@ func TestFSBadMsgFile(t *testing.T) {
 	}
 	// We should fail to create the filestore
 	expectedErrorOpeningDefaultFileStore(t)
+
+	//
+	// ADD INVALID MESSAGE FILE NAME
+	//
+	os.Remove(firstSliceFileName)
+	fileName := filepath.Join(defaultDataStore, "foo", msgFilesPrefix+"a"+datSuffix)
+	file, err = openFile(fileName)
+	if err != nil {
+		t.Fatalf("Error creating file: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+	os.Remove(fileName)
+	// Try with other malformed name
+	fileName = filepath.Join(defaultDataStore, "foo", msgFilesPrefix+datSuffix[1:])
+	file, err = openFile(fileName)
+	if err != nil {
+		t.Fatalf("Error creating file: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
 }
 
 func TestFSBadSubFile(t *testing.T) {
@@ -2889,7 +2918,7 @@ func TestFSEmptySlice(t *testing.T) {
 	fs.Close()
 
 	// Add an empty slice
-	file, err := openFile(filepath.Join(defaultDataStore, "foo", "msgs.2.dat"))
+	file, err := openFile(filepath.Join(defaultDataStore, "foo", msgFilesPrefix+"2"+datSuffix))
 	if err != nil {
 		t.Fatalf("Error creating file: %v", err)
 	}
@@ -3522,7 +3551,7 @@ func TestFSArchiveScript(t *testing.T) {
 
 	// File should have been moved to tmpDir by script
 	ok = false
-	bakFile := fmt.Sprintf("%s/foo/msgs.1.dat.bak", tmpDir)
+	bakFile := fmt.Sprintf("%s/foo/%s1%s%s", tmpDir, msgFilesPrefix, datSuffix, bakSuffix)
 	timeout = time.Now().Add(5 * time.Second)
 	for time.Now().Before(timeout) {
 		if s, serr := os.Stat(bakFile); s != nil && serr == nil {
