@@ -1734,11 +1734,11 @@ func (ms *FileMsgStore) expireMsgs() {
 			ms.allDone.Done()
 			return
 		}
-		diff := now - m.timestamp
-		if diff >= maxAge {
+		elapsed := now - m.timestamp
+		if elapsed >= maxAge {
 			ms.removeFirstMsg()
 		} else {
-			ms.ageTimer.Reset(time.Duration(maxAge - now))
+			ms.ageTimer.Reset(time.Duration(maxAge - elapsed))
 			return
 		}
 	}
