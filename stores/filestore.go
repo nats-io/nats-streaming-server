@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
@@ -72,7 +73,7 @@ const (
 	bufShrinkThreshold = 50
 
 	// Interval when to check/try to shrink buffer writers
-	bufShrinkTimerInterval = 5 * time.Second
+	defaultBufShrinkInterval = 5 * time.Second
 
 	// If FileStoreOption's BufferSize is > 0, the buffer writer is initially
 	// created with this size (unless this is > than BufferSize, in which case
@@ -85,6 +86,9 @@ const (
 	// BufferSize is used). When possible, the buffer will shrink but not lower
 	// than this value. This is for FileMsgStore's
 	msgBufMinShrinkSize = 512
+
+	// This is the sleep time in the background tasks go routine.
+	defaultBkgTasksSleepDuration = time.Second
 )
 
 // FileStoreOption is a function on the options for a File Store
@@ -377,6 +381,11 @@ type msgRecord struct {
 // FileMsgStore is a per channel message file store.
 type FileMsgStore struct {
 	genericMsgStore
+	// Atomic operations require 64bit aligned fields to be able
+	// to run with 32bit processes.
+	checkSlices int64 // used with atomic operations
+	timeTick    int64 // time captured in background tasks go routine
+
 	tmpMsgBuf    []byte
 	file         *os.File
 	idxFile      *os.File
@@ -397,15 +406,20 @@ type FileMsgStore struct {
 	wOffset      int64
 	firstMsg     *pb.MsgProto
 	lastMsg      *pb.MsgProto
+	expiration   int64
 	bufferedMsgs []uint64
 	bufferedMRec map[uint64]*msgRecord
-	tasksTimer   *time.Timer // get time, close file slices not recently used, etc...
-	timeTick     int64       // time captured in background task
-	lastShrink   int64       // last time we checked for opportunity to shrink
-	checkSlices  bool
-	ageTimer     *time.Timer
+	bkgTasksDone chan bool // signal the background tasks go routine to stop
+	bkgTasksWake chan bool // signal the background tasks go routine to get out of a sleep
 	allDone      sync.WaitGroup
 }
+
+// some variables based on constants but that we can change
+// for tests puposes.
+var (
+	bufShrinkInterval     = defaultBufShrinkInterval
+	bkgTasksSleepDuration = defaultBkgTasksSleepDuration
+)
 
 // openFile opens the file specified by `filename`.
 // If the file exists, it checks that the version is supported.
@@ -567,7 +581,7 @@ func (w *bufferedWriter) createNewWriter(file *os.File) io.Writer {
 }
 
 // expand the buffer (first flushing the buffer if not empty)
-func (w *bufferedWriter) expand(file *os.File) (io.Writer, error) {
+func (w *bufferedWriter) expand(file *os.File, required int) (io.Writer, error) {
 	// If there was a request to shrink the buffer, cancel that.
 	w.shrinkReq = false
 	// If there was something, flush first
@@ -576,8 +590,13 @@ func (w *bufferedWriter) expand(file *os.File) (io.Writer, error) {
 			return w.buf, err
 		}
 	}
-	// Double the size, but cap it.
+	// Double the size
 	w.bufSize *= 2
+	// If still smaller than what is required, adjust
+	if w.bufSize < required {
+		w.bufSize = required
+	}
+	// But cap it.
 	if w.bufSize > w.maxSize {
 		w.bufSize = w.maxSize
 	}
@@ -588,7 +607,8 @@ func (w *bufferedWriter) expand(file *os.File) (io.Writer, error) {
 // tryShrinkBuffer checks and possibly shrinks the buffer
 func (w *bufferedWriter) tryShrinkBuffer(file *os.File) (io.Writer, error) {
 	// Nothing to do if we are already at the lowest
-	if w.bufSize == w.minShrinkSize {
+	// or file not set/opened.
+	if w.bufSize == w.minShrinkSize || file == nil {
 		return w.buf, nil
 	}
 
@@ -1126,6 +1146,8 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		cache:        fs.opts.CacheMsgs,
 		files:        make(map[int]*fileSlice),
 		rootDir:      channelDirName,
+		bkgTasksDone: make(chan bool, 1),
+		bkgTasksWake: make(chan bool, 1),
 	}
 	// Defaults to the global limits
 	msgStoreLimits := fs.limits.MsgStoreLimits
@@ -1195,25 +1217,23 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 			// Apply message limits (no need to check if there are limits
 			// defined, the call won't do anything if they aren't).
 			err = ms.enforceLimits(false)
-			// If there is at least one message and age limit is present...
-			if err == nil && ms.totalCount > 0 && ms.limits.MaxAge > time.Duration(0) {
-				ms.Lock()
-				ms.allDone.Add(1)
-				// Create the timer with any duration.
-				ms.ageTimer = time.AfterFunc(time.Hour, ms.expireMsgs)
-				ms.Unlock()
-				// And now force the execution of the expireMsgs callback.
-				// This will take care of expiring messages that should
-				// already be expired, and will set properly the timer.
-				ms.expireMsgs()
-			}
 		}
 	}
 	if err == nil {
 		ms.Lock()
 		ms.allDone.Add(1)
+		// Capture the time here first, it will then be captured
+		// in the go routine we are about to start.
 		ms.timeTick = time.Now().UnixNano()
-		ms.tasksTimer = time.AfterFunc(time.Second, ms.backgroundTasks)
+		// On recovery, if there is age limit set and at least one message...
+		if doRecover && ms.limits.MaxAge > 0 && ms.totalCount > 0 {
+			// Force the execution of the expireMsgs method.
+			// This will take care of expiring messages that should have
+			// expired while the server was stopped.
+			ms.expireMsgs(ms.timeTick, int64(ms.limits.MaxAge))
+		}
+		// Start the background tasks go routine
+		go ms.backgroundTasks()
 		ms.Unlock()
 	}
 	// Cleanup on error
@@ -1538,7 +1558,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 		if fslice == nil ||
 			(ms.slSizeLim > 0 && fslice.msgsSize >= ms.slSizeLim) ||
 			(ms.slCountLim > 0 && fslice.msgsCount >= ms.slCountLim) ||
-			(ms.slAgeLim > 0 && ms.timeTick-fslice.firstWrite >= ms.slAgeLim) {
+			(ms.slAgeLim > 0 && atomic.LoadInt64(&ms.timeTick)-fslice.firstWrite >= ms.slAgeLim) {
 
 			// Don't change store variable until success...
 			newSliceSeq := ms.lastFSlSeq + 1
@@ -1595,8 +1615,9 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	}
 	msgSize := m.Size()
 	if bwBuf != nil {
-		if msgSize+recordHeaderSize > bwBuf.Available() {
-			ms.writer, err = ms.bw.expand(ms.file)
+		required := msgSize + recordHeaderSize
+		if required > bwBuf.Available() {
+			ms.writer, err = ms.bw.expand(ms.file, required)
 			if err != nil {
 				return 0, err
 			}
@@ -1632,13 +1653,17 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 		}
 	}
 
-	if ms.first == 0 {
-		ms.first = 1
-		ms.firstMsg = m
-	} else if ms.first == seq {
-		// Happens after all messages expired and this is the
+	if ms.first == 0 || ms.first == seq {
+		// First ever message or after all messages expired and this is the
 		// first new message.
+		ms.first = seq
 		ms.firstMsg = m
+		if maxAge := ms.limits.MaxAge; maxAge > 0 {
+			ms.expiration = mrec.timestamp + int64(maxAge)
+			if len(ms.bkgTasksWake) == 0 {
+				ms.bkgTasksWake <- true
+			}
+		}
 	}
 	ms.last = seq
 	ms.lastMsg = m
@@ -1661,12 +1686,6 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	fslice.msgsSize += size
 	if fslice.firstWrite == 0 {
 		fslice.firstWrite = m.Timestamp
-	}
-
-	// If there is an age limit and no timer yet created, do so now
-	if ms.limits.MaxAge > time.Duration(0) && ms.ageTimer == nil {
-		ms.allDone.Add(1)
-		ms.ageTimer = time.AfterFunc(ms.limits.MaxAge, ms.expireMsgs)
 	}
 
 	// Save references to first and last sequences for this slice
@@ -1716,32 +1735,24 @@ func (ms *FileMsgStore) processBufferedMsgs() error {
 
 // expireMsgs ensures that messages don't stay in the log longer than the
 // limit's MaxAge.
-func (ms *FileMsgStore) expireMsgs() {
-	ms.Lock()
-	if ms.closed {
-		ms.Unlock()
-		ms.allDone.Done()
-		return
-	}
-	defer ms.Unlock()
-
-	now := time.Now().UnixNano()
-	maxAge := int64(ms.limits.MaxAge)
+// Returns the time of the next expiration (possibly 0 if no message left)
+// The store's lock is assumed to be held on entry
+func (ms *FileMsgStore) expireMsgs(now, maxAge int64) int64 {
 	for {
-		m, ok := ms.msgs[ms.first]
-		if !ok {
-			ms.ageTimer = nil
-			ms.allDone.Done()
-			return
+		m, hasMore := ms.msgs[ms.first]
+		if !hasMore {
+			ms.expiration = 0
+			break
 		}
 		elapsed := now - m.timestamp
 		if elapsed >= maxAge {
 			ms.removeFirstMsg()
 		} else {
-			ms.ageTimer.Reset(time.Duration(maxAge - elapsed))
-			return
+			ms.expiration = now + (maxAge - elapsed)
+			break
 		}
 	}
+	return ms.expiration
 }
 
 // enforceLimits checks total counts with current msg store's limits,
@@ -1894,9 +1905,9 @@ func (ms *FileMsgStore) getFileForSeq(seq uint64) (*os.File, error) {
 				}
 				slice.file = file
 				// Let the background task know that we have opened a slice
-				ms.checkSlices = true
+				atomic.StoreInt64(&ms.checkSlices, 1)
 			}
-			slice.lastUsed = ms.timeTick
+			slice.lastUsed = atomic.LoadInt64(&ms.timeTick)
 			return file, nil
 		}
 	}
@@ -1906,36 +1917,66 @@ func (ms *FileMsgStore) getFileForSeq(seq uint64) (*os.File, error) {
 // backgroundTasks performs some background tasks related to this
 // messages store.
 func (ms *FileMsgStore) backgroundTasks() {
-	ms.Lock()
-	defer ms.Unlock()
+	defer ms.allDone.Done()
 
-	if ms.closed {
-		ms.allDone.Done()
-		return
-	}
+	ms.RLock()
+	hasBuffer := ms.bw != nil
+	maxAge := int64(ms.limits.MaxAge)
+	nextExpiration := ms.expiration
+	ms.RUnlock()
 
-	// Update time
-	ms.timeTick = time.Now().UnixNano()
+	lastBufShrink := int64(0)
 
-	// Close unused file slices
-	if ms.checkSlices {
-		for _, slice := range ms.files {
-			if slice.file != nil && time.Duration(ms.timeTick-slice.lastUsed) >= time.Second {
-				slice.file.Close()
-				slice.file = nil
+	for {
+		// Update time
+		timeTick := time.Now().UnixNano()
+		atomic.StoreInt64(&ms.timeTick, timeTick)
+
+		// Close unused file slices
+		if atomic.LoadInt64(&ms.checkSlices) == 1 {
+			ms.Lock()
+			for _, slice := range ms.files {
+				if slice.file != nil && time.Duration(timeTick-slice.lastUsed) >= time.Second {
+					slice.file.Close()
+					slice.file = nil
+				}
 			}
+			// We can update this without atomic since we are under store lock
+			// and this go routine is the only place where we check the value.
+			ms.checkSlices = 0
+			ms.Unlock()
 		}
-		ms.checkSlices = false
-	}
 
-	// Shrink the buffer if applicable
-	if ms.bw != nil && time.Duration(ms.timeTick-ms.lastShrink) >= bufShrinkTimerInterval {
-		ms.lastShrink = ms.timeTick
-		ms.writer, _ = ms.bw.tryShrinkBuffer(ms.file)
-	}
+		// Shrink the buffer if applicable
+		if hasBuffer && time.Duration(timeTick-lastBufShrink) >= bufShrinkInterval {
+			if lastBufShrink > 0 {
+				ms.Lock()
+				ms.writer, _ = ms.bw.tryShrinkBuffer(ms.file)
+				ms.Unlock()
+			}
+			lastBufShrink = timeTick
+		}
 
-	// Fire again in one second.
-	ms.tasksTimer.Reset(time.Second)
+		// Check for expiration
+		if maxAge > 0 && nextExpiration > 0 && timeTick >= nextExpiration {
+			ms.Lock()
+			// Expire messages
+			nextExpiration = ms.expireMsgs(timeTick, maxAge)
+			ms.Unlock()
+		}
+
+		select {
+		case <-ms.bkgTasksDone:
+			return
+		case <-ms.bkgTasksWake:
+			// wake up from a possible sleep to run the loop
+			ms.RLock()
+			nextExpiration = ms.expiration
+			ms.RUnlock()
+		case <-time.After(bkgTasksSleepDuration):
+			// go back to top of for loop.
+		}
+	}
 }
 
 // lookup returns the message for the given sequence number, possibly
@@ -2047,18 +2088,8 @@ func (ms *FileMsgStore) Close() error {
 			err = lerr
 		}
 	}
-	if ms.tasksTimer != nil {
-		if ms.tasksTimer.Stop() {
-			// If we can stop, timer callback won't fire,
-			// so we need to decrement the wait group.
-			ms.allDone.Done()
-		}
-	}
-	if ms.ageTimer != nil {
-		if ms.ageTimer.Stop() {
-			ms.allDone.Done()
-		}
-	}
+	// Signal the background tasks go-routine to exit
+	ms.bkgTasksDone <- true
 
 	ms.Unlock()
 
@@ -2146,7 +2177,7 @@ func (fs *FileStore) newFileSubStore(channelDirName, channel string, doRecover b
 		// execution of the callback itself.
 		ss.Lock()
 		ss.allDone.Add(1)
-		ss.shrinkTimer = time.AfterFunc(bufShrinkTimerInterval, ss.shrinkBuffer)
+		ss.shrinkTimer = time.AfterFunc(bufShrinkInterval, ss.shrinkBuffer)
 		ss.Unlock()
 	}
 	return ss, nil
@@ -2178,7 +2209,7 @@ func (ss *FileSubStore) shrinkBuffer() {
 	ss.writer, _ = ss.bw.tryShrinkBuffer(ss.file)
 
 	// Fire again
-	ss.shrinkTimer.Reset(bufShrinkTimerInterval)
+	ss.shrinkTimer.Reset(bufShrinkInterval)
 }
 
 // recoverSubscriptions recovers subscriptions state for this store.
@@ -2504,8 +2535,9 @@ func (ss *FileSubStore) writeRecord(w io.Writer, recType recordType, rec record)
 	// not already at the max size...
 	if bwBuf != nil && ss.bw.bufSize != ss.opts.BufferSize {
 		// Check if record fits
-		if recSize+recordHeaderSize > bwBuf.Available() {
-			ss.writer, err = ss.bw.expand(ss.file)
+		required := recSize + recordHeaderSize
+		if required > bwBuf.Available() {
+			ss.writer, err = ss.bw.expand(ss.file, required)
 			if err != nil {
 				return err
 			}
