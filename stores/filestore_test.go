@@ -812,21 +812,16 @@ func TestFSMaxAge(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
+	// For this test, reduce the background task go routine sleep interval
+	bkgTasksSleepDuration = 10 * time.Millisecond
+	defer func() {
+		bkgTasksSleepDuration = defaultBkgTasksSleepDuration
+	}()
+
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
 	testMaxAge(t, fs)
-
-	// Store a message
-	storeMsg(t, fs, "foo", []byte("msg"))
-	// Verify timer is set
-	fs.RLock()
-	cs := fs.LookupChannel("foo")
-	timerSet := cs.Msgs.(*FileMsgStore).ageTimer != nil
-	fs.RUnlock()
-	if !timerSet {
-		t.Fatal("Timer should have been set")
-	}
 }
 
 func TestFSBasicSubStore(t *testing.T) {
@@ -3875,5 +3870,55 @@ func TestFirstAndLastMsg(t *testing.T) {
 	}
 	if lastMsg == nil || lastMsg.Sequence != 4 {
 		t.Fatalf("Unexpected last message: %v", lastMsg)
+	}
+}
+
+func TestBufShrink(t *testing.T) {
+	if disableBufferWriters {
+		t.SkipNow()
+	}
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// For this test, reduce the buffer shrink interval
+	bufShrinkInterval = time.Second
+	defer func() {
+		bufShrinkInterval = defaultBufShrinkInterval
+	}()
+
+	fs := createDefaultFileStore(t, BufferSize(5*1024*1024))
+	defer fs.Close()
+
+	msg := make([]byte, 1024*1024)
+	storeMsg(t, fs, "foo", msg)
+
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	// Check that buffer size is at least 1MB
+	ms.RLock()
+	bufSize := ms.bw.bufSize
+	ms.RUnlock()
+	if bufSize < 1024*1024 {
+		t.Fatalf("Expected buffer to be at least 1MB, got %v", bufSize)
+	}
+	// Flush the store to empty the buffer
+	if err := cs.Msgs.Flush(); err != nil {
+		t.Fatalf("Error flushing store: %v", err)
+	}
+	// Ensure that buffer shrinks
+	timeout := time.Now().Add(5 * time.Second)
+	ok := false
+	for time.Now().Before(timeout) {
+		ms.RLock()
+		newBufSize := ms.bw.bufSize
+		ms.RUnlock()
+		if newBufSize < bufSize {
+			ok = true
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatalf("Buffer did not shrink")
 	}
 }
