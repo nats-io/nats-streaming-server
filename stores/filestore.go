@@ -89,6 +89,9 @@ const (
 
 	// This is the sleep time in the background tasks go routine.
 	defaultBkgTasksSleepDuration = time.Second
+
+	// This is the default amount of time a message is cached.
+	defaultCacheTTL = time.Second
 )
 
 // FileStoreOption is a function on the options for a File Store
@@ -123,10 +126,6 @@ type FileStoreOptions struct {
 	// DoSync indicates if `File.Sync()`` is called during a flush.
 	DoSync bool
 
-	// CacheMsgs allows MsgStore objects to keep messages in memory after being
-	// written to disk. This allows fast lookups at the expense of memory usage.
-	CacheMsgs bool
-
 	// Regardless of channel limits, the options below allow to split a message
 	// log in smaller file chunks. If all those options were to be set to 0,
 	// some file slice limit will be selected automatically based on the channel
@@ -159,7 +158,6 @@ var DefaultFileStoreOptions = FileStoreOptions{
 	DoCRC:                true,
 	CRCPolynomial:        int64(crc32.IEEE),
 	DoSync:               true,
-	CacheMsgs:            true,
 	SliceMaxBytes:        64 * 1024 * 1024, // 64MB
 }
 
@@ -235,16 +233,6 @@ func CRCPolynomial(polynomial int64) FileStoreOption {
 func DoSync(enableFileSync bool) FileStoreOption {
 	return func(o *FileStoreOptions) error {
 		o.DoSync = enableFileSync
-		return nil
-	}
-}
-
-// CacheMsgs is a FileStore option that allows channels' message stores to
-// keep messages in memory after being stored for fast lookup performance
-// (at the expense of memory).
-func CacheMsgs(cache bool) FileStoreOption {
-	return func(o *FileStoreOptions) error {
-		o.CacheMsgs = cache
 		return nil
 	}
 }
@@ -374,8 +362,35 @@ type fileSlice struct {
 type msgRecord struct {
 	offset    int64
 	timestamp int64
-	msg       *pb.MsgProto // will be nil when message flushed on disk and/or no caching allowed.
 	msgSize   uint32
+}
+
+// bufferedMsg is required to keep track of a message and msgRecord when
+// file buffering is used. It is possible that a message and index is
+// not flushed on disk while the message gets removed from the store
+// due to limit. We need a map that keeps a reference to message and
+// record until the file is flushed.
+type bufferedMsg struct {
+	msg *pb.MsgProto
+	rec *msgRecord
+}
+
+// cachedMsg is a structure that contains a reference to a message
+// and cache expiration value. The cache has a map and list so
+// that cached messages can be ordered by expiration time.
+type cachedMsg struct {
+	expiration int64
+	msg        *pb.MsgProto
+	prev       *cachedMsg
+	next       *cachedMsg
+}
+
+// msgsCache is the file store cache.
+type msgsCache struct {
+	tryEvict int32
+	seqMaps  map[uint64]*cachedMsg
+	head     *cachedMsg
+	tail     *cachedMsg
 }
 
 // FileMsgStore is a per channel message file store.
@@ -401,14 +416,14 @@ type FileMsgStore struct {
 	slAgeLim     int64
 	slHasLimits  bool
 	fstore       *FileStore // pointers to file store object
-	cache        bool       // shortcut to fstore.opts.CacheMsgs
+	cache        *msgsCache
 	msgs         map[uint64]*msgRecord
 	wOffset      int64
 	firstMsg     *pb.MsgProto
 	lastMsg      *pb.MsgProto
 	expiration   int64
-	bufferedMsgs []uint64
-	bufferedMRec map[uint64]*msgRecord
+	bufferedSeqs []uint64
+	bufferedMsgs map[uint64]*bufferedMsg
 	bkgTasksDone chan bool // signal the background tasks go routine to stop
 	bkgTasksWake chan bool // signal the background tasks go routine to get out of a sleep
 	allDone      sync.WaitGroup
@@ -419,6 +434,7 @@ type FileMsgStore struct {
 var (
 	bufShrinkInterval     = defaultBufShrinkInterval
 	bkgTasksSleepDuration = defaultBkgTasksSleepDuration
+	cacheTTL              = int64(defaultCacheTTL)
 )
 
 // openFile opens the file specified by `filename`.
@@ -1141,9 +1157,6 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		fstore:       fs,
 		msgs:         make(map[uint64]*msgRecord, 64),
 		wOffset:      int64(4), // The very first record starts after the file version record
-		bufferedMsgs: make([]uint64, 0, 1),
-		bufferedMRec: make(map[uint64]*msgRecord),
-		cache:        fs.opts.CacheMsgs,
 		files:        make(map[int]*fileSlice),
 		rootDir:      channelDirName,
 		bkgTasksDone: make(chan bool, 1),
@@ -1160,10 +1173,13 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 	ms.init(channel, &msgStoreLimits)
 
 	ms.setSliceLimits()
+	ms.initCache()
 
 	maxBufSize := fs.opts.BufferSize
 	if maxBufSize > 0 {
 		ms.bw = newBufferWriter(msgBufMinShrinkSize, maxBufSize)
+		ms.bufferedSeqs = make([]uint64, 0, 1)
+		ms.bufferedMsgs = make(map[uint64]*bufferedMsg)
 	}
 
 	// Use this variable for all errors below so we can do the cleanup
@@ -1355,7 +1371,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 		// Get these from the file store object
 		crcTable := ms.fstore.crcTable
 		doCRC := ms.fstore.opts.DoCRC
-		cache := ms.cache
 
 		// We are going to write the index file while recovering the data file
 		bw := bufio.NewWriterSize(ms.idxFile, msgIndexRecSize*1000)
@@ -1391,9 +1406,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 
 			mrec := &msgRecord{offset: offset, timestamp: msg.Timestamp, msgSize: uint32(msgSize)}
 			ms.msgs[msg.Sequence] = mrec
-			if cache {
-				mrec.msg = msg
-			}
 			// There was no index file, update it
 			err = ms.writeIndex(bw, msg.Sequence, offset, msg.Timestamp, msgSize)
 			if err != nil {
@@ -1604,7 +1616,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 		Timestamp: time.Now().UnixNano(),
 	}
 
-	pinMsg := false
+	msgInBuffer := false
 
 	var recSize int
 	var err error
@@ -1638,16 +1650,16 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 		if ms.bw.shrinkReq {
 			ms.bw.checkShrinkRequest()
 		}
-		// If message was added to the buffer we need to pin the message.
+		// If message was added to the buffer we need to also save a reference
+		// to that message outside of the cache, until the buffer is flushed.
 		if bwBuf.Buffered() >= recSize {
-			ms.bufferedMsgs = append(ms.bufferedMsgs, seq)
-			ms.bufferedMRec[seq] = mrec
-			pinMsg = true
+			ms.bufferedSeqs = append(ms.bufferedSeqs, seq)
+			ms.bufferedMsgs[seq] = &bufferedMsg{msg: m, rec: mrec}
+			msgInBuffer = true
 		}
 	}
 	// Message was flushed to disk, write corresponding index
-	if !pinMsg {
-		// No buffering, simply write index
+	if !msgInBuffer {
 		if err := ms.writeIndex(ms.idxFile, seq, ms.wOffset, m.Timestamp, msgSize); err != nil {
 			return 0, err
 		}
@@ -1668,9 +1680,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	ms.last = seq
 	ms.lastMsg = m
 	ms.msgs[ms.last] = mrec
-	if ms.cache || pinMsg {
-		mrec.msg = m
-	}
+	ms.addToCache(seq, m, true)
 	ms.wOffset += int64(recSize)
 
 	// For size, add the message record size, the record header and the size
@@ -1712,16 +1722,14 @@ func (ms *FileMsgStore) processBufferedMsgs() error {
 	idxBufferSize := len(ms.bufferedMsgs) * msgIndexRecSize
 	ms.tmpMsgBuf = util.EnsureBufBigEnough(ms.tmpMsgBuf, idxBufferSize)
 	bufOffset := 0
-	for _, pseq := range ms.bufferedMsgs {
-		mrec := ms.bufferedMRec[pseq]
-		if mrec != nil {
+	for _, pseq := range ms.bufferedSeqs {
+		bm := ms.bufferedMsgs[pseq]
+		if bm != nil {
+			mrec := bm.rec
 			// We add the index info for this flushed message
 			ms.addIndex(ms.tmpMsgBuf[bufOffset:], pseq, mrec.offset, mrec.timestamp, int(mrec.msgSize))
 			bufOffset += msgIndexRecSize
-			if !ms.cache {
-				mrec.msg = nil
-			}
-			delete(ms.bufferedMRec, pseq)
+			delete(ms.bufferedMsgs, pseq)
 		}
 	}
 	if bufOffset > 0 {
@@ -1729,7 +1737,7 @@ func (ms *FileMsgStore) processBufferedMsgs() error {
 			return err
 		}
 	}
-	ms.bufferedMsgs = ms.bufferedMsgs[:0]
+	ms.bufferedSeqs = ms.bufferedSeqs[:0]
 	return nil
 }
 
@@ -1794,7 +1802,7 @@ func (ms *FileMsgStore) removeFirstMsg() {
 	// Update total counts
 	ms.totalCount--
 	ms.totalBytes -= size
-	// Remove the first message from our cache
+	// Remove the first message from the records map
 	delete(ms.msgs, ms.first)
 	// Messages sequence is incremental with no gap on a given msgstore.
 	ms.first++
@@ -1923,9 +1931,9 @@ func (ms *FileMsgStore) backgroundTasks() {
 	hasBuffer := ms.bw != nil
 	maxAge := int64(ms.limits.MaxAge)
 	nextExpiration := ms.expiration
+	lastCacheCheck := ms.timeTick
+	lastBufShrink := ms.timeTick
 	ms.RUnlock()
-
-	lastBufShrink := int64(0)
 
 	for {
 		// Update time
@@ -1935,25 +1943,30 @@ func (ms *FileMsgStore) backgroundTasks() {
 		// Close unused file slices
 		if atomic.LoadInt64(&ms.checkSlices) == 1 {
 			ms.Lock()
+			opened := 0
 			for _, slice := range ms.files {
-				if slice.file != nil && time.Duration(timeTick-slice.lastUsed) >= time.Second {
-					slice.file.Close()
-					slice.file = nil
+				if slice.file != nil {
+					opened++
+					if slice.lastUsed < timeTick && time.Duration(timeTick-slice.lastUsed) >= time.Second {
+						slice.file.Close()
+						slice.file = nil
+						opened--
+					}
 				}
 			}
-			// We can update this without atomic since we are under store lock
-			// and this go routine is the only place where we check the value.
-			ms.checkSlices = 0
+			if opened == 0 {
+				// We can update this without atomic since we are under store lock
+				// and this go routine is the only place where we check the value.
+				ms.checkSlices = 0
+			}
 			ms.Unlock()
 		}
 
 		// Shrink the buffer if applicable
 		if hasBuffer && time.Duration(timeTick-lastBufShrink) >= bufShrinkInterval {
-			if lastBufShrink > 0 {
-				ms.Lock()
-				ms.writer, _ = ms.bw.tryShrinkBuffer(ms.file)
-				ms.Unlock()
-			}
+			ms.Lock()
+			ms.writer, _ = ms.bw.tryShrinkBuffer(ms.file)
+			ms.Unlock()
 			lastBufShrink = timeTick
 		}
 
@@ -1963,6 +1976,18 @@ func (ms *FileMsgStore) backgroundTasks() {
 			// Expire messages
 			nextExpiration = ms.expireMsgs(timeTick, maxAge)
 			ms.Unlock()
+		}
+
+		// Check for message caching
+		if timeTick >= lastCacheCheck+cacheTTL {
+			tryEvict := atomic.LoadInt32(&ms.cache.tryEvict)
+			if tryEvict == 1 {
+				ms.Lock()
+				// Possibly remove some/all cached messages
+				ms.evictFromCache(timeTick)
+				ms.Unlock()
+			}
+			lastCacheCheck = timeTick
 		}
 
 		select {
@@ -1981,11 +2006,20 @@ func (ms *FileMsgStore) backgroundTasks() {
 
 // lookup returns the message for the given sequence number, possibly
 // reading the message from disk.
+// Store write lock is assumed to be held on entry
 func (ms *FileMsgStore) lookup(seq uint64) *pb.MsgProto {
 	var msg *pb.MsgProto
 	m := ms.msgs[seq]
 	if m != nil {
-		msg = m.msg
+		msg = ms.getFromCache(seq)
+		if msg == nil && ms.bufferedMsgs != nil {
+			// Possibly in bufferedMsgs
+			bm := ms.bufferedMsgs[seq]
+			if bm != nil {
+				msg = bm.msg
+				ms.addToCache(seq, msg, false)
+			}
+		}
 		if msg == nil {
 			var msgSize int
 			// Look in which file slice the message is located.
@@ -2007,10 +2041,7 @@ func (ms *FileMsgStore) lookup(seq uint64) *pb.MsgProto {
 			if err != nil {
 				return nil
 			}
-			// Cache if allowed
-			if ms.cache {
-				m.msg = msg
-			}
+			ms.addToCache(seq, msg, false)
 		}
 	}
 	return msg
@@ -2060,6 +2091,89 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
 	})
 
 	return uint64(index) + ms.first
+}
+
+// initCache initializes the message cache
+func (ms *FileMsgStore) initCache() {
+	ms.cache = &msgsCache{
+		seqMaps: make(map[uint64]*cachedMsg),
+	}
+}
+
+// addToCache adds a message to the cache.
+// Store write lock is assumed held on entry
+func (ms *FileMsgStore) addToCache(seq uint64, msg *pb.MsgProto, isNew bool) {
+	c := ms.cache
+	exp := cacheTTL
+	if isNew {
+		exp += msg.Timestamp
+	} else {
+		exp += time.Now().UnixNano()
+	}
+	cMsg := &cachedMsg{
+		expiration: exp,
+		msg:        msg,
+	}
+	if c.tail == nil {
+		c.head = cMsg
+	} else {
+		c.tail.next = cMsg
+	}
+	cMsg.prev = c.tail
+	c.tail = cMsg
+	c.seqMaps[seq] = cMsg
+	if len(c.seqMaps) == 1 {
+		atomic.StoreInt32(&c.tryEvict, 1)
+	}
+}
+
+// getFromCache returns a message if available in the cache.
+// Store write lock is assumed held on entry
+func (ms *FileMsgStore) getFromCache(seq uint64) *pb.MsgProto {
+	c := ms.cache
+	cMsg := c.seqMaps[seq]
+	if cMsg == nil {
+		return nil
+	}
+	if cMsg != c.tail {
+		if cMsg.prev != nil {
+			cMsg.prev.next = cMsg.next
+		}
+		if cMsg.next != nil {
+			cMsg.next.prev = cMsg.prev
+		}
+		if cMsg == c.head {
+			c.head = cMsg.next
+		}
+		cMsg.prev = c.tail
+		cMsg.next = nil
+		c.tail = cMsg
+	}
+	cMsg.expiration = time.Now().UnixNano() + cacheTTL
+	return cMsg.msg
+}
+
+// evictFromCache move down the cache maps, evicting the last one.
+// Store write lock is assumed held on entry
+func (ms *FileMsgStore) evictFromCache(now int64) {
+	c := ms.cache
+	if now >= c.tail.expiration {
+		// Bulk remove
+		c.seqMaps = make(map[uint64]*cachedMsg)
+		c.head, c.tail, c.tryEvict = nil, nil, 0
+		return
+	}
+	cMsg := c.head
+	for cMsg != nil && cMsg.expiration <= now {
+		delete(c.seqMaps, cMsg.msg.Sequence)
+		cMsg = cMsg.next
+	}
+	if cMsg != c.head {
+		// There should be at least one left, otherwise, they
+		// would all have been bulk removed at top of this function.
+		cMsg.prev = nil
+		c.head = cMsg
+	}
 }
 
 // Close closes the store.

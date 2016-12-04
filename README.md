@@ -74,7 +74,6 @@ Streaming Server File Store Options:
     --file_crc                       Enable file CRC-32 checksum
     --file_crc_poly <int>            Polynomial used to make the table used for CRC-32 checksum
     --file_sync                      Enable File.Sync on Flush
-    --file_cache                     Enable messages caching
     --file_slice_max_msgs            Maximum number of messages per file slice (subject to channel limits)
     --file_slice_max_bytes           Maximum file slice size - including index file (subject to channel limits)
     --file_slice_max_age             Maximum file slice duration starting when the first message is stored (subject to channel limits)
@@ -250,11 +249,6 @@ file: {
     # Define if server should perform "file sync" operations during a flush.
     # Can be sync, do_sync, sync_on_flush
     sync: true
-
-    # Enable/disable caching of messages once stored. If enabled, it saves
-    # on disk reads (improved performance at the expense of memory).
-    # Can be cache, do_cache, cache_msgs
-    cache: true
 
     # Define the file slice maximum number of messages. If set to 0 and a
     # channel count limit is set, then the server will set a slice count

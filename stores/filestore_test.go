@@ -32,7 +32,6 @@ var testDefaultServerInfo = spb.ServerInfo{
 }
 
 var defaultDataStore string
-var disableMsgsCaching bool
 var disableBufferWriters bool
 
 func init() {
@@ -47,7 +46,6 @@ func init() {
 }
 
 func TestMain(m *testing.M) {
-	flag.BoolVar(&disableMsgsCaching, "no_cache", false, "Disable message caching")
 	flag.BoolVar(&disableBufferWriters, "no_buffer", false, "Disable use of buffer writers")
 	flag.Parse()
 	os.Exit(m.Run())
@@ -63,9 +61,6 @@ func newFileStore(t *testing.T, dataStore string, limits *StoreLimits, options .
 	opts := DefaultFileStoreOptions
 	// Set those options based on command line parameters.
 	// Each test may override those.
-	if disableMsgsCaching {
-		opts.CacheMsgs = false
-	}
 	if disableBufferWriters {
 		opts.BufferSize = 0
 	}
@@ -237,9 +232,6 @@ func TestFSOptions(t *testing.T) {
 		}
 	}
 	expected := DefaultFileStoreOptions
-	if disableMsgsCaching {
-		expected.CacheMsgs = false
-	}
 	if disableBufferWriters {
 		expected.BufferSize = 0
 	}
@@ -268,7 +260,6 @@ func TestFSOptions(t *testing.T) {
 		DoCRC:                false,
 		CRCPolynomial:        int64(crc32.Castagnoli),
 		DoSync:               false,
-		CacheMsgs:            false,
 		SliceMaxMsgs:         100,
 		SliceMaxBytes:        1024 * 1024,
 		SliceMaxAge:          time.Second,
@@ -284,7 +275,6 @@ func TestFSOptions(t *testing.T) {
 		DoCRC(expected.DoCRC),
 		CRCPolynomial(expected.CRCPolynomial),
 		DoSync(expected.DoSync),
-		CacheMsgs(expected.CacheMsgs),
 		SliceConfig(100, 1024*1024, time.Second, "myscript.sh"))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
@@ -2662,7 +2652,7 @@ func TestFSWriteRecord(t *testing.T) {
 		t.Fatal("Wrong crc")
 	}
 	if !reflect.DeepEqual(retBuf[recordHeaderSize:size], cliBuf) {
-		t.Fatalf("Unexpected content: %v", retBuf[recordHeaderSize:len(retBuf)])
+		t.Fatalf("Unexpected content: %v", retBuf[recordHeaderSize:])
 	}
 
 	// Check with no type
@@ -2687,7 +2677,7 @@ func TestFSWriteRecord(t *testing.T) {
 		t.Fatal("Wrong crc")
 	}
 	if !reflect.DeepEqual(retBuf[recordHeaderSize:size], cliBuf) {
-		t.Fatalf("Unexpected content: %v", retBuf[recordHeaderSize:len(retBuf)])
+		t.Fatalf("Unexpected content: %v", retBuf[recordHeaderSize:])
 	}
 
 	// Check for marshalling error
@@ -2820,10 +2810,18 @@ func TestFSFileSlicesClosed(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
+	// Reduce some filestore values for this test
+	bkgTasksSleepDuration = 100 * time.Millisecond
+	cacheTTL = int64(200 * time.Millisecond)
+	defer func() {
+		bkgTasksSleepDuration = defaultBkgTasksSleepDuration
+		cacheTTL = int64(defaultCacheTTL)
+	}()
+
 	limits := testDefaultStoreLimits
 	limits.MaxMsgs = 50
 	fs, _, err := NewFileStore(defaultDataStore, &limits,
-		SliceConfig(10, 0, 0, ""), CacheMsgs(false))
+		SliceConfig(10, 0, 0, ""))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -2833,12 +2831,27 @@ func TestFSFileSlicesClosed(t *testing.T) {
 		storeMsg(t, fs, "foo", payload)
 	}
 	cs := fs.LookupChannel("foo")
-	msgStore := cs.Msgs
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.Flush()
+	// Wait for cache to be empty
+	timeout := time.Now().Add(time.Duration(3 * cacheTTL))
+	empty := false
+	for time.Now().Before(timeout) {
+		ms.RLock()
+		empty = len(ms.cache.seqMaps) == 0
+		ms.RUnlock()
+		if empty {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !empty {
+		t.Fatal("Cache should be empty")
+	}
 	for i := 0; i < limits.MaxMsgs; i++ {
-		msgStore.Lookup(uint64(i + 1))
+		ms.Lookup(uint64(i + 1))
 	}
 	time.Sleep(1500 * time.Millisecond)
-	ms := msgStore.(*FileMsgStore)
 	ms.RLock()
 	for i, s := range ms.files {
 		if s.file != nil {
@@ -3920,5 +3933,93 @@ func TestBufShrink(t *testing.T) {
 	}
 	if !ok {
 		t.Fatalf("Buffer did not shrink")
+	}
+}
+
+func TestFSMsgCache(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// For this test, decrease some filestore values
+	bkgTasksSleepDuration = 100 * time.Millisecond
+	cacheTTL = int64(250 * time.Millisecond)
+	defer func() {
+		bkgTasksSleepDuration = defaultBkgTasksSleepDuration
+		cacheTTL = int64(defaultCacheTTL)
+	}()
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	payload := []byte("data")
+	msg := storeMsg(t, fs, "foo", payload)
+
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+	// Wait for stored message to be removed from cache
+	timeout := time.Now().Add(time.Second)
+	empty := false
+	for time.Now().Before(timeout) {
+		ms.RLock()
+		empty = len(ms.cache.seqMaps) == 0
+		ms.RUnlock()
+		if empty {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !empty {
+		t.Fatal("Message not removed from cache")
+	}
+	// First lookup
+	lm := ms.Lookup(msg.Sequence)
+	if !reflect.DeepEqual(msg, lm) {
+		t.Fatalf("Expected lookup message to be %v, got %v", msg, lm)
+	}
+	// Flush store so we removed from buffered messages
+	ms.Flush()
+	// As long as we call lookup, message should stay in cache
+	closeFile := true
+	end := time.Now().Add(2 * time.Duration(cacheTTL))
+	for time.Now().Before(end) {
+		lm = ms.Lookup(msg.Sequence)
+		if !reflect.DeepEqual(msg, lm) {
+			t.Fatalf("Expected lookup message to be %v, got %v", msg, lm)
+		}
+		if closeFile {
+			ms.Lock()
+			ms.file.Close()
+			ms.Unlock()
+			closeFile = false
+		} else {
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
+	// Wait for a bit.
+	time.Sleep(bkgTasksSleepDuration + time.Duration(cacheTTL) + 100*time.Millisecond)
+	// Now a lookup should return nil because message
+	// should have been evicted and file is closed
+	lm = ms.Lookup(msg.Sequence)
+	if lm != nil {
+		t.Fatalf("Unexpected message: %v", lm)
+	}
+
+	// Use another channel
+	end = time.Now().Add(2 * bkgTasksSleepDuration)
+	i := 0
+	for time.Now().Before(end) {
+		storeMsg(t, fs, "bar", payload)
+		i++
+		if i == 100 {
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
+	time.Sleep(bkgTasksSleepDuration)
+	// Cache should be empty now
+	ms.RLock()
+	empty = len(ms.cache.seqMaps) == 0
+	ms.RUnlock()
+	if !empty {
+		t.Fatal("Cache should be empty")
 	}
 }

@@ -68,9 +68,6 @@ func TestParseConfig(t *testing.T) {
 	if !opts.FileStoreOpts.DoSync {
 		t.Fatalf("Expected DoSync to be true, got false")
 	}
-	if !opts.FileStoreOpts.CacheMsgs {
-		t.Fatalf("Expected CacheMsgs to be true, got false")
-	}
 	if opts.FileStoreOpts.CompactFragmentation != 1 {
 		t.Fatalf("Expected CompactFragmentation to be 1, got %v", opts.FileStoreOpts.CompactFragmentation)
 	}
@@ -250,7 +247,6 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "file:{crc:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{crc_poly:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{sync:123}", wrongTypeErr)
-	expectFailureFor(t, "file:{cache:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{slice_max_msgs:true}", wrongTypeErr)
 	expectFailureFor(t, "file:{slice_max_bytes:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{slice_max_age:123}", wrongTypeErr)

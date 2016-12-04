@@ -41,7 +41,6 @@ Streaming Server File Store Options:
     --file_crc                       Enable file CRC-32 checksum
     --file_crc_poly <int>            Polynomial used to make the table used for CRC-32 checksum
     --file_sync                      Enable File.Sync on Flush
-    --file_cache                     Enable messages caching
     --file_slice_max_msgs            Maximum number of messages per file slice (subject to channel limits)
     --file_slice_max_bytes           Maximum file slice size - including index file (subject to channel limits)
     --file_slice_max_age             Maximum file slice duration starting when the first message is stored (subject to channel limits)
@@ -173,7 +172,6 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.Bool("file_crc", stores.DefaultFileStoreOptions.DoCRC, "FileStoreOpts.DoCRC")
 	flag.Int64("file_crc_poly", stores.DefaultFileStoreOptions.CRCPolynomial, "FileStoreOpts.CRCPolynomial")
 	flag.Bool("file_sync", stores.DefaultFileStoreOptions.DoSync, "FileStoreOpts.DoSync")
-	flag.Bool("file_cache", stores.DefaultFileStoreOptions.CacheMsgs, "FileStoreOpts.CacheMsgs")
 	flag.Int("file_slice_max_msgs", stores.DefaultFileStoreOptions.SliceMaxMsgs, "FileStoreOpts.SliceMaxMsgs")
 	flag.Int64("file_slice_max_bytes", stores.DefaultFileStoreOptions.SliceMaxBytes, "FileStoreOpts.SliceMaxBytes")
 	flag.String("file_slice_max_age", "0s", "FileStoreOpts.SliceMaxAge")
