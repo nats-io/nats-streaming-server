@@ -344,6 +344,12 @@ func TestInvalidRequests(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 
+	// Send a dummy message on the STAN subscription close subject
+	if err := checkServerResponse(nc, s.info.SubClose, ErrInvalidUnsubReq,
+		&pb.SubscriptionResponse{}); err != nil {
+		t.Fatalf("%v", err)
+	}
+
 	// Send a dummy message on the STAN close subject
 	if err := checkServerResponse(nc, s.info.Close, ErrInvalidCloseReq,
 		&pb.CloseResponse{}); err != nil {
@@ -4983,5 +4989,128 @@ func TestProtocolOrder(t *testing.T) {
 			t.Fatalf("Unexpected error on unsubscribe: %v", err)
 		}
 		sc2.Close()
+	}
+}
+
+func TestDurableClosedNotUnsubscribed(t *testing.T) {
+	closeSubscriber(t, "sub")
+	closeSubscriber(t, "queue")
+}
+
+func closeSubscriber(t *testing.T, subType string) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		stackFatalf(t, "Unexpected error on publish: %v", err)
+	}
+	// Create a durable
+	durName := "dur"
+	groupName := "group"
+	durKey := fmt.Sprintf("%s-%s-%s", clientName, "foo", durName)
+	if subType == "queue" {
+		durKey = fmt.Sprintf("%s:%s", durName, groupName)
+	}
+	ch := make(chan bool)
+	errCh := make(chan bool)
+	count := 0
+	cb := func(m *stan.Msg) {
+		count++
+		if m.Sequence != uint64(count) {
+			errCh <- true
+			return
+		}
+		ch <- true
+	}
+	var sub stan.Subscription
+	var err error
+	if subType == "sub" {
+		sub, err = sc.Subscribe("foo", cb,
+			stan.DeliverAllAvailable(),
+			stan.DurableName(durName))
+	} else {
+		sub, err = sc.QueueSubscribe("foo", groupName, cb,
+			stan.DeliverAllAvailable(),
+			stan.DurableName(durName))
+	}
+	if err != nil {
+		stackFatalf(t, "Unexpected error on subscribe: %v", err)
+	}
+	wait := func() {
+		select {
+		case <-errCh:
+			stackFatalf(t, "Unexpected message received")
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			stackFatalf(t, "Did not get our message")
+		}
+	}
+	wait()
+
+	s.RLock()
+	cs := s.store.LookupChannel("foo")
+	ss := cs.UserData.(*subStore)
+	var dur *subState
+	if subType == "sub" {
+		dur = ss.durables[durKey]
+	} else {
+		dur = ss.qsubs[durKey].subs[0]
+	}
+	s.RUnlock()
+	if dur == nil {
+		stackFatalf(t, "Durable should have been found")
+	}
+	// Make sure ACKs are processed before closing to avoid redelivery
+	waitForAcks(t, s, clientName, dur.ID, 0)
+	// Close durable, don't unsubscribe it
+	if err := sub.Close(); err != nil {
+		stackFatalf(t, "Error on subscriber close: %v", err)
+	}
+	// Durable should still be present
+	ss.RLock()
+	var there bool
+	if subType == "sub" {
+		_, there = ss.durables[durKey]
+	} else {
+		_, there = ss.qsubs[durKey]
+	}
+	ss.RUnlock()
+	if !there {
+		stackFatalf(t, "Durable should still be present")
+	}
+	// Send second message
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		stackFatalf(t, "Unexpected error on publish: %v", err)
+	}
+	// Restart the durable
+	if subType == "sub" {
+		sub, err = sc.Subscribe("foo", cb,
+			stan.DeliverAllAvailable(),
+			stan.DurableName(durName))
+	} else {
+		sub, err = sc.QueueSubscribe("foo", groupName, cb,
+			stan.DeliverAllAvailable(),
+			stan.DurableName(durName))
+	}
+	wait()
+	// Unsubscribe for good
+	if err := sub.Unsubscribe(); err != nil {
+		stackFatalf(t, "Unexpected error on unsubscribe")
+	}
+	// Wait for unsub to be fully processed
+	waitForNumSubs(t, s, clientName, 0)
+	// Should have been removed
+	ss.RLock()
+	if subType == "sub" {
+		_, there = ss.durables[durKey]
+	} else {
+		_, there = ss.qsubs[durKey]
+	}
+	ss.RUnlock()
+	if there {
+		stackFatalf(t, "Durable should not be present")
 	}
 }

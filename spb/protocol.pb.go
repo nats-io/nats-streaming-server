@@ -75,6 +75,7 @@ type ServerInfo struct {
 	Subscribe   string `protobuf:"bytes,4,opt,name=Subscribe,proto3" json:"Subscribe,omitempty"`
 	Unsubscribe string `protobuf:"bytes,5,opt,name=Unsubscribe,proto3" json:"Unsubscribe,omitempty"`
 	Close       string `protobuf:"bytes,6,opt,name=Close,proto3" json:"Close,omitempty"`
+	SubClose    string `protobuf:"bytes,7,opt,name=SubClose,proto3" json:"SubClose,omitempty"`
 }
 
 func (m *ServerInfo) Reset()         { *m = ServerInfo{} }
@@ -287,6 +288,12 @@ func (m *ServerInfo) MarshalTo(data []byte) (int, error) {
 		i = encodeVarintProtocol(data, i, uint64(len(m.Close)))
 		i += copy(data[i:], m.Close)
 	}
+	if len(m.SubClose) > 0 {
+		data[i] = 0x3a
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.SubClose)))
+		i += copy(data[i:], m.SubClose)
+	}
 	return i, nil
 }
 
@@ -457,6 +464,10 @@ func (m *ServerInfo) Size() (n int) {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
 	l = len(m.Close)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	l = len(m.SubClose)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
@@ -1150,6 +1161,35 @@ func (m *ServerInfo) Unmarshal(data []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.Close = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 7:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field SubClose", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.SubClose = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
