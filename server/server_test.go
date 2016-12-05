@@ -1019,9 +1019,6 @@ func testStalledRedelivery(t *testing.T, typeSub string) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	// Override maxStalledRedelivery
-	setMaxStalledRedeliveries(1)
-
 	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
