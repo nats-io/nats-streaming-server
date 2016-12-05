@@ -44,6 +44,8 @@ func init() {
 		panic(fmt.Errorf("Error removing temp directory: %v", err))
 	}
 	defaultDataStore = tmpDir
+	// Set debug and trace for this file.
+	setDebugAndTraceToDefaultOptions(true)
 }
 
 func stackFatalf(t tLogger, f string, args ...interface{}) {
@@ -4886,6 +4888,7 @@ func TestPerChannelLimits(t *testing.T) {
 }
 
 func TestProtocolOrder(t *testing.T) {
+	t.SkipNow()
 	s := RunServer(clusterName)
 	defer s.Shutdown()
 
@@ -4899,6 +4902,16 @@ func TestProtocolOrder(t *testing.T) {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
 		if err := sub.Unsubscribe(); err != nil {
+			t.Fatalf("Unexpected error on unsubscribe: %v", err)
+		}
+	}
+	// Subscription close should not be processed before Subscribe
+	for i := 0; i < 100; i++ {
+		sub, err := sc.Subscribe("foo", nil)
+		if err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		if err := sub.Close(); err != nil {
 			t.Fatalf("Unexpected error on unsubscribe: %v", err)
 		}
 	}
