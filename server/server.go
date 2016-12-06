@@ -119,6 +119,16 @@ type ioPendingMsg struct {
 // Constant that defines the size of the channel that feeds the IO thread.
 const ioChannelSize = 64 * 1024
 
+const (
+	useLocking     = true
+	dontUseLocking = false
+)
+
+const (
+	scheduleRequest = true
+	processRequest  = false
+)
+
 // StanServer structure represents the STAN server
 type StanServer struct {
 	// Keep all members for which we use atomic at the beginning of the
@@ -165,6 +175,13 @@ type StanServer struct {
 	ioChannel     chan *ioPendingMsg
 	ioChannelQuit chan struct{}
 	ioChannelWG   sync.WaitGroup
+
+	// Used to fix out-of-order processing of subUnsub/subClose/connClose
+	// requests due to use of different NATS subscribers for various
+	// protocols.
+	srvCtrlMsgID  string         // NUID used to filter control messages not intended for this server.
+	closeProtosMu sync.Mutex     // Mutex used for unsub/close requests.
+	connCloseReqs map[string]int // Key: clientID Value: ref count
 
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
@@ -683,6 +700,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
 		dupCIDTimeout:     defaultCheckDupCIDTimeout,
 		ioChannelQuit:     make(chan struct{}, 1),
+		srvCtrlMsgID:      nuid.Next(),
+		connCloseReqs:     make(map[string]int),
 		trace:             sOpts.Trace,
 		debug:             sOpts.Debug,
 	}
@@ -1201,7 +1220,7 @@ func (s *StanServer) initSubscriptions() {
 		panic(fmt.Sprintf("Could not subscribe to subscribe request subject, %v\n", err))
 	}
 	// Receive unsubscribe requests from clients.
-	_, err = s.nc.Subscribe(s.info.Unsubscribe, s.processUnSubscribeRequest)
+	_, err = s.nc.Subscribe(s.info.Unsubscribe, s.processUnsubscribeRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to unsubscribe request subject, %v\n", err))
 	}
@@ -1455,8 +1474,74 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 		return
 	}
 
-	if !s.closeClient(req.ClientID) {
-		Errorf("STAN: Unknown client %q in close request", req.ClientID)
+	// Lock for the remainder of the function
+	s.closeProtosMu.Lock()
+	defer s.closeProtosMu.Unlock()
+
+	ctrlMsg := &spb.CtrlMsg{
+		MsgType:  spb.CtrlMsg_ConnClose,
+		ServerID: s.srvCtrlMsgID,
+		Data:     []byte(req.ClientID),
+	}
+	ctrlBytes, _ := ctrlMsg.Marshal()
+
+	ctrlMsgNatsMsg := &nats.Msg{
+		Subject: s.info.Publish + ".close", // any pub subject will do
+		Reply:   m.Reply,
+		Data:    ctrlBytes,
+	}
+
+	refs := 0
+	if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
+		refs++
+	}
+	subs := s.clients.GetSubs(req.ClientID)
+	if len(subs) > 0 {
+		// There are subscribers, we will schedule the connection
+		// close request to subscriber's ackInbox subscribers.
+		for _, sub := range subs {
+			sub.Lock()
+			if sub.ackSub != nil {
+				ctrlMsgNatsMsg.Subject = sub.AckInbox
+				if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
+					refs++
+				}
+			}
+			sub.Unlock()
+		}
+	}
+	// If were unable to schedule a single proto, then execute
+	// performConnClose from here.
+	if refs == 0 {
+		s.connCloseReqs[req.ClientID] = 1
+		s.performConnClose(dontUseLocking, m, req.ClientID)
+	} else {
+		// Store our reference count and wait for performConnClose to
+		// be invoked...
+		s.connCloseReqs[req.ClientID] = refs
+	}
+}
+
+// performConnClose performs a connection close operation after all
+// client's pubMsg or client acks have been processed.
+func (s *StanServer) performConnClose(locking bool, m *nats.Msg, clientID string) {
+	if locking {
+		s.closeProtosMu.Lock()
+		defer s.closeProtosMu.Unlock()
+	}
+
+	refs := s.connCloseReqs[clientID]
+	refs--
+	if refs > 0 {
+		// Not done yet, update reference count
+		s.connCloseReqs[clientID] = refs
+		return
+	}
+	// Perform the connection close here...
+	delete(s.connCloseReqs, clientID)
+
+	if !s.closeClient(clientID) {
+		Errorf("STAN: Unknown client %q in close request", clientID)
 		s.sendCloseErr(m.Reply, ErrUnknownClient.Error())
 		return
 	}
@@ -1477,7 +1562,13 @@ func (s *StanServer) sendCloseErr(subj, err string) {
 func (s *StanServer) processClientPublish(m *nats.Msg) {
 	iopm := &ioPendingMsg{m: m}
 	pm := &iopm.pm
-	pm.Unmarshal(m.Data)
+	if pm.Unmarshal(m.Data) != nil {
+		// Expecting only a connection close request...
+		if s.processInternalCloseRequest(m, true) {
+			return
+		}
+		// else we will report an error below...
+	}
 
 	// Make sure we have a clientID, guid, etc.
 	if pm.Guid == "" || !s.clients.IsValid(pm.ClientID) || !isValidSubject(pm.Subject) {
@@ -1487,6 +1578,45 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	}
 
 	s.ioChannel <- iopm
+}
+
+// processInternalCloseRequest processes the incoming message has
+// a CtrlMsg. If this is not a CtrlMsg, returns false to indicate an error.
+// If the CtrlMsg's ServerID is not this server, the request is simply
+// ignored and this function returns true (so the caller does not fail).
+// Based on the CtrlMsg type, invokes appropriate function to
+// do final processing of unsub/subclose/conn close request.
+func (s *StanServer) processInternalCloseRequest(m *nats.Msg, onlyConnClose bool) bool {
+	cm := &spb.CtrlMsg{}
+	if cm.Unmarshal(m.Data) != nil {
+		return false
+	}
+	// If this control message is not intended for us, simply
+	// ignore the request and does not return a failure.
+	if cm.ServerID != s.srvCtrlMsgID {
+		return true
+	}
+	// If we expect only a connection close request but get
+	// something else, report as a failure.
+	if onlyConnClose && cm.MsgType != spb.CtrlMsg_ConnClose {
+		return false
+	}
+	switch cm.MsgType {
+	case spb.CtrlMsg_SubUnsubscribe:
+		// SubUnsub and SubClose use same function, using cm.MsgType
+		// to differentiate between unsubscribe and close.
+		fallthrough
+	case spb.CtrlMsg_SubClose:
+		req := &pb.UnsubscribeRequest{}
+		req.Unmarshal(cm.Data)
+		s.performSubUnsubOrClose(cm.MsgType, processRequest, m, req)
+	case spb.CtrlMsg_ConnClose:
+		clientID := string(cm.Data)
+		s.performConnClose(useLocking, m, clientID)
+	default:
+		return false // Valid ctrl message, but unexpected type, return failure.
+	}
+	return true
 }
 
 func (s *StanServer) sendPublishErr(subj, guid string, err error) {
@@ -2044,8 +2174,8 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 	}
 }
 
-// processUnSubscribeRequest will process a unsubscribe request.
-func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
+// processUnsubscribeRequest will process a unsubscribe request.
+func (s *StanServer) processUnsubscribeRequest(m *nats.Msg) {
 	req := &pb.UnsubscribeRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
@@ -2053,7 +2183,7 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidUnsubReq)
 		return
 	}
-	s.processCloseOrUnSubscribeRequest(false, req.ClientID, req.Subject, req.Inbox, m)
+	s.performSubUnsubOrClose(spb.CtrlMsg_SubUnsubscribe, scheduleRequest, m, req)
 }
 
 // processSubCloseRequest will process a subscription close request.
@@ -2065,19 +2195,22 @@ func (s *StanServer) processSubCloseRequest(m *nats.Msg) {
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidUnsubReq)
 		return
 	}
-	s.processCloseOrUnSubscribeRequest(true, req.ClientID, req.Subject, req.Inbox, m)
+	s.performSubUnsubOrClose(spb.CtrlMsg_SubClose, scheduleRequest, m, req)
 }
 
-// processCloseOrUnSubscribeRequest will process a close or unsubscribe request.
-func (s *StanServer) processCloseOrUnSubscribeRequest(doClose bool, clientID, subject, inbox string, m *nats.Msg) {
+// performSubUnsubOrClose either schedules the request to the
+// subscriber's AckInbox subscriber, or processes the request in place.
+func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule bool, m *nats.Msg, req *pb.UnsubscribeRequest) {
 	action := "unsub"
-	if doClose {
+	isSubClose := false
+	if reqType == spb.CtrlMsg_SubClose {
 		action = "sub close"
+		isSubClose = true
 	}
-	cs := s.store.LookupChannel(subject)
+	cs := s.store.LookupChannel(req.Subject)
 	if cs == nil {
 		Errorf("STAN: [Client:%s] %s request missing subject %s.",
-			clientID, action, subject)
+			req.ClientID, action, req.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
 	}
@@ -2085,35 +2218,66 @@ func (s *StanServer) processCloseOrUnSubscribeRequest(doClose bool, clientID, su
 	// Get the subStore
 	ss := cs.UserData.(*subStore)
 
-	sub := ss.LookupByAckInbox(inbox)
+	sub := ss.LookupByAckInbox(req.Inbox)
 	if sub == nil {
 		Errorf("STAN: [Client:%s] %s request for missing inbox %s.",
-			clientID, action, inbox)
+			req.ClientID, action, req.Inbox)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
 	}
 
+	// Lock for the remainder of the function
+	s.closeProtosMu.Lock()
+	defer s.closeProtosMu.Unlock()
+
+	if schedule {
+		processInPlace := true
+		sub.Lock()
+		if sub.ackSub != nil {
+			ctrlMsg := &spb.CtrlMsg{
+				MsgType:  reqType,
+				ServerID: s.srvCtrlMsgID,
+				Data:     m.Data,
+			}
+			ctrlBytes, _ := ctrlMsg.Marshal()
+			ctrlMsgNatsMsg := &nats.Msg{
+				Subject: sub.AckInbox,
+				Reply:   m.Reply,
+				Data:    ctrlBytes,
+			}
+			if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
+				// This function will be called from processAckMsg with
+				// internal == true.
+				processInPlace = false
+			}
+		}
+		sub.Unlock()
+		if !processInPlace {
+			return
+		}
+	}
+
 	// Remove from Client
-	if !s.clients.RemoveSub(clientID, sub) {
-		Errorf("STAN: [Client:%s] %s request for missing client", clientID, action)
+	if !s.clients.RemoveSub(req.ClientID, sub) {
+		Errorf("STAN: [Client:%s] %s request for missing client", req.ClientID, action)
 		s.sendSubscriptionResponseErr(m.Reply, ErrUnknownClient)
 		return
 	}
 
 	// Remove the subscription
-	unsubscribe := !doClose
+	unsubscribe := !isSubClose
 	ss.Remove(cs, sub, unsubscribe)
 
 	if s.debug {
-		if doClose {
-			Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", clientID, subject)
+		if isSubClose {
+			Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", req.ClientID, req.Subject)
 		} else {
-			Debugf("STAN: [Client:%s] Closing subscription subject=%s.", clientID, subject)
+			Debugf("STAN: [Client:%s] Closing subscription subject=%s.", req.ClientID, req.Subject)
 		}
 	}
 
 	// Create a non-error response
-	resp := &pb.SubscriptionResponse{AckInbox: inbox}
+	resp := &pb.SubscriptionResponse{AckInbox: req.Inbox}
 	b, _ := resp.Marshal()
 	s.ncs.Publish(m.Reply, b)
 }
@@ -2473,7 +2637,12 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 // processAckMsg processes inbound acks from clients for delivered messages.
 func (s *StanServer) processAckMsg(m *nats.Msg) {
 	ack := &pb.Ack{}
-	ack.Unmarshal(m.Data)
+	if ack.Unmarshal(m.Data) != nil {
+		// Expecting the full range of "close" requests: subUnsub, subClose, or connClose
+		if s.processInternalCloseRequest(m, false) {
+			return
+		}
+	}
 	cs := s.store.LookupChannel(ack.Subject)
 	if cs == nil {
 		Errorf("STAN: [Client:?] Ack received, invalid channel (%s)", ack.Subject)

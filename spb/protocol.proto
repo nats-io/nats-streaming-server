@@ -58,3 +58,14 @@ message ClientInfo {
 message ClientDelete {
   string ID = 1; // ID of the client being unregistered
 }
+
+message CtrlMsg {
+  enum Type {
+    SubUnsubscribe = 0; // Subscription Unsubscribe request.
+    SubClose       = 1; // Subscription Close request.
+    ConnClose      = 2; // Connection Close request.
+  }
+  Type    MsgType  = 1; // Type of the control message.
+  string  ServerID = 2; // Allows a server to detect if it is the intended receipient.
+  bytes   Data     = 3; // Optional bytes that carries context information.
+}
