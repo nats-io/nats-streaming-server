@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3092,9 +3093,7 @@ func TestFSFirstEmptySliceRemovedOnCreateNewSlice(t *testing.T) {
 	timeout = time.Now().Add(5 * time.Second)
 	ok = false
 	for time.Now().Before(timeout) {
-		ms.RLock()
-		timeTick := ms.timeTick
-		ms.RUnlock()
+		timeTick := atomic.LoadInt64(&ms.timeTick)
 
 		if timeTick-firstWrite > int64(time.Second) {
 			ok = true
@@ -3996,7 +3995,7 @@ func TestFSMsgCache(t *testing.T) {
 		}
 	}
 	// Wait for a bit.
-	time.Sleep(bkgTasksSleepDuration + time.Duration(cacheTTL) + 100*time.Millisecond)
+	time.Sleep(bkgTasksSleepDuration + time.Duration(cacheTTL) + 500*time.Millisecond)
 	// Now a lookup should return nil because message
 	// should have been evicted and file is closed
 	lm = ms.Lookup(msg.Sequence)
