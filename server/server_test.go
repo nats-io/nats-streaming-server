@@ -3467,7 +3467,7 @@ func TestEnsureStandAlone(t *testing.T) {
 
 	// Start a streaming server, and setup a route
 	nOpts := DefaultNatsServerOptions
-	nOpts.ClusterListenStr = "nats://127.0.0.1:5550"
+	nOpts.Cluster.ListenStr = "nats://127.0.0.1:5550"
 	nOpts.RoutesStr = "nats://127.0.0.1:5551"
 
 	sOpts := GetDefaultOptions()
@@ -3491,7 +3491,7 @@ func TestEnsureStandAlone(t *testing.T) {
 
 	nOpts2 := DefaultNatsServerOptions
 	nOpts2.Port = 4333
-	nOpts2.ClusterListenStr = "nats://127.0.0.1:5551"
+	nOpts2.Cluster.ListenStr = "nats://127.0.0.1:5551"
 	nOpts2.RoutesStr = "nats://127.0.0.1:5550"
 	failedServer = RunServerWithOpts(sOpts, &nOpts2)
 }

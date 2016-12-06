@@ -500,7 +500,7 @@ You can check [MemStore](https://github.com/nats-io/nats-streaming-server/blob/m
 
 ## Building
 
-Building the NATS Streaming Server from source requires at least version 1.5 of Go, but we encourage the use of the latest stable release. Information on installation, including pre-built binaries, is available at http://golang.org/doc/install. Stable branches of operating system packagers provided by your OS vendor may not be sufficient.
+Building the NATS Streaming Server from source requires at least version 1.6 of Go, but we encourage the use of the latest stable release. Information on installation, including pre-built binaries, is available at http://golang.org/doc/install. Stable branches of operating system packagers provided by your OS vendor may not be sufficient.
 
 Run `go version` to see the version of Go which you have installed.
 
