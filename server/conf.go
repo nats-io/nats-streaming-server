@@ -261,11 +261,6 @@ func parseFileOptions(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.FileStoreOpts.DoSync = v.(bool)
-		case "cache", "do_cache", "cache_msgs":
-			if err := checkType(k, reflect.Bool, v); err != nil {
-				return err
-			}
-			opts.FileStoreOpts.CacheMsgs = v.(bool)
 		case "slice_max_msgs", "slice_max_count", "slice_msgs", "slice_count":
 			if err := checkType(k, reflect.Int64, v); err != nil {
 				return err
