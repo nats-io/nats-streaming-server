@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -5112,5 +5113,52 @@ func closeSubscriber(t *testing.T, subType string) {
 	ss.RUnlock()
 	if there {
 		stackFatalf(t, "Durable should not be present")
+	}
+}
+
+func TestProcessCommandLineArgs(t *testing.T) {
+	var host string
+	var port int
+	cmd := flag.NewFlagSet("nats-streaming-server", flag.ExitOnError)
+	cmd.StringVar(&host, "a", "0.0.0.0", "Host.")
+	cmd.IntVar(&port, "p", 4222, "Port.")
+
+	cmd.Parse([]string{"-a", "127.0.0.1", "-p", "9090"})
+	showVersion, showHelp, err := natsd.ProcessCommandLineArgs(cmd)
+	if err != nil {
+		t.Errorf("Expected no errors, got: %s", err)
+	}
+	if showVersion || showHelp {
+		t.Errorf("Expected not having to handle subcommands")
+	}
+
+	cmd.Parse([]string{"version"})
+	showVersion, showHelp, err = natsd.ProcessCommandLineArgs(cmd)
+	if err != nil {
+		t.Errorf("Expected no errors, got: %s", err)
+	}
+	if !showVersion {
+		t.Errorf("Expected having to handle version command")
+	}
+	if showHelp {
+		t.Errorf("Expected not having to handle help command")
+	}
+
+	cmd.Parse([]string{"help"})
+	showVersion, showHelp, err = natsd.ProcessCommandLineArgs(cmd)
+	if err != nil {
+		t.Errorf("Expected no errors, got: %s", err)
+	}
+	if showVersion {
+		t.Errorf("Expected not having to handle version command")
+	}
+	if !showHelp {
+		t.Errorf("Expected having to handle help command")
+	}
+
+	cmd.Parse([]string{"foo", "-p", "9090"})
+	_, _, err = natsd.ProcessCommandLineArgs(cmd)
+	if err == nil {
+		t.Errorf("Expected an error handling the command arguments")
 	}
 }

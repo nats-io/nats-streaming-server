@@ -252,6 +252,18 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 		natsd.PrintTLSHelpAndDie()
 	}
 
+	// Process args looking for non-flag options,
+	// 'version' and 'help' only for now
+	showVersion, showHelp, err := natsd.ProcessCommandLineArgs(flag.CommandLine)
+	if err != nil {
+		natsd.PrintAndDie(err.Error() + usageStr)
+	} else if showVersion {
+		fmt.Printf("nats-streaming-server version %s, ", stand.VERSION)
+		natsd.PrintServerAndExit()
+	} else if showHelp {
+		usage()
+	}
+
 	// Parse NATS Streaming configuration file, updating stanOpts with
 	// what is found in the file, possibly overriding the defaults.
 	if stanConfigFile != "" {
