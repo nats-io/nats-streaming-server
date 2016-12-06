@@ -227,8 +227,8 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.BoolVar(&showVersion, "v", false, "")
 	flag.IntVar(&natsOpts.ProfPort, "profile", 0, "")
 	flag.StringVar(&natsOpts.RoutesStr, "routes", "", "")
-	flag.StringVar(&natsOpts.ClusterListenStr, "cluster", "", "")
-	flag.StringVar(&natsOpts.ClusterListenStr, "cluster_listen", "", "")
+	flag.StringVar(&natsOpts.Cluster.ListenStr, "cluster", "", "")
+	flag.StringVar(&natsOpts.Cluster.ListenStr, "cluster_listen", "", "")
 	flag.BoolVar(&showTLSHelp, "help_tls", false, "")
 	flag.BoolVar(&natsOpts.TLS, "tls", false, "")
 	flag.BoolVar(&natsOpts.TLSVerify, "tlsverify", false, "")
@@ -274,7 +274,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	}
 
 	// Remove any host/ip that points to itself in Route
-	newroutes, err := natsd.RemoveSelfReference(natsOpts.ClusterPort, natsOpts.Routes)
+	newroutes, err := natsd.RemoveSelfReference(natsOpts.Cluster.Port, natsOpts.Routes)
 	if err != nil {
 		natsd.PrintAndDie(err.Error())
 	}

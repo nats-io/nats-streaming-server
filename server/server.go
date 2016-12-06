@@ -982,20 +982,20 @@ func friendlyBytes(msgbytes int64) string {
 
 // TODO:  Explore parameter passing in gnatsd.  Keep seperate for now.
 func (s *StanServer) configureClusterOpts(opts *server.Options) error {
-	if opts.ClusterListenStr == "" {
+	if opts.Cluster.ListenStr == "" {
 		if opts.RoutesStr != "" {
 			Fatalf("Solicited routes require cluster capabilities, e.g. --cluster.")
 		}
 		return nil
 	}
 
-	clusterURL, err := url.Parse(opts.ClusterListenStr)
+	clusterURL, err := url.Parse(opts.Cluster.ListenStr)
 	h, p, err := net.SplitHostPort(clusterURL.Host)
 	if err != nil {
 		return err
 	}
-	opts.ClusterHost = h
-	_, err = fmt.Sscan(p, &opts.ClusterPort)
+	opts.Cluster.Host = h
+	_, err = fmt.Sscan(p, &opts.Cluster.Port)
 	if err != nil {
 		return err
 	}
@@ -1005,10 +1005,10 @@ func (s *StanServer) configureClusterOpts(opts *server.Options) error {
 		if !hasPassword {
 			return fmt.Errorf("Expected cluster password to be set.")
 		}
-		opts.ClusterPassword = pass
+		opts.Cluster.Password = pass
 
 		user := clusterURL.User.Username()
-		opts.ClusterUsername = user
+		opts.Cluster.Username = user
 	}
 
 	// If we have routes but no config file, fill in here.

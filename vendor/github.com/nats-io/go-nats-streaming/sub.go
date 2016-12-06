@@ -256,10 +256,6 @@ func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...Subs
 	return sub, nil
 }
 
-type marshaller interface {
-	Marshal() ([]byte, error)
-}
-
 // closeOrUnsubscribe performs either close or unsubsribe based on
 // given boolean.
 func (sub *subscription) closeOrUnsubscribe(doClose bool) error {
@@ -303,23 +299,12 @@ func (sub *subscription) closeOrUnsubscribe(doClose bool) error {
 	nc := sc.nc
 	sc.Unlock()
 
-	var req marshaller
-	if doClose {
-		scr := &pb.SubscriptionCloseRequest{
-			ClientID: sc.clientID,
-			Subject:  sub.subject,
-			Inbox:    sub.ackInbox,
-		}
-		req = scr
-	} else {
-		usr := &pb.UnsubscribeRequest{
-			ClientID: sc.clientID,
-			Subject:  sub.subject,
-			Inbox:    sub.ackInbox,
-		}
-		req = usr
+	usr := &pb.UnsubscribeRequest{
+		ClientID: sc.clientID,
+		Subject:  sub.subject,
+		Inbox:    sub.ackInbox,
 	}
-	b, _ := req.Marshal()
+	b, _ := usr.Marshal()
 	reply, err := nc.Request(reqSubject, b, sc.opts.ConnectTimeout)
 	if err != nil {
 		if err == nats.ErrTimeout {
