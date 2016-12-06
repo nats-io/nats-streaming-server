@@ -1368,7 +1368,7 @@ func (s *StanServer) processConnectRequestWithDupID(sc *stores.Client, req *pb.C
 	// running by sending a ping to that inbox.
 	if _, err := s.nc.Request(hbInbox, nil, s.dupCIDTimeout); err != nil {
 		// The old client didn't reply, assume it is dead, close it and continue.
-		s.closeClient(clientID)
+		s.closeClient(useLocking, clientID)
 
 		// Between the close and the new registration below, it is possible
 		// that a connection request came in (in connectCB) and since the
@@ -1429,7 +1429,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 		if client.fhb > maxFailedHB {
 			Debugf("STAN: [Client:%s] Timed out on heartbeats.", clientID)
 			client.Unlock()
-			s.closeClient(clientID)
+			s.closeClient(useLocking, clientID)
 			return
 		}
 	} else {
@@ -1440,7 +1440,11 @@ func (s *StanServer) checkClientHealth(clientID string) {
 }
 
 // Close a client
-func (s *StanServer) closeClient(clientID string) bool {
+func (s *StanServer) closeClient(lock bool, clientID string) bool {
+	if lock {
+		s.closeProtosMu.Lock()
+		defer s.closeProtosMu.Unlock()
+	}
 	// Remove from our clientStore.
 	sc := s.clients.Unregister(clientID)
 	if sc == nil {
@@ -1540,7 +1544,9 @@ func (s *StanServer) performConnClose(locking bool, m *nats.Msg, clientID string
 	// Perform the connection close here...
 	delete(s.connCloseReqs, clientID)
 
-	if !s.closeClient(clientID) {
+	// The function or the caller is already locking, so do not use
+	// locking in that function.
+	if !s.closeClient(dontUseLocking, clientID) {
 		Errorf("STAN: Unknown client %q in close request", clientID)
 		s.sendCloseErr(m.Reply, ErrUnknownClient.Error())
 		return
@@ -2586,7 +2592,9 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 	if err != nil {
 		// Try to undo what has been done.
+		s.closeProtosMu.Lock()
 		ss.Remove(cs, sub, false)
+		s.closeProtosMu.Unlock()
 		Errorf("STAN: Unable to add subscription for %s: %v", sr.Subject, err)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
