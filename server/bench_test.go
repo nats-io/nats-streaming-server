@@ -23,6 +23,8 @@ func benchCleanupDatastore(b *testing.B, dir string) {
 
 func benchRunServer(b *testing.B) *StanServer {
 	opts := GetDefaultOptions()
+	opts.Debug = false
+	opts.Trace = false
 	opts.StoreType = storeType
 	if storeType == stores.TypeFile {
 		opts.FilestoreDir = defaultDataStore

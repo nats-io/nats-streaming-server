@@ -15,6 +15,7 @@
 		ServerInfo
 		ClientInfo
 		ClientDelete
+		CtrlMsg
 */
 package spb
 
@@ -29,6 +30,29 @@ import io "io"
 var _ = proto.Marshal
 var _ = fmt.Errorf
 var _ = math.Inf
+
+type CtrlMsg_Type int32
+
+const (
+	CtrlMsg_SubUnsubscribe CtrlMsg_Type = 0
+	CtrlMsg_SubClose       CtrlMsg_Type = 1
+	CtrlMsg_ConnClose      CtrlMsg_Type = 2
+)
+
+var CtrlMsg_Type_name = map[int32]string{
+	0: "SubUnsubscribe",
+	1: "SubClose",
+	2: "ConnClose",
+}
+var CtrlMsg_Type_value = map[string]int32{
+	"SubUnsubscribe": 0,
+	"SubClose":       1,
+	"ConnClose":      2,
+}
+
+func (x CtrlMsg_Type) String() string {
+	return proto.EnumName(CtrlMsg_Type_name, int32(x))
+}
 
 // SubState represents the state of a Subscription
 type SubState struct {
@@ -100,6 +124,16 @@ func (m *ClientDelete) Reset()         { *m = ClientDelete{} }
 func (m *ClientDelete) String() string { return proto.CompactTextString(m) }
 func (*ClientDelete) ProtoMessage()    {}
 
+type CtrlMsg struct {
+	MsgType  CtrlMsg_Type `protobuf:"varint,1,opt,name=MsgType,proto3,enum=spb.CtrlMsg_Type" json:"MsgType,omitempty"`
+	ServerID string       `protobuf:"bytes,2,opt,name=ServerID,proto3" json:"ServerID,omitempty"`
+	Data     []byte       `protobuf:"bytes,3,opt,name=Data,proto3" json:"Data,omitempty"`
+}
+
+func (m *CtrlMsg) Reset()         { *m = CtrlMsg{} }
+func (m *CtrlMsg) String() string { return proto.CompactTextString(m) }
+func (*CtrlMsg) ProtoMessage()    {}
+
 func init() {
 	proto.RegisterType((*SubState)(nil), "spb.SubState")
 	proto.RegisterType((*SubStateDelete)(nil), "spb.SubStateDelete")
@@ -107,6 +141,8 @@ func init() {
 	proto.RegisterType((*ServerInfo)(nil), "spb.ServerInfo")
 	proto.RegisterType((*ClientInfo)(nil), "spb.ClientInfo")
 	proto.RegisterType((*ClientDelete)(nil), "spb.ClientDelete")
+	proto.RegisterType((*CtrlMsg)(nil), "spb.CtrlMsg")
+	proto.RegisterEnum("spb.CtrlMsg_Type", CtrlMsg_Type_name, CtrlMsg_Type_value)
 }
 func (m *SubState) Marshal() (data []byte, err error) {
 	size := m.Size()
@@ -351,6 +387,43 @@ func (m *ClientDelete) MarshalTo(data []byte) (int, error) {
 	return i, nil
 }
 
+func (m *CtrlMsg) Marshal() (data []byte, err error) {
+	size := m.Size()
+	data = make([]byte, size)
+	n, err := m.MarshalTo(data)
+	if err != nil {
+		return nil, err
+	}
+	return data[:n], nil
+}
+
+func (m *CtrlMsg) MarshalTo(data []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if m.MsgType != 0 {
+		data[i] = 0x8
+		i++
+		i = encodeVarintProtocol(data, i, uint64(m.MsgType))
+	}
+	if len(m.ServerID) > 0 {
+		data[i] = 0x12
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.ServerID)))
+		i += copy(data[i:], m.ServerID)
+	}
+	if m.Data != nil {
+		if len(m.Data) > 0 {
+			data[i] = 0x1a
+			i++
+			i = encodeVarintProtocol(data, i, uint64(len(m.Data)))
+			i += copy(data[i:], m.Data)
+		}
+	}
+	return i, nil
+}
+
 func encodeFixed64Protocol(data []byte, offset int, v uint64) int {
 	data[offset] = uint8(v)
 	data[offset+1] = uint8(v >> 8)
@@ -494,6 +567,25 @@ func (m *ClientDelete) Size() (n int) {
 	l = len(m.ID)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
+	}
+	return n
+}
+
+func (m *CtrlMsg) Size() (n int) {
+	var l int
+	_ = l
+	if m.MsgType != 0 {
+		n += 1 + sovProtocol(uint64(m.MsgType))
+	}
+	l = len(m.ServerID)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
+	}
+	if m.Data != nil {
+		l = len(m.Data)
+		if l > 0 {
+			n += 1 + l + sovProtocol(uint64(l))
+		}
 	}
 	return n
 }
@@ -1377,6 +1469,135 @@ func (m *ClientDelete) Unmarshal(data []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			m.ID = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipProtocol(data[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *CtrlMsg) Unmarshal(data []byte) error {
+	l := len(data)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowProtocol
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := data[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: CtrlMsg: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: CtrlMsg: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MsgType", wireType)
+			}
+			m.MsgType = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				m.MsgType |= (CtrlMsg_Type(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ServerID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ServerID = string(data[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Data", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				byteLen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Data = append(m.Data[:0], data[iNdEx:postIndex]...)
+			if m.Data == nil {
+				m.Data = []byte{}
+			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex

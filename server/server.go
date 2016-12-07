@@ -106,10 +106,12 @@ func init() {
 	}
 }
 
-// ioPendingMsg is a record that embeds the PubMsg and PubAck
-// structures so we reduce the number of memory allocations
-// to 1 when processing a message from producer.
+// ioPendingMsg is a record that embeds the pointer to the incoming
+// NATS Message, the PubMsg and PubAck structures so we reduce the
+// number of memory allocations to 1 when processing a message from
+// producer.
 type ioPendingMsg struct {
+	m  *nats.Msg
 	pm pb.PubMsg
 	pa pb.PubAck
 }
@@ -117,96 +119,15 @@ type ioPendingMsg struct {
 // Constant that defines the size of the channel that feeds the IO thread.
 const ioChannelSize = 64 * 1024
 
-// ioProto is a structure that includes the incoming NATS protocol message.
-// Those protocols are chained and processed in the ioLoop. This structure
-// includes a pointer to a ioPendingMsg for (the majority of) cases where
-// the protocol is a published message.
-type ioProto struct {
-	m      *nats.Msg
-	pubmsg *ioPendingMsg
-	next   *ioProto
-}
+const (
+	useLocking     = true
+	dontUseLocking = false
+)
 
-// ioProtoList is a list of ioProto records.
-type ioProtoList struct {
-	sync.RWMutex
-	head  *ioProto
-	tail  *ioProto
-	count int
-}
-
-// append adds a protocol to the end of the list.
-// This call is not thread-safe.
-func (l *ioProtoList) append(proto *ioProto) {
-	if l.tail == nil {
-		l.head = proto
-	} else {
-		l.tail.next = proto
-	}
-	l.tail = proto
-	l.count++
-}
-
-// protectedAppend is similar to ioProtoList.append except that it is thread-safe.
-func (l *ioProtoList) protectedAppend(proto *ioProto) {
-	l.Lock()
-	l.append(proto)
-	l.Unlock()
-}
-
-// popHead removes the head of the list and returns it, or nil if the list is
-// empty.
-// This call is not thread-safe.
-func (l *ioProtoList) popHead() *ioProto {
-	proto := l.head
-	if l.head != nil {
-		l.head = proto.next
-		l.count--
-		if l.count == 0 {
-			l.tail = nil
-		}
-		proto.next = nil
-	}
-	return proto
-}
-
-// getCount returns the number of elements in the list.
-// This call is not thread-safe.
-func (l *ioProtoList) getCount() int {
-	return l.count
-}
-
-// protectedGetCount is similar to ioProtoList.getCount except that it is thread-safe.
-func (l *ioProtoList) protectedGetCount() int {
-	l.RLock()
-	count := l.count
-	l.RUnlock()
-	return count
-}
-
-// isEmpty returns true if the list is empty, false otherwise.
-// This call is not thread-safe.
-func (l *ioProtoList) isEmpty() bool {
-	return l.count == 0
-}
-
-// protectedTransferTo transfers meta data of list `l` into `dst` and
-// clears `l` under lock.
-func (l *ioProtoList) protectedTransferTo(dst *ioProtoList) {
-	l.Lock()
-	dst.head = l.head
-	dst.tail = l.tail
-	dst.count = l.count
-	l.head, l.tail, l.count = nil, nil, 0
-	l.Unlock()
-}
-
-// ioProtoPool is a sync.Pool for ioProto objects.
-var ioProtoPool = sync.Pool{
-	New: func() interface{} {
-		return &ioProto{}
-	},
-}
+const (
+	scheduleRequest = true
+	processRequest  = false
+)
 
 // StanServer structure represents the STAN server
 type StanServer struct {
@@ -251,19 +172,16 @@ type StanServer struct {
 	store stores.Store
 
 	// IO Channel
-	ioChannel     chan *nats.Msg
+	ioChannel     chan *ioPendingMsg
 	ioChannelQuit chan struct{}
 	ioChannelWG   sync.WaitGroup
-	ioSignal      chan struct{}
-	ioList        *ioProtoList
 
-	// Channel subscribers (to identify which subjects message belongs to)
-	connSub     *nats.Subscription
-	pubSub      *nats.Subscription
-	subSub      *nats.Subscription
-	unsubSub    *nats.Subscription
-	subCloseSub *nats.Subscription
-	closeSub    *nats.Subscription
+	// Used to fix out-of-order processing of subUnsub/subClose/connClose
+	// requests due to use of different NATS subscribers for various
+	// protocols.
+	srvCtrlMsgID  string         // NUID used to filter control messages not intended for this server.
+	closeProtosMu sync.Mutex     // Mutex used for unsub/close requests.
+	connCloseReqs map[string]int // Key: clientID Value: ref count
 
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
@@ -615,6 +533,12 @@ var DefaultNatsServerOptions = server.Options{
 	NoSigs: true,
 }
 
+// Used only by tests
+func setDebugAndTraceToDefaultOptions(val bool) {
+	defaultOptions.Trace = val
+	defaultOptions.Debug = val
+}
+
 func stanDisconnectedHandler(nc *nats.Conn) {
 	if nc.LastError() != nil {
 		Errorf("STAN: connection %q has been disconnected: %v",
@@ -775,9 +699,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		dupCIDMap:         make(map[string]struct{}),
 		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
 		dupCIDTimeout:     defaultCheckDupCIDTimeout,
-		ioList:            &ioProtoList{},
-		ioSignal:          make(chan struct{}, 1),
-		ioChannelQuit:     make(chan struct{}, 2),
+		ioChannelQuit:     make(chan struct{}, 1),
+		srvCtrlMsgID:      nuid.Next(),
+		connCloseReqs:     make(map[string]int),
 		trace:             sOpts.Trace,
 		debug:             sOpts.Debug,
 	}
@@ -1201,11 +1125,12 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 		// been created (may happen with durables that may reconnect maybe?)
 		if sub.ackSub == nil {
 			// Subscribe to acks
-			sub.ackSub, err = s.nc.ChanSubscribe(sub.AckInbox, s.ioChannel)
+			sub.ackSub, err = s.nc.Subscribe(sub.AckInbox, s.processAckMsg)
 			if err != nil {
 				sub.Unlock()
 				return err
 			}
+			sub.ackSub.SetPendingLimits(-1, -1)
 		}
 		sub.Unlock()
 	}
@@ -1278,38 +1203,34 @@ func (s *StanServer) initSubscriptions() {
 
 	s.startIOLoop()
 
-	var err error
-	// We use ChanSubscribe and specify the same channel for all subscriptions.
-	// This gives us connection level ordering.
-
 	// Listen for connection requests.
-	s.connSub, err = s.nc.ChanSubscribe(s.info.Discovery, s.ioChannel)
+	_, err := s.nc.Subscribe(s.info.Discovery, s.connectCB)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to discover subject, %v\n", err))
 	}
 	// Receive published messages from clients.
 	pubSubject := fmt.Sprintf("%s.>", s.info.Publish)
-	s.pubSub, err = s.nc.ChanSubscribe(pubSubject, s.ioChannel)
+	_, err = s.nc.Subscribe(pubSubject, s.processClientPublish)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to publish subject, %v\n", err))
 	}
 	// Receive subscription requests from clients.
-	s.subSub, err = s.nc.ChanSubscribe(s.info.Subscribe, s.ioChannel)
+	_, err = s.nc.Subscribe(s.info.Subscribe, s.processSubscriptionRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to subscribe request subject, %v\n", err))
 	}
 	// Receive unsubscribe requests from clients.
-	s.unsubSub, err = s.nc.ChanSubscribe(s.info.Unsubscribe, s.ioChannel)
+	_, err = s.nc.Subscribe(s.info.Unsubscribe, s.processUnsubscribeRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to unsubscribe request subject, %v\n", err))
 	}
 	// Receive subscription close requests from clients.
-	s.subCloseSub, err = s.nc.ChanSubscribe(s.info.SubClose, s.ioChannel)
+	_, err = s.nc.Subscribe(s.info.SubClose, s.processSubCloseRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to subscription close request subject, %v\n", err))
 	}
 	// Receive close requests from clients.
-	s.closeSub, err = s.nc.ChanSubscribe(s.info.Close, s.ioChannel)
+	_, err = s.nc.Subscribe(s.info.Close, s.processCloseRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to close request subject, %v\n", err))
 	}
@@ -1447,7 +1368,7 @@ func (s *StanServer) processConnectRequestWithDupID(sc *stores.Client, req *pb.C
 	// running by sending a ping to that inbox.
 	if _, err := s.nc.Request(hbInbox, nil, s.dupCIDTimeout); err != nil {
 		// The old client didn't reply, assume it is dead, close it and continue.
-		s.closeClient(clientID)
+		s.closeClient(useLocking, clientID)
 
 		// Between the close and the new registration below, it is possible
 		// that a connection request came in (in connectCB) and since the
@@ -1508,7 +1429,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 		if client.fhb > maxFailedHB {
 			Debugf("STAN: [Client:%s] Timed out on heartbeats.", clientID)
 			client.Unlock()
-			s.closeClient(clientID)
+			s.closeClient(useLocking, clientID)
 			return
 		}
 	} else {
@@ -1519,7 +1440,11 @@ func (s *StanServer) checkClientHealth(clientID string) {
 }
 
 // Close a client
-func (s *StanServer) closeClient(clientID string) bool {
+func (s *StanServer) closeClient(lock bool, clientID string) bool {
+	if lock {
+		s.closeProtosMu.Lock()
+		defer s.closeProtosMu.Unlock()
+	}
 	// Remove from our clientStore.
 	sc := s.clients.Unregister(clientID)
 	if sc == nil {
@@ -1553,8 +1478,76 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 		return
 	}
 
-	if !s.closeClient(req.ClientID) {
-		Errorf("STAN: Unknown client %q in close request", req.ClientID)
+	// Lock for the remainder of the function
+	s.closeProtosMu.Lock()
+	defer s.closeProtosMu.Unlock()
+
+	ctrlMsg := &spb.CtrlMsg{
+		MsgType:  spb.CtrlMsg_ConnClose,
+		ServerID: s.srvCtrlMsgID,
+		Data:     []byte(req.ClientID),
+	}
+	ctrlBytes, _ := ctrlMsg.Marshal()
+
+	ctrlMsgNatsMsg := &nats.Msg{
+		Subject: s.info.Publish + ".close", // any pub subject will do
+		Reply:   m.Reply,
+		Data:    ctrlBytes,
+	}
+
+	refs := 0
+	if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
+		refs++
+	}
+	subs := s.clients.GetSubs(req.ClientID)
+	if len(subs) > 0 {
+		// There are subscribers, we will schedule the connection
+		// close request to subscriber's ackInbox subscribers.
+		for _, sub := range subs {
+			sub.Lock()
+			if sub.ackSub != nil {
+				ctrlMsgNatsMsg.Subject = sub.AckInbox
+				if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
+					refs++
+				}
+			}
+			sub.Unlock()
+		}
+	}
+	// If were unable to schedule a single proto, then execute
+	// performConnClose from here.
+	if refs == 0 {
+		s.connCloseReqs[req.ClientID] = 1
+		s.performConnClose(dontUseLocking, m, req.ClientID)
+	} else {
+		// Store our reference count and wait for performConnClose to
+		// be invoked...
+		s.connCloseReqs[req.ClientID] = refs
+	}
+}
+
+// performConnClose performs a connection close operation after all
+// client's pubMsg or client acks have been processed.
+func (s *StanServer) performConnClose(locking bool, m *nats.Msg, clientID string) {
+	if locking {
+		s.closeProtosMu.Lock()
+		defer s.closeProtosMu.Unlock()
+	}
+
+	refs := s.connCloseReqs[clientID]
+	refs--
+	if refs > 0 {
+		// Not done yet, update reference count
+		s.connCloseReqs[clientID] = refs
+		return
+	}
+	// Perform the connection close here...
+	delete(s.connCloseReqs, clientID)
+
+	// The function or the caller is already locking, so do not use
+	// locking in that function.
+	if !s.closeClient(dontUseLocking, clientID) {
+		Errorf("STAN: Unknown client %q in close request", clientID)
 		s.sendCloseErr(m.Reply, ErrUnknownClient.Error())
 		return
 	}
@@ -1572,25 +1565,64 @@ func (s *StanServer) sendCloseErr(subj, err string) {
 }
 
 // processClientPublish process inbound messages from clients.
-func (s *StanServer) processClientPublish(m *nats.Msg) (*ioPendingMsg, *stores.ChannelStore) {
-	iopm := &ioPendingMsg{}
+func (s *StanServer) processClientPublish(m *nats.Msg) {
+	iopm := &ioPendingMsg{m: m}
 	pm := &iopm.pm
-	pm.Unmarshal(m.Data)
+	if pm.Unmarshal(m.Data) != nil {
+		// Expecting only a connection close request...
+		if s.processInternalCloseRequest(m, true) {
+			return
+		}
+		// else we will report an error below...
+	}
 
 	// Make sure we have a clientID, guid, etc.
 	if pm.Guid == "" || !s.clients.IsValid(pm.ClientID) || !isValidSubject(pm.Subject) {
 		Errorf("STAN: Received invalid client publish message %v", pm)
 		s.sendPublishErr(m.Reply, pm.Guid, ErrInvalidPubReq)
-		return nil, nil
+		return
 	}
 
-	cs, err := s.assignAndStore(&iopm.pm)
-	if err != nil {
-		Errorf("STAN: [Client:%s] Error processing message for subject %q: %v", pm.ClientID, m.Subject, err)
-		s.sendPublishErr(m.Reply, pm.Guid, err)
-		return nil, nil
+	s.ioChannel <- iopm
+}
+
+// processInternalCloseRequest processes the incoming message has
+// a CtrlMsg. If this is not a CtrlMsg, returns false to indicate an error.
+// If the CtrlMsg's ServerID is not this server, the request is simply
+// ignored and this function returns true (so the caller does not fail).
+// Based on the CtrlMsg type, invokes appropriate function to
+// do final processing of unsub/subclose/conn close request.
+func (s *StanServer) processInternalCloseRequest(m *nats.Msg, onlyConnClose bool) bool {
+	cm := &spb.CtrlMsg{}
+	if cm.Unmarshal(m.Data) != nil {
+		return false
 	}
-	return iopm, cs
+	// If this control message is not intended for us, simply
+	// ignore the request and does not return a failure.
+	if cm.ServerID != s.srvCtrlMsgID {
+		return true
+	}
+	// If we expect only a connection close request but get
+	// something else, report as a failure.
+	if onlyConnClose && cm.MsgType != spb.CtrlMsg_ConnClose {
+		return false
+	}
+	switch cm.MsgType {
+	case spb.CtrlMsg_SubUnsubscribe:
+		// SubUnsub and SubClose use same function, using cm.MsgType
+		// to differentiate between unsubscribe and close.
+		fallthrough
+	case spb.CtrlMsg_SubClose:
+		req := &pb.UnsubscribeRequest{}
+		req.Unmarshal(cm.Data)
+		s.performSubUnsubOrClose(cm.MsgType, processRequest, m, req)
+	case spb.CtrlMsg_ConnClose:
+		clientID := string(cm.Data)
+		s.performConnClose(useLocking, m, clientID)
+	default:
+		return false // Valid ctrl message, but unexpected type, return failure.
+	}
+	return true
 }
 
 func (s *StanServer) sendPublishErr(subj, guid string, err error) {
@@ -1950,37 +1982,15 @@ func (s *StanServer) setupAckTimer(sub *subState, d time.Duration) {
 }
 
 func (s *StanServer) startIOLoop() {
-	s.ioChannelWG.Add(2)
-	s.ioChannel = make(chan *nats.Msg, ioChannelSize)
-	// Use wait group to ensure that those loops are as ready as
+	s.ioChannelWG.Add(1)
+	s.ioChannel = make(chan *ioPendingMsg, ioChannelSize)
+	// Use wait group to ensure that the loop is as ready as
 	// possible before we setup the subscriptions and open the door
 	// to incoming NATS messages.
 	ready := &sync.WaitGroup{}
-	ready.Add(2)
-	go s.buildProtocolsList(ready)
+	ready.Add(1)
 	go s.ioLoop(ready)
 	ready.Wait()
-}
-
-func (s *StanServer) buildProtocolsList(ready *sync.WaitGroup) {
-	defer s.ioChannelWG.Done()
-
-	ready.Done()
-	for {
-		select {
-		case m := <-s.ioChannel:
-			iop := ioProtoPool.Get().(*ioProto)
-			iop.m = m
-			iop.pubmsg = nil
-			iop.next = nil
-			s.ioList.protectedAppend(iop)
-			if len(s.ioSignal) == 0 {
-				s.ioSignal <- struct{}{}
-			}
-		case <-s.ioChannelQuit:
-			return
-		}
-	}
 }
 
 func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
@@ -1998,126 +2008,97 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 	////////////////////////////////////////////////////////////////////////////
 	storesToFlush := make(map[*stores.ChannelStore]struct{}, 64)
 
+	var _pendingMsgs [ioChannelSize]*ioPendingMsg
+	var pendingMsgs = _pendingMsgs[:0]
+
+	storeIOPendingMsg := func(iopm *ioPendingMsg) {
+		cs, err := s.assignAndStore(&iopm.pm)
+		if err != nil {
+			Errorf("STAN: [Client:%s] Error processing message for subject %q: %v", iopm.pm.ClientID, iopm.m.Subject, err)
+			s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, err)
+		} else {
+			pendingMsgs = append(pendingMsgs, iopm)
+			storesToFlush[cs] = struct{}{}
+		}
+	}
+
 	batchSize := s.opts.IOBatchSize
 	sleepTime := s.opts.IOSleepTime
 	sleepDur := time.Duration(sleepTime) * time.Microsecond
 	max := 0
-	pubMsgs := &ioProtoList{}
-	list := &ioProtoList{}
 
 	ready.Done()
 	for {
 		select {
-		case <-s.ioSignal:
-			// If allowed to sleep, to try gather more
-			if sleepTime > 0 {
-				count := s.ioList.protectedGetCount()
-				if count > 0 && count < batchSize {
-					time.Sleep(sleepDur)
-				}
-			}
-			// Transfer the global list meta data into this local list,
-			// and clear the global list at the same time.
-			s.ioList.protectedTransferTo(list)
+		case iopm := <-s.ioChannel:
+			// store the one we just pulled
+			storeIOPendingMsg(iopm)
 
-			// It is possible that current signal was processed by
-			// previous iteration. So if count is 0, we are done.
-			count := list.getCount()
-			if count == 0 {
-				continue
-			}
+			remaining := batchSize - 1
+			// fill the pending messages slice with at most our batch size,
+			// unless the channel is empty.
+			for remaining > 0 {
+				ioChanLen := len(s.ioChannel)
 
-			// Note that the count may be higher than batchSize, so we
-			// will limit processing up to batchSize and repeat until
-			// list is empty.
-			for count > 0 {
-				if batchSize > 0 && count > batchSize {
-					count = batchSize
-				}
-				// Keep track of max number of messages in a batch
-				if count > max {
-					max = count
-					atomic.StoreInt64(&(s.ioChannelStatsMaxBatchSize), int64(max))
-				}
-				for i := 0; i < count; i++ {
-					proto := list.popHead()
-
-					// Process client published messages and add them to the
-					// pubMsgs list.
-					if proto.m.Sub == s.pubSub {
-						iopm, cs := s.processClientPublish(proto.m)
-						if iopm != nil {
-							proto.pubmsg = iopm
-							storesToFlush[cs] = struct{}{}
-							pubMsgs.append(proto)
+				// if we are empty, wait, check again, and break if nothing.
+				// While this adds some latency, it optimizes batching.
+				if ioChanLen == 0 {
+					if sleepTime > 0 {
+						time.Sleep(sleepDur)
+						ioChanLen = len(s.ioChannel)
+						if ioChanLen == 0 {
+							break
 						}
 					} else {
-						// Process any pubMsg that we got up to that point.
-						if !pubMsgs.isEmpty() {
-							s.processPubMsgs(pubMsgs, storesToFlush)
-						}
-						switch proto.m.Sub {
-						case s.connSub:
-							s.connectCB(proto.m)
-						case s.subSub:
-							s.processSubscriptionRequest(proto.m)
-						case s.unsubSub:
-							s.processUnSubscribeRequest(proto.m)
-						case s.subCloseSub:
-							s.processSubscriptionCloseRequest(proto.m)
-						case s.closeSub:
-							s.processCloseRequest(proto.m)
-						default:
-							// assume this is an ACK
-							ack := &pb.Ack{}
-							if err := ack.Unmarshal(proto.m.Data); err != nil {
-								if s.debug {
-									Debugf("Unknown subject: %q", proto.m.Subject)
-								}
-							} else {
-								s.processAckMsg(ack, proto.m)
-							}
-						}
-						// Put back into pool
-						ioProtoPool.Put(proto)
+						break
 					}
 				}
-				// If there are pubMsgs, process them now.
-				if !pubMsgs.isEmpty() {
-					s.processPubMsgs(pubMsgs, storesToFlush)
+
+				// stick to our buffer size
+				if ioChanLen > remaining {
+					ioChanLen = remaining
 				}
-				// Refresh count
-				count = list.getCount()
+
+				for i := 0; i < ioChanLen; i++ {
+					storeIOPendingMsg(<-s.ioChannel)
+				}
+				// Keep track of max number of messages in a batch
+				if ioChanLen > max {
+					max = ioChanLen
+					atomic.StoreInt64(&(s.ioChannelStatsMaxBatchSize), int64(max))
+				}
+				remaining -= ioChanLen
 			}
+
+			// flush all the stores with messages written to them...
+			for cs := range storesToFlush {
+				if err := cs.Msgs.Flush(); err != nil {
+					// TODO: Attempt recovery, notify publishers of error.
+					panic(fmt.Errorf("Unable to flush msg store: %v", err))
+				}
+				// Call this here, so messages are sent to subscribers,
+				// which means that msg seq is added to subscription file
+				s.processMsg(cs)
+				if err := cs.Subs.Flush(); err != nil {
+					panic(fmt.Errorf("Unable to flush sub store: %v", err))
+				}
+				// Remove entry from map (this is safe in Go)
+				delete(storesToFlush, cs)
+			}
+
+			// Ack our messages back to the publisher
+			for i := range pendingMsgs {
+				iopm := pendingMsgs[i]
+				s.ackPublisher(iopm)
+				pendingMsgs[i] = nil
+			}
+
+			// clear out pending messages
+			pendingMsgs = pendingMsgs[:0]
+
 		case <-s.ioChannelQuit:
 			return
 		}
-	}
-}
-
-func (s *StanServer) processPubMsgs(list *ioProtoList, storesToFlush map[*stores.ChannelStore]struct{}) {
-	// flush all the stores with messages written to them...
-	for cs := range storesToFlush {
-		if err := cs.Msgs.Flush(); err != nil {
-			// TODO: Attempt recovery, notify publishers of error.
-			panic(fmt.Errorf("Unable to flush msg store: %v", err))
-		}
-		// Call this here, so messages are sent to subscribers,
-		// which means that msg seq is added to subscription file
-		s.processMsg(cs)
-		if err := cs.Subs.Flush(); err != nil {
-			panic(fmt.Errorf("Unable to flush sub store: %v", err))
-		}
-		// Remove entry from map (this is safe in Go)
-		delete(storesToFlush, cs)
-	}
-
-	// Ack our messages back to the publisher
-	for !list.isEmpty() {
-		proto := list.popHead()
-		s.ackPublisher(proto.m, proto.pubmsg)
-		// Put back into pool
-		ioProtoPool.Put(proto)
 	}
 }
 
@@ -2134,7 +2115,7 @@ func (s *StanServer) assignAndStore(pm *pb.PubMsg) (*stores.ChannelStore, error)
 }
 
 // ackPublisher sends the ack for a message.
-func (s *StanServer) ackPublisher(m *nats.Msg, iopm *ioPendingMsg) {
+func (s *StanServer) ackPublisher(iopm *ioPendingMsg) {
 	msgAck := &iopm.pa
 	msgAck.Guid = iopm.pm.Guid
 	var buf [32]byte
@@ -2144,7 +2125,7 @@ func (s *StanServer) ackPublisher(m *nats.Msg, iopm *ioPendingMsg) {
 		pm := &iopm.pm
 		Tracef("STAN: [Client:%s] Acking Publisher subj=%s guid=%s", pm.ClientID, pm.Subject, pm.Guid)
 	}
-	s.ncs.Publish(m.Reply, b[:n])
+	s.ncs.Publish(iopm.m.Reply, b[:n])
 }
 
 // Delete a sub from a given list.
@@ -2199,8 +2180,8 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 	}
 }
 
-// processUnSubscribeRequest will process a unsubscribe request.
-func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
+// processUnsubscribeRequest will process a unsubscribe request.
+func (s *StanServer) processUnsubscribeRequest(m *nats.Msg) {
 	req := &pb.UnsubscribeRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
@@ -2208,31 +2189,34 @@ func (s *StanServer) processUnSubscribeRequest(m *nats.Msg) {
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidUnsubReq)
 		return
 	}
-	s.processCloseOrUnSubscribeRequest(false, req.ClientID, req.Subject, req.Inbox, m)
+	s.performSubUnsubOrClose(spb.CtrlMsg_SubUnsubscribe, scheduleRequest, m, req)
 }
 
 // processSubCloseRequest will process a subscription close request.
-func (s *StanServer) processSubscriptionCloseRequest(m *nats.Msg) {
+func (s *StanServer) processSubCloseRequest(m *nats.Msg) {
 	req := &pb.UnsubscribeRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
-		Errorf("STAN: Invalid unsub request from %s.", m.Subject)
+		Errorf("STAN: Invalid sub close request from %s.", m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidUnsubReq)
 		return
 	}
-	s.processCloseOrUnSubscribeRequest(true, req.ClientID, req.Subject, req.Inbox, m)
+	s.performSubUnsubOrClose(spb.CtrlMsg_SubClose, scheduleRequest, m, req)
 }
 
-// processCloseOrUnSubscribeRequest will process a close or unsubscribe request.
-func (s *StanServer) processCloseOrUnSubscribeRequest(doClose bool, clientID, subject, inbox string, m *nats.Msg) {
+// performSubUnsubOrClose either schedules the request to the
+// subscriber's AckInbox subscriber, or processes the request in place.
+func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule bool, m *nats.Msg, req *pb.UnsubscribeRequest) {
 	action := "unsub"
-	if doClose {
+	isSubClose := false
+	if reqType == spb.CtrlMsg_SubClose {
 		action = "sub close"
+		isSubClose = true
 	}
-	cs := s.store.LookupChannel(subject)
+	cs := s.store.LookupChannel(req.Subject)
 	if cs == nil {
 		Errorf("STAN: [Client:%s] %s request missing subject %s.",
-			clientID, action, subject)
+			req.ClientID, action, req.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
 	}
@@ -2240,35 +2224,66 @@ func (s *StanServer) processCloseOrUnSubscribeRequest(doClose bool, clientID, su
 	// Get the subStore
 	ss := cs.UserData.(*subStore)
 
-	sub := ss.LookupByAckInbox(inbox)
+	sub := ss.LookupByAckInbox(req.Inbox)
 	if sub == nil {
 		Errorf("STAN: [Client:%s] %s request for missing inbox %s.",
-			clientID, action, inbox)
+			req.ClientID, action, req.Inbox)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
 	}
 
+	// Lock for the remainder of the function
+	s.closeProtosMu.Lock()
+	defer s.closeProtosMu.Unlock()
+
+	if schedule {
+		processInPlace := true
+		sub.Lock()
+		if sub.ackSub != nil {
+			ctrlMsg := &spb.CtrlMsg{
+				MsgType:  reqType,
+				ServerID: s.srvCtrlMsgID,
+				Data:     m.Data,
+			}
+			ctrlBytes, _ := ctrlMsg.Marshal()
+			ctrlMsgNatsMsg := &nats.Msg{
+				Subject: sub.AckInbox,
+				Reply:   m.Reply,
+				Data:    ctrlBytes,
+			}
+			if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
+				// This function will be called from processAckMsg with
+				// internal == true.
+				processInPlace = false
+			}
+		}
+		sub.Unlock()
+		if !processInPlace {
+			return
+		}
+	}
+
 	// Remove from Client
-	if !s.clients.RemoveSub(clientID, sub) {
-		Errorf("STAN: [Client:%s] %s request for missing client", clientID, action)
+	if !s.clients.RemoveSub(req.ClientID, sub) {
+		Errorf("STAN: [Client:%s] %s request for missing client", req.ClientID, action)
 		s.sendSubscriptionResponseErr(m.Reply, ErrUnknownClient)
 		return
 	}
 
 	// Remove the subscription
-	unsubscribe := !doClose
+	unsubscribe := !isSubClose
 	ss.Remove(cs, sub, unsubscribe)
 
 	if s.debug {
-		if doClose {
-			Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", clientID, subject)
+		if isSubClose {
+			Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", req.ClientID, req.Subject)
 		} else {
-			Debugf("STAN: [Client:%s] Closing subscription subject=%s.", clientID, subject)
+			Debugf("STAN: [Client:%s] Closing subscription subject=%s.", req.ClientID, req.Subject)
 		}
 	}
 
 	// Create a non-error response
-	resp := &pb.SubscriptionResponse{AckInbox: inbox}
+	resp := &pb.SubscriptionResponse{AckInbox: req.Inbox}
 	b, _ := resp.Marshal()
 	s.ncs.Publish(m.Reply, b)
 }
@@ -2577,7 +2592,9 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 	if err != nil {
 		// Try to undo what has been done.
+		s.closeProtosMu.Lock()
 		ss.Remove(cs, sub, false)
+		s.closeProtosMu.Unlock()
 		Errorf("STAN: Unable to add subscription for %s: %v", sr.Subject, err)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
@@ -2590,11 +2607,12 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// Subscribe to acks.
 	// We MUST use the same connection than all other chan subscribers
 	// if we want to receive messages in order from NATS server.
-	sub.ackSub, err = s.nc.ChanSubscribe(ackInbox, s.ioChannel)
+	sub.ackSub, err = s.nc.Subscribe(ackInbox, s.processAckMsg)
 	if err != nil {
 		sub.Unlock()
 		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
 	}
+	sub.ackSub.SetPendingLimits(-1, -1)
 	sub.Unlock()
 	// However, we need to flush to ensure that NATS server processes
 	// this subscription request before we return OK and start sending
@@ -2625,7 +2643,14 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 }
 
 // processAckMsg processes inbound acks from clients for delivered messages.
-func (s *StanServer) processAckMsg(ack *pb.Ack, m *nats.Msg) {
+func (s *StanServer) processAckMsg(m *nats.Msg) {
+	ack := &pb.Ack{}
+	if ack.Unmarshal(m.Data) != nil {
+		// Expecting the full range of "close" requests: subUnsub, subClose, or connClose
+		if s.processInternalCloseRequest(m, false) {
+			return
+		}
+	}
 	cs := s.store.LookupChannel(ack.Subject)
 	if cs == nil {
 		Errorf("STAN: [Client:?] Ack received, invalid channel (%s)", ack.Subject)
@@ -2846,8 +2871,6 @@ func (s *StanServer) Shutdown() {
 
 	if s.ioChannel != nil {
 		// Notify the IO channel that we are shutting down
-		s.ioChannelQuit <- struct{}{}
-		// There is also the loop that gets messages from NATS
 		s.ioChannelQuit <- struct{}{}
 	} else {
 		waitForIOStoreLoop = false

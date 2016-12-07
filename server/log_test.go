@@ -14,6 +14,9 @@ import (
 func TestConfigureLogger(t *testing.T) {
 
 	defer RemoveLogger()
+	defer setDebugAndTraceToDefaultOptions(true)
+
+	setDebugAndTraceToDefaultOptions(false)
 
 	checkDebugTraceOff := func() {
 		if debug != 0 || trace != 0 {
@@ -65,6 +68,9 @@ func TestConfigureLogger(t *testing.T) {
 func TestLogging(t *testing.T) {
 
 	defer RemoveLogger()
+	defer setDebugAndTraceToDefaultOptions(true)
+
+	setDebugAndTraceToDefaultOptions(false)
 
 	// test without a logger
 	Noticef("noop")
@@ -130,6 +136,9 @@ func (d *dummyLogger) Reset() {
 
 func TestLogOutput(t *testing.T) {
 	defer RemoveLogger()
+	defer setDebugAndTraceToDefaultOptions(true)
+
+	setDebugAndTraceToDefaultOptions(false)
 
 	// dummy to override the configured logger.
 	d := &dummyLogger{}
@@ -190,6 +199,9 @@ func TestLogOutput(t *testing.T) {
 
 func TestRunServerFailureLogsCause(t *testing.T) {
 	defer RemoveLogger()
+	defer setDebugAndTraceToDefaultOptions(true)
+
+	setDebugAndTraceToDefaultOptions(false)
 
 	// dummy to override the configured logger.
 	d := &dummyLogger{}

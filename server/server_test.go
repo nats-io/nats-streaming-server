@@ -45,6 +45,8 @@ func init() {
 		panic(fmt.Errorf("Error removing temp directory: %v", err))
 	}
 	defaultDataStore = tmpDir
+	// Set debug and trace for this file.
+	setDebugAndTraceToDefaultOptions(true)
 }
 
 func stackFatalf(t tLogger, f string, args ...interface{}) {
@@ -4893,20 +4895,157 @@ func TestProtocolOrder(t *testing.T) {
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
 
-	// Unsubscribe should not be processed before Subscribe
-	for i := 0; i < 100; i++ {
-		sub, err := sc.Subscribe("foo", nil)
-		if err != nil {
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish("bar", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+
+	ch := make(chan bool)
+	errCh := make(chan error)
+
+	recv := int32(0)
+	mode := 0
+	var sc2 stan.Conn
+	cb := func(m *stan.Msg) {
+		count := atomic.AddInt32(&recv, 1)
+		if err := m.Ack(); err != nil {
+			errCh <- err
+			return
+		}
+		if count == 10 {
+			var err error
+			switch mode {
+			case 1:
+				err = m.Sub.Unsubscribe()
+			case 2:
+				err = m.Sub.Close()
+			case 3:
+				err = sc2.Close()
+			case 4:
+				err = m.Sub.Unsubscribe()
+				if err == nil {
+					err = sc2.Close()
+				}
+			case 5:
+				err = m.Sub.Close()
+				if err == nil {
+					err = sc2.Close()
+				}
+			}
+			if err != nil {
+				errCh <- err
+			} else {
+				ch <- true
+			}
+		}
+	}
+
+	total := 50
+	// Unsubscribe should not be processed before last processed Ack
+	mode = 1
+	for i := 0; i < total; i++ {
+		atomic.StoreInt32(&recv, 0)
+		if _, err := sc.Subscribe("bar", cb,
+			stan.SetManualAckMode(), stan.DeliverAllAvailable()); err != nil {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
-		if err := sub.Unsubscribe(); err != nil {
-			t.Fatalf("Unexpected error on unsubscribe: %v", err)
+		// Wait confirmation of received message
+		select {
+		case <-ch:
+		case e := <-errCh:
+			t.Fatal(e)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timed-out waiting for messages")
+		}
+	}
+	// Subscription close should not be processed before last processed Ack
+	mode = 2
+	for i := 0; i < total; i++ {
+		atomic.StoreInt32(&recv, 0)
+		if _, err := sc.Subscribe("bar", cb,
+			stan.SetManualAckMode(), stan.DeliverAllAvailable()); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		// Wait confirmation of received message
+		select {
+		case <-ch:
+		case e := <-errCh:
+			t.Fatal(e)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timed-out waiting for messages")
+		}
+	}
+	// Connection close should not be processed before last processed Ack
+	mode = 3
+	for i := 0; i < total; i++ {
+		atomic.StoreInt32(&recv, 0)
+		conn, err := stan.Connect(clusterName, "otherclient")
+		if err != nil {
+			t.Fatalf("Expected to connect correctly, got err %v", err)
+		}
+		sc2 = conn
+		if _, err := sc2.Subscribe("bar", cb,
+			stan.SetManualAckMode(), stan.DeliverAllAvailable()); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		// Wait confirmation of received message
+		select {
+		case <-ch:
+		case e := <-errCh:
+			t.Fatal(e)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timed-out waiting for messages")
+		}
+	}
+	// Connection close should not be processed before unsubscribe and last processed Ack
+	mode = 4
+	for i := 0; i < total; i++ {
+		atomic.StoreInt32(&recv, 0)
+		conn, err := stan.Connect(clusterName, "otherclient")
+		if err != nil {
+			t.Fatalf("Expected to connect correctly, got err %v", err)
+		}
+		sc2 = conn
+		if _, err := sc2.Subscribe("bar", cb,
+			stan.SetManualAckMode(), stan.DeliverAllAvailable()); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		// Wait confirmation of received message
+		select {
+		case <-ch:
+		case e := <-errCh:
+			t.Fatal(e)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timed-out waiting for messages")
+		}
+	}
+	// Connection close should not be processed before sub close and last processed Ack
+	mode = 5
+	for i := 0; i < total; i++ {
+		atomic.StoreInt32(&recv, 0)
+		conn, err := stan.Connect(clusterName, "otherclient")
+		if err != nil {
+			t.Fatalf("Expected to connect correctly, got err %v", err)
+		}
+		sc2 = conn
+		if _, err := sc2.Subscribe("bar", cb,
+			stan.SetManualAckMode(), stan.DeliverAllAvailable()); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		// Wait confirmation of received message
+		select {
+		case <-ch:
+		case e := <-errCh:
+			t.Fatal(e)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timed-out waiting for messages")
 		}
 	}
 
 	// Mix pub and subscribe calls
-	ch := make(chan bool)
-	errCh := make(chan error)
+	ch = make(chan bool)
+	errCh = make(chan error)
 	startSubAt := 50
 	var sub stan.Subscription
 	var err error
@@ -4938,7 +5077,7 @@ func TestProtocolOrder(t *testing.T) {
 	sub.Unsubscribe()
 
 	// Acks should be processed before Connection close
-	for i := 0; i < 100; i++ {
+	for i := 0; i < total; i++ {
 		rcv := int32(0)
 		sc2, err := stan.Connect(clusterName, "otherclient")
 		if err != nil {
