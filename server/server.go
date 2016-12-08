@@ -225,7 +225,6 @@ type subState struct {
 	ackTimeFloor int64
 	ackSub       *nats.Subscription
 	acksPending  map[uint64]struct{}
-	stalledRdlv  int32 // number of times the redelivery cb ended with a stalled subscriber (due to MaxInFlight)
 	stalled      bool
 	newOnHold    bool            // Prevents delivery of new msgs until old are redelivered (on restart)
 	store        stores.SubStore // for easy access to the store interface
@@ -2311,7 +2310,6 @@ func isValidSubject(subject string) bool {
 // Clear the ackTimer.
 // sub Lock held in entry.
 func (sub *subState) clearAckTimer() {
-	sub.stalledRdlv = 0
 	if sub.ackTimer != nil {
 		sub.ackTimer.Stop()
 		sub.ackTimer = nil
