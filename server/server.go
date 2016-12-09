@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -589,9 +590,17 @@ func (s *StanServer) buildServerURLs(sOpts *Options, opts *server.Options) ([]st
 		// Use net.Join to support IPV6 addresses.
 		hostport = net.JoinHostPort(host, port)
 	} else {
-		// We embed the server, use listen endpoint which takes care
-		// of Windows use of 0.0.0.0 or [::].
-		hostport = s.natsServer.GetListenEndpoint()
+		// We embed the server, so it is local. If host is "any",
+		// use 127.0.0.1 or ::1 for host address (important for
+		// Windows since connect with 0.0.0.0 or :: fails).
+		sport := strconv.Itoa(opts.Port)
+		if opts.Host == "0.0.0.0" {
+			hostport = net.JoinHostPort("127.0.0.1", sport)
+		} else if opts.Host == "::" || opts.Host == "[::]" {
+			hostport = net.JoinHostPort("::1", sport)
+		} else {
+			hostport = net.JoinHostPort(opts.Host, sport)
+		}
 	}
 	var userpart string
 	if opts.Authorization != "" {
