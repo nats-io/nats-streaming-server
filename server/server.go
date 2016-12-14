@@ -452,6 +452,12 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 				}
 			}
 			sub.RUnlock()
+			// Even for durable queue subscribers, if this is not the last
+			// member, we need to delete from storage (we did that higher in
+			// that function for non durable case). Issue #215.
+			if isDurable {
+				store.DeleteSub(subid)
+			}
 		}
 		if storageUpdate {
 			// If we have a shadow sub, use that one, othewise any queue subscriber
@@ -1104,6 +1110,13 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 			// Add the subscription to the corresponding client
 			added := s.clients.AddSub(sub.ClientID, sub)
 			if added || sub.IsDurable {
+				// Repair for issue https://github.com/nats-io/nats-streaming-server/issues/215
+				// Do not recover a queue durable subscriber that still
+				// has ClientID but for which connection was closed (=>!added)
+				if !added && sub.isQueueDurableSubscriber() && !sub.isShadowQueueDurable() {
+					Noticef("WARN: Not recovering ghost durable queue subscriber: [%s]:[%s] subject=%s inbox=%s", sub.ClientID, sub.QGroup, sub.subject, sub.Inbox)
+					continue
+				}
 				// Add this subscription to subStore.
 				ss.updateState(sub)
 				// If this is a durable and the client was not recovered
@@ -2384,6 +2397,11 @@ func (sub *subState) durableKey() string {
 // Returns true if this sub is a queue subscriber (durable or not)
 func (sub *subState) isQueueSubscriber() bool {
 	return sub.QGroup != ""
+}
+
+// Returns true if this sub is a durable queue subscriber
+func (sub *subState) isQueueDurableSubscriber() bool {
+	return sub.QGroup != "" && sub.IsDurable
 }
 
 // Returns true if this is a "shadow" durable queue subscriber
