@@ -86,6 +86,29 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 			if err := parseFileOptions(v, opts); err != nil {
 				return err
 			}
+		case "hbi", "hb_interval", "server_to_client_hb_interval":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			dur, err := time.ParseDuration(v.(string))
+			if err != nil {
+				return err
+			}
+			opts.ClientHBInterval = dur
+		case "hbt", "hb_timeout", "server_to_client_hb_timeout":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			dur, err := time.ParseDuration(v.(string))
+			if err != nil {
+				return err
+			}
+			opts.ClientHBTimeout = dur
+		case "hbf", "hb_fail_count", "server_to_client_hb_fail_count":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.ClientHBFailCount = int(v.(int64))
 		}
 	}
 	return nil

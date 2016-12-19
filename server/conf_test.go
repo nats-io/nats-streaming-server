@@ -145,6 +145,15 @@ func TestParseConfig(t *testing.T) {
 	if cl.MaxSubscriptions != 8 {
 		t.Fatalf("Expected MaxSubscriptions to be 8, got %v", cl.MaxSubscriptions)
 	}
+	if opts.ClientHBInterval != 10*time.Second {
+		t.Fatalf("Expected ClientHBInterval to be 10s, got %v", opts.ClientHBInterval)
+	}
+	if opts.ClientHBTimeout != time.Second {
+		t.Fatalf("Expected ClientHBTimeout to be 1s, got %v", opts.ClientHBTimeout)
+	}
+	if opts.ClientHBFailCount != 2 {
+		t.Fatalf("Expected ClientHBFailCount to be 2, got %v", opts.ClientHBFailCount)
+	}
 }
 
 func TestParsePermError(t *testing.T) {
@@ -225,6 +234,11 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "sv: 123", wrongTypeErr)
 	expectFailureFor(t, "ns: 123", wrongTypeErr)
 	expectFailureFor(t, "secure: 123", wrongTypeErr)
+	expectFailureFor(t, "hb_interval: 123", wrongTypeErr)
+	expectFailureFor(t, "hb_interval: \"foo\"", wrongTimeErr)
+	expectFailureFor(t, "hb_timeout: 123", wrongTypeErr)
+	expectFailureFor(t, "hb_timeout: \"foo\"", wrongTimeErr)
+	expectFailureFor(t, "hb_fail_count: false", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_channels:false}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_msgs:false}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_bytes:false}", wrongTypeErr)
