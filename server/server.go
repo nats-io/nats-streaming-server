@@ -1753,7 +1753,7 @@ func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subS
 	clientID := sub.ClientID
 	sub.RUnlock()
 
-	if s.debug {
+	if s.debug && len(sortedSeqs) > 0 {
 		sub.RLock()
 		durName := sub.DurableName
 		if durName == "" {
@@ -1826,7 +1826,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 		return
 	}
 
-	if s.debug {
+	if s.debug && len(sortedSequences) > 0 {
 		Debugf("STAN: [Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
 			clientID, subject, inbox)
 	}
