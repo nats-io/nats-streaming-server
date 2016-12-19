@@ -5301,3 +5301,83 @@ func TestProcessCommandLineArgs(t *testing.T) {
 		t.Errorf("Expected an error handling the command arguments")
 	}
 }
+
+func TestFileStoreQMemberRemovedFromStore(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := getTestDefaultOptsForFileStore()
+	s := RunServerWithOpts(opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc1 := NewDefaultConnection(t)
+	defer sc1.Close()
+
+	ch := make(chan bool)
+	// Create the group (adding the first member)
+	if _, err := sc1.QueueSubscribe("foo", "group",
+		func(_ *stan.Msg) {
+			ch <- true
+		},
+		stan.DurableName("dur")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	sc2, err := stan.Connect(clusterName, "othername")
+	if err != nil {
+		stackFatalf(t, "Expected to connect correctly, got err %v", err)
+	}
+	defer sc2.Close()
+	// Add a second member to the group
+	if _, err := sc2.QueueSubscribe("foo", "group", func(_ *stan.Msg) {},
+		stan.DurableName("dur")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Remove it by closing the connection.
+	sc2.Close()
+
+	// Send a message and verify it is received
+	if err := sc1.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Have the first leave the group too.
+	sc1.Close()
+
+	// Restart the server
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Send a new message
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Have a member rejoin the group
+	if _, err := sc.QueueSubscribe("foo", "group",
+		func(_ *stan.Msg) {
+			ch <- true
+		},
+		stan.DurableName("dur")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// It should receive the second message
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Check server state
+	s.RLock()
+	cs, _ := s.lookupOrCreateChannel("foo")
+	ss := cs.UserData.(*subStore)
+	s.RUnlock()
+	ss.RLock()
+	qs := ss.qsubs["dur:group"]
+	ss.RUnlock()
+	if len(qs.subs) != 1 {
+		t.Fatalf("Expected only 1 member, got %v", len(qs.subs))
+	}
+}
