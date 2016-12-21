@@ -42,11 +42,11 @@ const (
 	DefaultClosePrefix    = "_STAN.close"
 	DefaultStoreType      = stores.TypeMemory
 
-	// DefaultHeartBeatInterval is the interval at which server sends an heartbeat to a client
+	// DefaultHeartBeatInterval is the interval at which server sends heartbeat to a client
 	DefaultHeartBeatInterval = 30 * time.Second
-	// DefaultClientHBTimeout is how long the server waits for a response to an heartbeat
+	// DefaultClientHBTimeout is how long server waits for a heartbeat response
 	DefaultClientHBTimeout = 10 * time.Second
-	// DefaultMaxFailedHeartBeats is the number of failed heartbeats after the server closes
+	// DefaultMaxFailedHeartBeats is the number of failed heartbeats before server closes
 	// the client connection (total= (heartbeat interval + heartbeat timeout) * (fail count + 1)
 	DefaultMaxFailedHeartBeats = int((5 * time.Minute) / DefaultHeartBeatInterval)
 
@@ -508,9 +508,9 @@ type Options struct {
 	IOBatchSize        int           // Number of messages we collect from clients before processing them.
 	IOSleepTime        int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
 	NATSServerURL      string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
-	ClientHBInterval   time.Duration // Interval at which an heartbeat is sent to a client.
-	ClientHBTimeout    time.Duration // How long to way for a response.
-	ClientHBFailCount  int           // Number of failed HBs after which server closes client connection.
+	ClientHBInterval   time.Duration // Interval at which server sends heartbeat to a client.
+	ClientHBTimeout    time.Duration // How long server waits for a heartbeat response.
+	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
 }
 
 // DefaultOptions are default options for the STAN server

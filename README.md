@@ -65,8 +65,8 @@ Streaming Server Options:
     -ns,  --nats_server <url>        Connect to this external NATS Server (embedded otherwise)
     -sc,  --stan_config <file>       Streaming server configuration file
     -hbi, --hb_interval <duration>   Interval at which server sends heartbeat to a client
-    -hbt, --hb_timeout <duration>    How long server waits for an heartbeat response
-    -hbf, --hb_fail_count <number>   Number of failed heartbeats after which server closes client connection
+    -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
+    -hbf, --hb_fail_count <number>   Number of failed heartbeats before server closes the client connection
 
 Streaming Server File Store Options:
     --file_compact_enabled           Enable file compaction
