@@ -31,6 +31,9 @@ Streaming Server Options:
     -ma,  --max_age <seconds>        Max duration a message can be stored ("0s" for unlimited)
     -ns,  --nats_server <url>        Connect to this external NATS Server (embedded otherwise)
     -sc,  --stan_config <file>       Streaming server configuration file
+    -hbi, --hb_interval <duration>   Interval at which server sends heartbeat to a client
+    -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
+    -hbf, --hb_fail_count <number>   Number of failed heartbeats before server closes the client connection
 
 Streaming Server File Store Options:
     --file_compact_enabled           Enable file compaction
@@ -151,6 +154,12 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.Int64("mb", stores.DefaultStoreLimits.MaxBytes, "MaxBytes")
 	flag.String("max_age", "0s", "MaxAge")
 	flag.String("ma", "0s", "MaxAge")
+	flag.String("hbi", stand.DefaultHeartBeatInterval.String(), "ClientHBInterval")
+	flag.String("hb_interval", stand.DefaultHeartBeatInterval.String(), "ClientHBInterval")
+	flag.String("hbt", stand.DefaultClientHBTimeout.String(), "ClientHBTimeout")
+	flag.String("hb_timeout", stand.DefaultClientHBTimeout.String(), "ClientHBTimeout")
+	flag.Int("hbf", stand.DefaultMaxFailedHeartBeats, "ClientHBFailCount")
+	flag.Int("hb_fail_count", stand.DefaultMaxFailedHeartBeats, "ClientHBFailCount")
 	flag.Bool("SD", false, "Debug")
 	flag.Bool("stan_debug", false, "Debug")
 	flag.Bool("SV", false, "Trace")
@@ -360,14 +369,19 @@ func overrideWithCmdLineParams(opts *stand.Options) error {
 		valKind := reflect.ValueOf(val).Kind()
 		switch valKind {
 		case reflect.String:
-			if strings.HasSuffix(f.Usage, "MaxAge") {
+			switch f.Usage {
+			case "MaxAge":
+				fallthrough
+			case "ClientHBInterval":
+				fallthrough
+			case "ClientHBTimeout":
 				var dur time.Duration
 				dur, err = time.ParseDuration(val.(string))
 				if err != nil {
 					return
 				}
 				o.SetInt(int64(dur))
-			} else {
+			default:
 				o.SetString(val.(string))
 			}
 		case reflect.Int:

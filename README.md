@@ -64,6 +64,9 @@ Streaming Server Options:
     -ma,  --max_age <seconds>        Max duration a message can be stored ("0s" for unlimited)
     -ns,  --nats_server <url>        Connect to this external NATS Server (embedded otherwise)
     -sc,  --stan_config <file>       Streaming server configuration file
+    -hbi, --hb_interval <duration>   Interval at which server sends heartbeat to a client
+    -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
+    -hbf, --hb_fail_count <number>   Number of failed heartbeats before server closes the client connection
 
 Streaming Server File Store Options:
     --file_compact_enabled           Enable file compaction
@@ -179,6 +182,21 @@ ns: "nats://localhost:4222"
 # This flag creates a TLS connection to the server but without
 # the need to use a TLS configuration (no NATS server certificate verification).
 secure: false
+
+# Interval at which the server sends an heartbeat to a client,
+# expressed as a duration.
+# Can be hbi, hb_interval, server_to_client_hb_interval
+hb_interval: "10s"
+
+# How long the server waits for a heartbeat response from the client
+# before considering it a failed hearbeat. Expressed as a duration.
+# Can be hbt, hb_timeout, server_to_client_hb_timeout
+hb_timeout: "10s"
+
+# Count of failed hearbeats before server closes the client connection.
+# The actual total wait is: (fail count + 1) * (hb interval + hb timeout).
+# Can be hbf, hb_fail_count, server_to_client_hb_fail_count
+hb_fail_count: 2
 
 # Define store limits.
 # Can be limits, store_limits or StoreLimits.
@@ -455,7 +473,7 @@ Finally, the number of stored messages for a given channel can also be limited w
 
 #### File Store Options
 
-As described in the [Configuring](#Configuring) section, there are several options that you can use to configure a file store.
+As described in the [Configuring](https://github.com/nats-io/nats-streaming-server#configuring) section, there are several options that you can use to configure a file store.
 
 Regardless of channel limits, you can configure message logs to be split in individual files (called file slices). You can configure
 those slices by number of messages it can contain (`--file_slice_max_msgs`), the size of the file - including the corresponding index file

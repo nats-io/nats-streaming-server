@@ -2547,15 +2547,14 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 }
 
 func TestCheckClientHealth(t *testing.T) {
-	s := RunServer(clusterName)
-	defer s.Shutdown()
-
+	opts := GetDefaultOptions()
+	opts.ID = clusterName
 	// Override HB settings
-	s.Lock()
-	s.hbInterval = 50 * time.Millisecond
-	s.hbTimeout = 10 * time.Millisecond
-	s.maxFailedHB = 5
-	s.Unlock()
+	opts.ClientHBInterval = 50 * time.Millisecond
+	opts.ClientHBTimeout = 10 * time.Millisecond
+	opts.ClientHBFailCount = 5
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
 
 	nc, err := nats.Connect(nats.DefaultURL)
 	if err != nil {
@@ -2573,7 +2572,10 @@ func TestCheckClientHealth(t *testing.T) {
 	waitForNumClients(t, s, 1)
 
 	// Check that client is not incorrectly purged
-	time.Sleep(time.Duration(s.maxFailedHB)*(s.hbInterval+s.hbTimeout) + 100*time.Millisecond)
+	dur := (s.opts.ClientHBInterval + s.opts.ClientHBTimeout)
+	dur *= time.Duration(s.opts.ClientHBFailCount + 1)
+	dur += 100 * time.Millisecond
+	time.Sleep(dur)
 	// Client should still be there
 	waitForNumClients(t, s, 1)
 
@@ -3029,13 +3031,13 @@ func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
 	waitForNumClients(t, s, 2)
 	// Restart
 	s.Shutdown()
+	// Change server's hb settings
+	opts.ClientHBInterval = 100 * time.Millisecond
+	opts.ClientHBTimeout = 10 * time.Millisecond
+	opts.ClientHBFailCount = 2
 	s = RunServerWithOpts(opts, nil)
 	// Check that there are 2 clients
 	checkClients(t, s, 2)
-	// Change server's hb settings
-	s.hbInterval = 100 * time.Millisecond
-	s.hbTimeout = 10 * time.Millisecond
-	s.maxFailedHB = 2
 	// Tweak their hbTimer interval to make the test short
 	clients := s.store.GetClients()
 	for cID, sc := range clients {
@@ -3045,7 +3047,6 @@ func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
 			c.Unlock()
 			t.Fatalf("HeartBeat Timer of client %q should have been set", cID)
 		}
-		c.hbt.Reset(s.hbInterval)
 		c.Unlock()
 	}
 	// Both clients should quickly timed-out

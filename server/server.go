@@ -42,9 +42,12 @@ const (
 	DefaultClosePrefix    = "_STAN.close"
 	DefaultStoreType      = stores.TypeMemory
 
-	// Heartbeat intervals.
-	DefaultHeartBeatInterval   = 30 * time.Second
-	DefaultClientHBTimeout     = 10 * time.Second
+	// DefaultHeartBeatInterval is the interval at which server sends heartbeat to a client
+	DefaultHeartBeatInterval = 30 * time.Second
+	// DefaultClientHBTimeout is how long server waits for a heartbeat response
+	DefaultClientHBTimeout = 10 * time.Second
+	// DefaultMaxFailedHeartBeats is the number of failed heartbeats before server closes
+	// the client connection (total= (heartbeat interval + heartbeat timeout) * (fail count + 1)
 	DefaultMaxFailedHeartBeats = int((5 * time.Minute) / DefaultHeartBeatInterval)
 
 	// Max number of outstanding go-routines handling connect requests for
@@ -151,12 +154,6 @@ type StanServer struct {
 	ncs *nats.Conn // used for sending to subscribers and acking publishers
 
 	wg sync.WaitGroup // Wait on go routines during shutdown
-
-	// For now, these will be set to the constants DefaultHeartBeatInterval, etc...
-	// but allow to override in tests.
-	hbInterval  time.Duration
-	hbTimeout   time.Duration
-	maxFailedHB int
 
 	// Used when processing connect requests for client ID already registered
 	dupCIDGuard       sync.RWMutex
@@ -501,27 +498,33 @@ type Options struct {
 	StoreType          string
 	FilestoreDir       string
 	FileStoreOpts      stores.FileStoreOptions
-	stores.StoreLimits        // Store limits (MaxChannels, etc..)
-	Trace              bool   // Verbose trace
-	Debug              bool   // Debug trace
-	Secure             bool   // Create a TLS enabled connection w/o server verification
-	ClientCert         string // Client Certificate for TLS
-	ClientKey          string // Client Key for TLS
-	ClientCA           string // Client CAs for TLS
-	IOBatchSize        int    // Number of messages we collect from clients before processing them.
-	IOSleepTime        int64  // Duration (in micro-seconds) the server waits for more message to fill up a batch.
-	NATSServerURL      string // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
+	stores.StoreLimits               // Store limits (MaxChannels, etc..)
+	Trace              bool          // Verbose trace
+	Debug              bool          // Debug trace
+	Secure             bool          // Create a TLS enabled connection w/o server verification
+	ClientCert         string        // Client Certificate for TLS
+	ClientKey          string        // Client Key for TLS
+	ClientCA           string        // Client CAs for TLS
+	IOBatchSize        int           // Number of messages we collect from clients before processing them.
+	IOSleepTime        int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
+	NATSServerURL      string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
+	ClientHBInterval   time.Duration // Interval at which server sends heartbeat to a client.
+	ClientHBTimeout    time.Duration // How long server waits for a heartbeat response.
+	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
 }
 
 // DefaultOptions are default options for the STAN server
 var defaultOptions = Options{
-	ID:             DefaultClusterID,
-	DiscoverPrefix: DefaultDiscoverPrefix,
-	StoreType:      DefaultStoreType,
-	FileStoreOpts:  stores.DefaultFileStoreOptions,
-	IOBatchSize:    DefaultIOBatchSize,
-	IOSleepTime:    DefaultIOSleepTime,
-	NATSServerURL:  "",
+	ID:                DefaultClusterID,
+	DiscoverPrefix:    DefaultDiscoverPrefix,
+	StoreType:         DefaultStoreType,
+	FileStoreOpts:     stores.DefaultFileStoreOptions,
+	IOBatchSize:       DefaultIOBatchSize,
+	IOSleepTime:       DefaultIOSleepTime,
+	NATSServerURL:     "",
+	ClientHBInterval:  DefaultHeartBeatInterval,
+	ClientHBTimeout:   DefaultClientHBTimeout,
+	ClientHBFailCount: DefaultMaxFailedHeartBeats,
 }
 
 // GetDefaultOptions returns default options for the STAN server
@@ -707,9 +710,6 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	s := StanServer{
 		serverID:          nuid.Next(),
 		opts:              sOpts,
-		hbInterval:        DefaultHeartBeatInterval,
-		hbTimeout:         DefaultClientHBTimeout,
-		maxFailedHB:       DefaultMaxFailedHeartBeats,
 		dupCIDMap:         make(map[string]struct{}),
 		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
 		dupCIDTimeout:     defaultCheckDupCIDTimeout,
@@ -1165,7 +1165,7 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 			// Because of the loop, we need to make copy for the closure
 			// to time.AfterFunc
 			cID := sc.ID
-			c.hbt = time.AfterFunc(s.hbInterval, func() {
+			c.hbt = time.AfterFunc(s.opts.ClientHBInterval, func() {
 				s.checkClientHealth(cID)
 			})
 		}
@@ -1352,17 +1352,13 @@ func (s *StanServer) finishConnectRequest(sc *stores.Client, req *pb.ConnectRequ
 	b, _ := cr.Marshal()
 	s.nc.Publish(replyInbox, b)
 
-	s.RLock()
-	hbInterval := s.hbInterval
-	s.RUnlock()
-
 	clientID := req.ClientID
 	hbInbox := req.HeartbeatInbox
 	client := sc.UserData.(*client)
 
 	// Heartbeat timer.
 	client.Lock()
-	client.hbt = time.AfterFunc(hbInterval, func() { s.checkClientHealth(clientID) })
+	client.hbt = time.AfterFunc(s.opts.ClientHBInterval, func() { s.checkClientHealth(clientID) })
 	client.Unlock()
 
 	Debugf("STAN: [Client:%s] Connected (Inbox=%v)", clientID, hbInbox)
@@ -1431,23 +1427,15 @@ func (s *StanServer) checkClientHealth(clientID string) {
 	}
 	client := sc.UserData.(*client)
 	hbInbox := sc.HbInbox
-	// Capture these under lock (as of now, there are not configurable,
-	// but we tweak them in tests and maybe they will be settable in
-	// the future)
-	s.RLock()
-	hbInterval := s.hbInterval
-	hbTimeout := s.hbTimeout
-	maxFailedHB := s.maxFailedHB
-	s.RUnlock()
 
 	client.Lock()
 	if client.unregistered {
 		client.Unlock()
 		return
 	}
-	if _, err := s.nc.Request(hbInbox, nil, hbTimeout); err != nil {
+	if _, err := s.nc.Request(hbInbox, nil, s.opts.ClientHBTimeout); err != nil {
 		client.fhb++
-		if client.fhb > maxFailedHB {
+		if client.fhb > s.opts.ClientHBFailCount {
 			Debugf("STAN: [Client:%s] Timed out on heartbeats.", clientID)
 			client.Unlock()
 			s.closeClient(useLocking, clientID)
@@ -1456,7 +1444,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 	} else {
 		client.fhb = 0
 	}
-	client.hbt.Reset(hbInterval)
+	client.hbt.Reset(s.opts.ClientHBInterval)
 	client.Unlock()
 }
 
