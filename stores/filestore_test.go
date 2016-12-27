@@ -3935,6 +3935,68 @@ func TestBufShrink(t *testing.T) {
 	}
 }
 
+func TestFSCacheList(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// Increase cacheTTL so eviction does not happen while we test content of list
+	cacheTTL = int64(10 * time.Second)
+	defer func() {
+		cacheTTL = int64(defaultCacheTTL)
+	}()
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	msg := []byte("hello")
+	// Store messages 1, 2, 3
+	for i := 0; i < 3; i++ {
+		storeMsg(t, fs, "foo", msg)
+	}
+
+	cs := fs.LookupChannel("foo")
+	ms := cs.Msgs.(*FileMsgStore)
+
+	// Check list content
+	checkList := func(expectedSeqs ...uint64) {
+		ms.RLock()
+		c := ms.cache
+		cMsg := c.head
+		i := 0
+		good := 0
+		gotStr := ""
+		for cMsg != nil {
+			gotStr = fmt.Sprintf("%v%v ", gotStr, cMsg.msg.Sequence)
+			if cMsg.msg.Sequence == expectedSeqs[i] {
+				good++
+			}
+			i++
+			cMsg = cMsg.next
+		}
+		ms.RUnlock()
+		if i != len(expectedSeqs) || good != len(expectedSeqs) {
+			expectedStr := ""
+			for i := 0; i < len(expectedSeqs); i++ {
+				expectedStr = fmt.Sprintf("%v%v ", expectedStr, expectedSeqs[i])
+			}
+			stackFatalf(t, "Expected sequences: %q, got %q", expectedStr, gotStr)
+		}
+	}
+	// Check that we should have 1, 2, 3
+	checkList(1, 2, 3)
+	// Lookup first, should be moved to end of list
+	ms.Lookup(1)
+	checkList(2, 3, 1)
+	// Repeat...
+	ms.lookup(2)
+	checkList(3, 1, 2)
+	ms.Lookup(3)
+	checkList(1, 2, 3)
+	// Lookup last should leave it there
+	ms.Lookup(3)
+	checkList(1, 2, 3)
+}
+
 func TestFSMsgCache(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)

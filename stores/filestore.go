@@ -2118,6 +2118,10 @@ func (ms *FileMsgStore) addToCache(seq uint64, msg *pb.MsgProto, isNew bool) {
 		c.head = cMsg
 	} else {
 		c.tail.next = cMsg
+		// Ensure last expiration is at least >= previous one.
+		if cMsg.expiration < c.tail.expiration {
+			cMsg.expiration = c.tail.expiration
+		}
 	}
 	cMsg.prev = c.tail
 	c.tail = cMsg
@@ -2135,6 +2139,9 @@ func (ms *FileMsgStore) getFromCache(seq uint64) *pb.MsgProto {
 	if cMsg == nil {
 		return nil
 	}
+	// Bump the expiration
+	cMsg.expiration = time.Now().UnixNano() + cacheTTL
+	// If not already at the tail of the list, move it there
 	if cMsg != c.tail {
 		if cMsg.prev != nil {
 			cMsg.prev.next = cMsg.next
@@ -2146,10 +2153,14 @@ func (ms *FileMsgStore) getFromCache(seq uint64) *pb.MsgProto {
 			c.head = cMsg.next
 		}
 		cMsg.prev = c.tail
+		c.tail.next = cMsg
 		cMsg.next = nil
+		// Ensure last expiration is at least >= previous one.
+		if cMsg.expiration < c.tail.expiration {
+			cMsg.expiration = c.tail.expiration
+		}
 		c.tail = cMsg
 	}
-	cMsg.expiration = time.Now().UnixNano() + cacheTTL
 	return cMsg.msg
 }
 
