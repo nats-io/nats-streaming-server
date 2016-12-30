@@ -417,7 +417,7 @@ func TestClientIDIsValid(t *testing.T) {
 	}
 }
 
-func sendInvalidSubRequest(s *StanServer, nc *nats.Conn, req *pb.SubscriptionRequest) error {
+func sendInvalidSubRequest(s *StanServer, nc *nats.Conn, req *pb.SubscriptionRequest, expectedErr error) error {
 	b, err := req.Marshal()
 	if err != nil {
 		return fmt.Errorf("Error during marshal: %v", err)
@@ -431,8 +431,8 @@ func sendInvalidSubRequest(s *StanServer, nc *nats.Conn, req *pb.SubscriptionReq
 	subRep.Unmarshal(rep.Data)
 
 	// Expect error
-	if subRep.Error == "" {
-		return fmt.Errorf("Expected error, got none")
+	if subRep.Error != expectedErr.Error() {
+		return fmt.Errorf("Expected error %v, got %v", expectedErr.Error(), subRep.Error)
 	}
 	return nil
 }
@@ -448,79 +448,88 @@ func TestInvalidSubRequest(t *testing.T) {
 	}
 	defer nc.Close()
 
+	// This test is very dependent on the validity tests performed
+	// in StanServer.processSubscriptionRequest(). Any cahnge there
+	// may require changes here.
+
 	// Create empty request
 	req := &pb.SubscriptionRequest{}
 
-	// Send this empty request
-	if err := sendInvalidSubRequest(s, nc, req); err != nil {
+	// We have already tested corrupted SusbcriptionRequests
+	// (as in Unmarshal errors) in TestInvalidRequests. Here, we check
+	// validity of request's fields.
+
+	// Send this empty request, clientID is missing
+	if err := sendInvalidSubRequest(s, nc, req, ErrMissingClient); err != nil {
 		t.Fatalf("%v", err)
 	}
 
-	// Add a valid ackWait
-	req.AckWaitInSecs = 3
+	// Set a clientID so we move on to next check
+	req.ClientID = clientName
 
-	// Set invalid subject
+	// Test invalid AckWait values
+	req.AckWaitInSecs = 0
+	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidAckWait); err != nil {
+		t.Fatalf("%v", err)
+	}
+	req.AckWaitInSecs = -1
+	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidAckWait); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	// Test invalid MaxInflight values
+	req.AckWaitInSecs = 1
+	req.MaxInFlight = 0
+	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidMaxInflight); err != nil {
+		t.Fatalf("%v", err)
+	}
+	req.MaxInFlight = -1
+	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidMaxInflight); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	// Test invalid StartPosition values
+	req.MaxInFlight = 1
+	req.StartPosition = pb.StartPosition_NewOnly - 1
+	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidStart); err != nil {
+		t.Fatalf("%v", err)
+	}
+	req.StartPosition = pb.StartPosition_First + 1
+	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidStart); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	// Test invalid subjects
+	req.StartPosition = pb.StartPosition_First
 	req.Subject = "foo*.bar"
-	if err := sendInvalidSubRequest(s, nc, req); err != nil {
+	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidSubject); err != nil {
 		t.Fatalf("%v", err)
 	}
 	// Other kinds of invalid subject
 	req.Subject = "foo.bar*"
-	if err := sendInvalidSubRequest(s, nc, req); err != nil {
+	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidSubject); err != nil {
 		t.Fatalf("%v", err)
 	}
 	req.Subject = "foo.>.*"
-	if err := sendInvalidSubRequest(s, nc, req); err != nil {
+	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidSubject); err != nil {
 		t.Fatalf("%v", err)
 	}
 
-	// Set valid subject, still no client ID specified
+	// Test Queue Group DurableName
 	req.Subject = "foo"
-	if err := sendInvalidSubRequest(s, nc, req); err != nil {
+	req.QGroup = "queue"
+	req.DurableName = "dur:name"
+	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidDurName); err != nil {
 		t.Fatalf("%v", err)
 	}
 
-	// Set ClientID, should complain that it does not know about clientName
-	req.ClientID = clientName
-	if err := sendInvalidSubRequest(s, nc, req); err != nil {
-		t.Fatalf("%v", err)
-	}
-
-	// TODO: This may change if we fix startSequenceValid
-	// Set a start position that we don't have
-	req.StartPosition = pb.StartPosition_SequenceStart
-	req.StartSequence = 100
-	if err := sendInvalidSubRequest(s, nc, req); err != nil {
-		t.Fatalf("%v", err)
-	}
-
-	// TODO: This may change if we fix startTimeValid
-	// Set a start position that we don't have
-	req.StartPosition = pb.StartPosition_TimeDeltaStart
-	req.StartTimeDelta = int64(10 * time.Second)
-	if err := sendInvalidSubRequest(s, nc, req); err != nil {
-		t.Fatalf("%v", err)
-	}
-
-	req.StartPosition = pb.StartPosition_NewOnly
-	// Set DurableName and QGroup
-	req.DurableName = "mydur"
-	req.QGroup = "mygroup"
-	if err := sendInvalidSubRequest(s, nc, req); err != nil {
-		t.Fatalf("%v", err)
-	}
-
-	// A durable
-	req.DurableName = "mydur"
+	// Reset those
 	req.QGroup = ""
-	if err := sendInvalidSubRequest(s, nc, req); err != nil {
-		t.Fatalf("%v", err)
-	}
-
-	// A queue subscriber
 	req.DurableName = ""
-	req.QGroup = "mygroup"
-	if err := sendInvalidSubRequest(s, nc, req); err != nil {
+
+	// Now we should have an error that says that we can't find client ID
+	// (that is, client was not registered).
+	if err := sendInvalidSubRequest(s, nc, req, fmt.Errorf("can't find clientID: %v", clientName)); err != nil {
 		t.Fatalf("%v", err)
 	}
 

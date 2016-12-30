@@ -81,20 +81,21 @@ const (
 
 // Errors.
 var (
-	ErrInvalidSubject  = errors.New("stan: invalid subject")
-	ErrInvalidSequence = errors.New("stan: invalid start sequence")
-	ErrInvalidTime     = errors.New("stan: invalid start time")
-	ErrInvalidSub      = errors.New("stan: invalid subscription")
-	ErrInvalidClient   = errors.New("stan: clientID already registered")
-	ErrInvalidAckWait  = errors.New("stan: invalid ack wait time, should be >= 1s")
-	ErrInvalidConnReq  = errors.New("stan: invalid connection request")
-	ErrInvalidPubReq   = errors.New("stan: invalid publish request")
-	ErrInvalidSubReq   = errors.New("stan: invalid subscription request")
-	ErrInvalidUnsubReq = errors.New("stan: invalid unsubscribe request")
-	ErrInvalidCloseReq = errors.New("stan: invalid close request")
-	ErrDupDurable      = errors.New("stan: duplicate durable registration")
-	ErrInvalidDurName  = errors.New("stan: durable name of a durable queue subscriber can't contain the character ':'")
-	ErrUnknownClient   = errors.New("stan: unknown clientID")
+	ErrInvalidSubject     = errors.New("stan: invalid subject")
+	ErrInvalidStart       = errors.New("stan: invalid start position")
+	ErrInvalidSub         = errors.New("stan: invalid subscription")
+	ErrInvalidClient      = errors.New("stan: clientID already registered")
+	ErrMissingClient      = errors.New("stan: clientID missing")
+	ErrInvalidAckWait     = errors.New("stan: invalid ack wait time, should be >= 1s")
+	ErrInvalidMaxInflight = errors.New("stan: invalid MaxInflight, should be >= 1")
+	ErrInvalidConnReq     = errors.New("stan: invalid connection request")
+	ErrInvalidPubReq      = errors.New("stan: invalid publish request")
+	ErrInvalidSubReq      = errors.New("stan: invalid subscription request")
+	ErrInvalidUnsubReq    = errors.New("stan: invalid unsubscribe request")
+	ErrInvalidCloseReq    = errors.New("stan: invalid close request")
+	ErrDupDurable         = errors.New("stan: duplicate durable registration")
+	ErrInvalidDurName     = errors.New("stan: durable name of a durable queue subscriber can't contain the character ':'")
+	ErrUnknownClient      = errors.New("stan: unknown clientID")
 )
 
 // Shared regular expression to check clientID validity.
@@ -2457,34 +2458,47 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	sr := &pb.SubscriptionRequest{}
 	err := sr.Unmarshal(m.Data)
 	if err != nil {
-		Errorf("STAN:  Invalid Subscription request from %s.", m.Subject)
+		Errorf("STAN: Invalid Subscription request from %s: %v", m.Subject, err)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubReq)
-		return
-	}
-
-	// FIXME(dlc) check for multiple errors, mis-configurations, etc.
-
-	// AckWait must be >= 1s
-	if sr.AckWaitInSecs <= 0 {
-		Debugf("STAN: [Client:%s] Invalid AckWait in subscription request from %s.",
-			sr.ClientID, m.Subject)
-		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidAckWait)
-		return
-	}
-
-	// Make sure subject is valid
-	if !isValidSubject(sr.Subject) {
-		Debugf("STAN: [Client:%s] Invalid subject <%s> in subscription request from %s.",
-			sr.ClientID, sr.Subject, m.Subject)
-		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubject)
 		return
 	}
 
 	// ClientID must not be empty.
 	if sr.ClientID == "" {
-		Debugf("STAN: missing clientID in subscription request from %s", m.Subject)
-		s.sendSubscriptionResponseErr(m.Reply,
-			errors.New("stan: malformed subscription request, clientID missing"))
+		Errorf("STAN: Missing ClientID in subscription request from %s", m.Subject)
+		s.sendSubscriptionResponseErr(m.Reply, ErrMissingClient)
+		return
+	}
+
+	// AckWait must be >= 1s
+	if sr.AckWaitInSecs <= 0 {
+		Errorf("STAN: [Client:%s] Invalid AckWait (%v) in subscription request from %s",
+			sr.ClientID, sr.AckWaitInSecs, m.Subject)
+		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidAckWait)
+		return
+	}
+
+	// MaxInflight must be >= 1
+	if sr.MaxInFlight <= 0 {
+		Errorf("STAN: [Client:%s] Invalid MaxInflight (%v) in subscription request from %s",
+			sr.ClientID, sr.MaxInFlight, m.Subject)
+		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidMaxInflight)
+		return
+	}
+
+	// StartPosition between StartPosition_NewOnly and StartPosition_First
+	if sr.StartPosition < pb.StartPosition_NewOnly || sr.StartPosition > pb.StartPosition_First {
+		Errorf("STAN: [Client:%s] Invalid StartPosition (%v) in subscription request from %s",
+			sr.ClientID, int(sr.StartPosition), m.Subject)
+		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidStart)
+		return
+	}
+
+	// Make sure subject is valid
+	if !isValidSubject(sr.Subject) {
+		Errorf("STAN: [Client:%s] Invalid Subject %q in subscription request from %s",
+			sr.ClientID, sr.Subject, m.Subject)
+		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubject)
 		return
 	}
 
@@ -2513,7 +2527,8 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			// For queue subscribers, we prevent DurableName to contain
 			// the ':' character, since we use it for the compound name.
 			if strings.Contains(sr.DurableName, ":") {
-				Debugf("STAN: [Client:%s] %s", sr.ClientID, ErrInvalidDurName)
+				Errorf("STAN: [Client:%s] Invalid DurableName (%q) for queue subscriber from %s",
+					sr.ClientID, sr.DurableName, sr.Subject)
 				s.sendSubscriptionResponseErr(m.Reply, ErrInvalidDurName)
 				return
 			}
@@ -2545,7 +2560,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			clientID := sub.ClientID
 			sub.RUnlock()
 			if clientID != "" {
-				Debugf("STAN: [Client:%s] Invalid client id in subscription request from %s.",
+				Errorf("STAN: [Client:%s] Invalid ClientID in subscription request from %s",
 					sr.ClientID, m.Subject)
 				s.sendSubscriptionResponseErr(m.Reply, ErrDupDurable)
 				return
