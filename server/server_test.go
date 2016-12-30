@@ -5382,3 +5382,59 @@ func TestFileStoreQMemberRemovedFromStore(t *testing.T) {
 		t.Fatalf("Expected only 1 member, got %v", len(qs.subs))
 	}
 }
+
+func TestIgnoreFailedHBInAckRedeliveryForQGroup(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.ID = clusterName
+	opts.ClientHBInterval = 100 * time.Millisecond
+	opts.ClientHBTimeout = time.Millisecond
+	opts.ClientHBFailCount = 100000
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	count := 0
+	ch := make(chan bool)
+	cb := func(m *stan.Msg) {
+		count++
+		if count == 4 {
+			ch <- true
+		}
+	}
+	// Create first queue member. Use NatsConn so we can close the NATS
+	// connection to produced failed HB
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	sc1, err := stan.Connect(clusterName, "client1", stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	if _, err := sc1.QueueSubscribe("foo", "group", cb, stan.AckWait(time.Second)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Create 2nd member.
+	sc2 := NewDefaultConnection(t)
+	defer sc2.Close()
+	if _, err := sc2.QueueSubscribe("foo", "group", cb, stan.AckWait(time.Second)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Send 2 messages, expecting to go to sub1 then sub2
+	for i := 0; i < 2; i++ {
+		sc1.Publish("foo", []byte("hello"))
+	}
+	// Wait for those messages to be ack'ed
+	waitForAcks(t, s, "client1", 1, 0)
+	// Close connection of sub1
+	nc.Close()
+	// Send 2 more messages
+	for i := 0; i < 2; i++ {
+		sc2.Publish("foo", []byte("hello"))
+	}
+	// Wait for messages to be received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+}

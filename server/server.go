@@ -1789,29 +1789,39 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	clientID := sub.ClientID
 	floorTimestamp := sub.ackTimeFloor
 	inbox := sub.Inbox
+	checkHB := qs == nil
 	sub.RUnlock()
 
-	// If we don't find the client, we are done.
-	client := s.clients.Lookup(clientID)
-	if client == nil {
-		return
+	// Do not check client's HB if subscriber's is part of a queue group,
+	// unless if the group is down to this single member.
+	if qs != nil {
+		qs.RLock()
+		checkHB = len(qs.subs) == 1
+		qs.RUnlock()
 	}
-	// If the client has some failed heartbeats, ignore this request.
-	client.RLock()
-	fhbs := client.fhb
-	client.RUnlock()
-	if fhbs != 0 {
-		// Reset the timer.
-		sub.Lock()
-		if sub.ackTimer != nil {
-			sub.ackTimer.Reset(sub.ackWait)
+	if checkHB {
+		// If we don't find the client, we are done.
+		client := s.clients.Lookup(clientID)
+		if client == nil {
+			return
 		}
-		sub.Unlock()
-		if s.debug {
-			Debugf("STAN: [Client:%s] Skipping redelivering on ack expiration due to client missed hearbeat, subject=%s, inbox=%s",
-				clientID, subject, inbox)
+		// If the client has some failed heartbeats, ignore this request.
+		client.RLock()
+		fhbs := client.fhb
+		client.RUnlock()
+		if fhbs != 0 {
+			// Reset the timer.
+			sub.Lock()
+			if sub.ackTimer != nil {
+				sub.ackTimer.Reset(sub.ackWait)
+			}
+			sub.Unlock()
+			if s.debug {
+				Debugf("STAN: [Client:%s] Skipping redelivering on ack expiration due to client missed hearbeat, subject=%s, inbox=%s",
+					clientID, subject, inbox)
+			}
+			return
 		}
-		return
 	}
 
 	if s.debug && len(sortedSequences) > 0 {
