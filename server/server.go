@@ -837,7 +837,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		// Do some post recovery processing (create subs on AckInbox, setup
 		// some timers, etc...)
 		if err := s.postRecoveryProcessing(recoveredState.Clients, recoveredSubs); err != nil {
-			panic(fmt.Errorf("error during post recovery processing: %v\n", err))
+			panic(fmt.Errorf("error during post recovery processing: %v", err))
 		}
 	}
 
@@ -942,7 +942,7 @@ func (s *StanServer) configureClusterOpts(opts *server.Options) error {
 	if clusterURL.User != nil {
 		pass, hasPassword := clusterURL.User.Password()
 		if !hasPassword {
-			return fmt.Errorf("Expected cluster password to be set.")
+			return fmt.Errorf("Expected cluster password to be set")
 		}
 		opts.Cluster.Password = pass
 
@@ -1749,7 +1749,9 @@ func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subS
 			durName = sub.QGroup
 		}
 		sub.RUnlock()
-		Debugf("STAN: [Client:%s] Redelivering to durable %s", clientID, durName)
+		if s.debug {
+			Debugf("STAN: [Client:%s] Redelivering to durable %s", clientID, durName)
+		}
 	}
 
 	// If we don't find the client, we are done.
@@ -2515,7 +2517,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// Grab channel state, create a new one if needed.
 	cs, err := s.lookupOrCreateChannel(sr.Subject)
 	if err != nil {
-		Errorf("STAN: Unable to create store for subject %s.", sr.Subject)
+		Errorf("STAN: Unable to create store for subject %s", sr.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
 	}
@@ -2637,8 +2639,10 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
 	}
-	Debugf("STAN: [Client:%s] Added subscription on subject=%s, inbox=%s",
-		sr.ClientID, sr.Subject, sr.Inbox)
+	if s.debug {
+		Debugf("STAN: [Client:%s] Added subscription on subject=%s, inbox=%s",
+			sr.ClientID, sr.Subject, sr.Inbox)
+	}
 
 	// In case this is a durable, sub already exists so we need to protect access
 	sub.Lock()
@@ -2826,15 +2830,19 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 	switch sr.StartPosition {
 	case pb.StartPosition_NewOnly:
 		lastSent = cs.Msgs.LastSequence()
-		Debugf("STAN: [Client:%s] Sending new-only subject=%s, seq=%d.",
-			sub.ClientID, sub.subject, lastSent)
+		if s.debug {
+			Debugf("STAN: [Client:%s] Sending new-only subject=%s, seq=%d.",
+				sub.ClientID, sub.subject, lastSent)
+		}
 	case pb.StartPosition_LastReceived:
 		lastSeq := cs.Msgs.LastSequence()
 		if lastSeq > 0 {
 			lastSent = lastSeq - 1
 		}
-		Debugf("STAN: [Client:%s] Sending last message, subject=%s.",
-			sub.ClientID, sub.subject)
+		if s.debug {
+			Debugf("STAN: [Client:%s] Sending last message, subject=%s.",
+				sub.ClientID, sub.subject)
+		}
 	case pb.StartPosition_TimeDeltaStart:
 		startTime := time.Now().UnixNano() - sr.StartTimeDelta
 		// If there is no message, seq will be 0.
@@ -2845,8 +2853,10 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 			// so this would translate to "new only" semantic.
 			lastSent = seq - 1
 		}
-		Debugf("STAN: [Client:%s] Sending from time, subject=%s time=%d seq=%d",
-			sub.ClientID, sub.subject, startTime, lastSent)
+		if s.debug {
+			Debugf("STAN: [Client:%s] Sending from time, subject=%s time='%v' seq=%d",
+				sub.ClientID, sub.subject, time.Unix(0, startTime), lastSent)
+		}
 	case pb.StartPosition_SequenceStart:
 		// If there is no message, firstSeq and lastSeq will be equal to 0.
 		firstSeq, lastSeq := cs.Msgs.FirstAndLastSequence()
@@ -2862,15 +2872,19 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 			// sequence number.
 			lastSent = sr.StartSequence - 1
 		}
-		Debugf("STAN: [Client:%s] Sending from sequence, subject=%s seq_asked=%d actual_seq=%d",
-			sub.ClientID, sub.subject, sr.StartSequence, lastSent)
+		if s.debug {
+			Debugf("STAN: [Client:%s] Sending from sequence, subject=%s seq_asked=%d actual_seq=%d",
+				sub.ClientID, sub.subject, sr.StartSequence, lastSent)
+		}
 	case pb.StartPosition_First:
 		firstSeq := cs.Msgs.FirstSequence()
 		if firstSeq > 0 {
 			lastSent = firstSeq - 1
 		}
-		Debugf("STAN: [Client:%s] Sending from beginning, subject=%s seq=%d",
-			sub.ClientID, sub.subject, lastSent)
+		if s.debug {
+			Debugf("STAN: [Client:%s] Sending from beginning, subject=%s seq=%d",
+				sub.ClientID, sub.subject, lastSent)
+		}
 	}
 	sub.LastSent = lastSent
 	sub.Unlock()
