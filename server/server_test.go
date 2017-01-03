@@ -21,6 +21,7 @@ import (
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/nats-io/nuid"
 )
 
 const (
@@ -5446,4 +5447,51 @@ func TestIgnoreFailedHBInAckRedeliveryForQGroup(t *testing.T) {
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our messages")
 	}
+}
+
+func TestAckPublisherBufSize(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	errCh := make(chan error)
+	inbox := nats.NewInbox()
+	iopm := &ioPendingMsg{m: &nats.Msg{Reply: inbox}}
+	nc.Subscribe(inbox, func(m *nats.Msg) {
+		pubAck := pb.PubAck{}
+		if err := pubAck.Unmarshal(m.Data); err != nil {
+			errCh <- err
+			return
+		}
+		if !reflect.DeepEqual(pubAck, iopm.pa) {
+			errCh <- fmt.Errorf("Expected PubAck: %v, got: %v", iopm.pa, pubAck)
+			return
+		}
+		errCh <- nil
+	})
+	nc.Flush()
+
+	checkErr := func() {
+		select {
+		case e := <-errCh:
+			if e != nil {
+				t.Fatalf("%v", e)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Did not get our message")
+		}
+	}
+
+	iopm.pm.Guid = nuid.Next()
+	s.ackPublisher(iopm)
+	checkErr()
+
+	iopm.pm.Guid = "this is a very very very very very very very very very very very very very very very very very very long guid"
+	s.ackPublisher(iopm)
+	checkErr()
 }
