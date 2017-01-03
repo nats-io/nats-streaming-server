@@ -23,6 +23,7 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	stores "github.com/nats-io/nats-streaming-server/stores"
+	"github.com/nats-io/nats-streaming-server/util"
 	"github.com/nats-io/nuid"
 )
 
@@ -181,6 +182,8 @@ type StanServer struct {
 	srvCtrlMsgID  string         // NUID used to filter control messages not intended for this server.
 	closeProtosMu sync.Mutex     // Mutex used for unsub/close requests.
 	connCloseReqs map[string]int // Key: clientID Value: ref count
+
+	tmpBuf []byte // Used to marshal protocols (right now, only PubAck)
 
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
@@ -2140,14 +2143,14 @@ func (s *StanServer) assignAndStore(pm *pb.PubMsg) (*stores.ChannelStore, error)
 func (s *StanServer) ackPublisher(iopm *ioPendingMsg) {
 	msgAck := &iopm.pa
 	msgAck.Guid = iopm.pm.Guid
-	var buf [32]byte
-	b := buf[:]
-	n, _ := msgAck.MarshalTo(b)
+	needed := msgAck.Size()
+	s.tmpBuf = util.EnsureBufBigEnough(s.tmpBuf, needed)
+	n, _ := msgAck.MarshalTo(s.tmpBuf)
 	if s.trace {
 		pm := &iopm.pm
 		Tracef("STAN: [Client:%s] Acking Publisher subj=%s guid=%s", pm.ClientID, pm.Subject, pm.Guid)
 	}
-	s.ncs.Publish(iopm.m.Reply, b[:n])
+	s.ncs.Publish(iopm.m.Reply, s.tmpBuf[:n])
 }
 
 // Delete a sub from a given list.
