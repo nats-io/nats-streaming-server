@@ -1609,12 +1609,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	}
 
 	seq := ms.last + 1
-	m := &pb.MsgProto{
-		Sequence:  seq,
-		Subject:   ms.subject,
-		Data:      data,
-		Timestamp: time.Now().UnixNano(),
-	}
+	m := ms.genericMsgStore.createMsg(seq, data)
 
 	msgInBuffer := false
 
@@ -1755,6 +1750,8 @@ func (ms *FileMsgStore) expireMsgs(now, maxAge int64) int64 {
 		elapsed := now - m.timestamp
 		if elapsed >= maxAge {
 			ms.removeFirstMsg()
+		} else if elapsed < 0 {
+			ms.expiration = m.timestamp + maxAge
 		} else {
 			ms.expiration = now + (maxAge - elapsed)
 			break

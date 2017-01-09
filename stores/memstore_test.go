@@ -3,10 +3,12 @@
 package stores
 
 import (
+	"os"
 	"reflect"
 	"testing"
 
 	"github.com/nats-io/nats-streaming-server/spb"
+	"github.com/nats-io/nats-streaming-server/util"
 )
 
 func createDefaultMemStore(t *testing.T) *MemoryStore {
@@ -201,4 +203,18 @@ func TestMSPerChannelLimits(t *testing.T) {
 	defer ms.Close()
 
 	testPerChannelLimits(t, ms)
+}
+
+func TestMSIncrementalTimestamp(t *testing.T) {
+	// This test need to run without race and may take some time, so
+	// excluding from Travis. Check presence of a known TRAVIS env
+	// variable to detect that we run on Travis so we can skip this
+	// test.
+	if util.RaceEnabled || os.Getenv("TRAVIS_GO_VERSION") != "" {
+		t.SkipNow()
+	}
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+
+	testIncrementalTimestamp(t, ms)
 }
