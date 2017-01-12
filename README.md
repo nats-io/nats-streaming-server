@@ -522,8 +522,6 @@ Building the NATS Streaming Server from source requires at least version 1.6 of 
 
 Run `go version` to see the version of Go which you have installed.
 
-Run `go get` inside the directory to include all possible dependencies.
-
 Run `go build` inside the directory to build.
 
 Run `go test ./...` to run the unit regression tests.
