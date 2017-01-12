@@ -833,3 +833,29 @@ func testPerChannelLimits(t *testing.T, s Store) {
 	checkLimitsForChannel("def", noMaxBytesOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
 	checkLimitsForChannel("global", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
 }
+
+func testIncrementalTimestamp(t *testing.T, s Store) {
+	limits := DefaultStoreLimits
+	limits.MaxMsgs = 2
+	s.SetLimits(&limits)
+
+	cs, _, _ := s.CreateChannel("foo", nil)
+	ms := cs.Msgs
+
+	msg := []byte("msg")
+
+	total := 8000000
+	for i := 0; i < total; i++ {
+		seq1, err1 := ms.Store(msg)
+		seq2, err2 := ms.Store(msg)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("Unexpected error on store: %v %v", err1, err2)
+		}
+		m1 := ms.Lookup(seq1)
+		m2 := ms.Lookup(seq2)
+		if m2.Timestamp < m1.Timestamp {
+			t.Fatalf("Timestamp of msg %v is smaller than previous one. Diff is %vms",
+				m2.Sequence, m1.Timestamp-m2.Timestamp)
+		}
+	}
+}

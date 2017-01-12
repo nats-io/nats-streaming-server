@@ -5,6 +5,7 @@ package stores
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
@@ -48,6 +49,7 @@ type genericMsgStore struct {
 	subject    string // Can't be wildcard
 	first      uint64
 	last       uint64
+	lTimestamp int64 // Timestamp of last message
 	totalCount int
 	totalBytes uint64
 	hitLimit   bool // indicates if store had to drop messages due to limit
@@ -256,6 +258,25 @@ func (gs *genericStore) close() error {
 func (gms *genericMsgStore) init(subject string, limits *MsgStoreLimits) {
 	gms.subject = subject
 	gms.limits = *limits
+}
+
+// createMsg creates a MsgProto with the given sequence number.
+// A timestamp is assigned with the guarantee that it will be at least
+// same than the previous message. That is, given that M1 is stored
+// before M2, this ensures that:
+// M1.Sequence<M2.Sequence && M1.Timestamp <= M2.Timestamp
+func (gms *genericMsgStore) createMsg(seq uint64, data []byte) *pb.MsgProto {
+	m := &pb.MsgProto{
+		Sequence:  seq,
+		Subject:   gms.subject,
+		Data:      data,
+		Timestamp: time.Now().UnixNano(),
+	}
+	if gms.lTimestamp > 0 && m.Timestamp < gms.lTimestamp {
+		m.Timestamp = gms.lTimestamp
+	}
+	gms.lTimestamp = m.Timestamp
+	return m
 }
 
 // State returns some statistics related to this store

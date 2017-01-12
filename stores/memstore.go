@@ -96,12 +96,7 @@ func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
 		ms.first = 1
 	}
 	ms.last++
-	m := &pb.MsgProto{
-		Sequence:  ms.last,
-		Subject:   ms.subject,
-		Data:      data,
-		Timestamp: time.Now().UnixNano(),
-	}
+	m := ms.genericMsgStore.createMsg(ms.last, data)
 	ms.msgs[ms.last] = m
 	ms.totalCount++
 	ms.totalBytes += uint64(m.Size())
@@ -193,6 +188,8 @@ func (ms *MemoryMsgStore) expireMsgs() {
 		elapsed := now - m.Timestamp
 		if elapsed >= maxAge {
 			ms.removeFirstMsg()
+		} else if elapsed < 0 {
+			ms.ageTimer.Reset(time.Duration(m.Timestamp - now + maxAge))
 		} else {
 			ms.ageTimer.Reset(time.Duration(maxAge - elapsed))
 			return
