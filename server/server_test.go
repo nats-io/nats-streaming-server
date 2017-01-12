@@ -2596,6 +2596,56 @@ func TestCheckClientHealth(t *testing.T) {
 	waitForNumClients(t, s, 0)
 }
 
+func TestCheckClientHealthDontKeepClientLock(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.ID = clusterName
+	// Override HB settings
+	opts.ClientHBInterval = 50 * time.Millisecond
+	opts.ClientHBTimeout = 3 * time.Second
+	opts.ClientHBFailCount = 1
+	s := RunServerWithOpts(opts, nil)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Wait for client to be registered
+	waitForNumClients(t, s, 1)
+
+	// Kill the NATS Connection
+	nc.Close()
+
+	// Check that when the server sends a HB request,
+	// the client is not blocked for the duration of the
+	// HB Timeout
+	start := time.Now()
+
+	// Since we can't reliably know when the server is performing
+	// the HB request, we are going to wait for at least 2 HB intervals
+	// before checking.
+	time.Sleep(2 * opts.ClientHBInterval)
+
+	c := s.clients.Lookup(clientName)
+	c.RLock()
+	// This is to avoid staticcheck "empty critical section (SA2001)" report
+	_ = c.fhb
+	c.RUnlock()
+	dur := time.Now().Sub(start)
+	// This should have taken less than HB Timeout
+	if dur >= opts.ClientHBTimeout {
+		t.Fatalf("Client may be locked for the duration of the HB request: %v", dur)
+	}
+}
+
 func TestConnectsWithDupCID(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()

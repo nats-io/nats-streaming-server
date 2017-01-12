@@ -1432,23 +1432,41 @@ func (s *StanServer) checkClientHealth(clientID string) {
 	client := sc.UserData.(*client)
 	hbInbox := sc.HbInbox
 
-	client.Lock()
-	if client.unregistered {
-		client.Unlock()
+	client.RLock()
+	unregistered := client.unregistered
+	client.RUnlock()
+	if unregistered {
 		return
 	}
-	if _, err := s.nc.Request(hbInbox, nil, s.opts.ClientHBTimeout); err != nil {
-		client.fhb++
-		if client.fhb > s.opts.ClientHBFailCount {
-			Debugf("STAN: [Client:%s] Timed out on heartbeats.", clientID)
-			client.Unlock()
-			s.closeClient(useLocking, clientID)
-			return
+	// Sends the HB request. This call blocks for ClientHBTimeout,
+	// do not hold the lock for that long!
+	_, err := s.nc.Request(hbInbox, nil, s.opts.ClientHBTimeout)
+	// Grab the lock now.
+	client.Lock()
+	// If client has been unregisted in the meantime, we are done.
+	if !client.unregistered {
+		// If we did not get the reply, increase the number of
+		// failed heartbeats.
+		if err != nil {
+			client.fhb++
+			// If we have reached the max number of failures
+			if client.fhb > s.opts.ClientHBFailCount {
+				Debugf("STAN: [Client:%s] Timed out on heartbeats.", clientID)
+				// close the client (connection). This locks the
+				// client object internally so unlock here.
+				client.Unlock()
+				// useLocking is not for client.Lock but for the
+				// use closeProtosMu mutex.
+				s.closeClient(useLocking, clientID)
+				return
+			}
+		} else {
+			// We got the reply, reset the number of failed heartbeats.
+			client.fhb = 0
 		}
-	} else {
-		client.fhb = 0
+		// Reset the timer to fire again.
+		client.hbt.Reset(s.opts.ClientHBInterval)
 	}
-	client.hbt.Reset(s.opts.ClientHBInterval)
 	client.Unlock()
 }
 
