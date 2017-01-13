@@ -23,6 +23,14 @@ type client struct {
 	subs         []*subState
 }
 
+// getSubsCopy returns a copy of the client's subscribers array.
+// At least Read-lock must be held by the caller.
+func (c *client) getSubsCopy() []*subState {
+	subs := make([]*subState, len(c.subs))
+	copy(subs, c.subs)
+	return subs
+}
+
 // Register a client if new, otherwise returns the client already registered
 // and `false` to indicate that the client is not new.
 func (cs *clientStore) Register(ID, hbInbox string) (*stores.Client, bool, error) {
@@ -69,8 +77,7 @@ func (cs *clientStore) GetSubs(ID string) []*subState {
 		return nil
 	}
 	c.RLock()
-	subs := make([]*subState, len(c.subs))
-	copy(subs, c.subs)
+	subs := c.getSubsCopy()
 	c.RUnlock()
 	return subs
 }

@@ -230,6 +230,7 @@ type subState struct {
 	stalled      bool
 	newOnHold    bool            // Prevents delivery of new msgs until old are redelivered (on restart)
 	store        stores.SubStore // for easy access to the store interface
+	hasFailedHB  bool            // This is set when server sends heartbeat to this subscriber's client.
 }
 
 // Looks up, or create a new channel if it does not exist
@@ -1438,6 +1439,8 @@ func (s *StanServer) checkClientHealth(clientID string) {
 	if unregistered {
 		return
 	}
+	var subs []*subState
+	hasFailedHB := false
 	// Sends the HB request. This call blocks for ClientHBTimeout,
 	// do not hold the lock for that long!
 	_, err := s.nc.Request(hbInbox, nil, s.opts.ClientHBTimeout)
@@ -1464,10 +1467,23 @@ func (s *StanServer) checkClientHealth(clientID string) {
 			// We got the reply, reset the number of failed heartbeats.
 			client.fhb = 0
 		}
+		// Get a copy of subscribers and client.fhb while under lock
+		subs = client.getSubsCopy()
+		hasFailedHB = client.fhb > 0
 		// Reset the timer to fire again.
 		client.hbt.Reset(s.opts.ClientHBInterval)
 	}
 	client.Unlock()
+	if len(subs) > 0 {
+		// Push the info about presence of failed heartbeats down to
+		// subscribers, so they have easier access to that info in
+		// the redelivery attempt code.
+		for _, sub := range subs {
+			sub.Lock()
+			sub.hasFailedHB = hasFailedHB
+			sub.Unlock()
+		}
+	}
 }
 
 // Close a client
@@ -1676,15 +1692,18 @@ func findBestQueueSub(sl []*subState) (rsub *subState) {
 		rsub.RLock()
 		rOut := len(rsub.acksPending)
 		rStalled := rsub.stalled
+		rHasFailedHB := rsub.hasFailedHB
 		rsub.RUnlock()
 
 		sub.RLock()
 		sOut := len(sub.acksPending)
 		sStalled := sub.stalled
+		sHasFailedHB := sub.hasFailedHB
 		sub.RUnlock()
 
-		// Favor non stalled subscribers
-		if (!sStalled || rStalled) && (sOut < rOut) {
+		// Favor non stalled subscribers and clients that do not have
+		// failed heartbeats
+		if (!sStalled || rStalled) && (!sHasFailedHB || rHasFailedHB) && (sOut < rOut) {
 			rsub = sub
 		}
 	}
@@ -1804,7 +1823,7 @@ func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subS
 // Redeliver all outstanding messages that have expired.
 func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
-	sub.RLock()
+	sub.Lock()
 	expTime := int64(sub.ackWait)
 	cs := s.store.LookupChannel(sub.subject)
 	sortedSequences := makeSortedSequences(sub.acksPending)
@@ -1813,32 +1832,11 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	clientID := sub.ClientID
 	floorTimestamp := sub.ackTimeFloor
 	inbox := sub.Inbox
-	checkHB := qs == nil
-	sub.RUnlock()
-
-	// Do not check client's HB if subscriber's is part of a queue group,
-	// unless if the group is down to this single member.
-	if qs != nil {
-		qs.RLock()
-		checkHB = len(qs.subs) == 1
-		qs.RUnlock()
-	}
-	if checkHB {
-		// If we don't find the client, we are done.
-		client := s.clients.Lookup(clientID)
-		if client == nil {
-			return
-		}
+	if qs == nil {
 		// If the client has some failed heartbeats, ignore this request.
-		client.RLock()
-		fhbs := client.fhb
-		client.RUnlock()
-		if fhbs != 0 {
-			// Reset the timer.
-			sub.Lock()
-			if sub.ackTimer != nil {
-				sub.ackTimer.Reset(sub.ackWait)
-			}
+		if sub.hasFailedHB {
+			// Reset the timer
+			sub.ackTimer.Reset(sub.ackWait)
 			sub.Unlock()
 			if s.debug {
 				Debugf("STAN: [Client:%s] Skipping redelivering on ack expiration due to client missed hearbeat, subject=%s, inbox=%s",
@@ -1847,6 +1845,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			return
 		}
 	}
+	sub.Unlock()
 
 	if s.debug && len(sortedSequences) > 0 {
 		Debugf("STAN: [Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
