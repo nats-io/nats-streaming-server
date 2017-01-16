@@ -720,6 +720,76 @@ func TestRedelivery(t *testing.T) {
 	}(subs[0])
 }
 
+func TestMultipleRedeliveries(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	dlvTimes := make(map[uint64]int64)
+	mu := &sync.Mutex{}
+	sent := 5
+	count := 0
+	ch := make(chan bool)
+	ackWait := int64(time.Second)
+	lowBound := int64(float64(ackWait) * 0.9)
+	highBound := int64(float64(ackWait) * 1.1)
+	errCh := make(chan error)
+	cb := func(m *stan.Msg) {
+		now := time.Now().UnixNano()
+		mu.Lock()
+		lastDlv := dlvTimes[m.Sequence]
+		if lastDlv != 0 && (now < lastDlv-lowBound || now > lastDlv+highBound) {
+			if len(errCh) == 0 {
+				errCh <- fmt.Errorf("Message %d redelivered %v instead of [%v,%v] after last (re)delivery",
+					m.Sequence, time.Duration(now-lastDlv), time.Duration(lowBound), time.Duration(highBound))
+				mu.Unlock()
+				return
+			}
+		} else {
+			dlvTimes[m.Sequence] = now
+		}
+		if m.Redelivered {
+			count++
+			if count == 2*sent*4 {
+				// we want at least 4 redeliveries
+				ch <- true
+			}
+		}
+		mu.Unlock()
+	}
+	// Create regular subscriber
+	if _, err := sc.Subscribe("foo", cb,
+		stan.SetManualAckMode(),
+		stan.AckWait(time.Second)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// And two queue subscribers from same group
+	for i := 0; i < 2; i++ {
+		if _, err := sc.QueueSubscribe("foo", "bar", cb,
+			stan.SetManualAckMode(),
+			stan.AckWait(time.Second)); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+	}
+
+	for i := 0; i < 5; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	// Wait for all redeliveries or errors
+	select {
+	case e := <-errCh:
+		t.Fatal(e)
+	case <-ch: // all good
+	case <-time.After(5 * time.Second):
+		t.Fatal("Did not get all our redeliveries")
+	}
+}
+
 func TestRedeliveryRace(t *testing.T) {
 	s := RunServer(clusterName)
 	defer s.Shutdown()
@@ -805,6 +875,98 @@ func TestQueueRedelivery(t *testing.T) {
 			t.Fatalf("Expected timer to be nil")
 		}
 	}(subs[0])
+}
+
+// As of now, it is possible for members of the same group to have different
+// AckWait values. This test checks that if a member with an higher AckWait
+// than the other member leaves, the message with an higher expiration time
+// is set to the remaining member's AckWait value.
+// It also checks that on the opposite case, if a member leaves and the
+// remaining member has a higher AckWait, the original expiration time is
+// maintained.
+func TestQueueSubsWithDifferentAckWait(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	var qsub1, qsub2, qsub3 stan.Subscription
+	var err error
+
+	dch := make(chan bool)
+	rch2 := make(chan bool)
+	rch3 := make(chan bool)
+
+	cb := func(m *stan.Msg) {
+		if !m.Redelivered {
+			dch <- true
+		} else {
+			if m.Sub == qsub2 {
+				rch2 <- true
+			} else if m.Sub == qsub3 {
+				rch3 <- true
+				// stop further redeliveries, test is done.
+				qsub3.Close()
+			}
+		}
+	}
+	// Create first queue member with high AckWait
+	qsub1, err = sc.QueueSubscribe("foo", "bar", cb,
+		stan.SetManualAckMode(),
+		stan.AckWait(30*time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Send the single message used in this test
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Wait for message to be received
+	if err := Wait(dch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Create the second member with low AckWait
+	qsub2, err = sc.QueueSubscribe("foo", "bar", cb,
+		stan.SetManualAckMode(),
+		stan.AckWait(time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Check we have the two members
+	checkQueueGroupSize(t, s, "foo", "bar", true, 2)
+	// Close the first, message should be redelivered within
+	// qsub2's AckWait, which is 1 second.
+	qsub1.Close()
+	// Check we have only 1 member
+	checkQueueGroupSize(t, s, "foo", "bar", true, 1)
+	// Wait for redelivery
+	select {
+	case <-rch2:
+	// ok
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("Message should have been redelivered")
+	}
+	// Create 3rd member with higher AckWait than the 2nd
+	qsub3, err = sc.QueueSubscribe("foo", "bar", cb,
+		stan.SetManualAckMode(),
+		stan.AckWait(10*time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Close qsub2
+	qsub2.Close()
+	// Check we have only 1 member
+	checkQueueGroupSize(t, s, "foo", "bar", true, 1)
+	// Wait for redelivery. It should happen after the remaining
+	// of the first redelivery to qsub2 and its AckWait, which
+	// should be less than a second.
+	select {
+	case <-rch3:
+	// ok
+	case <-time.After(time.Second):
+		t.Fatal("Message should have been redelivered")
+	}
 }
 
 func TestDurableRedelivery(t *testing.T) {
@@ -4496,7 +4658,7 @@ func TestDurableQueueSubRedeliveryOnRejoin(t *testing.T) {
 			if rdlv == total {
 				rdch <- true
 			}
-		} else if m.Redelivered && int(m.Sequence) > total {
+		} else if !m.Redelivered && int(m.Sequence) > total {
 			if !signaled {
 				signaled = true
 				sigCh <- true

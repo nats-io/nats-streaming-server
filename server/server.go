@@ -216,6 +216,14 @@ type queueState struct {
 	shadow   *subState // For durable case, when last member leaves and group is not closed.
 }
 
+// When doing message redelivery due to ack expiration, the function
+// makeSortedPendingMsgs return an array of pendingMsg objects,
+// ordered by their expiration date.
+type pendingMsg struct {
+	seq    uint64
+	expire int64
+}
+
 // Holds Subscription state
 type subState struct {
 	sync.RWMutex
@@ -224,9 +232,8 @@ type subState struct {
 	qstate       *queueState
 	ackWait      time.Duration // SubState.AckWaitInSecs expressed as a time.Duration
 	ackTimer     *time.Timer
-	ackTimeFloor int64
 	ackSub       *nats.Subscription
-	acksPending  map[uint64]struct{}
+	acksPending  map[uint64]int64 // key is message sequence, value is expiration time.
 	stalled      bool
 	newOnHold    bool            // Prevents delivery of new msgs until old are redelivered (on restart)
 	store        stores.SubStore // for easy access to the store interface
@@ -375,6 +382,8 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 		delete(ss.durables, durableKey)
 	}
 
+	var qsubs map[uint64]*subState
+
 	// Delete ourselves from the list
 	if qs != nil {
 		storageUpdate := false
@@ -403,6 +412,7 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 				storageUpdate = true
 			}
 		} else {
+			now := time.Now().UnixNano()
 			// If there are pending messages in this sub, they need to be
 			// transfered to remaining queue subscribers.
 			numQSubs := len(qs.subs)
@@ -411,9 +421,9 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 			// Need to update if this member was the one with the last
 			// message of the group.
 			storageUpdate = sub.LastSent == qs.lastSent
-			sortedSequences := makeSortedSequences(sub.acksPending)
-			for _, seq := range sortedSequences {
-				m := cs.Msgs.Lookup(seq)
+			sortedPendingMsgs := makeSortedPendingMsgs(sub.acksPending)
+			for _, pm := range sortedPendingMsgs {
+				m := cs.Msgs.Lookup(pm.seq)
 				if m == nil {
 					// Don't need to ack it since we are destroying this subscription
 					continue
@@ -437,14 +447,22 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 				if m.Sequence > qsub.LastSent {
 					qsub.LastSent = m.Sequence
 				}
+				// As of now, members can have different AckWait values.
+				expirationTime := pm.expire
+				// If the member the message is transfered to has a higher AckWait,
+				// keep original expiration time, otherwise check that it is smaller
+				// than the new AckWait.
+				if sub.ackWait > qsub.ackWait && expirationTime-now > 0 {
+					expirationTime = now + int64(qsub.ackWait)
+				}
 				// Store in ackPending.
-				qsub.acksPending[m.Sequence] = struct{}{}
-				// Make sure we set its ack timer if none already set, otherwise
-				// adjust the ackTimer floor as needed.s
-				if qsub.ackTimer == nil {
-					ss.stan.setupAckTimer(qsub, qsub.ackWait)
-				} else if qsub.ackTimeFloor > 0 && m.Timestamp < qsub.ackTimeFloor {
-					qsub.ackTimeFloor = m.Timestamp
+				qsub.acksPending[m.Sequence] = expirationTime
+				// Keep track of this qsub
+				if qsubs == nil {
+					qsubs = make(map[uint64]*subState)
+				}
+				if _, tracked := qsubs[qsub.ID]; !tracked {
+					qsubs[qsub.ID] = qsub
 				}
 				qsub.Unlock()
 				// Move to the next queue subscriber, going back to first if needed.
@@ -478,6 +496,13 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 		ss.psubs, _ = sub.deleteFromList(ss.psubs)
 	}
 	ss.Unlock()
+
+	// Calling this will sort current pending messages and ensure
+	// that the ackTimer is properly set. It does not necessarily
+	// mean that messages are going to be redelivered on the spot.
+	for _, qsub := range qsubs {
+		ss.stan.performAckExpirationRedelivery(qsub)
+	}
 }
 
 // Lookup by durable name.
@@ -1091,9 +1116,9 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 				ackWait: time.Duration(recSub.Sub.AckWaitInSecs) * time.Second,
 				store:   channel.Subs,
 			}
-			sub.acksPending = make(map[uint64]struct{}, len(recSub.Pending))
+			sub.acksPending = make(map[uint64]int64, len(recSub.Pending))
 			for seq := range recSub.Pending {
-				sub.acksPending[seq] = struct{}{}
+				sub.acksPending[seq] = 0
 			}
 			if len(sub.acksPending) > 0 {
 				// Prevent delivery of new messages until resent of old ones
@@ -1190,10 +1215,6 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 			sub.Unlock()
 			continue
 		}
-		// Create the delivery timer since performAckExpirationRedelivery
-		// may need to reset the timer (which would not work if timer is nil).
-		// Set it to a high value, it will be correctly reset or cleared.
-		s.setupAckTimer(sub, time.Hour)
 		// If this is a durable and it is offline, then skip the rest.
 		if sub.isOfflineDurableSubscriber() {
 			sub.newOnHold = false
@@ -1765,12 +1786,41 @@ func (a bySeq) Len() int           { return (len(a)) }
 func (a bySeq) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a bySeq) Less(i, j int) bool { return a[i] < a[j] }
 
-func makeSortedSequences(sequences map[uint64]struct{}) []uint64 {
+// Returns an array of message sequence numbers ordered by sequence.
+func makeSortedSequences(sequences map[uint64]int64) []uint64 {
 	results := make([]uint64, 0, len(sequences))
 	for seq := range sequences {
 		results = append(results, seq)
 	}
 	sort.Sort(bySeq(results))
+	return results
+}
+
+// Used for sorting by expiration time
+type byExpire []*pendingMsg
+
+func (a byExpire) Len() int      { return (len(a)) }
+func (a byExpire) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
+func (a byExpire) Less(i, j int) bool {
+	// If expire is 0, it means the server was restarted
+	// and we don't have the expiration time, which will
+	// be set later. Order by sequence instead.
+	if a[i].expire == 0 || a[j].expire == 0 {
+		return a[i].seq < a[j].seq
+	}
+	return a[i].expire < a[j].expire
+}
+
+// Returns an array of pendingMsg ordered by expiration date, unless
+// the expiration date in the pendingMsgs map is not set (0), which
+// happens after a server restart. In this case, the array is ordered
+// by message sequence numbers.
+func makeSortedPendingMsgs(pendingMsgs map[uint64]int64) []*pendingMsg {
+	results := make([]*pendingMsg, 0, len(pendingMsgs))
+	for seq, expire := range pendingMsgs {
+		results = append(results, &pendingMsg{seq: seq, expire: expire})
+	}
+	sort.Sort(byExpire(results))
 	return results
 }
 
@@ -1824,14 +1874,20 @@ func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subS
 func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.Lock()
+	sortedPendingMsgs := makeSortedPendingMsgs(sub.acksPending)
+	if len(sortedPendingMsgs) == 0 {
+		sub.clearAckTimer()
+		sub.Unlock()
+		return
+	}
 	expTime := int64(sub.ackWait)
-	cs := s.store.LookupChannel(sub.subject)
-	sortedSequences := makeSortedSequences(sub.acksPending)
 	subject := sub.subject
 	qs := sub.qstate
 	clientID := sub.ClientID
-	floorTimestamp := sub.ackTimeFloor
 	inbox := sub.Inbox
+	if sub.ackTimer == nil {
+		s.setupAckTimer(sub, sub.ackWait)
+	}
 	if qs == nil {
 		// If the client has some failed heartbeats, ignore this request.
 		if sub.hasFailedHB {
@@ -1847,47 +1903,66 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	}
 	sub.Unlock()
 
-	if s.debug && len(sortedSequences) > 0 {
+	cs := s.store.LookupChannel(subject)
+	// Should not happen at this time since channels are not
+	// removed...
+	if cs == nil {
+		Errorf("STAN: [Client:%s] Aborting redelivery for non existing channel: %s",
+			clientID, subject)
+		sub.Lock()
+		sub.clearAckTimer()
+		sub.Unlock()
+		return
+	}
+
+	if s.debug {
 		Debugf("STAN: [Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
 			clientID, subject, inbox)
 	}
 
 	now := time.Now().UnixNano()
+	// limit is now plus a buffer of 15ms to avoid repeated timer callbacks.
+	limit := now + int64(15*time.Millisecond)
 
 	var pick *subState
 	sent := false
-
-	// The messages from sortedSequences are possibly going to be acknowledged
-	// by the end of this function, but we are going to set the timer based on
-	// the oldest on that list, which is the sooner the timer should fire anyway.
-	// The timer will correctly be adjusted.
-	firstUnacked := int64(0)
+	needToSetExpireTime := false
+	tracePrinted := false
+	nextExpirationTIme := int64(0)
 
 	// We will move through acksPending(sorted) and see what needs redelivery.
-	for _, seq := range sortedSequences {
-		m := s.getMsgForRedelivery(cs, sub, seq)
+	for _, pm := range sortedPendingMsgs {
+		m := s.getMsgForRedelivery(cs, sub, pm.seq)
 		if m == nil {
 			continue
 		}
-		if firstUnacked == 0 {
-			firstUnacked = m.Timestamp
+		expireTime := pm.expire
+		if expireTime == 0 {
+			needToSetExpireTime = true
+			expireTime = m.Timestamp + expTime
 		}
 
-		// Ignore messages with a timestamp below our floor
-		if floorTimestamp > 0 && floorTimestamp > m.Timestamp {
-			continue
-		}
-
-		if m.Timestamp+expTime > now {
-			// the messages are ordered by seq so the expiration
-			// times are ascending.  Once we've get here, we've hit an
-			// unexpired message, and we're done. Reset the sub's ack
-			// timer to fire on the next message expiration.
-			if s.trace {
+		// If this message has not yet expired, reset timer for next callback
+		if expireTime > limit {
+			if nextExpirationTIme == 0 {
+				nextExpirationTIme = expireTime
+			}
+			if !tracePrinted && s.trace {
+				tracePrinted = true
 				Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
 			}
-			sub.adjustAckTimer(m.Timestamp)
-			return
+			if needToSetExpireTime {
+				sub.Lock()
+				// Is message still pending?
+				if _, present := sub.acksPending[pm.seq]; present {
+					// Update expireTime
+					expireTime = time.Now().UnixNano() + expTime
+					sub.acksPending[pm.seq] = expireTime
+				}
+				sub.Unlock()
+				continue
+			}
+			break
 		}
 
 		// Flag as redelivered.
@@ -1922,7 +1997,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	}
 
 	// Adjust the timer
-	sub.adjustAckTimer(firstUnacked)
+	sub.adjustAckTimer(nextExpirationTIme)
 }
 
 // getMsgForRedelivery looks up the message from storage. If not found -
@@ -1981,8 +2056,17 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 		s.setupAckTimer(sub, sub.ackWait)
 	}
 
-	// If this message is already pending, nothing else to do.
-	if _, present := sub.acksPending[m.Sequence]; present {
+	// If this message is already pending, do not add it again to the store.
+	if expTime, present := sub.acksPending[m.Sequence]; present {
+		// However, update the next expiration time.
+		if expTime == 0 {
+			// That can happen after a server restart, so need to use
+			// the current time.
+			expTime = time.Now().UnixNano()
+		}
+		// bump the next expiration time with the sub's ackWait.
+		expTime += int64(sub.ackWait)
+		sub.acksPending[m.Sequence] = expTime
 		return true, true
 	}
 	// Store in storage
@@ -1998,7 +2082,11 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	}
 
 	// Store in ackPending.
-	sub.acksPending[m.Sequence] = struct{}{}
+	// Use current time to compute expiration time instead of m.Timestamp.
+	// A message can be persisted in the log and send much later to a
+	// new subscriber. Basing expiration time on m.Timestamp would
+	// likely set the expiration time in the past!
+	sub.acksPending[m.Sequence] = time.Now().UnixNano() + int64(sub.ackWait)
 
 	// Now that we have added to acksPending, check again if we
 	// have reached the max and tell the caller that it should not
@@ -2359,13 +2447,14 @@ func (sub *subState) clearAckTimer() {
 	}
 }
 
-// adjustAckTimer adjusts the timer based on a given timestamp
+// adjustAckTimer adjusts the timer based on a given next
+// expiration time.
 // The timer will be stopped if there is no more pending ack.
 // If there are pending acks, the timer will be reset to the
-// default sub.ackWait value if the given timestamp is
+// default sub.ackWait value if the given expiration time is
 // 0 or in the past. Otherwise, it is set to the remaining time
-// between the given timestamp and now.
-func (sub *subState) adjustAckTimer(firstUnackedTimestamp int64) {
+// between the given expiration time and now.
+func (sub *subState) adjustAckTimer(nextExpirationTime int64) {
 	sub.Lock()
 	defer sub.Unlock()
 
@@ -2374,32 +2463,20 @@ func (sub *subState) adjustAckTimer(firstUnackedTimestamp int64) {
 		return
 	}
 
-	// Reset the floor (it will be set if needed)
-	sub.ackTimeFloor = 0
-
 	// Check if there are still pending acks
 	if len(sub.acksPending) > 0 {
 		// Capture time
 		now := time.Now().UnixNano()
 
-		// ackWait in int64
-		expTime := int64(sub.ackWait)
-
-		// If the message timestamp + expiration is in the past
-		// (which will happen when a message is redelivered more
-		// than once), or if timestamp is 0, use the default ackWait
-		if firstUnackedTimestamp+expTime <= now {
+		// If the next expiration time is 0 or less than now,
+		// use the default ackWait
+		if nextExpirationTime <= now {
 			sub.ackTimer.Reset(sub.ackWait)
 		} else {
-			// Compute the time the ackTimer should fire, which is the
-			// ack timeout less the duration the message has been in
-			// the server.
-			fireIn := (firstUnackedTimestamp + expTime - now)
-
+			// Compute the time the ackTimer should fire, based
+			// on the given next expiration time and now.
+			fireIn := (nextExpirationTime - now)
 			sub.ackTimer.Reset(time.Duration(fireIn))
-
-			// Skip redelivery of messages before this one.
-			sub.ackTimeFloor = firstUnackedTimestamp
 		}
 	} else {
 		// No more pending acks, clear the timer.
@@ -2638,7 +2715,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			},
 			subject:     sr.Subject,
 			ackWait:     time.Duration(sr.AckWaitInSecs) * time.Second,
-			acksPending: make(map[uint64]struct{}),
+			acksPending: make(map[uint64]int64),
 			store:       cs.Subs,
 		}
 
