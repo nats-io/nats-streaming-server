@@ -25,19 +25,19 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[53638] 2016/10/18 10:05:15.718693 [INF] Starting nats-streaming-server[test-cluster] version 0.3.0
-[53638] 2016/10/18 10:05:15.721356 [INF] Starting nats-server version 0.9.4
-[53638] 2016/10/18 10:05:15.721366 [INF] Listening for client connections on 0.0.0.0:4222
-[53638] 2016/10/18 10:05:15.721941 [INF] Server is ready
-[53638] 2016/10/18 10:05:16.063714 [INF] STAN: Message store is MEMORY
-[53638] 2016/10/18 10:05:16.063726 [INF] STAN: --------- Store Limits ---------
-[53638] 2016/10/18 10:05:16.063732 [INF] STAN: Channels:                  100 *
-[53638] 2016/10/18 10:05:16.063734 [INF] STAN: -------- channels limits -------
-[53638] 2016/10/18 10:05:16.063738 [INF] STAN:   Subscriptions:          1000 *
-[53638] 2016/10/18 10:05:16.063741 [INF] STAN:   Messages     :       1000000 *
-[53638] 2016/10/18 10:05:16.063786 [INF] STAN:   Bytes        :     976.56 MB *
-[53638] 2016/10/18 10:05:16.063789 [INF] STAN:   Age          :     unlimited *
-[53638] 2016/10/18 10:05:16.063791 [INF] STAN: --------------------------------
+[79856] 2017/01/17 16:25:30.111311 [INF] Starting nats-streaming-server[test-cluster] version 0.3.8
+[79856] 2017/01/17 16:25:30.111620 [INF] Starting nats-server version 0.9.6
+[79856] 2017/01/17 16:25:30.111632 [INF] Listening for client connections on 0.0.0.0:4222
+[79856] 2017/01/17 16:25:30.111706 [INF] Server is ready
+[79856] 2017/01/17 16:25:30.395811 [INF] STAN: Message store is MEMORY
+[79856] 2017/01/17 16:25:30.395828 [INF] STAN: --------- Store Limits ---------
+[79856] 2017/01/17 16:25:30.395836 [INF] STAN: Channels:                  100 *
+[79856] 2017/01/17 16:25:30.395840 [INF] STAN: -------- channels limits -------
+[79856] 2017/01/17 16:25:30.395845 [INF] STAN:   Subscriptions:          1000 *
+[79856] 2017/01/17 16:25:30.395850 [INF] STAN:   Messages     :       1000000 *
+[79856] 2017/01/17 16:25:30.395873 [INF] STAN:   Bytes        :     976.56 MB *
+[79856] 2017/01/17 16:25:30.395878 [INF] STAN:   Age          :     unlimited *
+[79856] 2017/01/17 16:25:30.395881 [INF] STAN: --------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
