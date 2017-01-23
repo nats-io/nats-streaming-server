@@ -1,10 +1,11 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
 
 package util
 
 import (
 	"encoding/binary"
 	"io"
+	"os"
 )
 
 // ByteOrder specifies how to convert byte sequences into 16-, 32-, or 64-bit
@@ -50,4 +51,13 @@ func ReadInt(r io.Reader) (int, error) {
 		return 0, err
 	}
 	return int(ByteOrder.Uint32(bs)), nil
+}
+
+// CloseFile closes the given file and report the possible error only
+// if the given error `err` is not already set.
+func CloseFile(err error, f *os.File) error {
+	if lerr := f.Close(); lerr != nil && err == nil {
+		err = lerr
+	}
+	return err
 }

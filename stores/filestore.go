@@ -1,4 +1,4 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
 
 package stores
 
@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -354,12 +353,16 @@ type fileSlice struct {
 	msgsSize   uint64
 	firstWrite int64    // Time the first message was added to this slice (used for slice age limit)
 	file       *os.File // Used during lookups.
+	idxFile    *os.File // Used during lookups and other when ReduceMemoryUsage is true.
 	lastUsed   int64
 }
 
-// msgRecord contains data regarding a message that the FileMsgStore needs to
-// keep in memory for performance reasons.
-type msgRecord struct {
+// msgIndex contains the message's offset in the data file, its timestamp
+// and size, which allows quick recovery of message and reconstructing of
+// file slices. It also helps for GetSequenceFromTimestamp by not having
+// to recover actual messages to find out the correct message sequence
+// based on timestamp.
+type msgIndex struct {
 	offset    int64
 	timestamp int64
 	msgSize   uint32
@@ -371,8 +374,8 @@ type msgRecord struct {
 // due to limit. We need a map that keeps a reference to message and
 // record until the file is flushed.
 type bufferedMsg struct {
-	msg *pb.MsgProto
-	rec *msgRecord
+	msg   *pb.MsgProto
+	index *msgIndex
 }
 
 // cachedMsg is a structure that contains a reference to a message
@@ -417,7 +420,6 @@ type FileMsgStore struct {
 	slHasLimits  bool
 	fstore       *FileStore // pointers to file store object
 	cache        *msgsCache
-	msgs         map[uint64]*msgRecord
 	wOffset      int64
 	firstMsg     *pb.MsgProto
 	lastMsg      *pb.MsgProto
@@ -1131,18 +1133,9 @@ func (fs *FileStore) Close() error {
 	}
 	fs.closed = true
 
-	var err error
-	closeFile := func(f *os.File) {
-		if f == nil {
-			return
-		}
-		if lerr := f.Close(); lerr != nil && err == nil {
-			err = lerr
-		}
-	}
-	err = fs.genericStore.close()
-	closeFile(fs.serverFile)
-	closeFile(fs.clientsFile)
+	err := fs.genericStore.close()
+	err = util.CloseFile(err, fs.serverFile)
+	err = util.CloseFile(err, fs.clientsFile)
 	return err
 }
 
@@ -1155,7 +1148,6 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 	// Create an instance and initialize
 	ms := &FileMsgStore{
 		fstore:       fs,
-		msgs:         make(map[uint64]*msgRecord, 64),
 		wOffset:      int64(4), // The very first record starts after the file version record
 		files:        make(map[int]*fileSlice),
 		rootDir:      channelDirName,
@@ -1290,12 +1282,8 @@ func (ms *FileMsgStore) openDataAndIndexFiles(dataFileName, idxFileName string) 
 // closeDataAndIndexFiles closes both current data and index files.
 func (ms *FileMsgStore) closeDataAndIndexFiles() error {
 	err := ms.flush()
-	if cerr := ms.file.Close(); cerr != nil && err == nil {
-		err = cerr
-	}
-	if cerr := ms.idxFile.Close(); cerr != nil && err == nil {
-		err = cerr
-	}
+	err = util.CloseFile(err, ms.file)
+	err = util.CloseFile(err, ms.idxFile)
 	return err
 }
 
@@ -1316,7 +1304,7 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 
 	msgSize := 0
 	var msg *pb.MsgProto
-	var mrec *msgRecord
+	var mindex *msgIndex
 	var seq uint64
 
 	// Check if index file exists
@@ -1345,7 +1333,7 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 
 	if useIdxFile {
 		for {
-			seq, mrec, err = ms.readIndex(br)
+			seq, mindex, err = ms.readIndex(br)
 			if err != nil {
 				if err == io.EOF {
 					// We are done, reset err
@@ -1362,9 +1350,9 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 			fslice.msgsCount++
 			// For size, add the message record size, the record header and the size
 			// required for the corresponding index record.
-			fslice.msgsSize += uint64(mrec.msgSize + msgRecordOverhead)
+			fslice.msgsSize += uint64(mindex.msgSize + msgRecordOverhead)
 			if fslice.firstWrite == 0 {
-				fslice.firstWrite = mrec.timestamp
+				fslice.firstWrite = mindex.timestamp
 			}
 		}
 	} else {
@@ -1404,8 +1392,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int) error {
 				fslice.firstWrite = msg.Timestamp
 			}
 
-			mrec := &msgRecord{offset: offset, timestamp: msg.Timestamp, msgSize: uint32(msgSize)}
-			ms.msgs[msg.Sequence] = mrec
 			// There was no index file, update it
 			err = ms.writeIndex(bw, msg.Sequence, offset, msg.Timestamp, msgSize)
 			if err != nil {
@@ -1535,18 +1521,18 @@ func (ms *FileMsgStore) addIndex(buf []byte, seq uint64, offset, timestamp int64
 }
 
 // readIndex reads a message index record from the given reader
-// and returns an allocated msgRecord object.
-func (ms *FileMsgStore) readIndex(r io.Reader) (uint64, *msgRecord, error) {
+// and returns an allocated msgIndex object.
+func (ms *FileMsgStore) readIndex(r io.Reader) (uint64, *msgIndex, error) {
 	_buf := [msgIndexRecSize]byte{}
 	buf := _buf[:]
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return 0, nil, err
 	}
-	mrec := &msgRecord{}
+	mindex := &msgIndex{}
 	seq := util.ByteOrder.Uint64(buf)
-	mrec.offset = int64(util.ByteOrder.Uint64(buf[8:]))
-	mrec.timestamp = int64(util.ByteOrder.Uint64(buf[16:]))
-	mrec.msgSize = util.ByteOrder.Uint32(buf[24:])
+	mindex.offset = int64(util.ByteOrder.Uint64(buf[8:]))
+	mindex.timestamp = int64(util.ByteOrder.Uint64(buf[16:]))
+	mindex.msgSize = util.ByteOrder.Uint32(buf[24:])
 	if ms.fstore.opts.DoCRC {
 		storedCRC := util.ByteOrder.Uint32(buf[msgIndexRecSize-crcSize:])
 		crc := crc32.Checksum(buf[:msgIndexRecSize-crcSize], ms.fstore.crcTable)
@@ -1554,8 +1540,7 @@ func (ms *FileMsgStore) readIndex(r io.Reader) (uint64, *msgRecord, error) {
 			return 0, nil, fmt.Errorf("corrupted data, expected crc to be 0x%08x, got 0x%08x", storedCRC, crc)
 		}
 	}
-	ms.msgs[seq] = mrec
-	return seq, mrec, nil
+	return seq, mindex, nil
 }
 
 // Store a given message.
@@ -1639,7 +1624,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	mrec := &msgRecord{offset: ms.wOffset, timestamp: m.Timestamp, msgSize: uint32(msgSize)}
+	var mindex *msgIndex
 	if bwBuf != nil {
 		// Check to see if we should cancel a buffer shrink request
 		if ms.bw.shrinkReq {
@@ -1649,7 +1634,8 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 		// to that message outside of the cache, until the buffer is flushed.
 		if bwBuf.Buffered() >= recSize {
 			ms.bufferedSeqs = append(ms.bufferedSeqs, seq)
-			ms.bufferedMsgs[seq] = &bufferedMsg{msg: m, rec: mrec}
+			mindex = &msgIndex{offset: ms.wOffset, timestamp: m.Timestamp, msgSize: uint32(msgSize)}
+			ms.bufferedMsgs[seq] = &bufferedMsg{msg: m, index: mindex}
 			msgInBuffer = true
 		}
 	}
@@ -1666,7 +1652,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 		ms.first = seq
 		ms.firstMsg = m
 		if maxAge := ms.limits.MaxAge; maxAge > 0 {
-			ms.expiration = mrec.timestamp + int64(maxAge)
+			ms.expiration = m.Timestamp + int64(maxAge)
 			if len(ms.bkgTasksWake) == 0 {
 				ms.bkgTasksWake <- true
 			}
@@ -1674,7 +1660,6 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	}
 	ms.last = seq
 	ms.lastMsg = m
-	ms.msgs[ms.last] = mrec
 	ms.addToCache(seq, m, true)
 	ms.wOffset += int64(recSize)
 
@@ -1720,9 +1705,10 @@ func (ms *FileMsgStore) processBufferedMsgs() error {
 	for _, pseq := range ms.bufferedSeqs {
 		bm := ms.bufferedMsgs[pseq]
 		if bm != nil {
-			mrec := bm.rec
+			mindex := bm.index
 			// We add the index info for this flushed message
-			ms.addIndex(ms.tmpMsgBuf[bufOffset:], pseq, mrec.offset, mrec.timestamp, int(mrec.msgSize))
+			ms.addIndex(ms.tmpMsgBuf[bufOffset:], pseq, mindex.offset,
+				mindex.timestamp, int(mindex.msgSize))
 			bufOffset += msgIndexRecSize
 			delete(ms.bufferedMsgs, pseq)
 		}
@@ -1741,15 +1727,25 @@ func (ms *FileMsgStore) processBufferedMsgs() error {
 // Returns the time of the next expiration (possibly 0 if no message left)
 // The store's lock is assumed to be held on entry
 func (ms *FileMsgStore) expireMsgs(now, maxAge int64) int64 {
+	var m *msgIndex
+	var slice *fileSlice
 	for {
-		m, hasMore := ms.msgs[ms.first]
-		if !hasMore {
+		m = nil
+		if ms.first <= ms.last {
+			if slice == nil || ms.first > slice.lastSeq {
+				slice = ms.getFileSliceForSeq(ms.first)
+			}
+			if slice != nil {
+				m = ms.getMsgIndex(slice, ms.first)
+			}
+		}
+		if m == nil {
 			ms.expiration = 0
 			break
 		}
 		elapsed := now - m.timestamp
 		if elapsed >= maxAge {
-			ms.removeFirstMsg()
+			ms.removeFirstMsg(m)
 		} else if elapsed < 0 {
 			ms.expiration = m.timestamp + maxAge
 		} else {
@@ -1775,7 +1771,7 @@ func (ms *FileMsgStore) enforceLimits(reportHitLimit bool) error {
 
 		// Remove first message from first slice, potentially removing
 		// the slice, etc...
-		ms.removeFirstMsg()
+		ms.removeFirstMsg(nil)
 		if reportHitLimit && !ms.hitLimit {
 			ms.hitLimit = true
 			Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs, ms.totalBytes, ms.limits.MaxBytes)
@@ -1784,13 +1780,81 @@ func (ms *FileMsgStore) enforceLimits(reportHitLimit bool) error {
 	return nil
 }
 
+// getMsgIndex returns a msgIndex object for message with sequence `seq`,
+// or nil if message is not found (or no longer valid: expired, removed
+// due to limits, etc).
+// This call first checks that the record is not present in
+// ms.bufferedMsgs since it is possible that message and index are not
+// yet stored on disk.
+func (ms *FileMsgStore) getMsgIndex(slice *fileSlice, seq uint64) *msgIndex {
+	bm := ms.bufferedMsgs[seq]
+	if bm != nil {
+		return bm.index
+	}
+	msgIndex, fileOpened, updateLastUsed := ms.readMsgIndex(slice, seq)
+	if msgIndex != nil {
+		if fileOpened {
+			// Let the background task know that we have opened
+			// a file in this fileSlice.
+			atomic.StoreInt64(&ms.checkSlices, 1)
+		}
+		if updateLastUsed {
+			slice.lastUsed = atomic.LoadInt64(&ms.timeTick)
+		}
+	}
+	return msgIndex
+}
+
+// readMsgIndex reads a message index record from disk and returns a msgIndex
+// object along with booleans indicating if the file was opened as a result
+// and if the slice's lastUsed should be updated (if slice is not the current
+// one).
+func (ms *FileMsgStore) readMsgIndex(slice *fileSlice, seq uint64) (*msgIndex, bool, bool) {
+	var (
+		idxFile        *os.File
+		updateLastUsed bool
+		fileOpened     bool
+	)
+	if slice == ms.currSlice {
+		idxFile = ms.idxFile
+	} else {
+		idxFile = slice.idxFile
+		if idxFile == nil {
+			var err error
+			idxFile, err = openFile(slice.idxFName)
+			if err != nil {
+				return nil, false, false
+			}
+			slice.idxFile = idxFile
+			fileOpened = true
+		}
+		updateLastUsed = true
+	}
+	// Compute the offset in the index file itself.
+	idxFileOffset := 4 + (int64(seq-slice.firstSeq)+int64(slice.rmCount))*msgIndexRecSize
+	// Then position the file pointer of the index file.
+	if _, err := idxFile.Seek(idxFileOffset, 0); err != nil {
+		return nil, fileOpened, updateLastUsed
+	}
+	// Read the index record and ensure we have what we expect
+	seqInIndexFile, msgIndex, err := ms.readIndex(idxFile)
+	if seqInIndexFile != seq || err != nil {
+		return nil, fileOpened, updateLastUsed
+	}
+	return msgIndex, fileOpened, updateLastUsed
+}
+
 // removeFirstMsg "removes" the first message of the first slice.
 // If the slice is "empty" the file slice is removed.
-func (ms *FileMsgStore) removeFirstMsg() {
+func (ms *FileMsgStore) removeFirstMsg(mindex *msgIndex) {
 	// Work with the first slice
 	slice := ms.files[ms.firstFSlSeq]
+	// Get the message index for the first valid message in this slice
+	if mindex == nil {
+		mindex = ms.getMsgIndex(slice, slice.firstSeq)
+	}
 	// Size of the first message in this slice
-	firstMsgSize := ms.msgs[slice.firstSeq].msgSize
+	firstMsgSize := mindex.msgSize
 	// For size, we count the size of serialized message + record header +
 	// the corresponding index record
 	size := uint64(firstMsgSize + msgRecordOverhead)
@@ -1799,8 +1863,6 @@ func (ms *FileMsgStore) removeFirstMsg() {
 	// Update total counts
 	ms.totalCount--
 	ms.totalBytes -= size
-	// Remove the first message from the records map
-	delete(ms.msgs, ms.first)
 	// Messages sequence is incremental with no gap on a given msgstore.
 	ms.first++
 	// Invalidate ms.firstMsg, it will be looked-up on demand.
@@ -1826,6 +1888,11 @@ func (ms *FileMsgStore) removeFirstSlice() {
 	if sl.file != nil {
 		sl.file.Close()
 		sl.file = nil
+	}
+	// Close index file too.
+	if sl.idxFile != nil {
+		sl.idxFile.Close()
+		sl.idxFile = nil
 	}
 	// Assume we will remove the files
 	remove := true
@@ -1884,39 +1951,71 @@ func (ms *FileMsgStore) removeFirstSlice() {
 	}
 }
 
-// getFileForSeq returns the file where the message of the given sequence
-// is stored. If the file is opened, a task is triggered to close this
-// file when no longer used after a period of time.
-func (ms *FileMsgStore) getFileForSeq(seq uint64) (*os.File, error) {
+// getFileSliceForSeq returns the file slice where the message of the
+// given sequence is stored, or nil if the message is not found in any
+// of the file slices.
+func (ms *FileMsgStore) getFileSliceForSeq(seq uint64) *fileSlice {
 	if len(ms.files) == 0 {
-		return nil, fmt.Errorf("no file slice for store %q, message seq: %v", ms.subject, seq)
+		return nil
 	}
 	// Start with current slice
 	slice := ms.currSlice
 	if (slice.firstSeq <= seq) && (seq <= slice.lastSeq) {
-		return ms.file, nil
+		return slice
 	}
 	// We want to support possible gaps in file slice sequence, so
 	// no dichotomy, but simple iteration of the map, which in Go is
 	// random.
 	for _, slice := range ms.files {
 		if (slice.firstSeq <= seq) && (seq <= slice.lastSeq) {
-			file := slice.file
-			if file == nil {
-				var err error
-				file, err = openFile(slice.fileName)
-				if err != nil {
-					return nil, fmt.Errorf("unable to open file %q: %v", slice.fileName, err)
-				}
-				slice.file = file
-				// Let the background task know that we have opened a slice
-				atomic.StoreInt64(&ms.checkSlices, 1)
-			}
-			slice.lastUsed = atomic.LoadInt64(&ms.timeTick)
-			return file, nil
+			return slice
 		}
 	}
-	return nil, fmt.Errorf("could not find file slice for store %q, message seq: %v", ms.subject, seq)
+	return nil
+}
+
+// getDataFileAndOffsetOfMsg returns the file and offset where the message
+// of the given sequence is stored. If the slice files are opened, a
+// task is triggered to close these files when no longer used after a
+// period of time.
+func (ms *FileMsgStore) getDataFileAndOffsetOfMsg(seq uint64) (*os.File, int64, error) {
+	slice := ms.getFileSliceForSeq(seq)
+	if slice == nil {
+		return nil, 0, fmt.Errorf("could not find file slice for store %q, message seq: %v", ms.subject, seq)
+	}
+	var (
+		file           *os.File
+		dataFileOpened bool
+		idxFileOpened  bool
+		updateLastUsed bool
+	)
+	mrec, idxFileOpened, updateLastUsed := ms.readMsgIndex(slice, seq)
+	if mrec == nil {
+		return nil, 0, fmt.Errorf("could not find message index for store %q, message seq: %v", ms.subject, seq)
+	}
+	if slice == ms.currSlice {
+		file = ms.file
+	} else {
+		file = slice.file
+		if file == nil {
+			var err error
+			file, err = openFile(slice.fileName)
+			if err != nil {
+				return nil, 0, fmt.Errorf("unable to open file %q: %v", slice.fileName, err)
+			}
+			slice.file = file
+			dataFileOpened = true
+		}
+		updateLastUsed = true
+	}
+	if idxFileOpened || dataFileOpened {
+		// Let the background task know that we have opened a slice
+		atomic.StoreInt64(&ms.checkSlices, 1)
+	}
+	if updateLastUsed {
+		slice.lastUsed = atomic.LoadInt64(&ms.timeTick)
+	}
+	return file, mrec.offset, nil
 }
 
 // backgroundTasks performs some background tasks related to this
@@ -1942,11 +2041,17 @@ func (ms *FileMsgStore) backgroundTasks() {
 			ms.Lock()
 			opened := 0
 			for _, slice := range ms.files {
-				if slice.file != nil {
+				if slice.file != nil || slice.idxFile != nil {
 					opened++
 					if slice.lastUsed < timeTick && time.Duration(timeTick-slice.lastUsed) >= time.Second {
-						slice.file.Close()
-						slice.file = nil
+						if slice.file != nil {
+							slice.file.Close()
+							slice.file = nil
+						}
+						if slice.idxFile != nil {
+							slice.idxFile.Close()
+							slice.idxFile = nil
+						}
 						opened--
 					}
 				}
@@ -2005,41 +2110,42 @@ func (ms *FileMsgStore) backgroundTasks() {
 // reading the message from disk.
 // Store write lock is assumed to be held on entry
 func (ms *FileMsgStore) lookup(seq uint64) *pb.MsgProto {
-	var msg *pb.MsgProto
-	m := ms.msgs[seq]
-	if m != nil {
-		msg = ms.getFromCache(seq)
-		if msg == nil && ms.bufferedMsgs != nil {
-			// Possibly in bufferedMsgs
-			bm := ms.bufferedMsgs[seq]
-			if bm != nil {
-				msg = bm.msg
-				ms.addToCache(seq, msg, false)
-			}
-		}
-		if msg == nil {
-			var msgSize int
-			// Look in which file slice the message is located.
-			file, err := ms.getFileForSeq(seq)
-			if err != nil {
-				return nil
-			}
-			// Position file to message's offset. 0 means from start.
-			if _, err := file.Seek(m.offset, 0); err != nil {
-				return nil
-			}
-			ms.tmpMsgBuf, msgSize, _, err = readRecord(file, ms.tmpMsgBuf, false, ms.fstore.crcTable, ms.fstore.opts.DoCRC)
-			if err != nil {
-				return nil
-			}
-			// Recover this message
-			msg = &pb.MsgProto{}
-			err = msg.Unmarshal(ms.tmpMsgBuf[:msgSize])
-			if err != nil {
-				return nil
-			}
+	// Reject message for sequence outside valid range
+	if seq < ms.first || seq > ms.last {
+		return nil
+	}
+	// Check first if it's in the cache.
+	msg := ms.getFromCache(seq)
+	if msg == nil && ms.bufferedMsgs != nil {
+		// Possibly in bufferedMsgs
+		bm := ms.bufferedMsgs[seq]
+		if bm != nil {
+			msg = bm.msg
 			ms.addToCache(seq, msg, false)
 		}
+	}
+	// If not, we need to read it from disk...
+	if msg == nil {
+		var msgSize int
+		file, offset, err := ms.getDataFileAndOffsetOfMsg(seq)
+		if err != nil {
+			return nil
+		}
+		// Position file to message's offset. 0 means from start.
+		if _, err := file.Seek(offset, 0); err != nil {
+			return nil
+		}
+		ms.tmpMsgBuf, msgSize, _, err = readRecord(file, ms.tmpMsgBuf, false, ms.fstore.crcTable, ms.fstore.opts.DoCRC)
+		if err != nil {
+			return nil
+		}
+		// Recover this message
+		msg = &pb.MsgProto{}
+		err = msg.Unmarshal(ms.tmpMsgBuf[:msgSize])
+		if err != nil {
+			return nil
+		}
+		ms.addToCache(seq, msg, false)
 	}
 	return msg
 }
@@ -2080,11 +2186,41 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
 	ms.RLock()
 	defer ms.RUnlock()
 
-	index := sort.Search(len(ms.msgs), func(i int) bool {
-		return ms.msgs[uint64(i)+ms.first].timestamp >= timestamp
-	})
+	// Quick check first
+	if ms.first == ms.last {
+		return 0
+	}
+	// If we have some state, try to quickly get the sequence
+	if ms.firstMsg != nil && ms.firstMsg.Timestamp >= timestamp {
+		return ms.first
+	}
+	if ms.lastMsg != nil && timestamp >= ms.lastMsg.Timestamp {
+		return ms.last + 1
+	}
 
-	return uint64(index) + ms.first
+	// This will require disk access.
+	for _, slice := range ms.files {
+		mindex := ms.getMsgIndex(slice, slice.firstSeq)
+		if timestamp < mindex.timestamp {
+			continue
+		}
+		mindex = ms.getMsgIndex(slice, slice.lastSeq)
+		if timestamp > mindex.timestamp {
+			continue
+		}
+		// Could do binary search, but will be probably more efficient
+		// to do sequential disk reads. The index records are small,
+		// so read of a record will probably bring many consecutive ones
+		// in the system's disk cache, resulting in memory-only access
+		// for the following indexes...
+		for seq := slice.firstSeq + 1; seq < slice.lastSeq; seq++ {
+			mindex = ms.getMsgIndex(slice, seq)
+			if mindex.timestamp >= timestamp {
+				return seq
+			}
+		}
+	}
+	return ms.last + 1
 }
 
 // initCache initializes the message cache
@@ -2192,14 +2328,10 @@ func (ms *FileMsgStore) Close() error {
 	ms.closed = true
 
 	var err error
-	// Close file slices that may have been opened due to
-	// message lookups.
+	// Close file slices that may have been opened.
 	for _, slice := range ms.files {
-		if slice.file != nil {
-			if lerr := slice.file.Close(); lerr != nil && err == nil {
-				err = lerr
-			}
-		}
+		err = util.CloseFile(err, slice.file)
+		err = util.CloseFile(err, slice.idxFile)
 	}
 	// Flush and close current files
 	if ms.currSlice != nil {
@@ -2734,9 +2866,7 @@ func (ss *FileSubStore) Close() error {
 	var err error
 	if ss.file != nil {
 		err = ss.flush()
-		if lerr := ss.file.Close(); lerr != nil && err == nil {
-			err = lerr
-		}
+		err = util.CloseFile(err, ss.file)
 	}
 	if ss.shrinkTimer != nil {
 		if ss.shrinkTimer.Stop() {

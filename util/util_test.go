@@ -1,8 +1,9 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
 
 package util
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
@@ -56,5 +57,32 @@ func TestReadInt(t *testing.T) {
 	}
 	if v, err := ReadInt(file); err != nil || v != 123 {
 		t.Fatalf("Expected to read 123, got: %v (err=%v)", v, err)
+	}
+}
+
+func TestCloseFile(t *testing.T) {
+	fileName := "test.dat"
+	file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer os.Remove(fileName)
+
+	err = nil
+	cferr := CloseFile(err, file)
+	if cferr != nil {
+		t.Fatalf("Unexpected error: %v", cferr)
+	}
+
+	err = fmt.Errorf("Previous error")
+	cferr = CloseFile(err, file)
+	if cferr != err {
+		t.Fatalf("Expected original error to be untouched")
+	}
+
+	err = nil
+	cferr = CloseFile(err, file)
+	if cferr == err {
+		t.Fatalf("Expected returned error to be different")
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
 
 package stores
 
@@ -154,9 +154,19 @@ func (ms *MemoryMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
 	ms.RLock()
 	defer ms.RUnlock()
 
+	// Quick checks first
+	if len(ms.msgs) == 0 {
+		return 0
+	}
+	if ms.msgs[ms.first].Timestamp >= timestamp {
+		return ms.first
+	}
+	if timestamp >= ms.msgs[ms.last].Timestamp {
+		return ms.last + 1
+	}
+
 	index := sort.Search(len(ms.msgs), func(i int) bool {
-		m := ms.msgs[uint64(i)+ms.first]
-		return m.Timestamp >= timestamp
+		return ms.msgs[uint64(i)+ms.first].Timestamp >= timestamp
 	})
 
 	return uint64(index) + ms.first
