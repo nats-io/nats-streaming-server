@@ -95,11 +95,14 @@ func TestLogging(t *testing.T) {
 	// test file
 	tmpDir, err := ioutil.TempDir("", "_stan_server")
 	if err != nil {
-		t.Fatal("Could not create tmp dir")
+		t.Fatalf("Could not create tmp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
 	file, err := ioutil.TempFile(tmpDir, "stan_server:log_")
+	if err != nil {
+		t.Fatalf("Could not create tmp file: %v", err)
+	}
 
 	nOpts = &natsd.Options{}
 	nOpts.LogFile = file.Name()

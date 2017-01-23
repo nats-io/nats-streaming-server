@@ -5458,6 +5458,9 @@ func closeSubscriber(t *testing.T, subType string) {
 			stan.DeliverAllAvailable(),
 			stan.DurableName(durName))
 	}
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
 	wait()
 	// Unsubscribe for good
 	if err := sub.Unsubscribe(); err != nil {

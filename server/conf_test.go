@@ -165,6 +165,9 @@ func TestParsePermError(t *testing.T) {
 		t.Fatalf("Could not create tmp dir: %v", err)
 	}
 	file, err := ioutil.TempFile(tmpDir, "config.conf")
+	if err != nil {
+		t.Fatalf("Could not create tmp file: %v", err)
+	}
 	os.Chmod(tmpDir, 0400)
 
 	defer file.Close()
