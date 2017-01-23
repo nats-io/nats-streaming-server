@@ -958,6 +958,9 @@ func (s *StanServer) configureClusterOpts(opts *server.Options) error {
 	}
 
 	clusterURL, err := url.Parse(opts.Cluster.ListenStr)
+	if err != nil {
+		return err
+	}
 	h, p, err := net.SplitHostPort(clusterURL.Host)
 	if err != nil {
 		return err
