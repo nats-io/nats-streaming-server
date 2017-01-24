@@ -2045,9 +2045,15 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 		return false, false
 	}
 
+	// Marshal of a pb.MsgProto cannot fail
 	b, _ := m.Marshal()
+	// but protect against a store implementation that may incorrectly
+	// return an empty message.
+	if len(b) == 0 {
+		panic("store implementation returned an empty message")
+	}
 	if err := s.ncs.Publish(sub.Inbox, b); err != nil {
-		Errorf("STAN: [Client:%s] Failed Sending msgseq %s:%d to %s (%s).",
+		Errorf("STAN: [Client:%s] Failed sending message seq %s:%d to %s (%v)",
 			sub.ClientID, m.Subject, m.Sequence, sub.Inbox, err)
 		return false, false
 	}

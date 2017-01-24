@@ -964,7 +964,7 @@ func TestQueueSubsWithDifferentAckWait(t *testing.T) {
 	select {
 	case <-rch3:
 	// ok
-	case <-time.After(time.Second):
+	case <-time.After(1500 * time.Millisecond):
 		t.Fatal("Message should have been redelivered")
 	}
 }
@@ -5709,4 +5709,42 @@ func TestAckPublisherBufSize(t *testing.T) {
 	iopm.pm.Guid = "this is a very very very very very very very very very very very very very very very very very very long guid"
 	s.ackPublisher(iopm)
 	checkErr()
+}
+
+func TestDontSendEmptyMsgProto(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(nats.DefaultURL, nats.NoReconnect())
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	// Since server is expected to crash, do not attempt to close sc
+	// because it would delay test by 2 seconds.
+
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	waitForNumSubs(t, s, clientName, 1)
+
+	subs := s.clients.GetSubs(clientName)
+	sub := subs[0]
+
+	defer func() {
+		if r := recover(); r != nil {
+			// Ok!
+		}
+	}()
+
+	m := &pb.MsgProto{}
+	sub.Lock()
+	s.sendMsgToSub(sub, m, false)
+	sub.Unlock()
+
+	t.Fatal("Server should have panic'ed")
 }
