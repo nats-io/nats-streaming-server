@@ -58,7 +58,7 @@ func stackFatalf(t tLogger, f string, args ...interface{}) {
 	// Generate the Stack of callers:
 	for i := 1; true; i++ {
 		_, file, line, ok := runtime.Caller(i)
-		if ok == false {
+		if !ok {
 			break
 		}
 		msg := fmt.Sprintf("%d - %s:%d", i, file, line)
@@ -2069,7 +2069,7 @@ func TestClientCrashAndReconnect(t *testing.T) {
 		defer sc2.Close()
 	}
 
-	duration := time.Now().Sub(start)
+	duration := time.Since(start)
 	if duration > 5*time.Second {
 		t.Fatalf("Took too long to be able to connect: %v", duration)
 	}
@@ -2801,7 +2801,7 @@ func TestCheckClientHealthDontKeepClientLock(t *testing.T) {
 	// This is to avoid staticcheck "empty critical section (SA2001)" report
 	_ = c.fhb
 	c.RUnlock()
-	dur := time.Now().Sub(start)
+	dur := time.Since(start)
 	// This should have taken less than HB Timeout
 	if dur >= opts.ClientHBTimeout {
 		t.Fatalf("Client may be locked for the duration of the HB request: %v", dur)
@@ -2847,7 +2847,7 @@ func TestConnectsWithDupCID(t *testing.T) {
 	connect := func(cid string, shouldFail bool) (stan.Conn, time.Duration, error) {
 		start := time.Now()
 		c, err := stan.Connect(clusterName, cid, stan.ConnectWait(3*s.dupCIDTimeout))
-		duration := time.Now().Sub(start)
+		duration := time.Since(start)
 		if shouldFail {
 			if c != nil {
 				c.Close()
@@ -4370,9 +4370,9 @@ func TestQueueSubscriberTransferPendingMsgsOnClose(t *testing.T) {
 	qsetup := make(chan bool)
 	cb := func(m *stan.Msg) {
 		<-qsetup
-		if m.Sub == sub1 && m.Sequence == 1 && m.Redelivered == false {
+		if m.Sub == sub1 && m.Sequence == 1 && !m.Redelivered {
 			ch <- true
-		} else if m.Sub == sub2 && m.Sequence == 1 && m.Redelivered == true {
+		} else if m.Sub == sub2 && m.Sequence == 1 && m.Redelivered {
 			ch <- true
 		}
 	}

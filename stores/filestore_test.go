@@ -2428,7 +2428,7 @@ func TestFSDoSync(t *testing.T) {
 			storeSubPending(t, fs, "foo", subID, m.Sequence)
 			cs.Subs.Flush()
 		}
-		dur[i] = time.Now().Sub(start)
+		dur[i] = time.Since(start)
 
 		fs.Close()
 		cleanupDatastore(t, defaultDataStore)
