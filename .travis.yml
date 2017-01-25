@@ -8,15 +8,15 @@ install:
 - go get github.com/nats-io/gnatsd
 - go get github.com/mattn/goveralls
 - go get github.com/wadey/gocovmerge
-- go get honnef.co/go/staticcheck/cmd/staticcheck
+- go get honnef.co/go/tools/cmd/staticcheck
 script:
 - EXCLUDE_VENDOR=$(go list ./... | grep -v "/vendor/")
 - go build
 - go fmt ./...
 - go vet $EXCLUDE_VENDOR
+- staticcheck -ignore "$(cat staticcheck.ignore)" $EXCLUDE_VENDOR
 - go test -i -race $EXCLUDE_VENDOR
 - go test -race -v -p=1 $EXCLUDE_VENDOR
-- staticcheck -ignore "$(cat staticcheck.ignore)" $EXCLUDE_VENDOR
 after_success:
 - if [[ "$TRAVIS_GO_VERSION" == 1.7.* ]]; then ./scripts/cov.sh TRAVIS; fi
 - if [[ "$TRAVIS_GO_VERSION" == 1.7.* ]] && [ "$TRAVIS_TAG" != "" ]; then ./scripts/cross_compile.sh $TRAVIS_TAG; ghr --owner nats-io --token $GITHUB_TOKEN --draft --replace $TRAVIS_TAG pkg/; fi
