@@ -1025,7 +1025,7 @@ func (fs *FileStore) shouldCompactClientFile() bool {
 		return false
 	}
 	// Check that we don't do too often
-	if time.Now().Sub(fs.cliCompactTS) < fs.compactItvl {
+	if time.Since(fs.cliCompactTS) < fs.compactItvl {
 		return false
 	}
 	return true
@@ -2081,10 +2081,7 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
 	defer ms.RUnlock()
 
 	index := sort.Search(len(ms.msgs), func(i int) bool {
-		if ms.msgs[uint64(i)+ms.first].timestamp >= timestamp {
-			return true
-		}
-		return false
+		return ms.msgs[uint64(i)+ms.first].timestamp >= timestamp
 	})
 
 	return uint64(index) + ms.first
@@ -2528,7 +2525,7 @@ func (ss *FileSubStore) shouldCompact() bool {
 		return false
 	}
 	// Check that we don't compact too often
-	if time.Now().Sub(ss.compactTS) < ss.compactItvl {
+	if time.Since(ss.compactTS) < ss.compactItvl {
 		return false
 	}
 	return true

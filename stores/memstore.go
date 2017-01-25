@@ -156,10 +156,7 @@ func (ms *MemoryMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
 
 	index := sort.Search(len(ms.msgs), func(i int) bool {
 		m := ms.msgs[uint64(i)+ms.first]
-		if m.Timestamp >= timestamp {
-			return true
-		}
-		return false
+		return m.Timestamp >= timestamp
 	})
 
 	return uint64(index) + ms.first
