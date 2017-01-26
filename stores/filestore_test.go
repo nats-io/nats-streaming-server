@@ -1,4 +1,4 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
 
 package stores
 
@@ -2857,7 +2857,11 @@ func TestFSFileSlicesClosed(t *testing.T) {
 	for i, s := range ms.files {
 		if s.file != nil {
 			ms.RUnlock()
-			t.Fatalf("File slice %v should be closed", i)
+			t.Fatalf("File slice %v should be closed (data file)", i)
+		}
+		if s.idxFile != nil {
+			ms.RUnlock()
+			t.Fatalf("File slice %v should be closed (index file)", i)
 		}
 	}
 	ms.RUnlock()
