@@ -5748,3 +5748,91 @@ func TestDontSendEmptyMsgProto(t *testing.T) {
 
 	t.Fatal("Server should have panic'ed")
 }
+
+func TestMsgsNotSentToSubBeforeSubReqResponse(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	// Use a bare NATS connection to send incorrect requests
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	// Get the connect subject
+	connSubj := fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, clusterName)
+	connReq := &pb.ConnectRequest{
+		ClientID:       clientName,
+		HeartbeatInbox: nats.NewInbox(),
+	}
+	crb, _ := connReq.Marshal()
+	respMsg, err := nc.Request(connSubj, crb, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Request error: %v", err)
+	}
+	connResponse := &pb.ConnectResponse{}
+	connResponse.Unmarshal(respMsg.Data)
+
+	subSubj := connResponse.SubRequests
+	unsubSubj := connResponse.UnsubRequests
+	pubSubj := connResponse.PubPrefix + ".foo"
+
+	pubMsg := &pb.PubMsg{
+		ClientID: clientName,
+		Subject:  "foo",
+		Data:     []byte("hello"),
+	}
+	subReq := &pb.SubscriptionRequest{
+		ClientID:      clientName,
+		MaxInFlight:   1024,
+		Subject:       "foo",
+		StartPosition: pb.StartPosition_First,
+		AckWaitInSecs: 30,
+	}
+	unsubReq := &pb.UnsubscribeRequest{
+		ClientID: clientName,
+		Subject:  "foo",
+	}
+	for i := 0; i < 100; i++ {
+		// Use the same subscriber for subscription request response and data,
+		// so we can reliably check if data comes before response.
+		inbox := nats.NewInbox()
+		sub, err := nc.SubscribeSync(inbox)
+		if err != nil {
+			t.Fatalf("Unable to create nats subscriber: %v", err)
+		}
+		subReq.Inbox = inbox
+		bytes, _ := subReq.Marshal()
+		// Send the request with inbox as the Reply
+		if err := nc.PublishRequest(subSubj, inbox, bytes); err != nil {
+			t.Fatalf("Error sending request: %v", err)
+		}
+		// Followed by a data message
+		pubMsg.Guid = nuid.Next()
+		bytes, _ = pubMsg.Marshal()
+		if err := nc.Publish(pubSubj, bytes); err != nil {
+			t.Fatalf("Error sending msg: %v", err)
+		}
+		nc.Flush()
+		// Dequeue
+		msg, err := sub.NextMsg(2 * time.Second)
+		if err != nil {
+			t.Fatalf("Did not get our message: %v", err)
+		}
+		// It should always be the subscription response!!!
+		msgProto := &pb.MsgProto{}
+		err = msgProto.Unmarshal(msg.Data)
+		if err == nil && msgProto.Sequence != 0 {
+			t.Fatalf("Iter=%v - Did not receive valid subscription response: %#v - %v", (i + 1), msgProto, err)
+		}
+		subReqResp := &pb.SubscriptionResponse{}
+		subReqResp.Unmarshal(msg.Data)
+		unsubReq.Inbox = subReqResp.AckInbox
+		bytes, _ = unsubReq.Marshal()
+		if err := nc.Publish(unsubSubj, bytes); err != nil {
+			t.Fatalf("Unable to send unsub request: %v", err)
+		}
+		sub.Unsubscribe()
+	}
+}
