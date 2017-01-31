@@ -234,6 +234,7 @@ type subState struct {
 	ackTimer     *time.Timer
 	ackSub       *nats.Subscription
 	acksPending  map[uint64]int64 // key is message sequence, value is expiration time.
+	initialized  bool             // false until the subscription response has been sent to prevent data to be sent too early.
 	stalled      bool
 	newOnHold    bool            // Prevents delivery of new msgs until old are redelivered (on restart)
 	store        stores.SubStore // for easy access to the store interface
@@ -1186,6 +1187,11 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 			}
 			sub.ackSub.SetPendingLimits(-1, -1)
 		}
+		// Consider this subscription initialized. Note that it may
+		// still have newOnHold == true, which would prevent incoming
+		// messages to be delivered before we attempt to redeliver
+		// unacknowledged messages in performRedeliveryOnStartup.
+		sub.initialized = true
 		sub.Unlock()
 	}
 	// Go through the list of clients and ensure their Hb timer is set.
@@ -2025,7 +2031,7 @@ func (s *StanServer) getMsgForRedelivery(cs *stores.ChannelStore, sub *subState,
 // are not sent and subscriber is marked as stalled.
 // Sub lock should be held before calling.
 func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bool, bool) {
-	if sub == nil || m == nil || (sub.newOnHold && !m.Redelivered) {
+	if sub == nil || m == nil || !sub.initialized || (sub.newOnHold && !m.Redelivered) {
 		return false, false
 	}
 
@@ -2761,7 +2767,6 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
 	}
 	sub.ackSub.SetPendingLimits(-1, -1)
-	sub.Unlock()
 	// However, we need to flush to ensure that NATS server processes
 	// this subscription request before we return OK and start sending
 	// messages to the client.
@@ -2772,6 +2777,15 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	b, _ := resp.Marshal()
 	s.ncs.Publish(m.Reply, b)
 
+	// Capture under lock here
+	qs := sub.qstate
+	// Now that we have sent the response, we set the subscription to initialized,
+	// which allows messages to be sent to it - but not sooner (which could happen
+	// without this since the subscription is added to the system earlier and
+	// incoming messages to the channel would trigger delivery).
+	sub.initialized = true
+	sub.Unlock()
+
 	// If we are a durable (queue or not) and have state
 	if isDurable {
 		// Redeliver any oustanding.
@@ -2779,10 +2793,6 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 
 	// publish messages to this subscriber
-	sub.RLock()
-	qs := sub.qstate
-	sub.RUnlock()
-
 	if qs != nil {
 		s.sendAvailableMessagesToQueue(cs, qs)
 	} else {
