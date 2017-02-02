@@ -104,6 +104,7 @@ Common Options:
 // usage will print out the flag options for the server.
 func usage() {
 	fmt.Printf("%s\n", usageStr)
+	os.Exit(0)
 }
 
 func main() {
@@ -244,7 +245,9 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.StringVar(&natsOpts.TLSKey, "tlskey", "", "")
 	flag.StringVar(&natsOpts.TLSCaCert, "tlscacert", "", "")
 
-	flag.Usage = usage
+	flag.Usage = func() {
+		fmt.Printf("%s\n", usageStr)
+	}
 	flag.Parse()
 
 	// Show version and exit
