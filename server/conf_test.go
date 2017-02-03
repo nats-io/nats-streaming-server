@@ -95,6 +95,9 @@ func TestParseConfig(t *testing.T) {
 	if opts.FileStoreOpts.SliceArchiveScript != "myArchiveScript" {
 		t.Fatalf("Expected SliceArchiveScript to be myArchiveScript, got %v", opts.FileStoreOpts.SliceArchiveScript)
 	}
+	if opts.FileStoreOpts.FileDescriptorsLimit != 8 {
+		t.Fatalf("Expected FileDescriptorsLimit to be 8, got %v", opts.FileStoreOpts.FileDescriptorsLimit)
+	}
 	if opts.MaxChannels != 11 {
 		t.Fatalf("Expected MaxChannels to be 11, got %v", opts.MaxChannels)
 	}
@@ -273,6 +276,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "file:{slice_max_age:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{slice_max_age:\"1h:0m\"}", wrongTimeErr)
 	expectFailureFor(t, "file:{slice_archive_script:123}", wrongTypeErr)
+	expectFailureFor(t, "file:{fds_limit:false}", wrongTypeErr)
 }
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {

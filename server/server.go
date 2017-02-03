@@ -1353,10 +1353,11 @@ func (s *StanServer) initSubscriptions() {
 	}
 	// Receive published messages from clients.
 	pubSubject := fmt.Sprintf("%s.>", s.info.Publish)
-	_, err = s.nc.Subscribe(pubSubject, s.processClientPublish)
+	pubSub, err := s.nc.Subscribe(pubSubject, s.processClientPublish)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to publish subject, %v\n", err))
 	}
+	pubSub.SetPendingLimits(-1, -1)
 	// Receive subscription requests from clients.
 	_, err = s.nc.Subscribe(s.info.Subscribe, s.processSubscriptionRequest)
 	if err != nil {

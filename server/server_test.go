@@ -1199,7 +1199,7 @@ func getTestDefaultOptsForFileStore() *Options {
 
 func testStalledRedelivery(t *testing.T, typeSub string) {
 	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	// defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
 	s := RunServerWithOpts(opts, nil)

@@ -34,6 +34,9 @@ var testDefaultServerInfo = spb.ServerInfo{
 
 var defaultDataStore string
 var disableBufferWriters bool
+var setFDsLimit bool
+
+var testFDsLimit = int64(5)
 
 func init() {
 	tmpDir, err := ioutil.TempDir(".", "data_stores_")
@@ -48,8 +51,299 @@ func init() {
 
 func TestMain(m *testing.M) {
 	flag.BoolVar(&disableBufferWriters, "no_buffer", false, "Disable use of buffer writers")
+	flag.BoolVar(&setFDsLimit, "set_fds_limit", false, "Set some FDs limit")
 	flag.Parse()
 	os.Exit(m.Run())
+}
+
+func TestFSFilesManager(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	if err := os.MkdirAll(defaultDataStore, os.ModeDir+os.ModePerm); err != nil && !os.IsExist(err) {
+		t.Fatalf("Unable to create the root directory [%s]: %v", defaultDataStore, err)
+	}
+
+	fm := createFilesManager(defaultDataStore, 4)
+	defer fm.close()
+	// This should fail since file does not exist
+	failedFile, err := fm.createFile("foo", os.O_RDONLY, nil)
+	if err == nil {
+		t.Fatal("Creating file should have failed")
+	}
+	if failedFile != nil {
+		t.Fatalf("On error, file should be nil, got %#v", failedFile)
+	}
+	// Ensure not in fm's map
+	fm.Lock()
+	lenMap := len(fm.files)
+	fm.Unlock()
+	if lenMap > 0 {
+		t.Fatalf("Map should be empty, got %v", lenMap)
+	}
+	closeCbCalled := 0
+	bccb := func() error {
+		closeCbCalled++
+		return nil
+	}
+	firstFile, err := fm.createFile("foo", defaultFileFlags, bccb)
+	if err != nil {
+		t.Fatalf("Unexpected error on create: %v", err)
+	}
+	if firstFile.id == invalidFileID {
+		t.Fatal("Got invalid file ID on success")
+	}
+	if firstFile == nil {
+		t.Fatal("Got nil file on success")
+	}
+	// Check content
+	// The callback cannot be checked, we need to temporarly set to nil
+	firstFile.beforeClose = nil
+	expectedFile := file{
+		id:     fileID(1),
+		handle: firstFile.handle, // we cannot know what to expect here, so use value returned
+		name:   filepath.Join(defaultDataStore, "foo"),
+		flags:  defaultFileFlags,
+		state:  fileInUse,
+	}
+	fobj := *firstFile
+	if !reflect.DeepEqual(expectedFile, fobj) {
+		t.Fatalf("Expected file to be %#v, got %#v", expectedFile, fobj)
+	}
+	firstFile.beforeClose = bccb
+	// unlock the file
+	fm.unlockFile(firstFile)
+	// Create more files
+	moreFiles := make([]*file, 10)
+	for i := 0; i < len(moreFiles); i++ {
+		fname := fmt.Sprintf("foo.%d", (i + 1))
+		f, err := fm.createFile(fname, defaultFileFlags, nil)
+		if err != nil {
+			t.Fatalf("Error on file create: %q - %v", fname, err)
+		}
+		moreFiles[i] = f
+		fm.unlockFile(f)
+	}
+	// Check the number of opened files.
+	fm.Lock()
+	opened := fm.openedFDs
+	fm.Unlock()
+	if opened > fm.limit {
+		t.Fatalf("Expected up to %v opened files, got %v", fm.limit, opened)
+	}
+	// Verify that number is accurate
+	actualOpened := int64(0)
+	fm.Lock()
+	for _, file := range fm.files {
+		if file.state == fileOpened && file.handle != nil {
+			actualOpened++
+		}
+	}
+	fm.Unlock()
+	if actualOpened != opened {
+		t.Fatalf("FM's opened is %v, but actual number of files opened is %v", opened, actualOpened)
+	}
+	// Lock all files, which should cause the opened count to go over limit
+	for _, file := range moreFiles {
+		fm.lockFile(file)
+	}
+	fm.Lock()
+	opened = fm.openedFDs
+	fm.Unlock()
+	if opened != int64(len(moreFiles)) {
+		t.Fatalf("Expected opened to be %v, got %v", len(moreFiles), opened)
+	}
+	// Unlock the files now
+	for _, file := range moreFiles {
+		fm.unlockFile(file)
+	}
+	// We should be able to lock them back and they should still be opened
+	for _, file := range moreFiles {
+		if !fm.lockFileIfOpened(file) {
+			t.Fatalf("LockIfOpened for file %q should not have failed", file.name)
+		}
+		// This would panic if the file is not locked
+		if err := fm.closeLockedFile(file); err != nil {
+			t.Fatalf("Unexpected error on close: %v", err)
+		}
+		// This should do nothing and not return an error
+		if err := fm.closeFileIfOpened(file); err != nil {
+			t.Fatalf("Unexpected error on closeIfOpened: %v", err)
+		}
+	}
+	// Open them all again and closed if opened
+	for _, file := range moreFiles {
+		if _, err := fm.lockFile(file); err != nil {
+			t.Fatalf("Unexpected error opening file %q: %v", file.name, err)
+		}
+		fm.unlockFile(file)
+		if err := fm.closeFileIfOpened(file); err != nil {
+			t.Fatalf("Unexpected error closing file %q that was opened: %v", file.name, err)
+		}
+	}
+	// Remove all the files in moreFiles
+	for _, file := range moreFiles {
+		if !fm.remove(file) {
+			t.Fatalf("Should have been able to remove file %q", file.name)
+		}
+	}
+	// Try to remove a file already removed
+	if fm.remove(moreFiles[0]) {
+		t.Fatalf("Should have failed to remove file %q", moreFiles[0].name)
+	}
+
+	// At this point, there should be no file opened
+	fm.Lock()
+	opened = fm.openedFDs
+	fm.Unlock()
+	if opened != 0 {
+		t.Fatalf("There should be no file opened, got %v", opened)
+	}
+
+	// Open our first file
+	fm.lockFile(firstFile)
+	// Unlock now, it should stay opened
+	fm.unlockFile(firstFile)
+	// Create a file that will be left locked when calling close
+	lockedFile, err := fm.createFile("bar", defaultFileFlags, nil)
+	if err != nil {
+		t.Fatalf("Unexpected error on file create: %v", err)
+	}
+	// Close the manager, which should close this file
+	if err := fm.close(); err == nil || !strings.Contains(err.Error(), "still probably locked") {
+		t.Fatalf("Unexpected error on FM close: %v", err)
+	}
+	if closeCbCalled != 2 {
+		t.Fatal("Expected closeCbCalled to not be 0")
+	}
+	// Ensure that closing a second time is fine
+	if err := fm.close(); err != nil {
+		t.Fatalf("Unexpected error on double close: %v", err)
+	}
+	// Check file `f` is closed
+	if firstFile.handle != nil || firstFile.state != fileClosed {
+		t.Fatalf("File %q should be closed: handle=%v state=%v", firstFile.name, firstFile.handle, firstFile.state)
+	}
+	// Close the lockedFile
+	if err := fm.closeLockedFile(lockedFile); err != nil {
+		t.Fatalf("Error closing locked file: %v", err)
+	}
+	// Verify that we can no longer create or open files
+	if fmClosedFile, err := fm.createFile("baz", defaultFileFlags, nil); err == nil || !strings.Contains(err.Error(), "is being closed") {
+		fm.closeLockedFile(fmClosedFile)
+		t.Fatalf("Creating file should have failed after FM was closed, got %v", err)
+	}
+	if _, err := fm.lockFile(lockedFile); err == nil || !strings.Contains(err.Error(), "is being closed") {
+		fm.closeLockedFile(lockedFile)
+		t.Fatalf("Should not be able to lock a file after FM was closed, got %v", err)
+	}
+
+	// Recreate a file manager
+	fm = createFilesManager(defaultDataStore, 0)
+	defer fm.close()
+
+	closeCbCalled = 0
+	testcb, err := fm.createFile("testcb", defaultFileFlags, bccb)
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+	if err := fm.closeLockedFile(testcb); err != nil {
+		t.Fatalf("Failed to close file: %v", err)
+	}
+	if closeCbCalled != 1 {
+		t.Fatalf("Expected callback to be invoked once, got %v", closeCbCalled)
+	}
+	fm.setBeforeCloseCb(testcb, nil)
+	if _, err := fm.lockFile(testcb); err != nil {
+		t.Fatalf("Failed to open file: %v", err)
+	}
+	if err := fm.closeLockedFile(testcb); err != nil {
+		t.Fatalf("Failed to close file: %v", err)
+	}
+	if closeCbCalled != 1 {
+		t.Fatalf("Expected callback to be invoked once, got %v", closeCbCalled)
+	}
+	if !fm.remove(testcb) {
+		t.Fatal("Should have been able to remove file")
+	}
+
+	testcloseOrOpenedFile, err := fm.createFile("testcloselockedoropened", defaultFileFlags, nil)
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+	if err := fm.closeLockedOrOpenedFile(testcloseOrOpenedFile); err != nil {
+		t.Fatalf("Error closing file: %v", err)
+	}
+	if _, err := fm.lockFile(testcloseOrOpenedFile); err != nil {
+		t.Fatalf("Error opening file: %v", err)
+	}
+	// simply unlock (which will leave it opened)
+	fm.unlockFile(testcloseOrOpenedFile)
+	if err := fm.closeLockedOrOpenedFile(testcloseOrOpenedFile); err != nil {
+		t.Fatalf("Error closing file: %v", err)
+	}
+	if !fm.remove(testcloseOrOpenedFile) {
+		t.Fatal("Should have been able to remove file")
+	}
+
+	// Following tests are supposed to produce panic
+	file, err := fm.createFile("failure", defaultFileFlags, nil)
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+	lockLockedFile := func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("Locking a locked file should panic")
+			}
+		}()
+		fm.lockFile(file)
+	}
+	lockLockedFile()
+	if err := fm.closeLockedFile(file); err != nil {
+		t.Fatalf("Error closing locked file: %v", err)
+	}
+	fm.lockFile(file)
+	fm.unlockFile(file)
+	closeLockedFile := func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("closeLockedFile should panic if file is not locked")
+			}
+		}()
+		fm.closeLockedFile(file)
+	}
+	closeLockedFile()
+	unlockUnlockedFile := func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("Unlocking an unlocked file should panic")
+			}
+		}()
+		fm.unlockFile(file)
+	}
+	unlockUnlockedFile()
+	if !fm.remove(file) {
+		t.Fatal("File should have been removed")
+	}
+	lockRemovedFile := func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("Locking a removed file should panic")
+			}
+		}()
+		fm.lockFile(file)
+	}
+	lockRemovedFile()
+	fm.close()
+	fm.Lock()
+	lenMap = len(fm.files)
+	fm.Unlock()
+	if lenMap != 0 {
+		t.Fatalf("Map should be empty, got %v", lenMap)
+	}
+	// Close file to avoid issue when cleaning up datastore on Windows.
+	file.handle.Close()
 }
 
 func cleanupDatastore(t *testing.T, dir string) {
@@ -64,6 +358,9 @@ func newFileStore(t *testing.T, dataStore string, limits *StoreLimits, options .
 	// Each test may override those.
 	if disableBufferWriters {
 		opts.BufferSize = 0
+	}
+	if setFDsLimit {
+		opts.FileDescriptorsLimit = testFDsLimit
 	}
 	// Apply the provided options
 	for _, opt := range options {
@@ -234,6 +531,9 @@ func TestFSOptions(t *testing.T) {
 	if disableBufferWriters {
 		expected.BufferSize = 0
 	}
+	if setFDsLimit {
+		expected.FileDescriptorsLimit = testFDsLimit
+	}
 	checkOpts(expected, opts)
 
 	fs.CreateChannel("foo", nil)
@@ -263,6 +563,7 @@ func TestFSOptions(t *testing.T) {
 		SliceMaxBytes:        1024 * 1024,
 		SliceMaxAge:          time.Second,
 		SliceArchiveScript:   "myscript.sh",
+		FileDescriptorsLimit: 20,
 	}
 	// Create the file with custom options
 	fs, _, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits,
@@ -274,7 +575,8 @@ func TestFSOptions(t *testing.T) {
 		DoCRC(expected.DoCRC),
 		CRCPolynomial(expected.CRCPolynomial),
 		DoSync(expected.DoSync),
-		SliceConfig(100, 1024*1024, time.Second, "myscript.sh"))
+		SliceConfig(100, 1024*1024, time.Second, "myscript.sh"),
+		FileDescriptorsLimit(20))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
@@ -1444,8 +1746,8 @@ func TestFSBadMsgFile(t *testing.T) {
 		t.Fatal("Expected channel foo to exist")
 	}
 	msgStore := cs.Msgs.(*FileMsgStore)
-	firstSliceFileName := msgStore.files[1].fileName
-	firstIdxFileName := msgStore.files[1].idxFName
+	firstSliceFileName := msgStore.files[1].file.name
+	firstIdxFileName := msgStore.files[1].idxFile.name
 
 	// Close it
 	fs.Close()
@@ -1453,7 +1755,7 @@ func TestFSBadMsgFile(t *testing.T) {
 	//
 	// INVALID INDEX FILE CONTENT
 	//
-	idxFile, err := openFile(firstIdxFileName, os.O_RDWR)
+	idxFile, err := openFileWithFlags(firstIdxFileName, os.O_RDWR)
 	if err != nil {
 		t.Fatalf("Error creating index file: %v", err)
 	}
@@ -1674,74 +1976,6 @@ func TestFSBadSubFile(t *testing.T) {
 	}
 }
 
-func TestFSSwapFiles(t *testing.T) {
-	var tmpFile, activeFile *os.File
-	defer func() {
-		if tmpFile != nil {
-			tmpFile.Close()
-		}
-		if activeFile != nil {
-			activeFile.Close()
-		}
-		os.Remove("file.dat.tmp")
-		os.Remove("file.dat")
-	}()
-	resetFiles := func() {
-		if tmpFile != nil {
-			tmpFile.Close()
-		}
-		if activeFile != nil {
-			activeFile.Close()
-		}
-		tmpFileName := "file.dat.tmp"
-		os.Remove(tmpFileName)
-		activeFileName := "file.dat"
-		os.Remove(activeFileName)
-
-		var err error
-		tmpFile, err = openFile(tmpFileName)
-		if err != nil {
-			stackFatalf(t, "Unexpected error creating file: %v", tmpFile)
-		}
-		activeFile, err = openFile(activeFileName)
-		if err != nil {
-			stackFatalf(t, "Unexpected error creating file: %v", activeFile)
-		}
-	}
-	doSwapWithError := func() {
-		f, err := swapFiles(tmpFile, activeFile)
-		if err == nil {
-			stackFatalf(t, "Expected error swapping files, got none")
-		}
-		if f != activeFile {
-			stackFatalf(t, "Expected returned file to be the active file")
-		}
-	}
-
-	resetFiles()
-	// Invoke with a closed tmpFile
-	tmpFile.Close()
-	doSwapWithError()
-
-	resetFiles()
-	// Invoke with a closed active file
-	activeFile.Close()
-	doSwapWithError()
-
-	resetFiles()
-	// Success test
-	activeFile, err := swapFiles(tmpFile, activeFile)
-	if err != nil {
-		t.Fatalf("Unexpected error on swap: %v", err)
-	}
-	if _, err := os.Stat("file.dat"); err != nil {
-		t.Fatalf("Active file should exist")
-	}
-	if _, err := os.Stat("file.dat.tmp"); err == nil {
-		t.Fatalf("Temp file should no longer exist")
-	}
-}
-
 func TestFSAddClientError(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
@@ -1751,7 +1985,7 @@ func TestFSAddClientError(t *testing.T) {
 
 	// Test failure of AddClient (generic tested in common_test.go)
 	// Close the client file to cause error
-	fs.clientsFile.Close()
+	fs.clientsFile.handle.Close()
 	// Should fail
 	if c, _, err := fs.AddClient("c1", "hbInbox", "test"); err == nil {
 		t.Fatal("Expected error, got none")
@@ -2339,7 +2573,7 @@ func TestFSFlush(t *testing.T) {
 	// Close the underlying file
 	ms := cs.Msgs.(*FileMsgStore)
 	ms.Lock()
-	ms.file.Close()
+	ms.writeSlice.file.handle.Close()
 	ms.Unlock()
 	// Expect Flush to fail
 	if err := cs.Msgs.Flush(); err == nil {
@@ -2348,7 +2582,7 @@ func TestFSFlush(t *testing.T) {
 	// Close the underlying file
 	ss := cs.Subs.(*FileSubStore)
 	ss.Lock()
-	ss.file.Close()
+	ss.file.handle.Close()
 	ss.Unlock()
 	// Expect Flush to fail
 	if err := cs.Subs.Flush(); err == nil {
@@ -2369,7 +2603,7 @@ func TestFSFlush(t *testing.T) {
 	// Close the underlying file
 	ms = cs.Msgs.(*FileMsgStore)
 	ms.Lock()
-	ms.file.Close()
+	ms.writeSlice.file.handle.Close()
 	ms.Unlock()
 	// Expect Flush to fail
 	if err := cs.Msgs.Flush(); err == nil {
@@ -2378,7 +2612,7 @@ func TestFSFlush(t *testing.T) {
 	// Close the underlying file
 	ss = cs.Subs.(*FileSubStore)
 	ss.Lock()
-	ss.file.Close()
+	ss.file.handle.Close()
 	// Simulate that there was activity (alternatively,
 	// we would need a buffer size smaller than a sub record
 	// being written so that buffer writer is by-passed).
@@ -2786,7 +3020,8 @@ func TestFSCompactSubsUpdateLastSent(t *testing.T) {
 	// Consume the 2 last
 	storeSubAck(t, s, "foo", subID, 4, 5)
 	// Force a compact
-	s.LookupChannel("foo").Subs.(*FileSubStore).compact()
+	ss := s.LookupChannel("foo").Subs.(*FileSubStore)
+	ss.compact(ss.file.name)
 	// Close and re-open store
 	s.Close()
 	s, rs := openDefaultFileStore(t)
@@ -2853,11 +3088,14 @@ func TestFSFileSlicesClosed(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 	ms.RLock()
 	for i, s := range ms.files {
-		if s.file != nil {
+		if s == ms.writeSlice {
+			continue
+		}
+		if s.file.handle != nil {
 			ms.RUnlock()
 			t.Fatalf("File slice %v should be closed (data file)", i)
 		}
-		if s.idxFile != nil {
+		if s.idxFile.handle != nil {
 			ms.RUnlock()
 			t.Fatalf("File slice %v should be closed (index file)", i)
 		}
@@ -2890,7 +3128,7 @@ func TestFSRecoverWithoutIndexFiles(t *testing.T) {
 	fs.RLock()
 	idxFileNames := make([]string, 0, len(msgStore.files))
 	for _, sl := range msgStore.files {
-		idxFileNames = append(idxFileNames, sl.idxFName)
+		idxFileNames = append(idxFileNames, sl.idxFile.name)
 	}
 	fs.RUnlock()
 	// Close store
@@ -3081,10 +3319,10 @@ func TestFSFirstEmptySliceRemovedOnCreateNewSlice(t *testing.T) {
 	numFiles := len(ms.files)
 	firstFileSeq := ms.firstFSlSeq
 	empty := false
-	if ms.currSlice != nil && ms.currSlice.msgsCount == ms.currSlice.rmCount {
+	if ms.writeSlice != nil && ms.writeSlice.msgsCount == ms.writeSlice.rmCount {
 		empty = true
 	}
-	firstWrite := ms.currSlice.firstWrite
+	firstWrite := ms.writeSlice.firstWrite
 	ms.RUnlock()
 	if !empty || numFiles != 1 || firstFileSeq != 1 {
 		t.Fatalf("Expected slice to be empty, numFiles and firstFileSeq to be 1, got %v, %v and %v",
@@ -3127,11 +3365,11 @@ func TestFSFirstEmptySliceRemovedOnCreateNewSlice(t *testing.T) {
 	ms.RLock()
 	numFiles = len(ms.files)
 	firstFileSeq = ms.firstFSlSeq
-	updatedCurrSlice := ms.currSlice == ms.files[2]
+	updatedwriteSlice := ms.writeSlice == ms.files[2]
 	ms.RUnlock()
-	if !updatedCurrSlice || numFiles != 1 || firstFileSeq != 2 {
+	if !updatedwriteSlice || numFiles != 1 || firstFileSeq != 2 {
 		t.Fatalf("Expected current slice to be updated to second slice, numFiles to be 1, firstFileSeq to be 2, got %v, %v and %v",
-			updatedCurrSlice, numFiles, firstFileSeq)
+			updatedwriteSlice, numFiles, firstFileSeq)
 	}
 }
 
@@ -3162,7 +3400,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 		ss.RLock()
 		bw := ss.bw
 		writer := ss.writer
-		file := ss.file
+		file := ss.file.handle
 		bufSize := 0
 		if ss.bw != nil {
 			bufSize = ss.bw.buf.Available()
@@ -3251,7 +3489,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 		storeSubDelete(t, fs, "foo", subID)
 		// Compact
 		ss.Lock()
-		err := ss.compact()
+		err := ss.compact(ss.file.name)
 		ss.Unlock()
 		if err != nil {
 			t.Fatalf("Error during compact: %v", err)
@@ -3259,7 +3497,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 		ss.RLock()
 		bw = ss.bw
 		writer = ss.writer
-		file = ss.file
+		file = ss.file.handle
 		shrinkTimerOn := ss.shrinkTimer != nil
 		ss.RUnlock()
 		if size == 0 {
@@ -3350,7 +3588,7 @@ func TestFSMsgStoreVariousBufferSizes(t *testing.T) {
 		ms.RLock()
 		bw := ms.bw
 		writer := ms.writer
-		file := ms.file
+		file := ms.writeSlice.file.handle
 		bufSize := 0
 		if ms.bw != nil {
 			bufSize = ms.bw.buf.Available()
@@ -3441,7 +3679,7 @@ func TestFSMsgStoreVariousBufferSizes(t *testing.T) {
 			// Call many times and make sure size never goes down too low.
 			for i := 0; i < 14; i++ {
 				ms.Lock()
-				ms.bw.tryShrinkBuffer(ms.file)
+				ms.bw.tryShrinkBuffer(ms.writeSlice.file.handle)
 				ms.writer = ms.bw.buf
 				ms.Unlock()
 			}
@@ -3463,7 +3701,7 @@ func TestFSMsgStoreVariousBufferSizes(t *testing.T) {
 			ms.Flush()
 			// Invoke shrink
 			ms.Lock()
-			ms.bw.tryShrinkBuffer(ms.file)
+			ms.bw.tryShrinkBuffer(ms.writeSlice.file.handle)
 			ms.Unlock()
 			// Check that request is set
 			ms.RLock()
@@ -3537,7 +3775,7 @@ func TestFSArchiveScript(t *testing.T) {
 	cs := fs.LookupChannel("foo")
 	ms := cs.Msgs.(*FileMsgStore)
 	ms.RLock()
-	fileName := ms.files[1].fileName
+	fileName := ms.files[1].file.name
 	ms.RUnlock()
 
 	// Store one more message. Should move to next slice and invoke script
@@ -3805,7 +4043,7 @@ func TestFSRecoverSlicesOutOfOrder(t *testing.T) {
 	ms.RLock()
 	firstFileSeq, lastFileSeq = ms.firstFSlSeq, ms.lastFSlSeq
 	first, last = ms.first, ms.last
-	currSlice := ms.currSlice
+	writeSlice := ms.writeSlice
 	recoveredWOffset := ms.wOffset
 	ms.RUnlock()
 
@@ -3818,8 +4056,8 @@ func TestFSRecoverSlicesOutOfOrder(t *testing.T) {
 	if recoveredWOffset != wOffset {
 		t.Fatalf("Write offset should be %v, got %v", wOffset, recoveredWOffset)
 	}
-	if currSlice == nil || currSlice.firstSeq != uint64(total) {
-		t.Fatalf("Unexpected current slice: %v", currSlice)
+	if writeSlice == nil || writeSlice.firstSeq != uint64(total) {
+		t.Fatalf("Unexpected current slice: %v", writeSlice)
 	}
 }
 
@@ -4051,7 +4289,7 @@ func TestFSMsgCache(t *testing.T) {
 		}
 		if closeFile {
 			ms.Lock()
-			ms.file.Close()
+			ms.writeSlice.file.handle.Close()
 			ms.Unlock()
 			closeFile = false
 		} else {

@@ -6,6 +6,8 @@ mkdir cov
 go test -v -covermode=count -coverprofile=./cov/server.out ./server
 go test -v -covermode=count -coverprofile=./cov/stores.out ./stores
 go test -v -covermode=count -coverprofile=./cov/stores_no_buffer.out -run=TestFS ./stores -no_buffer
+go test -v -covermode=count -coverprofile=./cov/stores_fds_limit.out -run=TestFS ./stores -set_fds_limit
+go test -v -covermode=count -coverprofile=./cov/stores_no_buffer_and_fds_limit.out -run=TestFS ./stores -no_buffer -set_fds_limit
 go test -v -covermode=count -coverprofile=./cov/util.out ./util
 gocovmerge ./cov/*.out > acc.out
 rm -rf ./cov
