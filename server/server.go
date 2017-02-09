@@ -64,6 +64,16 @@ const (
 	// DefaultIOSleepTime is the duration (in micro-seconds) the server waits for more messages
 	// before starting processing. Set to 0 (or negative) to disable the wait.
 	DefaultIOSleepTime = int64(0)
+
+	// Length of the channel used to schedule subscriptions start requests.
+	// Subscriptions requests are processed from the same NATS subscription.
+	// When a subscriber starts and it has pending messages, the server
+	// processes the new subscription request and sends avail messages out
+	// (up to MaxInflight). When done in place, this can cause other
+	// new subscriptions requests to timeout. Server uses a channel to schedule
+	// start (that is sending avail messages) of new subscriptions. This is
+	// the default length of that channel.
+	defaultSubStartChanLen = 2048
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -135,6 +145,15 @@ const (
 	processRequest  = false
 )
 
+// subStartInfo contains information used when a subscription request
+// is successful and the start (sending avail messages) is scheduled.
+type subStartInfo struct {
+	cs        *stores.ChannelStore
+	sub       *subState
+	qs        *queueState
+	isDurable bool
+}
+
 // StanServer structure represents the STAN server
 type StanServer struct {
 	// Keep all members for which we use atomic at the beginning of the
@@ -184,6 +203,9 @@ type StanServer struct {
 	connCloseReqs map[string]int // Key: clientID Value: ref count
 
 	tmpBuf []byte // Used to marshal protocols (right now, only PubAck)
+
+	subStartCh   chan *subStartInfo
+	subStartQuit chan struct{}
 
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
@@ -749,6 +771,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		connCloseReqs:     make(map[string]int),
 		trace:             sOpts.Trace,
 		debug:             sOpts.Debug,
+		subStartCh:        make(chan *subStartInfo, defaultSubStartChanLen),
+		subStartQuit:      make(chan struct{}, 1),
 	}
 
 	// Ensure that we shutdown the server if there is a panic during startup.
@@ -860,6 +884,13 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 	s.createNatsConnections(sOpts, nOpts)
 
 	s.ensureRunningStandAlone()
+
+	// Start the go-routine responsible to start sending messages to newly
+	// started subscriptions. We do that before opening the gates in
+	// s.initSupscriptions() (which is where the internal subscriptions
+	// are created).
+	s.wg.Add(1)
+	go s.processSubscriptionsStart()
 
 	s.initSubscriptions()
 
@@ -2759,7 +2790,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// In case this is a durable, sub already exists so we need to protect access
 	sub.Lock()
 	// Subscribe to acks.
-	// We MUST use the same connection than all other chan subscribers
+	// We MUST use the same connection than all other internal subscribers
 	// if we want to receive messages in order from NATS server.
 	sub.ackSub, err = s.nc.Subscribe(ackInbox, s.processAckMsg)
 	if err != nil {
@@ -2786,17 +2817,31 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	sub.initialized = true
 	sub.Unlock()
 
-	// If we are a durable (queue or not) and have state
-	if isDurable {
-		// Redeliver any oustanding.
-		s.performDurableRedelivery(cs, sub)
-	}
+	s.subStartCh <- &subStartInfo{cs: cs, sub: sub, qs: qs, isDurable: isDurable}
+}
 
-	// publish messages to this subscriber
-	if qs != nil {
-		s.sendAvailableMessagesToQueue(cs, qs)
-	} else {
-		s.sendAvailableMessages(cs, sub)
+func (s *StanServer) processSubscriptionsStart() {
+	defer s.wg.Done()
+	for {
+		select {
+		case subStart := <-s.subStartCh:
+			cs := subStart.cs
+			sub := subStart.sub
+			qs := subStart.qs
+			isDurable := subStart.isDurable
+			if isDurable {
+				// Redeliver any oustanding.
+				s.performDurableRedelivery(cs, sub)
+			}
+			// publish messages to this subscriber
+			if qs != nil {
+				s.sendAvailableMessagesToQueue(cs, qs)
+			} else {
+				s.sendAvailableMessages(cs, sub)
+			}
+		case <-s.subStartQuit:
+			return
+		}
 	}
 }
 
@@ -3036,6 +3081,9 @@ func (s *StanServer) Shutdown() {
 	// we won't panic.
 	ncs := s.ncs
 	nc := s.nc
+
+	// Stop processing subscriptions start requests
+	s.subStartQuit <- struct{}{}
 
 	if s.ioChannel != nil {
 		// Notify the IO channel that we are shutting down
