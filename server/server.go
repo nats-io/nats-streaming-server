@@ -74,6 +74,13 @@ const (
 	// start (that is sending avail messages) of new subscriptions. This is
 	// the default length of that channel.
 	defaultSubStartChanLen = 2048
+
+	// Used when server is configured to create a pool of ack subscriptions.
+	pooledSubAcksPrefix = "_STAN.subacks."
+	// Length of above prefix
+	pooledSubAcksPrefixLen = len(pooledSubAcksPrefix)
+	// Length of the NATS Inbox prefix
+	natsInboxPrefixLen = len(nats.InboxPrefix)
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -207,6 +214,16 @@ type StanServer struct {
 	subStartCh   chan *subStartInfo
 	subStartQuit chan struct{}
 
+	// By default we create a subscription on AckInbox per subscription,
+	// but still use a single connection to receive all ACKs. So
+	// effectively, this means having a go-routine per subscription for
+	// processing of client's ACKs. The more subscriptions there are,
+	// the more go-routines the system will need. To curb this growth,
+	// there is an option to use a pool of ack subscribers.
+	acksSubsPoolSize int
+	acksSubsIndex    int
+	acksSubs         []*nats.Subscription
+
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
 	// figure out if the statement should be logged, however, the
@@ -256,11 +273,15 @@ type subState struct {
 	ackTimer     *time.Timer
 	ackSub       *nats.Subscription
 	acksPending  map[uint64]int64 // key is message sequence, value is expiration time.
-	initialized  bool             // false until the subscription response has been sent to prevent data to be sent too early.
-	stalled      bool
-	newOnHold    bool            // Prevents delivery of new msgs until old are redelivered (on restart)
-	store        stores.SubStore // for easy access to the store interface
-	hasFailedHB  bool            // This is set when server sends heartbeat to this subscriber's client.
+	store        stores.SubStore  // for easy access to the store interface
+
+	// So far, compacting these booleans into a byte flag would not save space.
+	// May change if we need to add more.
+	initialized bool // false until the subscription response has been sent to prevent data to be sent too early.
+	stalled     bool
+	newOnHold   bool // Prevents delivery of new msgs until old are redelivered (on restart)
+	hasFailedHB bool // This is set when server sends heartbeat to this subscriber's client.
+	removed     bool // This is true when subStore.Remove() has been invoked for this subscription.
 }
 
 // Looks up, or create a new channel if it does not exist
@@ -368,6 +389,7 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 	}
 
 	sub.Lock()
+	sub.removed = true
 	sub.clearAckTimer()
 	durableKey := ""
 	// Do this before clearing the sub.ClientID since this is part of the key!!!
@@ -558,12 +580,13 @@ type Options struct {
 	ClientCert         string        // Client Certificate for TLS
 	ClientKey          string        // Client Key for TLS
 	ClientCA           string        // Client CAs for TLS
-	IOBatchSize        int           // Number of messages we collect from clients before processing them.
+	IOBatchSize        int           // Maximum number of messages collected from clients before starting their processing.
 	IOSleepTime        int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
 	NATSServerURL      string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
 	ClientHBInterval   time.Duration // Interval at which server sends heartbeat to a client.
 	ClientHBTimeout    time.Duration // How long server waits for a heartbeat response.
 	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
+	AckSubsPoolSize    int           // Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription).
 }
 
 // DefaultOptions are default options for the STAN server
@@ -773,6 +796,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer 
 		debug:             sOpts.Debug,
 		subStartCh:        make(chan *subStartInfo, defaultSubStartChanLen),
 		subStartQuit:      make(chan struct{}, 1),
+		acksSubsPoolSize:  sOpts.AckSubsPoolSize,
 	}
 
 	// Ensure that we shutdown the server if there is a panic during startup.
@@ -1210,13 +1234,47 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 		// To be on the safe side, just check that the ackSub has not
 		// been created (may happen with durables that may reconnect maybe?)
 		if sub.ackSub == nil {
-			// Subscribe to acks
-			sub.ackSub, err = s.nc.Subscribe(sub.AckInbox, s.processAckMsg)
+			if len(sub.AckInbox) <= natsInboxPrefixLen {
+				err = fmt.Errorf("invalid ack inbox: %s", sub.AckInbox)
+			} else {
+				// If the recovered AckInbox starts with nats.InboxPrefix, we
+				// need to create an individual subscription for that,
+				// regardless if the server is using ackSub pool or not.
+				ackSubject := sub.AckInbox
+				createSub := sub.AckInbox[:natsInboxPrefixLen] == nats.InboxPrefix
+				if !createSub {
+					ackSubIndex := 0
+					// This server instance could have been started with a
+					// pool size lower than before. We need to make sure
+					// that if the AckInbox is for a ackSubIndex that is
+					// higher than the current max, we create an individual
+					// ack subscription.
+					ackSubIndexEnd := strings.Index(sub.AckInbox, ".")
+					if ackSubIndexEnd != -1 {
+						ackSubIndexStr := sub.AckInbox[:ackSubIndexEnd]
+						ackSubIndex, err = strconv.Atoi(ackSubIndexStr)
+						if err == nil {
+							createSub = ackSubIndex >= s.acksSubsPoolSize
+							ackSubject = pooledSubAcksPrefix + sub.AckInbox
+						}
+					}
+					if ackSubIndexEnd == -1 || err != nil {
+						err = fmt.Errorf("invalid ack inbox: %s", sub.AckInbox)
+					}
+				}
+				if err == nil && createSub {
+					// Subscribe to acks
+					// Actual subject may be AckInbox prefixed with pooledSubAcksPrefix.
+					sub.ackSub, err = s.nc.Subscribe(ackSubject, s.processAckMsg)
+					if err == nil {
+						sub.ackSub.SetPendingLimits(-1, -1)
+					}
+				}
+			}
 			if err != nil {
 				sub.Unlock()
 				return err
 			}
-			sub.ackSub.SetPendingLimits(-1, -1)
 		}
 		// Consider this subscription initialized. Note that it may
 		// still have newOnHold == true, which would prevent incoming
@@ -1320,6 +1378,18 @@ func (s *StanServer) initSubscriptions() {
 	_, err = s.nc.Subscribe(s.info.Close, s.processCloseRequest)
 	if err != nil {
 		panic(fmt.Sprintf("Could not subscribe to close request subject, %v\n", err))
+	}
+	// Optionally receive ACKs from clients using this pool of ack subscribers.
+	if s.acksSubsPoolSize > 0 {
+		for i := 0; i < s.acksSubsPoolSize; i++ {
+			ackSub, err := s.nc.Subscribe(fmt.Sprintf("%s%d.>", pooledSubAcksPrefix, i),
+				s.processAckMsgFromAcksSubsPool)
+			if err != nil {
+				panic(fmt.Errorf("Could not subscribe to subscriptions acks subject: %v", err))
+			}
+			ackSub.SetPendingLimits(-1, -1)
+			s.acksSubs = append(s.acksSubs, ackSub)
+		}
 	}
 
 	Debugf("STAN: Discover subject:           %s", s.info.Discovery)
@@ -1613,8 +1683,10 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 		// close request to subscriber's ackInbox subscribers.
 		for _, sub := range subs {
 			sub.Lock()
-			if sub.ackSub != nil {
-				ctrlMsgNatsMsg.Subject = sub.AckInbox
+			if !sub.removed {
+				// Don't use sub.AckInbox directly since it may
+				// need to be prefixed with pooledSubAcksPrefix.
+				ctrlMsgNatsMsg.Subject = s.getAckSubject(sub)
 				if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
 					refs++
 				}
@@ -2415,15 +2487,17 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 	if schedule {
 		processInPlace := true
 		sub.Lock()
-		if sub.ackSub != nil {
+		if !sub.removed {
 			ctrlMsg := &spb.CtrlMsg{
 				MsgType:  reqType,
 				ServerID: s.srvCtrlMsgID,
 				Data:     m.Data,
 			}
 			ctrlBytes, _ := ctrlMsg.Marshal()
+			// Don't use sub.AckInbox directly since it may
+			// need to be prefixed with pooledSubAcksPrefix.
 			ctrlMsgNatsMsg := &nats.Msg{
-				Subject: sub.AckInbox,
+				Subject: s.getAckSubject(sub),
 				Reply:   m.Reply,
 				Data:    ctrlBytes,
 			}
@@ -2669,7 +2743,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	var sub *subState
 
-	ackInbox := nats.NewInbox()
+	ackInbox, ackSubject := s.createAckInboxAndSubject()
 
 	// Will be true for durable queue subscribers and durable subscribers alike.
 	isDurable := false
@@ -2790,21 +2864,23 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// In case this is a durable, sub already exists so we need to protect access
 	sub.Lock()
 	// Subscribe to acks.
-	// We MUST use the same connection than all other internal subscribers
-	// if we want to receive messages in order from NATS server.
-	sub.ackSub, err = s.nc.Subscribe(ackInbox, s.processAckMsg)
-	if err != nil {
-		sub.Unlock()
-		panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
+	if s.acksSubsPoolSize == 0 {
+		// We MUST use the same connection than all other internal subscribers
+		// if we want to receive messages in order from NATS server.
+		sub.ackSub, err = s.nc.Subscribe(ackInbox, s.processAckMsg)
+		if err != nil {
+			sub.Unlock()
+			panic(fmt.Sprintf("Could not subscribe to ack subject, %v\n", err))
+		}
+		sub.ackSub.SetPendingLimits(-1, -1)
+		// However, we need to flush to ensure that NATS server processes
+		// this subscription request before we return OK and start sending
+		// messages to the client.
+		s.nc.Flush()
 	}
-	sub.ackSub.SetPendingLimits(-1, -1)
-	// However, we need to flush to ensure that NATS server processes
-	// this subscription request before we return OK and start sending
-	// messages to the client.
-	s.nc.Flush()
 
 	// Create a non-error response
-	resp := &pb.SubscriptionResponse{AckInbox: ackInbox}
+	resp := &pb.SubscriptionResponse{AckInbox: ackSubject}
 	b, _ := resp.Marshal()
 	s.ncs.Publish(m.Reply, b)
 
@@ -2818,6 +2894,43 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	sub.Unlock()
 
 	s.subStartCh <- &subStartInfo{cs: cs, sub: sub, qs: qs, isDurable: isDurable}
+}
+
+// createAckInboxAndSubject returns an AckInbox.
+// Based on the configuration, this is simply a nats.NewInbox()
+// or a unique subject with a prefix that corresponds to one
+// of the acksSub pooled subscription.
+// NOTE: So far, this function is called from a single go-routine,
+// so no locking for s.acksSubIndex is required.
+func (s *StanServer) createAckInboxAndSubject() (string, string) {
+	ackInbox := nats.NewInbox()
+	ackInboxSubject := ackInbox
+	if s.acksSubsPoolSize > 0 {
+		// Convert _INBOX.abcdefghijk to abcdefghijk
+		ackInbox = ackInbox[natsInboxPrefixLen:]
+		// Then prefix with the index of one of the ackSub in the array.
+		// Use round-robin for now.
+		acksSubsIndex := s.acksSubsIndex
+		s.acksSubsIndex++
+		if s.acksSubsIndex >= s.acksSubsPoolSize {
+			s.acksSubsIndex = 0
+		}
+		// This results in ackInbox being something like: 2.abcdefghijk
+		ackInbox = fmt.Sprintf("%d.%s", acksSubsIndex, ackInbox)
+		// The client will send the acks to a subject that looks like:
+		// _STAN.subacks.2.abcdefghijk
+		ackInboxSubject = pooledSubAcksPrefix + ackInbox
+	}
+	return ackInbox, ackInboxSubject
+}
+
+// getAckSubject returns the proper ACK subject for the given subscription.
+// Assumes sub's lock is held on entry and sub has not been removed.
+func (s *StanServer) getAckSubject(sub *subState) string {
+	if sub.ackSub != nil {
+		return sub.ackSub.Subject
+	}
+	return pooledSubAcksPrefix + sub.AckInbox
 }
 
 func (s *StanServer) processSubscriptionsStart() {
@@ -2860,6 +2973,19 @@ func (s *StanServer) processAckMsg(m *nats.Msg) {
 		return
 	}
 	s.processAck(cs, cs.UserData.(*subStore).LookupByAckInbox(m.Subject), ack.Sequence)
+}
+
+// processAckMsgFromAcksSubsPool gets an ACK message from one of
+// the pooled ackSub. This function extracts the AckInbox from
+// the incoming message's subject and then invoke processAckMsg.
+func (s *StanServer) processAckMsgFromAcksSubsPool(m *nats.Msg) {
+	if len(m.Subject) <= pooledSubAcksPrefixLen {
+		Errorf("STAN: Received ack with invalid subject: %v", m.Subject)
+		return
+	}
+	// Extract the actual AckInbox from the message's Subject
+	m.Subject = m.Subject[pooledSubAcksPrefixLen:]
+	s.processAckMsg(m)
 }
 
 // processAck processes an ack and if needed sends more messages.

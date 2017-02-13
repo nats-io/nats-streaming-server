@@ -34,6 +34,7 @@ Streaming Server Options:
     -hbi, --hb_interval <duration>   Interval at which server sends heartbeat to a client
     -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
     -hbf, --hb_fail_count <number>   Number of failed heartbeats before server closes the client connection
+          --ack_subs <number>        Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription)
 
 Streaming Server File Store Options:
     --file_compact_enabled           Enable file compaction
@@ -173,6 +174,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.String("ns", "", "NATSServerURL")
 	flag.StringVar(&stanConfigFile, "sc", "", "")
 	flag.StringVar(&stanConfigFile, "stan_config", "", "")
+	flag.Int("ack_subs", 0, "AckSubsPoolSize")
 	flag.Bool("file_compact_enabled", stores.DefaultFileStoreOptions.CompactEnabled, "FileStoreOpts.CompactEnabled")
 	flag.Int("file_compact_frag", stores.DefaultFileStoreOptions.CompactFragmentation, "FileStoreOpts.CompactFragmentation")
 	flag.Int("file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "FileStoreOpts.CompactInterval")
