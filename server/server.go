@@ -984,7 +984,7 @@ func friendlyBytes(msgbytes int64) string {
 func (s *StanServer) configureClusterOpts(opts *server.Options) error {
 	if opts.Cluster.ListenStr == "" {
 		if opts.RoutesStr != "" {
-			Fatalf("Solicited routes require cluster capabilities, e.g. --cluster.")
+			Fatalf("Solicited routes require cluster capabilities, e.g. --cluster")
 		}
 		return nil
 	}
@@ -1095,7 +1095,7 @@ func (s *StanServer) ensureRunningStandAlone() {
 	b, _ := req.Marshal()
 	reply, err := s.nc.Request(s.info.Discovery, b, timeout)
 	if err == nats.ErrTimeout {
-		Debugf("Did not detect another server instance.")
+		Debugf("Did not detect another server instance")
 		return
 	}
 	if err != nil {
@@ -1322,12 +1322,12 @@ func (s *StanServer) initSubscriptions() {
 		panic(fmt.Sprintf("Could not subscribe to close request subject, %v\n", err))
 	}
 
-	Debugf("STAN: Discover subject:    %s", s.info.Discovery)
-	Debugf("STAN: Publish subject:     %s", pubSubject)
-	Debugf("STAN: Subscribe subject:   %s", s.info.Subscribe)
-	Debugf("STAN: Unsubscribe subject: %s", s.info.Unsubscribe)
-	Debugf("STAN: Close subject:       %s", s.info.Close)
-
+	Debugf("STAN: Discover subject:           %s", s.info.Discovery)
+	Debugf("STAN: Publish subject:            %s", pubSubject)
+	Debugf("STAN: Subscribe subject:          %s", s.info.Subscribe)
+	Debugf("STAN: Subscription Close subject: %s", s.info.SubClose)
+	Debugf("STAN: Unsubscribe subject:        %s", s.info.Unsubscribe)
+	Debugf("STAN: Close subject:              %s", s.info.Close)
 }
 
 // Process a client connect request
@@ -1515,7 +1515,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 			client.fhb++
 			// If we have reached the max number of failures
 			if client.fhb > s.opts.ClientHBFailCount {
-				Debugf("STAN: [Client:%s] Timed out on heartbeats.", clientID)
+				Debugf("STAN: [Client:%s] Timed out on heartbeats", clientID)
 				// close the client (connection). This locks the
 				// client object internally so unlock here.
 				client.Unlock()
@@ -1581,7 +1581,7 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	req := &pb.CloseRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
-		Errorf("STAN: Received invalid close request, subject=%s.", m.Subject)
+		Errorf("STAN: Received invalid close request, subject=%s", m.Subject)
 		s.sendCloseErr(m.Reply, ErrInvalidCloseReq.Error())
 		return
 	}
@@ -1989,7 +1989,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			}
 			if !tracePrinted && s.trace {
 				tracePrinted = true
-				Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d.", clientID, m.Sequence)
+				Tracef("STAN: [Client:%s] redelivery, skipping seqno=%d", clientID, m.Sequence)
 			}
 			if needToSetExpireTime {
 				sub.Lock()
@@ -2067,7 +2067,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	}
 
 	if s.trace {
-		Tracef("STAN: [Client:%s] Sending msg subject=%s inbox=%s seqno=%d.",
+		Tracef("STAN: [Client:%s] Sending msg subject=%s inbox=%s seqno=%d",
 			sub.ClientID, m.Subject, sub.Inbox, m.Sequence)
 	}
 
@@ -2076,7 +2076,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	if !force && (ap >= sub.MaxInFlight) {
 		sub.stalled = true
 		if s.debug {
-			Debugf("STAN: [Client:%s] Stalled msgseq %s:%d to %s.",
+			Debugf("STAN: [Client:%s] Stalled msgseq %s:%d to %s",
 				sub.ClientID, m.Subject, m.Sequence, sub.Inbox)
 		}
 		return false, false
@@ -2140,7 +2140,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	if !force && (ap+1 == sub.MaxInFlight) {
 		sub.stalled = true
 		if s.debug {
-			Debugf("STAN: [Client:%s] Stalling after msgseq %s:%d to %s.",
+			Debugf("STAN: [Client:%s] Stalling after msgseq %s:%d to %s",
 				sub.ClientID, m.Subject, m.Sequence, sub.Inbox)
 		}
 		return true, false
@@ -2361,7 +2361,7 @@ func (s *StanServer) processUnsubscribeRequest(m *nats.Msg) {
 	req := &pb.UnsubscribeRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
-		Errorf("STAN: Invalid unsub request from %s.", m.Subject)
+		Errorf("STAN: Invalid unsub request from %s", m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidUnsubReq)
 		return
 	}
@@ -2373,7 +2373,7 @@ func (s *StanServer) processSubCloseRequest(m *nats.Msg) {
 	req := &pb.UnsubscribeRequest{}
 	err := req.Unmarshal(m.Data)
 	if err != nil {
-		Errorf("STAN: Invalid sub close request from %s.", m.Subject)
+		Errorf("STAN: Invalid sub close request from %s", m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidUnsubReq)
 		return
 	}
@@ -2391,7 +2391,7 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 	}
 	cs := s.store.LookupChannel(req.Subject)
 	if cs == nil {
-		Errorf("STAN: [Client:%s] %s request missing subject %s.",
+		Errorf("STAN: [Client:%s] %s request missing subject %s",
 			req.ClientID, action, req.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
@@ -2402,7 +2402,7 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 
 	sub := ss.LookupByAckInbox(req.Inbox)
 	if sub == nil {
-		Errorf("STAN: [Client:%s] %s request for missing inbox %s.",
+		Errorf("STAN: [Client:%s] %s request for missing inbox %s",
 			req.ClientID, action, req.Inbox)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
 		return
@@ -2452,9 +2452,9 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 
 	if s.debug {
 		if isSubClose {
-			Debugf("STAN: [Client:%s] Unsubscribing subject=%s.", req.ClientID, req.Subject)
+			Debugf("STAN: [Client:%s] Closing subscription subject=%s", req.ClientID, req.Subject)
 		} else {
-			Debugf("STAN: [Client:%s] Closing subscription subject=%s.", req.ClientID, req.Subject)
+			Debugf("STAN: [Client:%s] Unsubscribing subject=%s", req.ClientID, req.Subject)
 		}
 	}
 
@@ -2992,7 +2992,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 	case pb.StartPosition_NewOnly:
 		lastSent = cs.Msgs.LastSequence()
 		if s.debug {
-			Debugf("STAN: [Client:%s] Sending new-only subject=%s, seq=%d.",
+			Debugf("STAN: [Client:%s] Sending new-only subject=%s, seq=%d",
 				sub.ClientID, sub.subject, lastSent)
 		}
 	case pb.StartPosition_LastReceived:
@@ -3001,7 +3001,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 			lastSent = lastSeq - 1
 		}
 		if s.debug {
-			Debugf("STAN: [Client:%s] Sending last message, subject=%s.",
+			Debugf("STAN: [Client:%s] Sending last message, subject=%s",
 				sub.ClientID, sub.subject)
 		}
 	case pb.StartPosition_TimeDeltaStart:

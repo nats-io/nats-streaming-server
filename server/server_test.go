@@ -266,7 +266,7 @@ func TestDefaultOptions(t *testing.T) {
 
 	opts2 := GetDefaultOptions()
 	if opts2.Debug == opts.Debug {
-		t.Fatal("Modified original default options.")
+		t.Fatal("Modified original default options")
 	}
 }
 
@@ -3711,7 +3711,7 @@ func TestEnsureStandAlone(t *testing.T) {
 			if failedServer != nil {
 				failedServer.Shutdown()
 			}
-			t.Fatal("Server did not detect a duplicate instance.")
+			t.Fatal("Server did not detect a duplicate instance")
 		}
 	}()
 

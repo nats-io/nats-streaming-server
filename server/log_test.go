@@ -20,7 +20,7 @@ func TestConfigureLogger(t *testing.T) {
 
 	checkDebugTraceOff := func() {
 		if debug != 0 || trace != 0 {
-			t.Fatalf("Expected debug/trace to be disabled.")
+			t.Fatalf("Expected debug/trace to be disabled")
 		}
 	}
 
@@ -48,7 +48,7 @@ func TestConfigureLogger(t *testing.T) {
 	sOpts.Trace = true
 	ConfigureLogger(sOpts, &nOpts)
 	if debug == 0 || trace == 0 {
-		t.Fatalf("Expected debug/trace to be enabled.")
+		t.Fatalf("Expected debug/trace to be enabled")
 	}
 
 	// All enabled... (coverage)
@@ -58,7 +58,7 @@ func TestConfigureLogger(t *testing.T) {
 	sOpts.Trace = true
 	ConfigureLogger(sOpts, &nOpts)
 	if debug == 0 || trace == 0 {
-		t.Fatalf("Expected debug/trace to be enabled.")
+		t.Fatalf("Expected debug/trace to be enabled")
 	}
 
 	// turn off logging we've enabled
