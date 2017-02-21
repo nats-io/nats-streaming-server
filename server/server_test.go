@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -5835,4 +5836,151 @@ func TestMsgsNotSentToSubBeforeSubReqResponse(t *testing.T) {
 		}
 		sub.Unsubscribe()
 	}
+}
+
+func TestFileStoreAcksPool(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := getTestDefaultOptsForFileStore()
+	opts.AckSubsPoolSize = 5
+	s := RunServerWithOpts(opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	// Check server's ackSub pool
+	checkPoolSize := func() {
+		s.RLock()
+		poolSize := len(s.acksSubs)
+		s.RUnlock()
+		if poolSize != opts.AckSubsPoolSize {
+			stackFatalf(t, "Expected acksSubs pool size to be %v, got %v", opts.AckSubsPoolSize, poolSize)
+		}
+	}
+	checkPoolSize()
+
+	// Check total subs and each sub's ackSub is pooled or not as expected.
+	checkAckSubs := func(total int, checkSubFunc func(sub *subState) error) {
+		subs := s.clients.GetSubs(clientName)
+		if len(subs) != total {
+			stackFatalf(t, "Expected %d subs, got %v", total, len(subs))
+		}
+		for _, sub := range subs {
+			sub.RLock()
+			err := checkSubFunc(sub)
+			sub.RUnlock()
+			if err != nil {
+				stackFatalf(t, err.Error())
+			}
+		}
+	}
+
+	sc, nc := createConnectionWithNatsOpts(t, clientName,
+		nats.ReconnectWait(100*time.Millisecond))
+	defer nc.Close()
+	defer sc.Close()
+
+	totalSubs := 10
+	errCh := make(chan error, totalSubs)
+	ch := make(chan bool)
+	count := int32(0)
+	cb := func(m *stan.Msg) {
+		if m.Redelivered {
+			errCh <- fmt.Errorf("Unexpected redelivered message: %v", m)
+		} else if atomic.AddInt32(&count, 1) == int32(totalSubs) {
+			ch <- true
+		}
+	}
+	// Create 10 subs
+	for i := 0; i < totalSubs; i++ {
+		if _, err := sc.Subscribe("foo", cb, stan.AckWait(time.Second)); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+	}
+	// Send 1 message
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Wait for all messages to be received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+	// Wait for more than redelivery time
+	time.Sleep(1500 * time.Millisecond)
+	// Check that there was no error
+	select {
+	case e := <-errCh:
+		t.Fatal(e)
+	default:
+	}
+	// Check that server's subs have nil ackSub
+	checkAckSubs(totalSubs, func(sub *subState) error {
+		if sub.ackSub != nil {
+			return fmt.Errorf("Expected ackSub for sub %v to be nil, was not", sub.ID)
+		}
+		return nil
+	})
+	// Stop server and restart with lower pool size
+	s.Shutdown()
+	opts.AckSubsPoolSize = 2
+	s = RunServerWithOpts(opts, nil)
+	// Check server's ackSub pool
+	checkPoolSize()
+	// Check that AckInbox with ackSubIndex > AcksPoolSize-1 have
+	// individual ackSub
+	checkAckSubs(totalSubs, func(sub *subState) error {
+		wantsNil := false
+		ackSubIndexEnd := strings.Index(sub.AckInbox, ".")
+		if n, _ := strconv.Atoi(sub.AckInbox[:ackSubIndexEnd]); n <= 1 {
+			wantsNil = true
+		}
+		if wantsNil && sub.ackSub != nil {
+			return fmt.Errorf("Expected ackSub for sub %v to be nil, was not", sub.ID)
+		} else if !wantsNil && sub.ackSub == nil {
+			return fmt.Errorf("Expected ackSub for sub %v to be not nil, was nil", sub.ID)
+		}
+		return nil
+	})
+	// Restart server with no acksSub pool
+	s.Shutdown()
+	opts.AckSubsPoolSize = 0
+	s = RunServerWithOpts(opts, nil)
+	// Check server's ackSub pool
+	checkPoolSize()
+	// Check that all subs have an individual ackSub
+	checkAckSubs(totalSubs, func(sub *subState) error {
+		if sub.ackSub == nil {
+			return fmt.Errorf("Expected ackSub for sub %v to be not nil, was nil", sub.ID)
+		}
+		return nil
+	})
+	// Add another subscriber
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Restart server
+	s.Shutdown()
+	s = RunServerWithOpts(opts, nil)
+	// Check that the new sub's AckInbox is _INBOX as usual.
+	checkAckSubs(totalSubs+1, func(sub *subState) error {
+		if int(sub.ID) > totalSubs {
+			if sub.AckInbox[:len(nats.InboxPrefix)] != nats.InboxPrefix {
+				return fmt.Errorf("Unexpected AckInbox: %v", sub)
+			}
+		}
+		if sub.ackSub == nil {
+			return fmt.Errorf("Expected ackSub for sub %v to be not nil, was nil", sub.ID)
+		}
+		return nil
+	})
+	// Restart server with ackPool
+	s.Shutdown()
+	opts.AckSubsPoolSize = 2
+	s = RunServerWithOpts(opts, nil)
+	// Check server's ackSub pool
+	checkPoolSize()
+	// Close the client connection
+	sc.Close()
+	nc.Close()
+	// Make sure connection close is correctly processed.
+	waitForNumClients(t, s, 0)
 }

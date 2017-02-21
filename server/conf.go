@@ -109,6 +109,11 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.ClientHBFailCount = int(v.(int64))
+		case "ack_subs_pool_size", "ack_subscriptions_pool_size":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.AckSubsPoolSize = int(v.(int64))
 		}
 	}
 	return nil

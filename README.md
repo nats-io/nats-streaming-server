@@ -67,6 +67,7 @@ Streaming Server Options:
     -hbi, --hb_interval <duration>   Interval at which server sends heartbeat to a client
     -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
     -hbf, --hb_fail_count <number>   Number of failed heartbeats before server closes the client connection
+          --ack_subs <number>        Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription)
 
 Streaming Server File Store Options:
     --file_compact_enabled           Enable file compaction
@@ -197,6 +198,14 @@ hb_timeout: "10s"
 # The actual total wait is: (fail count + 1) * (hb interval + hb timeout).
 # Can be hbf, hb_fail_count, server_to_client_hb_fail_count
 hb_fail_count: 2
+
+# Normally, when a client creates a subscription, the server creates
+# an internal subscription to receive its ACKs.
+# If lots of subscriptions are created, the number of internal
+# subscriptions in the server could be very high. To curb this growth,
+# use this parameter to configure a pool of internal ACKs subscriptions.
+# Can be ack_subs_pool_size, ack_subscriptions_pool_size
+ack_subs_pool_size: 10
 
 # Define store limits.
 # Can be limits, store_limits or StoreLimits.
