@@ -180,10 +180,8 @@ func TestFSUnsupportedFileVersion(t *testing.T) {
 	// Overwrite the file version of a message store to an unsupported version
 	writeVersion(t, filepath.Join(defaultDataStore, "foo", msgFilesPrefix+"1"+datSuffix), fileVersion+1)
 
-	var err error
-
 	// Recover store (should fail)
-	err = expectedErrorOpeningDefaultFileStore(t)
+	err := expectedErrorOpeningDefaultFileStore(t)
 	fileVerStr := fmt.Sprintf("%d", (fileVersion + 1))
 	if !strings.Contains(err.Error(), fileVerStr) {
 		t.Fatalf("Expected error to report unsupported file version %q, got %v", fileVerStr, err)
