@@ -30,9 +30,8 @@ func EnsureBufBigEnough(buf []byte, needed int) []byte {
 // WriteInt writes an int (4 bytes) to the given writer using ByteOrder.
 func WriteInt(w io.Writer, v int) error {
 	var b [4]byte
-	var bs []byte
 
-	bs = b[:4]
+	bs := b[:4]
 
 	ByteOrder.PutUint32(bs, uint32(v))
 	_, err := w.Write(bs)
@@ -42,9 +41,8 @@ func WriteInt(w io.Writer, v int) error {
 // ReadInt reads an int (4 bytes) from the reader using ByteOrder.
 func ReadInt(r io.Reader) (int, error) {
 	var b [4]byte
-	var bs []byte
 
-	bs = b[:4]
+	bs := b[:4]
 
 	_, err := io.ReadFull(r, bs)
 	if err != nil {
