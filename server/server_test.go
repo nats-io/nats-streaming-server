@@ -5984,3 +5984,66 @@ func TestFileStoreAcksPool(t *testing.T) {
 	// Make sure connection close is correctly processed.
 	waitForNumClients(t, s, 0)
 }
+
+func TestAckSubsSubjectsInPoolUseUniqueSubject(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.ID = clusterName
+	opts.AckSubsPoolSize = 1
+	s1 := RunServerWithOpts(opts, nil)
+	defer s1.Shutdown()
+
+	opts.NATSServerURL = nats.DefaultURL
+	opts.ID = "otherCluster"
+	s2 := RunServerWithOpts(opts, nil)
+	defer s2.Shutdown()
+
+	sc1 := NewDefaultConnection(t)
+	defer sc1.Close()
+
+	if _, err := sc1.Subscribe("foo", func(m *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	sc2, err := stan.Connect("otherCluster", "otherClient")
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc2.Close()
+
+	// Create a subscription with manual ack, and ack after message is
+	// redelivered.
+	cb := func(m *stan.Msg) {
+		if m.Redelivered {
+			m.Ack()
+		}
+	}
+	if _, err := sc2.Subscribe("foo", cb,
+		stan.SetManualAckMode(),
+		stan.AckWait(time.Second)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Produce 1 message for each connection
+	if err := sc1.Publish("foo", []byte("hello s1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	if err := sc2.Publish("foo", []byte("hello s2")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Wait for ack of sc2 to be processed by s2
+	waitForAcks(t, s2, "otherClient", 1, 0)
+
+	s1.Lock()
+	s1AcksReceived, _ := s1.acksSubs[0].Delivered()
+	s1.Unlock()
+	if s1AcksReceived != 1 {
+		t.Fatalf("Expected pooled ack sub to receive only 1 message, got %v", s1AcksReceived)
+	}
+	s2.Lock()
+	s2AcksReceived, _ := s2.acksSubs[0].Delivered()
+	s2.Unlock()
+	if s2AcksReceived != 1 {
+		t.Fatalf("Expected pooled ack sub to receive only 1 message, got %v", s2AcksReceived)
+	}
+}

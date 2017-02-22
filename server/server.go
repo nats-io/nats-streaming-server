@@ -75,10 +75,6 @@ const (
 	// the default length of that channel.
 	defaultSubStartChanLen = 2048
 
-	// Used when server is configured to create a pool of ack subscriptions.
-	pooledSubAcksPrefix = "_STAN.subacks."
-	// Length of above prefix
-	pooledSubAcksPrefixLen = len(pooledSubAcksPrefix)
 	// Length of the NATS Inbox prefix
 	natsInboxPrefixLen = len(nats.InboxPrefix)
 )
@@ -220,9 +216,11 @@ type StanServer struct {
 	// processing of client's ACKs. The more subscriptions there are,
 	// the more go-routines the system will need. To curb this growth,
 	// there is an option to use a pool of ack subscribers.
-	acksSubsPoolSize int
-	acksSubsIndex    int
-	acksSubs         []*nats.Subscription
+	acksSubsPoolSize  int
+	acksSubsIndex     int
+	acksSubs          []*nats.Subscription
+	acksSubsPrefix    string
+	acksSubsPrefixLen int
 
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
@@ -1255,7 +1253,7 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 						ackSubIndex, err = strconv.Atoi(ackSubIndexStr)
 						if err == nil {
 							createSub = ackSubIndex >= s.acksSubsPoolSize
-							ackSubject = pooledSubAcksPrefix + sub.AckInbox
+							ackSubject = s.acksSubsPrefix + sub.AckInbox
 						}
 					}
 					if ackSubIndexEnd == -1 || err != nil {
@@ -1264,7 +1262,7 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 				}
 				if err == nil && createSub {
 					// Subscribe to acks
-					// Actual subject may be AckInbox prefixed with pooledSubAcksPrefix.
+					// Actual subject may be AckInbox prefixed with s.acksSubsPrefix.
 					sub.ackSub, err = s.nc.Subscribe(ackSubject, s.processAckMsg)
 					if err == nil {
 						sub.ackSub.SetPendingLimits(-1, -1)
@@ -1381,8 +1379,10 @@ func (s *StanServer) initSubscriptions() {
 	}
 	// Optionally receive ACKs from clients using this pool of ack subscribers.
 	if s.acksSubsPoolSize > 0 {
+		s.acksSubsPrefix = "_STAN.subacks." + s.info.ClusterID + "."
+		s.acksSubsPrefixLen = len(s.acksSubsPrefix)
 		for i := 0; i < s.acksSubsPoolSize; i++ {
-			ackSub, err := s.nc.Subscribe(fmt.Sprintf("%s%d.>", pooledSubAcksPrefix, i),
+			ackSub, err := s.nc.Subscribe(fmt.Sprintf("%s%d.>", s.acksSubsPrefix, i),
 				s.processAckMsgFromAcksSubsPool)
 			if err != nil {
 				panic(fmt.Errorf("Could not subscribe to subscriptions acks subject: %v", err))
@@ -1685,7 +1685,7 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 			sub.Lock()
 			if !sub.removed {
 				// Don't use sub.AckInbox directly since it may
-				// need to be prefixed with pooledSubAcksPrefix.
+				// need to be prefixed with s.acksSubsPrefix
 				ctrlMsgNatsMsg.Subject = s.getAckSubject(sub)
 				if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
 					refs++
@@ -2495,7 +2495,7 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 			}
 			ctrlBytes, _ := ctrlMsg.Marshal()
 			// Don't use sub.AckInbox directly since it may
-			// need to be prefixed with pooledSubAcksPrefix.
+			// need to be prefixed with s.acksSubsPrefix.
 			ctrlMsgNatsMsg := &nats.Msg{
 				Subject: s.getAckSubject(sub),
 				Reply:   m.Reply,
@@ -2919,7 +2919,7 @@ func (s *StanServer) createAckInboxAndSubject() (string, string) {
 		ackInbox = fmt.Sprintf("%d.%s", acksSubsIndex, ackInbox)
 		// The client will send the acks to a subject that looks like:
 		// _STAN.subacks.2.abcdefghijk
-		ackInboxSubject = pooledSubAcksPrefix + ackInbox
+		ackInboxSubject = s.acksSubsPrefix + ackInbox
 	}
 	return ackInbox, ackInboxSubject
 }
@@ -2930,7 +2930,7 @@ func (s *StanServer) getAckSubject(sub *subState) string {
 	if sub.ackSub != nil {
 		return sub.ackSub.Subject
 	}
-	return pooledSubAcksPrefix + sub.AckInbox
+	return s.acksSubsPrefix + sub.AckInbox
 }
 
 func (s *StanServer) processSubscriptionsStart() {
@@ -2979,12 +2979,12 @@ func (s *StanServer) processAckMsg(m *nats.Msg) {
 // the pooled ackSub. This function extracts the AckInbox from
 // the incoming message's subject and then invoke processAckMsg.
 func (s *StanServer) processAckMsgFromAcksSubsPool(m *nats.Msg) {
-	if len(m.Subject) <= pooledSubAcksPrefixLen {
+	if len(m.Subject) <= s.acksSubsPrefixLen {
 		Errorf("STAN: Received ack with invalid subject: %v", m.Subject)
 		return
 	}
 	// Extract the actual AckInbox from the message's Subject
-	m.Subject = m.Subject[pooledSubAcksPrefixLen:]
+	m.Subject = m.Subject[s.acksSubsPrefixLen:]
 	s.processAckMsg(m)
 }
 
