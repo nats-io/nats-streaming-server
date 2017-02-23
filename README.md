@@ -304,6 +304,17 @@ file: {
     # files.
     # Can be slice_archive_script, slice_archive, slice_script
     slice_archive_script: "/home/nats-streaming/archive/script.sh"
+
+    # Channels translate to sub-directories under the file store's root
+    # directory. Each channel needs several files to maintain the state
+    # so the need for file descriptors increase with the number of
+    # channels. This option instructs the store to limit the concurrent
+    # use of file descriptors. Note that this is a soft limit and there
+    # may be cases when the store will use more than this number.
+    # A value of 0 means no limit. Setting a limit will probably have
+    # a performance impact.
+    # Can be file_descriptors_limit, fds_limit
+    fds_limit: 100
 }
 ```
 
@@ -510,6 +521,13 @@ and you have configured the script `/home/nats-streaming/archive_script.sh`. The
 Notice how the files have been renamed with the `.bak` extension so that they are not going to be recovered if
 the script leave those files in place.
 
+As previously described, each channel corresponds to a sub-directory that contains several files. It means that the need
+for file descriptors increase with the number of channels. In order to scale to ten or hundred thousands of channels,
+the option `fds_limit` (or command line parameter `--file_fds_limit`) may be considered to limit the total use of file descriptors.
+
+Note that this is a soft limit. It is possible for the store to use more file descriptors than the given limit if the
+number of concurrent read/writes to different channels is more than the said limit. It is also understood that this
+may affect performance since files may need to be closed/re-opened as needed.
 
 ### Store Interface
 
