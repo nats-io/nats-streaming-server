@@ -5847,6 +5847,8 @@ func TestFileStoreAcksPool(t *testing.T) {
 	s := RunServerWithOpts(opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
+	var allSubs []stan.Subscription
+
 	// Check server's ackSub pool
 	checkPoolSize := func() {
 		s.RLock()
@@ -5892,9 +5894,11 @@ func TestFileStoreAcksPool(t *testing.T) {
 	}
 	// Create 10 subs
 	for i := 0; i < totalSubs; i++ {
-		if _, err := sc.Subscribe("foo", cb, stan.AckWait(time.Second)); err != nil {
+		sub, err := sc.Subscribe("foo", cb, stan.AckWait(time.Second))
+		if err != nil {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
+		allSubs = append(allSubs, sub)
 	}
 	// Send 1 message
 	if err := sc.Publish("foo", []byte("hello")); err != nil {
@@ -5954,9 +5958,11 @@ func TestFileStoreAcksPool(t *testing.T) {
 		return nil
 	})
 	// Add another subscriber
-	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+	sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {})
+	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
+	allSubs = append(allSubs, sub)
 	// Restart server
 	s.Shutdown()
 	s = RunServerWithOpts(opts, nil)
@@ -5978,6 +5984,17 @@ func TestFileStoreAcksPool(t *testing.T) {
 	s = RunServerWithOpts(opts, nil)
 	// Check server's ackSub pool
 	checkPoolSize()
+	// Check that unsubscribe work ok
+	for _, sub := range allSubs {
+		if err := sub.Unsubscribe(); err != nil {
+			t.Fatalf("Error on unsubscribe: %v", err)
+		}
+	}
+	// Create a subscription without call unsubscribe and make
+	// sure it does not prevent closing of connection.
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
 	// Close the client connection
 	sc.Close()
 	nc.Close()

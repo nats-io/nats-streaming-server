@@ -77,6 +77,11 @@ const (
 
 	// Length of the NATS Inbox prefix
 	natsInboxPrefixLen = len(nats.InboxPrefix)
+	// First character of a NATS Inbox. When using the ackSub pool,
+	// ackInboxes will start with a number.
+	natsInboxFirstChar = '_'
+	// Length of a NATS inbox
+	natsInboxLen = 29 // _INBOX.<nuid: 22 characters>
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -558,7 +563,16 @@ func (ss *subStore) LookupByDurable(durableName string) *subState {
 
 // Lookup by ackInbox name.
 func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
+	aiLen := len(ackInbox)
 	ss.RLock()
+	if aiLen != natsInboxLen {
+		if aiLen <= ss.stan.acksSubsPrefixLen {
+			ss.RUnlock()
+			return nil
+		}
+		// Extract the actual AckInbox
+		ackInbox = ackInbox[ss.stan.acksSubsPrefixLen:]
+	}
 	sub := ss.acks[ackInbox]
 	ss.RUnlock()
 	return sub
@@ -767,6 +781,13 @@ func RunServer(ID string) *StanServer {
 
 // RunServerWithOpts will startup an embedded STAN server and a nats-server to support it.
 func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) *StanServer {
+	testInbox := nats.NewInbox()
+	// We rely heavily on the format of a NATS inbox.
+	// Since we vendor nats and nuid, it should not change without our knowledge.
+	if testInbox[0] != natsInboxFirstChar || len(testInbox) != natsInboxLen {
+		panic(fmt.Errorf("STAN: inbox format has changed, new inbox looks like: %v", testInbox))
+	}
+
 	// Run a nats server by default
 	sOpts := stanOpts
 	nOpts := natsOpts
@@ -1239,7 +1260,7 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 				// need to create an individual subscription for that,
 				// regardless if the server is using ackSub pool or not.
 				ackSubject := sub.AckInbox
-				createSub := sub.AckInbox[:natsInboxPrefixLen] == nats.InboxPrefix
+				createSub := ackSubject[0] == natsInboxFirstChar
 				if !createSub {
 					ackSubIndex := 0
 					// This server instance could have been started with a
@@ -1384,7 +1405,7 @@ func (s *StanServer) initSubscriptions() {
 		s.acksSubsPrefixLen = len(s.acksSubsPrefix)
 		for i := 0; i < s.acksSubsPoolSize; i++ {
 			ackSub, err := s.nc.Subscribe(fmt.Sprintf("%s%d.>", s.acksSubsPrefix, i),
-				s.processAckMsgFromAcksSubsPool)
+				s.processAckMsg)
 			if err != nil {
 				panic(fmt.Errorf("Could not subscribe to subscriptions acks subject: %v", err))
 			}
@@ -2974,19 +2995,6 @@ func (s *StanServer) processAckMsg(m *nats.Msg) {
 		return
 	}
 	s.processAck(cs, cs.UserData.(*subStore).LookupByAckInbox(m.Subject), ack.Sequence)
-}
-
-// processAckMsgFromAcksSubsPool gets an ACK message from one of
-// the pooled ackSub. This function extracts the AckInbox from
-// the incoming message's subject and then invoke processAckMsg.
-func (s *StanServer) processAckMsgFromAcksSubsPool(m *nats.Msg) {
-	if len(m.Subject) <= s.acksSubsPrefixLen {
-		Errorf("STAN: Received ack with invalid subject: %v", m.Subject)
-		return
-	}
-	// Extract the actual AckInbox from the message's Subject
-	m.Subject = m.Subject[s.acksSubsPrefixLen:]
-	s.processAckMsg(m)
 }
 
 // processAck processes an ack and if needed sends more messages.
