@@ -2491,10 +2491,12 @@ func (ms *FileMsgStore) backgroundTasks() {
 		// Shrink the buffer if applicable
 		if hasBuffer && time.Duration(timeTick-lastBufShrink) >= bufShrinkInterval {
 			ms.Lock()
-			file := ms.writeSlice.file
-			if ms.fm.lockFileIfOpened(file) {
-				ms.writer, _ = ms.bw.tryShrinkBuffer(file.handle)
-				ms.fm.unlockFile(file)
+			if ms.writeSlice != nil {
+				file := ms.writeSlice.file
+				if ms.fm.lockFileIfOpened(file) {
+					ms.writer, _ = ms.bw.tryShrinkBuffer(file.handle)
+					ms.fm.unlockFile(file)
+				}
 			}
 			ms.Unlock()
 			lastBufShrink = timeTick

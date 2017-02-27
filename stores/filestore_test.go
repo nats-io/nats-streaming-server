@@ -4324,3 +4324,22 @@ func TestFSMsgCache(t *testing.T) {
 		t.Fatal("Cache should be empty")
 	}
 }
+
+func TestFSMsgStoreBackgroundTaskCrash(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// For this test, reduce the buffer shrink interval
+	bufShrinkInterval = time.Second
+	defer func() {
+		bufShrinkInterval = defaultBufShrinkInterval
+	}()
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	fs.CreateChannel("foo", nil)
+	// Wait for background task to execute
+	time.Sleep(1500 * time.Millisecond)
+	// It should not have crashed.
+}
