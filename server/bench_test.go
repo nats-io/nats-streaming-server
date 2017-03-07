@@ -29,7 +29,10 @@ func benchRunServer(b *testing.B) *StanServer {
 	if storeType == stores.TypeFile {
 		opts.FilestoreDir = defaultDataStore
 	}
-	s := RunServerWithOpts(opts, nil)
+	s, err := RunServerWithOpts(opts, nil)
+	if err != nil {
+		b.Fatalf("Unable to start server: %v", err)
+	}
 	return s
 }
 
