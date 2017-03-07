@@ -2003,6 +2003,7 @@ func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subS
 	sub.RLock()
 	sortedSeqs := makeSortedSequences(sub.acksPending)
 	clientID := sub.ClientID
+	newOnHold := sub.newOnHold
 	sub.RUnlock()
 
 	if s.debug && len(sortedSeqs) > 0 {
@@ -2039,6 +2040,12 @@ func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subS
 		sub.Lock()
 		// Force delivery
 		s.sendMsgToSub(sub, m, forceDelivery)
+		sub.Unlock()
+	}
+	// Release newOnHold if needed.
+	if newOnHold {
+		sub.Lock()
+		sub.newOnHold = false
 		sub.Unlock()
 	}
 }
@@ -2874,6 +2881,9 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		sub.ackWait = time.Duration(sr.AckWaitInSecs) * time.Second
 		sub.stalled = false
 		if len(sub.acksPending) > 0 {
+			// We have a durable with pending messages, set newOnHold
+			// until we have performed the initial redelivery.
+			sub.newOnHold = true
 			s.setupAckTimer(sub, sub.ackWait)
 		}
 		sub.Unlock()

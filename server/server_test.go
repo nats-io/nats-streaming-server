@@ -6039,3 +6039,90 @@ func TestAckSubsSubjectsInPoolUseUniqueSubject(t *testing.T) {
 		t.Fatalf("Expected pooled ack sub to receive only 1 message, got %v", s2AcksReceived)
 	}
 }
+
+func TestNewOnHoldSetOnDurableRestart(t *testing.T) {
+	s := RunServer(clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	var (
+		dur stan.Subscription
+		err error
+	)
+	total := 50
+	count := 0
+	ch := make(chan bool)
+	dur, err = sc.Subscribe("foo", func(_ *stan.Msg) {
+		count++
+		if count == total {
+			dur.Close()
+			ch <- true
+		}
+	}, stan.SetManualAckMode(), stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	for i := 0; i < total; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+
+	// Start a go routine that will pump messages to the channel
+	// and make sure that the very first message we receive is
+	// the redelivered message.
+	failed := false
+	mu := sync.Mutex{}
+	count = 0
+	cb := func(m *stan.Msg) {
+		count++
+		if m.Sequence != uint64(count) && !m.Redelivered {
+			failed = true
+		}
+		if count == total {
+			mu.Lock()
+			dur.Unsubscribe()
+			mu.Unlock()
+			ch <- true
+		}
+	}
+	stop := make(chan struct{})
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if err := sc.Publish("foo", []byte("hello")); err != nil {
+					t.Fatalf("Unexpected error on publish: %v", err)
+				}
+			}
+		}
+	}()
+	// Restart durable
+	mu.Lock()
+	dur, err = sc.Subscribe("foo", cb, stan.DeliverAllAvailable(), stan.DurableName("dur"))
+	mu.Unlock()
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Make publishers stop
+	close(stop)
+	// Wait for go routine to finish
+	wg.Wait()
+	// Check our success
+	if failed {
+		t.Fatal("Did not receive the redelivered messages first")
+	}
+}
