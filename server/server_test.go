@@ -6041,7 +6041,7 @@ func TestAckSubsSubjectsInPoolUseUniqueSubject(t *testing.T) {
 }
 
 func TestNewOnHoldSetOnDurableRestart(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
