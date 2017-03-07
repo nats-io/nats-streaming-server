@@ -219,17 +219,13 @@ func TestRunServerFailureLogsCause(t *testing.T) {
 	stanLog.Unlock()
 
 	// We expect the server to fail to start
-	var s *StanServer
-	defer func() {
-		if s != nil {
-			t.Fatal("Expected no server to be returned")
-		}
-		if r := recover(); r != nil {
-			// We should get a trace in the log_
-			if !strings.Contains(d.msg, "Can't connect to NATS") {
-				t.Fatalf("Expected to get a cause as invalid connection, got: %v", d.msg)
-			}
-		}
-	}()
-	s = RunServerWithOpts(sOpts, nil)
+	s, err := RunServerWithOpts(sOpts, nil)
+	if err == nil {
+		s.Shutdown()
+		t.Fatal("Expected error, got none")
+	}
+	// We should get a trace in the log_
+	if !strings.Contains(d.msg, "available for connection") {
+		t.Fatalf("Expected to get a cause as invalid connection, got: %v", d.msg)
+	}
 }

@@ -214,8 +214,24 @@ func WaitTime(ch chan bool, timeout time.Duration) error {
 	return errors.New("timeout")
 }
 
+func runServerWithOpts(t *testing.T, sOpts *Options, nOpts *natsd.Options) *StanServer {
+	s, err := RunServerWithOpts(sOpts, nOpts)
+	if err != nil {
+		stackFatalf(t, err.Error())
+	}
+	return s
+}
+
+func runServer(t *testing.T, clusterName string) *StanServer {
+	s, err := RunServer(clusterName)
+	if err != nil {
+		stackFatalf(t, err.Error())
+	}
+	return s
+}
+
 // RunServerWithDebugTrace is a helper to assist debugging
-func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) *StanServer {
+func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) (*StanServer, error) {
 	var sOpts *Options
 
 	if opts == nil {
@@ -238,12 +254,12 @@ func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) *Stan
 
 func TestRunServer(t *testing.T) {
 	// Test passing nil options
-	s := RunServerWithOpts(nil, nil)
+	s := runServerWithOpts(t, nil, nil)
 	s.Shutdown()
 
 	// Test passing stan options, nil nats options
 	opts := GetDefaultOptions()
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 	clusterID := s.ClusterID()
 
@@ -256,7 +272,7 @@ func TestRunServer(t *testing.T) {
 	nOpts := &natsd.Options{}
 	nOpts.NoLog = true
 	nOpts.NoSigs = true
-	s = RunServerWithOpts(nil, nOpts)
+	s = runServerWithOpts(t, nil, nOpts)
 	defer s.Shutdown()
 }
 
@@ -272,7 +288,7 @@ func TestDefaultOptions(t *testing.T) {
 }
 
 func TestDoubleShutdown(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	s.Shutdown()
 
 	ch := make(chan bool)
@@ -313,7 +329,7 @@ func checkServerResponse(nc *nats.Conn, subj string, expectedError error, r resp
 }
 
 func TestInvalidRequests(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	// Use a bare NATS connection to send incorrect requests
@@ -363,7 +379,7 @@ func TestInvalidRequests(t *testing.T) {
 }
 
 func TestClientIDIsValid(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	// Use a bare NATS connection to send incorrect requests
@@ -440,7 +456,7 @@ func sendInvalidSubRequest(s *StanServer, nc *nats.Conn, req *pb.SubscriptionReq
 }
 
 func TestInvalidSubRequest(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	// Use a bare NATS connection to send incorrect requests
@@ -565,7 +581,7 @@ func sendInvalidUnsubRequest(s *StanServer, nc *nats.Conn, req *pb.UnsubscribeRe
 }
 
 func TestInvalidUnsubRequest(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	// Use a bare NATS connection to send incorrect requests
@@ -635,7 +651,7 @@ func TestInvalidUnsubRequest(t *testing.T) {
 }
 
 func TestDuplicateClientIDs(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	c1 := NewDefaultConnection(t)
@@ -653,7 +669,7 @@ func TestDuplicateClientIDs(t *testing.T) {
 }
 
 func TestRedelivery(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc, err := stan.Connect(clusterName, clientName)
@@ -722,7 +738,7 @@ func TestRedelivery(t *testing.T) {
 }
 
 func TestMultipleRedeliveries(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -792,7 +808,7 @@ func TestMultipleRedeliveries(t *testing.T) {
 }
 
 func TestRedeliveryRace(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -810,7 +826,7 @@ func TestRedeliveryRace(t *testing.T) {
 }
 
 func TestQueueRedelivery(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc, err := stan.Connect(clusterName, clientName)
@@ -886,7 +902,7 @@ func TestQueueRedelivery(t *testing.T) {
 // remaining member has a higher AckWait, the original expiration time is
 // maintained.
 func TestQueueSubsWithDifferentAckWait(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -971,7 +987,7 @@ func TestQueueSubsWithDifferentAckWait(t *testing.T) {
 }
 
 func TestDurableRedelivery(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	ch := make(chan bool)
@@ -1036,7 +1052,7 @@ func TestDurableRedelivery(t *testing.T) {
 }
 
 func TestDurableRestartWithMaxInflight(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	maxAckPending := 100
@@ -1091,7 +1107,7 @@ func TestDurableRestartWithMaxInflight(t *testing.T) {
 }
 
 func testStalledDelivery(t *testing.T, typeSub string) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -1202,7 +1218,7 @@ func testStalledRedelivery(t *testing.T, typeSub string) {
 	// defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	sc, nc := createConnectionWithNatsOpts(t, clientName,
@@ -1306,7 +1322,7 @@ func testStalledRedelivery(t *testing.T, typeSub string) {
 	}
 	// Restart server
 	s.Shutdown()
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 	// Wait for completion or error
 	select {
 	case <-rch:
@@ -1334,7 +1350,7 @@ func TestTooManyChannelsOnCreateSub(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
 	sOpts.MaxChannels = 1
-	s := RunServerWithOpts(sOpts, nil)
+	s := runServerWithOpts(t, sOpts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -1355,7 +1371,7 @@ func TestTooManyChannelsOnPublish(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
 	sOpts.MaxChannels = 1
-	s := RunServerWithOpts(sOpts, nil)
+	s := runServerWithOpts(t, sOpts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -1381,7 +1397,7 @@ func TestTooManySubs(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
 	sOpts.MaxSubscriptions = 1
-	s := RunServerWithOpts(sOpts, nil)
+	s := runServerWithOpts(t, sOpts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -1413,7 +1429,7 @@ func TestMaxMsgs(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
 	sOpts.MaxMsgs = 10
-	s := RunServerWithOpts(sOpts, nil)
+	s := runServerWithOpts(t, sOpts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -1444,7 +1460,7 @@ func TestMaxBytes(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
 	sOpts.MaxBytes = int64(msgSize * 10)
-	s := RunServerWithOpts(sOpts, nil)
+	s := runServerWithOpts(t, sOpts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -1474,7 +1490,7 @@ func TestRunServerWithFileStore(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	// Create our own NATS connection to control reconnect wait
@@ -1545,7 +1561,7 @@ func TestRunServerWithFileStore(t *testing.T) {
 	atomic.StoreInt32(&delivered, 0)
 
 	// Recover
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 
 	// Check server recovered state
 	// Should be 1 client
@@ -1697,7 +1713,7 @@ func checkDurable(t *testing.T, s *StanServer, channel, durName, durKey string) 
 }
 
 func TestDurableCanReconnect(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -1762,7 +1778,7 @@ func TestRecoveredDurableCanReconnect(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	sc := NewDefaultConnection(t)
@@ -1828,7 +1844,7 @@ func TestRecoveredDurableCanReconnect(t *testing.T) {
 	s.Shutdown()
 
 	// Recover
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 
 	// Connect again
 	sc = NewDefaultConnection(t)
@@ -1844,7 +1860,7 @@ func TestRecoveredDurableCanReconnect(t *testing.T) {
 }
 
 func TestDurableAckedMsgNotRedelivered(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -1948,7 +1964,7 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 }
 
 func TestDurableRemovedOnUnsubscribe(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -2035,7 +2051,7 @@ func checkDurableNoPendingAck(t *testing.T, s *StanServer, isSame bool,
 }
 
 func TestClientCrashAndReconnect(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	nc, err := nats.Connect(nats.DefaultURL)
@@ -2077,7 +2093,7 @@ func TestClientCrashAndReconnect(t *testing.T) {
 }
 
 func TestStartPositionNewOnly(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -2127,7 +2143,7 @@ func TestStartPositionNewOnly(t *testing.T) {
 }
 
 func TestStartPositionLastReceived(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -2193,7 +2209,7 @@ func TestStartPositionLastReceived(t *testing.T) {
 }
 
 func TestStartPositionFirstSequence(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -2272,7 +2288,7 @@ func TestStartPositionSequenceStart(t *testing.T) {
 	opts := GetDefaultOptions()
 	opts.ID = clusterName
 	opts.MaxMsgs = 10
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -2359,7 +2375,7 @@ func TestStartPositionSequenceStart(t *testing.T) {
 }
 
 func TestStartPositionTimeDelta(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -2444,7 +2460,7 @@ func TestStartPositionTimeDelta(t *testing.T) {
 }
 
 func TestStartPositionWithDurable(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -2526,7 +2542,7 @@ func TestStartPositionWithDurable(t *testing.T) {
 }
 
 func TestStartPositionWithDurableQueueSub(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -2608,7 +2624,7 @@ func TestStartPositionWithDurableQueueSub(t *testing.T) {
 }
 
 func TestStartPositionWithQueueSub(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -2681,7 +2697,7 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	sc := NewDefaultConnection(t)
@@ -2698,7 +2714,7 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	s.Shutdown()
 
 	// Restart the server
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 
 	// Check that client does not exist
 	if s.clients.Lookup(clientName) != nil {
@@ -2726,7 +2742,7 @@ func TestCheckClientHealth(t *testing.T) {
 	opts.ClientHBInterval = 50 * time.Millisecond
 	opts.ClientHBTimeout = 10 * time.Millisecond
 	opts.ClientHBFailCount = 5
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
 	nc, err := nats.Connect(nats.DefaultURL)
@@ -2766,7 +2782,7 @@ func TestCheckClientHealthDontKeepClientLock(t *testing.T) {
 	opts.ClientHBInterval = 50 * time.Millisecond
 	opts.ClientHBTimeout = 3 * time.Second
 	opts.ClientHBFailCount = 1
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
 	nc, err := nats.Connect(nats.DefaultURL)
@@ -2810,7 +2826,7 @@ func TestCheckClientHealthDontKeepClientLock(t *testing.T) {
 }
 
 func TestConnectsWithDupCID(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	// Not too small to avoid flapping tests.
@@ -3025,16 +3041,11 @@ func TestStoreTypeUnknown(t *testing.T) {
 	opts := GetDefaultOptions()
 	opts.StoreType = "MyType"
 
-	var failedServer *StanServer
-	defer func() {
-		if r := recover(); r == nil {
-			if failedServer != nil {
-				failedServer.Shutdown()
-			}
-			t.Fatal("Server should have failed with a panic because of unknown store type")
-		}
-	}()
-	failedServer = RunServerWithOpts(opts, nil)
+	s, err := RunServerWithOpts(opts, nil)
+	if s != nil || err == nil {
+		s.Shutdown()
+		t.Fatal("Expected server to fail to start, it did not")
+	}
 }
 
 func TestFileStoreMissingDirectory(t *testing.T) {
@@ -3045,16 +3056,11 @@ func TestFileStoreMissingDirectory(t *testing.T) {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = ""
 
-	var failedServer *StanServer
-	defer func() {
-		if r := recover(); r == nil {
-			if failedServer != nil {
-				failedServer.Shutdown()
-			}
-			t.Fatal("Server should have failed with a panic because missing directory")
-		}
-	}()
-	failedServer = RunServerWithOpts(opts, nil)
+	s, err := RunServerWithOpts(opts, nil)
+	if s != nil || err == nil {
+		s.Shutdown()
+		t.Fatal("Expected server to fail to start, it did not")
+	}
 }
 
 func TestFileStoreChangedClusterID(t *testing.T) {
@@ -3064,21 +3070,16 @@ func TestFileStoreChangedClusterID(t *testing.T) {
 	opts := GetDefaultOptions()
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = defaultDataStore
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	s.Shutdown()
 
-	var failedServer *StanServer
-	defer func() {
-		if r := recover(); r == nil {
-			if failedServer != nil {
-				failedServer.Shutdown()
-			}
-			t.Fatal("Server should have failed with a panic because of different IDs")
-		}
-	}()
 	// Change cluster ID, running the server should fail with a panic
 	opts.ID = "differentID"
-	failedServer = RunServerWithOpts(opts, nil)
+	s, err := RunServerWithOpts(opts, nil)
+	if s != nil || err == nil {
+		s.Shutdown()
+		t.Fatal("Expected server to fail to start, it did not")
+	}
 }
 
 func TestFileStoreRedeliveredPerSub(t *testing.T) {
@@ -3086,7 +3087,7 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	sc, nc := createConnectionWithNatsOpts(t, clientName,
@@ -3101,7 +3102,7 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 
 	// Restart server
 	s.Shutdown()
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 
 	// Message should not be marked as redelivered
 	cs := s.store.LookupChannel("foo")
@@ -3152,7 +3153,7 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	}
 	// Restart server
 	s.Shutdown()
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 
 	// Client should have been recovered
 	checkClients(t, s, 1)
@@ -3187,7 +3188,7 @@ func TestFileStoreDurableCanReceiveAfterRestart(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	ch := make(chan bool)
@@ -3219,7 +3220,7 @@ func TestFileStoreDurableCanReceiveAfterRestart(t *testing.T) {
 
 	// Restart server
 	s.Shutdown()
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 
 	// Send 1 message
 	if err := sc.Publish("foo", []byte("msg")); err != nil {
@@ -3236,7 +3237,7 @@ func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	// Create 2 clients
@@ -3258,7 +3259,7 @@ func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
 	opts.ClientHBInterval = 100 * time.Millisecond
 	opts.ClientHBTimeout = 10 * time.Millisecond
 	opts.ClientHBFailCount = 2
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 	// Check that there are 2 clients
 	checkClients(t, s, 2)
 	// Tweak their hbTimer interval to make the test short
@@ -3281,7 +3282,7 @@ func TestFileStoreRedeliveryCbPerSub(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	sc, nc := createConnectionWithNatsOpts(t, clientName,
@@ -3342,7 +3343,7 @@ func TestFileStoreRedeliveryCbPerSub(t *testing.T) {
 
 	// Restart server
 	s.Shutdown()
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 
 	// Client should have been recovered
 	checkClients(t, s, 1)
@@ -3367,7 +3368,7 @@ func TestFileStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	var err error
@@ -3418,7 +3419,7 @@ func TestFileStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
 
 	// Stop server
 	s.Shutdown()
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 
 	// Get subs
 	subs := s.clients.GetSubs(clientName)
@@ -3444,7 +3445,7 @@ func TestFileStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	var err error
@@ -3512,7 +3513,7 @@ func TestFileStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 	// Track unexpected delivery of non redelivered message
 	atomic.StoreInt32(&trackDelivered, 1)
 	// Restart server
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 
 	// Get subs
 	subs := s.clients.GetSubs(clientName)
@@ -3543,7 +3544,7 @@ func TestFileStoreAutomaticDeliveryOnRestart(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
 	toSend := int32(10)
@@ -3589,7 +3590,7 @@ func TestFileStoreAutomaticDeliveryOnRestart(t *testing.T) {
 	// Restart server
 	s.Shutdown()
 	s = nil
-	s2 := RunServerWithOpts(opts, nil)
+	s2 := runServerWithOpts(t, opts, nil)
 	// defer s.Shutdown()
 
 	// Release 	the consumer
@@ -3604,7 +3605,7 @@ func TestFileStoreAutomaticDeliveryOnRestart(t *testing.T) {
 }
 
 func TestSubscribeShrink(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -3647,7 +3648,7 @@ func TestGetSubStoreRace(t *testing.T) {
 
 	opts := GetDefaultOptions()
 	opts.MaxChannels = numChans + 1
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
 	errs := make(chan error, 2)
@@ -3700,27 +3701,20 @@ func TestEnsureStandAlone(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
 
-	s := RunServerWithOpts(sOpts, &nOpts)
+	s := runServerWithOpts(t, sOpts, &nOpts)
 	defer s.Shutdown()
 
 	// Start a second streaming server and route to the first, while using the
-	// same cluster ID.  It should panic.
-	var failedServer *StanServer
-
-	defer func() {
-		if r := recover(); r == nil {
-			if failedServer != nil {
-				failedServer.Shutdown()
-			}
-			t.Fatal("Server did not detect a duplicate instance")
-		}
-	}()
-
+	// same cluster ID.  It should fail
 	nOpts2 := DefaultNatsServerOptions
 	nOpts2.Port = 4333
 	nOpts2.Cluster.ListenStr = "nats://127.0.0.1:5551"
 	nOpts2.RoutesStr = "nats://127.0.0.1:5550"
-	failedServer = RunServerWithOpts(sOpts, &nOpts2)
+	s2, err := RunServerWithOpts(sOpts, &nOpts2)
+	if s2 != nil || err == nil {
+		s2.Shutdown()
+		t.Fatal("Expected server to fail to start, it did not")
+	}
 }
 
 func TestAuthenticationUserPass(t *testing.T) {
@@ -3731,7 +3725,7 @@ func TestAuthenticationUserPass(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
 
-	s := RunServerWithOpts(sOpts, &nOpts)
+	s := runServerWithOpts(t, sOpts, &nOpts)
 	defer s.Shutdown()
 
 	_, err := nats.Connect(fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port))
@@ -3758,7 +3752,7 @@ func TestAuthenticationUserOnly(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
 
-	s := RunServerWithOpts(sOpts, &nOpts)
+	s := runServerWithOpts(t, sOpts, &nOpts)
 	defer s.Shutdown()
 
 	_, err := nats.Connect(fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port))
@@ -3780,7 +3774,7 @@ func TestAuthenticationToken(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
 
-	s := RunServerWithOpts(sOpts, &nOpts)
+	s := runServerWithOpts(t, sOpts, &nOpts)
 	defer s.Shutdown()
 
 	_, err := nats.Connect(fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port))
@@ -3807,7 +3801,7 @@ func TestAuthenticationMultiUser(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
 
-	s := RunServerWithOpts(sOpts, nOpts)
+	s := runServerWithOpts(t, sOpts, nOpts)
 	defer s.Shutdown()
 
 	_, err = nats.Connect(fmt.Sprintf("nats://%s:%d", nOpts.Host, nOpts.Port))
@@ -3835,7 +3829,7 @@ func TestTLSSuccess(t *testing.T) {
 	sOpts.ClientCA = "../test/certs/ca.pem"
 	sOpts.ClientKey = "../test/certs/client-key.pem"
 
-	s := RunServerWithOpts(sOpts, &nOpts)
+	s := runServerWithOpts(t, sOpts, &nOpts)
 	defer s.Shutdown()
 }
 
@@ -3850,7 +3844,7 @@ func TestTLSSuccessSecure(t *testing.T) {
 	sOpts.ID = clusterName
 	sOpts.Secure = true
 
-	s := RunServerWithOpts(sOpts, &nOpts)
+	s := runServerWithOpts(t, sOpts, &nOpts)
 	defer s.Shutdown()
 }
 
@@ -3864,16 +3858,11 @@ func TestTLSFailServerTLSClientPlain(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
 
-	var failedServer *StanServer
-	defer func() {
-		if r := recover(); r == nil {
-			if failedServer != nil {
-				failedServer.Shutdown()
-			}
-			t.Fatal("Server did not fail with invalid TLS configuration")
-		}
-	}()
-	failedServer = RunServerWithOpts(sOpts, &nOpts)
+	s, err := RunServerWithOpts(sOpts, &nOpts)
+	if s != nil || err == nil {
+		s.Shutdown()
+		t.Fatal("Expected server to fail to start, it did not")
+	}
 }
 
 func TestTLSFailClientTLSServerPlain(t *testing.T) {
@@ -3885,16 +3874,11 @@ func TestTLSFailClientTLSServerPlain(t *testing.T) {
 	sOpts.ClientCA = "../test/certs/ca.pem"
 	sOpts.ClientKey = "../test/certs/client-key.pem"
 
-	var failedServer *StanServer
-	defer func() {
-		if r := recover(); r == nil {
-			if failedServer != nil {
-				failedServer.Shutdown()
-			}
-			t.Fatal("Server did not fail with invalid TLS configuration")
-		}
-	}()
-	failedServer = RunServerWithOpts(sOpts, &nOpts)
+	s, err := RunServerWithOpts(sOpts, &nOpts)
+	if s != nil || err == nil {
+		s.Shutdown()
+		t.Fatal("Expected server to fail to start, it did not")
+	}
 }
 
 func TestIOChannel(t *testing.T) {
@@ -3906,7 +3890,7 @@ func TestIOChannel(t *testing.T) {
 	}
 
 	run := func(opts *Options) {
-		s := RunServerWithOpts(opts, nil)
+		s := runServerWithOpts(t, opts, nil)
 		defer s.Shutdown()
 
 		sc := NewDefaultConnection(t)
@@ -3968,7 +3952,7 @@ func TestDontEmbedNATSNotRunning(t *testing.T) {
 	// Make sure that with empty string (normally the default), we
 	// can run the streaming server (will embed NATS)
 	sOpts.NATSServerURL = ""
-	s := RunServerWithOpts(sOpts, nil)
+	s := runServerWithOpts(t, sOpts, nil)
 	s.Shutdown()
 
 	// Point to a NATS Server that will not be running
@@ -3976,15 +3960,11 @@ func TestDontEmbedNATSNotRunning(t *testing.T) {
 
 	// Don't start a NATS Server, starting streaming server
 	// should fail.
-
-	var failedServer *StanServer
-	defer func() {
-		if r := recover(); r == nil {
-			failedServer.Shutdown()
-			t.Fatal("Expected streaming server to fail to start")
-		}
-	}()
-	failedServer = RunServerWithOpts(sOpts, nil)
+	s, err := RunServerWithOpts(sOpts, nil)
+	if s != nil || err == nil {
+		s.Shutdown()
+		t.Fatal("Expected server to fail to start, it did not")
+	}
 }
 
 func TestDontEmbedNATSRunning(t *testing.T) {
@@ -3997,7 +3977,7 @@ func TestDontEmbedNATSRunning(t *testing.T) {
 	natsd := natsdTest.RunServer(&nOpts)
 	defer natsd.Shutdown()
 
-	s := RunServerWithOpts(sOpts, &nOpts)
+	s := runServerWithOpts(t, sOpts, &nOpts)
 	defer s.Shutdown()
 }
 
@@ -4021,7 +4001,7 @@ func TestDontEmbedNATSMultipleURLs(t *testing.T) {
 	}
 	for _, url := range workingURLs {
 		sOpts.NATSServerURL = url
-		s := RunServerWithOpts(sOpts, &nOpts)
+		s := runServerWithOpts(t, sOpts, &nOpts)
 		s.Shutdown()
 	}
 
@@ -4035,22 +4015,17 @@ func TestDontEmbedNATSMultipleURLs(t *testing.T) {
 		" ",
 	}
 	for _, url := range notWorkingURLs {
-		func() {
-			var s *StanServer
-			defer func() {
-				if r := recover(); r == nil {
-					s.Shutdown()
-					t.Fatalf("Expected streaming server to fail to start with url=%v", url)
-				}
-			}()
-			sOpts.NATSServerURL = url
-			s = RunServerWithOpts(sOpts, &nOpts)
-		}()
+		sOpts.NATSServerURL = url
+		s, err := RunServerWithOpts(sOpts, &nOpts)
+		if s != nil || err == nil {
+			s.Shutdown()
+			t.Fatalf("Expected streaming server to fail to start with url=%v", url)
+		}
 	}
 }
 
 func TestQueueMaxInFlight(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -4085,7 +4060,7 @@ func TestQueueMaxInFlight(t *testing.T) {
 
 func TestAckTimerSetOnStalledSub(t *testing.T) {
 
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -4152,7 +4127,7 @@ func TestFileStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
 
 	opts := getTestDefaultOptsForFileStore()
 	opts.NATSServerURL = nats.DefaultURL
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	sc := NewDefaultConnection(t)
@@ -4210,7 +4185,7 @@ func TestFileStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
 	// Stop the Streaming server
 	s.Shutdown()
 	// Restart the Streaming server
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 
 	// We should not get any message, if we do, this is an error
 	if err := WaitTime(failCh, time.Second); err == nil {
@@ -4228,7 +4203,7 @@ func TestFileStoreNoPanicOnShutdown(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
 	// Start a go routine that keeps sending messages
@@ -4266,7 +4241,7 @@ func TestNonDurableRemovedFromStoreOnConnClose(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -4296,7 +4271,7 @@ func TestNonDurableRemovedFromStoreOnConnClose(t *testing.T) {
 }
 
 func TestQueueGroupRemovedOnLastMemberLeaving(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -4355,7 +4330,7 @@ func TestQueueGroupRemovedOnLastMemberLeaving(t *testing.T) {
 }
 
 func TestQueueSubscriberTransferPendingMsgsOnClose(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -4410,7 +4385,7 @@ func TestFileStoreQueueSubLeavingUpdateQGroupLastSent(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	sc := NewDefaultConnection(t)
@@ -4452,7 +4427,7 @@ func TestFileStoreQueueSubLeavingUpdateQGroupLastSent(t *testing.T) {
 	sub2.Unsubscribe()
 	// Restart server
 	s.Shutdown()
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 	// Send a third message
 	if err := sc.Publish("foo", []byte("msg3")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
@@ -4510,7 +4485,7 @@ func checkQueueGroupSize(t *testing.T, s *StanServer, channelName, groupName str
 }
 
 func TestBasicDurableQueueSub(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc1 := NewDefaultConnection(t)
@@ -4576,7 +4551,7 @@ func TestBasicDurableQueueSub(t *testing.T) {
 }
 
 func TestDurableAndNonDurableQueueSub(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -4628,7 +4603,7 @@ func TestDurableAndNonDurableQueueSub(t *testing.T) {
 }
 
 func TestDurableQueueSubRedeliveryOnRejoin(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -4719,7 +4694,7 @@ func TestFileStoreDurableQueueSub(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	sc1 := NewDefaultConnection(t)
@@ -4765,7 +4740,7 @@ func TestFileStoreDurableQueueSub(t *testing.T) {
 	}
 	// Stop and restart the server
 	s.Shutdown()
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 	// Create another client connection
 	sc2, err = stan.Connect(clusterName, "sc2cid")
 	if err != nil {
@@ -4789,7 +4764,7 @@ func TestFileStoreDurableQueueSubRedeliveryOnRejoin(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	sc := NewDefaultConnection(t)
@@ -4823,7 +4798,7 @@ func TestFileStoreDurableQueueSubRedeliveryOnRejoin(t *testing.T) {
 	// Stop server
 	s.Shutdown()
 	// Restart it
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 	// Connect
 	sc = NewDefaultConnection(t)
 	defer sc.Close()
@@ -4869,7 +4844,7 @@ func TestIsValidSubject(t *testing.T) {
 func TestDroppedMessagesOnSendToSub(t *testing.T) {
 	opts := GetDefaultOptions()
 	opts.MaxMsgs = 3
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -4928,7 +4903,7 @@ func TestDroppedMessagesOnSendToSub(t *testing.T) {
 func TestDroppedMessagesOnSendToQueueSub(t *testing.T) {
 	opts := GetDefaultOptions()
 	opts.MaxMsgs = 3
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -4986,7 +4961,7 @@ func TestDroppedMessagesOnSendToQueueSub(t *testing.T) {
 func TestDroppedMessagesOnRedelivery(t *testing.T) {
 	opts := GetDefaultOptions()
 	opts.MaxMsgs = 3
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -5058,7 +5033,7 @@ func TestPerChannelLimits(t *testing.T) {
 		sl.AddPerChannel("foo", &clfoo)
 		sl.AddPerChannel("bar", &clbar)
 
-		s := RunServerWithOpts(opts, nil)
+		s := runServerWithOpts(t, opts, nil)
 		defer s.Shutdown()
 
 		sc := NewDefaultConnection(t)
@@ -5113,7 +5088,7 @@ func TestPerChannelLimits(t *testing.T) {
 }
 
 func TestProtocolOrder(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -5362,7 +5337,7 @@ func TestDurableClosedNotUnsubscribed(t *testing.T) {
 }
 
 func closeSubscriber(t *testing.T, subType string) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	sc := NewDefaultConnection(t)
@@ -5534,7 +5509,7 @@ func TestFileStoreQMemberRemovedFromStore(t *testing.T) {
 	defer cleanupDatastore(t, defaultDataStore)
 
 	opts := getTestDefaultOptsForFileStore()
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	sc1 := NewDefaultConnection(t)
@@ -5575,7 +5550,7 @@ func TestFileStoreQMemberRemovedFromStore(t *testing.T) {
 
 	// Restart the server
 	s.Shutdown()
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
@@ -5615,7 +5590,7 @@ func TestIgnoreFailedHBInAckRedeliveryForQGroup(t *testing.T) {
 	opts.ClientHBInterval = 100 * time.Millisecond
 	opts.ClientHBTimeout = time.Millisecond
 	opts.ClientHBFailCount = 100000
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
 	count := 0
@@ -5666,7 +5641,7 @@ func TestIgnoreFailedHBInAckRedeliveryForQGroup(t *testing.T) {
 }
 
 func TestAckPublisherBufSize(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	nc, err := nats.Connect(nats.DefaultURL)
@@ -5713,7 +5688,7 @@ func TestAckPublisherBufSize(t *testing.T) {
 }
 
 func TestDontSendEmptyMsgProto(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	nc, err := nats.Connect(nats.DefaultURL, nats.NoReconnect())
@@ -5751,7 +5726,7 @@ func TestDontSendEmptyMsgProto(t *testing.T) {
 }
 
 func TestMsgsNotSentToSubBeforeSubReqResponse(t *testing.T) {
-	s := RunServer(clusterName)
+	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
 	// Use a bare NATS connection to send incorrect requests
@@ -5844,7 +5819,7 @@ func TestFileStoreAcksPool(t *testing.T) {
 
 	opts := getTestDefaultOptsForFileStore()
 	opts.AckSubsPoolSize = 5
-	s := RunServerWithOpts(opts, nil)
+	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	var allSubs []stan.Subscription
@@ -5926,7 +5901,7 @@ func TestFileStoreAcksPool(t *testing.T) {
 	// Stop server and restart with lower pool size
 	s.Shutdown()
 	opts.AckSubsPoolSize = 2
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 	// Check server's ackSub pool
 	checkPoolSize()
 	// Check that AckInbox with ackSubIndex > AcksPoolSize-1 have
@@ -5947,7 +5922,7 @@ func TestFileStoreAcksPool(t *testing.T) {
 	// Restart server with no acksSub pool
 	s.Shutdown()
 	opts.AckSubsPoolSize = 0
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 	// Check server's ackSub pool
 	checkPoolSize()
 	// Check that all subs have an individual ackSub
@@ -5965,7 +5940,7 @@ func TestFileStoreAcksPool(t *testing.T) {
 	allSubs = append(allSubs, sub)
 	// Restart server
 	s.Shutdown()
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 	// Check that the new sub's AckInbox is _INBOX as usual.
 	checkAckSubs(totalSubs+1, func(sub *subState) error {
 		if int(sub.ID) > totalSubs {
@@ -5981,7 +5956,7 @@ func TestFileStoreAcksPool(t *testing.T) {
 	// Restart server with ackPool
 	s.Shutdown()
 	opts.AckSubsPoolSize = 2
-	s = RunServerWithOpts(opts, nil)
+	s = runServerWithOpts(t, opts, nil)
 	// Check server's ackSub pool
 	checkPoolSize()
 	// Check that unsubscribe work ok
@@ -6006,12 +5981,12 @@ func TestAckSubsSubjectsInPoolUseUniqueSubject(t *testing.T) {
 	opts := GetDefaultOptions()
 	opts.ID = clusterName
 	opts.AckSubsPoolSize = 1
-	s1 := RunServerWithOpts(opts, nil)
+	s1 := runServerWithOpts(t, opts, nil)
 	defer s1.Shutdown()
 
 	opts.NATSServerURL = nats.DefaultURL
 	opts.ID = "otherCluster"
-	s2 := RunServerWithOpts(opts, nil)
+	s2 := runServerWithOpts(t, opts, nil)
 	defer s2.Shutdown()
 
 	sc1 := NewDefaultConnection(t)

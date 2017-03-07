@@ -116,7 +116,11 @@ func main() {
 	// override the NoSigs for NATS since we have our own signal handler below
 	nOpts.NoSigs = true
 	stand.ConfigureLogger(sOpts, nOpts)
-	s := stand.RunServerWithOpts(sOpts, nOpts)
+	s, err := stand.RunServerWithOpts(sOpts, nOpts)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
 	go func() {
