@@ -26,6 +26,7 @@ var testDefaultStoreLimits = StoreLimits{
 			MaxSubscriptions: 1000,
 		},
 	},
+	false,
 	nil,
 }
 

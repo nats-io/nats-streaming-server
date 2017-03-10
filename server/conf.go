@@ -176,6 +176,11 @@ func parseStoreLimits(itf interface{}, opts *Options) error {
 			if err := parsePerChannelLimits(v, opts); err != nil {
 				return err
 			}
+		case "unknown_channels_disallowed":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.UnknownChannelsDisallowed = v.(bool)
 		default:
 			// Check for the global limits (MaxMsgs, MaxBytes, etc..)
 			if err := parseChannelLimits(&opts.ChannelLimits, k, name, v); err != nil {

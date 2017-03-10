@@ -113,6 +113,9 @@ func TestParseConfig(t *testing.T) {
 	if opts.MaxSubscriptions != 15 {
 		t.Fatalf("Expected MaxSubscriptions to be 15, got %v", opts.MaxSubscriptions)
 	}
+	if !opts.UnknownChannelsDisallowed {
+		t.Fatalf("Expected UnknownChannelsDisallowed to be true, got false")
+	}
 	if len(opts.PerChannel) != 2 {
 		t.Fatalf("Expected PerChannel map to have 2 elements, got %v", len(opts.PerChannel))
 	}

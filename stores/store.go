@@ -40,6 +40,8 @@ type StoreLimits struct {
 	MaxChannels int
 	// Global limits. Any 0 value means that the limit is ignored (unlimited).
 	ChannelLimits
+	// Channels not referenced in PerChannel cannot be subscribed.
+	UnknownChannelsDisallowed bool
 	// Per-channel limits. If a limit for a channel in this map is 0,
 	// the corresponding global limit (specified above) is used.
 	PerChannel map[string]*ChannelLimits
@@ -86,6 +88,7 @@ var DefaultStoreLimits = StoreLimits{
 			MaxSubscriptions: 1000,
 		},
 	},
+	false,
 	nil,
 }
 
