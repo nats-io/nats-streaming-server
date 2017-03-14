@@ -5712,8 +5712,8 @@ func TestDontSendEmptyMsgProto(t *testing.T) {
 	sub := subs[0]
 
 	defer func() {
-		if r := recover(); r != nil {
-			// Ok!
+		if r := recover(); r == nil {
+			t.Fatal("Server should have panic'ed")
 		}
 	}()
 
@@ -5721,8 +5721,6 @@ func TestDontSendEmptyMsgProto(t *testing.T) {
 	sub.Lock()
 	s.sendMsgToSub(sub, m, false)
 	sub.Unlock()
-
-	t.Fatal("Server should have panic'ed")
 }
 
 func TestMsgsNotSentToSubBeforeSubReqResponse(t *testing.T) {
