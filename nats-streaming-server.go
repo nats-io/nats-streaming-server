@@ -195,6 +195,9 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.Int64("file_fds_limit", stores.DefaultFileStoreOptions.FileDescriptorsLimit, "FileStoreOpts.FileDescriptorsLimit")
 	flag.Int("io_batch_size", stand.DefaultIOBatchSize, "IOBatchSize")
 	flag.Int64("io_sleep_time", stand.DefaultIOSleepTime, "IOSleepTime")
+	flag.String("ft_group", "", "FTGroupName")
+	flag.Int("ft_quorum", 1, "FTQuorum")
+	flag.String("ft_logfile", "", "FTLogFile")
 
 	// NATS options
 	var showVersion bool
