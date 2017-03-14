@@ -292,7 +292,7 @@ func (s *StanServer) lookupOrCreateChannel(channel string) (*stores.ChannelStore
 	if cs := s.store.LookupChannel(channel); cs != nil {
 		return cs, nil
 	}
-	if s.opts.UnknownChannelsDisallowed {
+	if s.opts.UnknownChannelsDisallowed && !s.store.IsPredeclaredChannel(channel) {
 		return nil, ErrUnknownChannel
 	}
 	// It's possible that more than one go routine comes here at the same

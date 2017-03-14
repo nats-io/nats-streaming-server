@@ -258,6 +258,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "store_limits:{max_age:false}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_age:\"foo\"}", wrongTimeErr)
 	expectFailureFor(t, "store_limits:{max_subs:false}", wrongTypeErr)
+	expectFailureFor(t, "store_limits:{unknown_channels_disallowed:1}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_msgs:false}}}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_bytes:false}}}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_age:\"1h:0m\"}}}", wrongTimeErr)

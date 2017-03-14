@@ -159,6 +159,10 @@ type Store interface {
 	// does not exist.
 	LookupChannel(channel string) *ChannelStore
 
+	// IsPredeclaredChannel returns true if this store has
+	// predeclared this channel in store_limits.channels hash.
+	IsPredeclaredChannel(channel string) bool
+
 	// HasChannel returns true if this store has any channel.
 	HasChannel() bool
 
