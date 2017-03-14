@@ -4,9 +4,19 @@ package util
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
-	"os"
 )
+
+// ErrAlreadyLocked is used to indicate that a lock cannot be
+// immediately acquired.
+var ErrAlreadyLocked = errors.New("unable to acquire the lock")
+
+// LockFile is an interface for lock files utility.
+type LockFile interface {
+	io.Closer
+	IsClosed() bool
+}
 
 // ByteOrder specifies how to convert byte sequences into 16-, 32-, or 64-bit
 // unsigned integers.
@@ -53,7 +63,7 @@ func ReadInt(r io.Reader) (int, error) {
 
 // CloseFile closes the given file and report the possible error only
 // if the given error `err` is not already set.
-func CloseFile(err error, f *os.File) error {
+func CloseFile(err error, f io.Closer) error {
 	if lerr := f.Close(); lerr != nil && err == nil {
 		err = lerr
 	}
