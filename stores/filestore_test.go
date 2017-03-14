@@ -725,7 +725,6 @@ func TestFSBasicRecovery(t *testing.T) {
 					t.Fatalf("Unexpected recovered pending seqno for sub1: %v", seq)
 				}
 			}
-			break
 		case "bar":
 			if subID != sub2 {
 				t.Fatalf("Invalid subscription id. Expected %v, got %v", sub2, subID)
@@ -735,7 +734,6 @@ func TestFSBasicRecovery(t *testing.T) {
 					t.Fatalf("Unexpected recovered pending seqno for sub2: %v", seq)
 				}
 			}
-			break
 		default:
 			t.Fatalf("Recovered unknown channel: %v", channel)
 		}
