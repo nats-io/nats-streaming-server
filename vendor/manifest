@@ -62,6 +62,14 @@
 			"notests": true
 		},
 		{
+			"importpath": "github.com/nats-io/graft",
+			"repository": "https://github.com/nats-io/graft",
+			"vcs": "git",
+			"revision": "4629e3c17aa511b7f79fcba42d0527ad4d80ef12",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/nats-io/nuid",
 			"repository": "https://github.com/nats-io/nuid",
 			"vcs": "git",
