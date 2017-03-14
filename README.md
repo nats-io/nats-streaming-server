@@ -11,7 +11,23 @@ NATS Streaming provides the following high-level feature set.
 - Replay/Restart
 - Last Value Semantics
 
-### Getting Started
+# Important Changes
+
+## Version `v0.4.0`
+
+The Store interface was updated. There are 2 news APIs:
+
+* `Recover()`: The recovery of persistent state used to be assumed to be done in the constructor
+of the store implementation.<br>
+It is now separate and specified with this API. The server will first instantiate the store, in
+which some initialization or checks can be made.<br>
+If no error is reported, it will then proceed with calling `Recover()`, which will returned the recovered state.<br>
+* `GetExclusiveLock()`: In Fault Tolerance mode, when a server is elected leader, it will attempt to get an exclusive
+lock to the shared storage before proceeding.<br>
+
+Check the [Store interface](https://github.com/nats-io/nats-streaming-server/blob/master/stores/store.go) for more information.
+
+# Getting Started
 
 The best way to get the NATS Streaming Server is to use one of the pre-built release binaries which are available for OSX, Linux (x86-64/ARM), Windows. Instructions for using these binaries are on the GitHub releases page.
 
@@ -19,7 +35,7 @@ Of course you can build the latest version of the server from the master branch.
 
 See also the NATS Streaming Quickstart [tutorial](https://nats.io/documentation/streaming/nats-streaming-quickstart/).
 
-### Running
+# Running
 
 The NATS Streaming Server embeds a NATS Server. Starting the server with no argument will give you a server with default settings and a memory based store.
 
@@ -44,9 +60,9 @@ The server will be started and listening for client connections on port 4222 (th
 
 Note that you do not need to start the embedded NATS Server. It is started automatically when you run the NATS Streaming Server. See below for details on how you secure the embedded NATS Server.
 
-## Configuring
+# Configuring
 
-### Command line arguments
+## Command line arguments
 
 The NATS Streaming Server accepts command line arguments to control its behavior. There is a set of parameters specific to the NATS Streaming Server and some to the embedded NATS Server.
 
@@ -135,7 +151,7 @@ Common Options:
         --help_tls                   TLS help.
 ```
 
-### Configuration file
+## Configuration file
 
 You can use a configuration file to configure the options specific to the NATS Streaming server.
 
@@ -318,7 +334,7 @@ file: {
 }
 ```
 
-### Store Limits
+## Store Limits
 
 The `store_limits` section in the configuration file (or the command line parameters
 `-mc`, `-mm`, etc..) allow you to configure the global limits.
@@ -529,7 +545,7 @@ Note that this is a soft limit. It is possible for the store to use more file de
 number of concurrent read/writes to different channels is more than the said limit. It is also understood that this
 may affect performance since files may need to be closed/re-opened as needed.
 
-### Store Interface
+## Store Interface
 
 Every store implementation follows the [Store interface](https://github.com/nats-io/nats-streaming-server/blob/master/stores/store.go).
 

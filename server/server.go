@@ -31,7 +31,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.3.9"
+	VERSION = "0.4.0"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -169,7 +169,7 @@ type StanServer struct {
 	// at 64bit. See https://github.com/golang/go/issues/599
 	ioChannelStatsMaxBatchSize int64 // stats of the max number of messages than went into a single batch
 
-	sync.RWMutex
+	mu         sync.RWMutex
 	shutdown   bool
 	serverID   string
 	info       spb.ServerInfo // Contains cluster ID and subjects
@@ -851,12 +851,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 	// Create the store. So far either memory or file-based.
 	switch sOpts.StoreType {
 	case stores.TypeFile:
-		// The dir must be specified
-		if sOpts.FilestoreDir == "" {
-			err = fmt.Errorf("for %v stores, root directory must be specified", stores.TypeFile)
-			break
-		}
-		store, recoveredState, err = stores.NewFileStore(sOpts.FilestoreDir, limits,
+		store, err = stores.NewFileStore(sOpts.FilestoreDir, limits,
 			stores.AllOptions(&sOpts.FileStoreOpts))
 	case stores.TypeMemory:
 		store, err = stores.NewMemoryStore(limits)
@@ -879,6 +874,10 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 	// Create clientStore
 	s.clients = &clientStore{store: s.store}
 
+	recoveredState, err = store.Recover()
+	if err != nil {
+		goto handleError
+	}
 	if recoveredState != nil {
 		// Copy content
 		s.info = *recoveredState.Info
@@ -1497,13 +1496,13 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 		// to check on shutdown status. Note that s.wg is for all server's
 		// go routines, not specific to duplicate CID handling. Use server's
 		// lock here.
-		s.Lock()
+		s.mu.Lock()
 		shutdown := s.shutdown
 		if !shutdown {
 			// Assume we are going to start a go routine.
 			s.wg.Add(1)
 		}
-		s.Unlock()
+		s.mu.Unlock()
 
 		if shutdown {
 			// The client will timeout on connect
@@ -3244,9 +3243,9 @@ func (s *StanServer) ClusterID() string {
 func (s *StanServer) Shutdown() {
 	Noticef("STAN: Shutting down.")
 
-	s.Lock()
+	s.mu.Lock()
 	if s.shutdown {
-		s.Unlock()
+		s.mu.Unlock()
 		return
 	}
 
@@ -3275,7 +3274,7 @@ func (s *StanServer) Shutdown() {
 	} else {
 		waitForIOStoreLoop = false
 	}
-	s.Unlock()
+	s.mu.Unlock()
 
 	// Make sure the StoreIOLoop returns before closing the Store
 	if waitForIOStoreLoop {
