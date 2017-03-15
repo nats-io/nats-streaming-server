@@ -35,6 +35,9 @@ Streaming Server Options:
     -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
     -hbf, --hb_fail_count <number>   Number of failed heartbeats before server closes the client connection
           --ack_subs <number>        Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription)
+          --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+          --ft_quorum <number>       Number of servers needed in order to elect a leader.
+          --ft_logfile <string>      FT logfile of this member (used for leader election). This file must not be shared by members.
 
 Streaming Server File Store Options:
     --file_compact_enabled           Enable file compaction

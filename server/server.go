@@ -634,8 +634,8 @@ type Options struct {
 	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
 	AckSubsPoolSize    int           // Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription).
 	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
-	FTQuorum           int           // Number of servers needed for the group to be elect a leader.
-	FTLogFile          string        // FT logfile of this member (used for leader election), must be unique per member.
+	FTQuorum           int           // Number of servers needed in order to elect a leader.
+	FTLogFile          string        // FT logfile of this member (used for leader election). This file must not be shared by members.
 }
 
 // DefaultOptions are default options for the STAN server
