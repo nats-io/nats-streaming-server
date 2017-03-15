@@ -303,6 +303,15 @@ func TestDoubleShutdown(t *testing.T) {
 	}
 }
 
+func TestServerStates(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+	checkState(t, s, Standalone)
+	s.Shutdown()
+	checkState(t, s, Shutdown)
+	// FT states are checked in ft_test.go
+}
+
 type response interface {
 	Unmarshal([]byte) error
 }

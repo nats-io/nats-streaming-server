@@ -863,12 +863,11 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// properly shutdown. To do so, we recover from the panic in order to
 	// call Shutdown, then issue the original panic.
 	defer func() {
+		// We used to issue panic for common errors but now return error
+		// instead. Still we want to log the reason for the panic.
 		if r := recover(); r != nil {
 			s.Shutdown()
-			// Log the reason for the panic. We use noticef here since
-			// Fatalf() would cause an exit.
 			Noticef("Failed to start: %v", r)
-			// Issue the original panic now that the store is closed.
 			panic(r)
 		} else if returnedError != nil {
 			s.Shutdown()

@@ -157,6 +157,11 @@ func checkState(t *testing.T, s *StanServer, expectedState State) {
 		stackFatalf(t, "Expected server state to be %v, got %v (ft error=%v)",
 			expectedState.String(), state.String(), s.FTStartupError())
 	}
+	// Repeat test with String() too...
+	if stateStr := s.State().String(); stateStr != expectedState.String() {
+		stackFatalf(t, "Expected server state to be %v, got %v (ft error=%v)",
+			expectedState.String(), stateStr, s.FTStartupError())
+	}
 }
 
 func waitForElection() {

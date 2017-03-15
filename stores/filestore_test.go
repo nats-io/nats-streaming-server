@@ -424,6 +424,19 @@ func TestFSBasicCreate(t *testing.T) {
 	testBasicCreate(t, fs, TypeFile)
 }
 
+func TestFSNoDirectoryError(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs, err := NewFileStore("", nil)
+	if err == nil || !strings.Contains(err.Error(), "specified") {
+		if fs != nil {
+			fs.Close()
+		}
+		t.Fatalf("Expected error about missing root directory, got: %v", err)
+	}
+}
+
 func TestFSInit(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
