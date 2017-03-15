@@ -218,3 +218,31 @@ func TestMSIncrementalTimestamp(t *testing.T) {
 
 	testIncrementalTimestamp(t, ms)
 }
+
+func TestMSGetExclusiveLock(t *testing.T) {
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+	// GetExclusiveLock is not supported
+	locked, err := ms.GetExclusiveLock()
+	if err == nil {
+		t.Fatal("Should have failed, it did not")
+	}
+	if locked {
+		t.Fatal("Should not be locked")
+	}
+}
+
+func TestMSRecover(t *testing.T) {
+	ms, err := NewMemoryStore(nil)
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer ms.Close()
+	state, err := ms.Recover()
+	if err != nil {
+		t.Fatalf("Recover should not return an error, got %v", err)
+	}
+	if state != nil {
+		t.Fatalf("State should be nil, got %v", state)
+	}
+}

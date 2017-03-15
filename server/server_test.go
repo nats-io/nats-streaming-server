@@ -303,6 +303,15 @@ func TestDoubleShutdown(t *testing.T) {
 	}
 }
 
+func TestServerStates(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+	checkState(t, s, Standalone)
+	s.Shutdown()
+	checkState(t, s, Shutdown)
+	// FT states are checked in ft_test.go
+}
+
 type response interface {
 	Unmarshal([]byte) error
 }
@@ -4256,11 +4265,15 @@ func TestNonDurableRemovedFromStoreOnConnClose(t *testing.T) {
 	s.Shutdown()
 	// Open the store directly and verify that the sub record is not even found.
 	limits := stores.DefaultStoreLimits
-	store, recoveredState, err := stores.NewFileStore(defaultDataStore, &limits)
+	store, err := stores.NewFileStore(defaultDataStore, &limits)
 	if err != nil {
 		t.Fatalf("Error opening file: %v", err)
 	}
 	defer store.Close()
+	recoveredState, err := store.Recover()
+	if err != nil {
+		t.Fatalf("Error recovering state: %v", err)
+	}
 	if recoveredState == nil {
 		t.Fatal("Expected to recover state, got none")
 	}
@@ -4464,13 +4477,13 @@ func checkQueueGroupSize(t *testing.T, s *StanServer, channelName, groupName str
 	if cs == nil {
 		stackFatalf(t, "Expected channel store %q to exist", channelName)
 	}
-	s.RLock()
+	s.mu.RLock()
 	groupSize := 0
 	group, exist := cs.UserData.(*subStore).qsubs[groupName]
 	if exist {
 		groupSize = len(group.subs)
 	}
-	s.RUnlock()
+	s.mu.RUnlock()
 	if expectedExist && !exist {
 		stackFatalf(t, "Expected group to still exist, does not")
 	}
@@ -5046,9 +5059,9 @@ func TestPerChannelLimits(t *testing.T) {
 			}
 		}
 		// Check messages count
-		s.RLock()
+		s.mu.RLock()
 		n, _, err := s.store.MsgsState("foo")
-		s.RUnlock()
+		s.mu.RUnlock()
 		if err != nil {
 			t.Fatalf("Unexpected error getting state: %v", err)
 		}
@@ -5064,9 +5077,9 @@ func TestPerChannelLimits(t *testing.T) {
 			}
 		}
 		// Check messages count
-		s.RLock()
+		s.mu.RLock()
 		n, b, err := s.store.MsgsState("bar")
-		s.RUnlock()
+		s.mu.RUnlock()
 		if err != nil {
 			t.Fatalf("Unexpected error getting state: %v", err)
 		}
@@ -5389,7 +5402,7 @@ func closeSubscriber(t *testing.T, subType string) {
 	}
 	wait()
 
-	s.RLock()
+	s.mu.RLock()
 	cs := s.store.LookupChannel("foo")
 	ss := cs.UserData.(*subStore)
 	var dur *subState
@@ -5398,7 +5411,7 @@ func closeSubscriber(t *testing.T, subType string) {
 	} else {
 		dur = ss.qsubs[durKey].subs[0]
 	}
-	s.RUnlock()
+	s.mu.RUnlock()
 	if dur == nil {
 		stackFatalf(t, "Durable should have been found")
 	}
@@ -5572,10 +5585,10 @@ func TestFileStoreQMemberRemovedFromStore(t *testing.T) {
 		t.Fatal("Did not get our message")
 	}
 	// Check server state
-	s.RLock()
+	s.mu.RLock()
 	cs, _ := s.lookupOrCreateChannel("foo")
 	ss := cs.UserData.(*subStore)
-	s.RUnlock()
+	s.mu.RUnlock()
 	ss.RLock()
 	qs := ss.qsubs["dur:group"]
 	ss.RUnlock()
@@ -5824,9 +5837,9 @@ func TestFileStoreAcksPool(t *testing.T) {
 
 	// Check server's ackSub pool
 	checkPoolSize := func() {
-		s.RLock()
+		s.mu.RLock()
 		poolSize := len(s.acksSubs)
-		s.RUnlock()
+		s.mu.RUnlock()
 		if poolSize != opts.AckSubsPoolSize {
 			stackFatalf(t, "Expected acksSubs pool size to be %v, got %v", opts.AckSubsPoolSize, poolSize)
 		}
@@ -6024,15 +6037,15 @@ func TestAckSubsSubjectsInPoolUseUniqueSubject(t *testing.T) {
 	// Wait for ack of sc2 to be processed by s2
 	waitForAcks(t, s2, "otherClient", 1, 0)
 
-	s1.Lock()
+	s1.mu.Lock()
 	s1AcksReceived, _ := s1.acksSubs[0].Delivered()
-	s1.Unlock()
+	s1.mu.Unlock()
 	if s1AcksReceived != 1 {
 		t.Fatalf("Expected pooled ack sub to receive only 1 message, got %v", s1AcksReceived)
 	}
-	s2.Lock()
+	s2.mu.Lock()
 	s2AcksReceived, _ := s2.acksSubs[0].Delivered()
-	s2.Unlock()
+	s2.mu.Unlock()
 	if s2AcksReceived != 1 {
 		t.Fatalf("Expected pooled ack sub to receive only 1 message, got %v", s2AcksReceived)
 	}

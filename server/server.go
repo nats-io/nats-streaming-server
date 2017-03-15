@@ -31,7 +31,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.3.9"
+	VERSION = "0.4.0"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -161,6 +161,35 @@ type subStartInfo struct {
 	isDurable bool
 }
 
+// State represents the possible server states
+type State int8
+
+// Possible server states
+const (
+	Standalone State = iota
+	FTActive
+	FTStandby
+	FTFailed
+	Shutdown
+)
+
+func (state State) String() string {
+	switch state {
+	case Standalone:
+		return "STANDALONE"
+	case FTActive:
+		return "FT_ACTIVE"
+	case FTStandby:
+		return "FT_STANDBY"
+	case FTFailed:
+		return "FT_FAILED"
+	case Shutdown:
+		return "SHUTDOWN"
+	default:
+		return "UNKNOW STATE"
+	}
+}
+
 // StanServer structure represents the STAN server
 type StanServer struct {
 	// Keep all members for which we use atomic at the beginning of the
@@ -169,7 +198,7 @@ type StanServer struct {
 	// at 64bit. See https://github.com/golang/go/issues/599
 	ioChannelStatsMaxBatchSize int64 // stats of the max number of messages than went into a single batch
 
-	sync.RWMutex
+	mu         sync.RWMutex
 	shutdown   bool
 	serverID   string
 	info       spb.ServerInfo // Contains cluster ID and subjects
@@ -225,6 +254,12 @@ type StanServer struct {
 	acksSubs          []*nats.Subscription
 	acksSubsPrefix    string
 	acksSubsPrefixLen int
+
+	// For FT mode
+	ftQuit  chan struct{}
+	ftError error
+
+	state State
 
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
@@ -598,6 +633,9 @@ type Options struct {
 	ClientHBTimeout    time.Duration // How long server waits for a heartbeat response.
 	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
 	AckSubsPoolSize    int           // Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription).
+	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+	FTQuorum           int           // Number of servers needed in order to elect a leader.
+	FTLogFile          string        // FT logfile of this member (used for leader election). This file must not be shared by members.
 }
 
 // DefaultOptions are default options for the STAN server
@@ -612,6 +650,7 @@ var defaultOptions = Options{
 	ClientHBInterval:  DefaultHeartBeatInterval,
 	ClientHBTimeout:   DefaultClientHBTimeout,
 	ClientHBFailCount: DefaultMaxFailedHeartBeats,
+	FTQuorum:          1,
 }
 
 // GetDefaultOptions returns default options for the STAN server
@@ -778,7 +817,7 @@ func RunServer(ID string) (*StanServer, error) {
 }
 
 // RunServerWithOpts will startup an embedded STAN server and a nats-server to support it.
-func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer, error) {
+func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *StanServer, returnedError error) {
 	testInbox := nats.NewInbox()
 	// We rely heavily on the format of a NATS inbox.
 	// Since we vendor nats and nuid, it should not change without our knowledge.
@@ -818,19 +857,23 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 		acksSubsPoolSize:  sOpts.AckSubsPoolSize,
 	}
 
-	// Ensure that we shutdown the server if there is a panic during startup.
+	// Ensure that we shutdown the server if there is a panic/error during startup.
 	// This will ensure that stores are closed (which otherwise would cause
 	// issues during testing) and that the NATS Server (if started) is also
 	// properly shutdown. To do so, we recover from the panic in order to
 	// call Shutdown, then issue the original panic.
 	defer func() {
+		// We used to issue panic for common errors but now return error
+		// instead. Still we want to log the reason for the panic.
 		if r := recover(); r != nil {
 			s.Shutdown()
-			// Log the reason for the panic. We use noticef here since
-			// Fatalf() would cause an exit.
 			Noticef("Failed to start: %v", r)
-			// Issue the original panic now that the store is closed.
 			panic(r)
+		} else if returnedError != nil {
+			s.Shutdown()
+			// Log it as a fatal error, process will exit (if
+			// running from executable or logger is configured).
+			Fatalf("Failed to start: %v", returnedError)
 		}
 	}()
 
@@ -838,11 +881,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 	limits := &sOpts.StoreLimits
 
 	var (
-		err            error
-		recoveredState *stores.RecoveredState
-		recoveredSubs  []*subState
-		store          stores.Store
-		callStoreInit  bool
+		err   error
+		store stores.Store
 	)
 
 	// Ensure store type option is in upper-case
@@ -851,12 +891,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 	// Create the store. So far either memory or file-based.
 	switch sOpts.StoreType {
 	case stores.TypeFile:
-		// The dir must be specified
-		if sOpts.FilestoreDir == "" {
-			err = fmt.Errorf("for %v stores, root directory must be specified", stores.TypeFile)
-			break
-		}
-		store, recoveredState, err = stores.NewFileStore(sOpts.FilestoreDir, limits,
+		store, err = stores.NewFileStore(sOpts.FilestoreDir, limits,
 			stores.AllOptions(&sOpts.FileStoreOpts))
 	case stores.TypeMemory:
 		store, err = stores.NewMemoryStore(limits)
@@ -864,7 +899,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 		err = fmt.Errorf("unsupported store type: %v", sOpts.StoreType)
 	}
 	if err != nil {
-		goto handleError
+		return nil, err
 	}
 	// StanServer.store (s.store here) is of type stores.Store, which is an
 	// interace. If we assign s.store in the call of the constructor and there
@@ -879,14 +914,71 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 	// Create clientStore
 	s.clients = &clientStore{store: s.store}
 
+	// If no NATS server url is provided, it means that we embed the NATS Server
+	if sOpts.NATSServerURL == "" {
+		if err := s.startNATSServer(nOpts); err != nil {
+			return nil, err
+		}
+	}
+	// Create our connections
+	if err := s.createNatsConnections(sOpts, nOpts); err != nil {
+		return nil, err
+	}
+
+	// In FT mode, server cannot recover the store until it is elected leader.
+	if s.opts.FTGroupName != "" {
+		if err := s.ftSetup(); err != nil {
+			return nil, err
+		}
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			if err := s.ftStart(); err != nil {
+				s.setFTError(err)
+			}
+		}()
+	} else {
+		if err := s.start(Standalone); err != nil {
+			return nil, err
+		}
+	}
+	return &s, nil
+}
+
+// This is either running inside RunServerWithOpts() and before any reference
+// to the server is returned, so locking is not really an issue, or it is
+// running from a go-routine when the server has been elected the FT active.
+// Therefore, this function grabs the server lock for the duration of this
+// call and so care must be taken to not invoke - directly or indirectly -
+// code that would attempt to grab the server lock.
+func (s *StanServer) start(runningState State) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.shutdown {
+		return nil
+	}
+
+	var (
+		err            error
+		recoveredState *stores.RecoveredState
+		recoveredSubs  []*subState
+		callStoreInit  bool
+	)
+
+	limits := &s.opts.StoreLimits
+
+	// Recover the state.
+	recoveredState, err = s.store.Recover()
+	if err != nil {
+		return err
+	}
 	if recoveredState != nil {
 		// Copy content
 		s.info = *recoveredState.Info
 		// Check cluster IDs match
 		if s.opts.ID != s.info.ClusterID {
-			err = fmt.Errorf("cluster ID %q does not match recovered value of %q",
+			return fmt.Errorf("cluster ID %q does not match recovered value of %q",
 				s.opts.ID, s.info.ClusterID)
-			goto handleError
 		}
 		// Check to see if SubClose subject is present or not.
 		// If not, it means we recovered from an older server, so
@@ -905,37 +997,30 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 	} else {
 		s.info.ClusterID = s.opts.ID
 		// Generate Subjects
-		// FIXME(dlc) guid needs to be shared in cluster mode
+		subjID := s.opts.ID
+		if runningState == Standalone {
+			subjID = nuid.Next()
+		}
 		s.info.Discovery = fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.info.ClusterID)
-		s.info.Publish = fmt.Sprintf("%s.%s", DefaultPubPrefix, nuid.Next())
-		s.info.Subscribe = fmt.Sprintf("%s.%s", DefaultSubPrefix, nuid.Next())
-		s.info.SubClose = fmt.Sprintf("%s.%s", DefaultSubClosePrefix, nuid.Next())
-		s.info.Unsubscribe = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
-		s.info.Close = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
+		s.info.Publish = fmt.Sprintf("%s.%s", DefaultPubPrefix, subjID)
+		s.info.Subscribe = fmt.Sprintf("%s.%s", DefaultSubPrefix, subjID)
+		s.info.SubClose = fmt.Sprintf("%s.%s", DefaultSubClosePrefix, subjID)
+		s.info.Unsubscribe = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, subjID)
+		s.info.Close = fmt.Sprintf("%s.%s", DefaultClosePrefix, subjID)
 
 		callStoreInit = true
 	}
 	if callStoreInit {
 		// Initialize the store with the server info
-		err = s.store.Init(&s.info)
-		if err != nil {
-			err = fmt.Errorf("Unable to initialize the store: %v", err)
-			goto handleError
+		if err := s.store.Init(&s.info); err != nil {
+			return fmt.Errorf("Unable to initialize the store: %v", err)
 		}
 	}
 
-	// If no NATS server url is provided, it means that we embed the NATS Server
-	if sOpts.NATSServerURL == "" {
-		err = s.startNATSServer(nOpts)
-	}
-	if err == nil {
-		err = s.createNatsConnections(sOpts, nOpts)
-	}
-	if err == nil {
-		err = s.ensureRunningStandAlone()
-	}
-	if err != nil {
-		goto handleError
+	if runningState == Standalone {
+		if err := s.ensureRunningStandAlone(); err != nil {
+			return err
+		}
 	}
 
 	// Start the go-routine responsible to start sending messages to newly
@@ -945,27 +1030,22 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 	s.wg.Add(1)
 	go s.processSubscriptionsStart()
 
-	err = s.initSubscriptions()
-	if err != nil {
-		goto handleError
+	if err := s.initSubscriptions(); err != nil {
+		return err
 	}
 
 	if recoveredState != nil {
 		// Do some post recovery processing (create subs on AckInbox, setup
 		// some timers, etc...)
-		err = s.postRecoveryProcessing(recoveredState.Clients, recoveredSubs)
-		if err != nil {
-			err = fmt.Errorf("error during post recovery processing: %v", err)
-			goto handleError
+		if err := s.postRecoveryProcessing(recoveredState.Clients, recoveredSubs); err != nil {
+			return fmt.Errorf("error during post recovery processing: %v", err)
 		}
 	}
 
 	// Flush to make sure all subscriptions are processed before
 	// we return control to the user.
-	err = s.nc.Flush()
-	if err != nil {
-		err = fmt.Errorf("could not flush the subscriptions, %v", err)
-		goto handleError
+	if err := s.nc.Flush(); err != nil {
+		return fmt.Errorf("could not flush the subscriptions, %v", err)
 	}
 
 	Noticef("STAN: Message store is %s", s.store.Name())
@@ -987,13 +1067,21 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 	// and release newOnHold
 	s.wg.Add(1)
 	go s.performRedeliveryOnStartup(recoveredSubs)
+	s.state = runningState
+	return nil
+}
 
-	return &s, nil
-
-handleError:
-	s.Shutdown()
-	Fatalf("Failed to start: %v", err)
-	return nil, err
+// setFTError is used in FT mode when a server fails for some reasons.
+// The state is set to FTFailed unless the server was already shutdown.
+func (s *StanServer) setFTError(err error) {
+	s.mu.Lock()
+	s.ftError = err
+	// Don't override the state if server was shutdown before it got
+	// the FT failure.
+	if s.state != Shutdown {
+		s.state = FTFailed
+	}
+	s.mu.Unlock()
 }
 
 func printLimits(isGlobal bool, limits, parentLimits *stores.ChannelLimits) {
@@ -1047,36 +1135,52 @@ func friendlyBytes(msgbytes int64) string {
 
 // TODO:  Explore parameter passing in gnatsd.  Keep seperate for now.
 func (s *StanServer) configureClusterOpts(opts *server.Options) error {
-	if opts.Cluster.ListenStr == "" {
+	// If we don't have cluster defined in the configuration
+	// file and no cluster listen string override, but we do
+	// have a routes override, we need to report misconfiguration.
+	if opts.Cluster.ListenStr == "" && opts.Cluster.Host == "" &&
+		opts.Cluster.Port == 0 {
 		if opts.RoutesStr != "" {
-			Fatalf("Solicited routes require cluster capabilities, e.g. --cluster")
+			err := fmt.Errorf("solicited routes require cluster capabilities, e.g. --cluster")
+			Fatalf(err.Error())
+			// Also return error in case server is started from application
+			// and no logger has been set.
+			return err
 		}
 		return nil
 	}
 
-	clusterURL, err := url.Parse(opts.Cluster.ListenStr)
-	if err != nil {
-		return err
-	}
-	h, p, err := net.SplitHostPort(clusterURL.Host)
-	if err != nil {
-		return err
-	}
-	opts.Cluster.Host = h
-	_, err = fmt.Sscan(p, &opts.Cluster.Port)
-	if err != nil {
-		return err
-	}
-
-	if clusterURL.User != nil {
-		pass, hasPassword := clusterURL.User.Password()
-		if !hasPassword {
-			return fmt.Errorf("Expected cluster password to be set")
+	// If cluster flag override, process it
+	if opts.Cluster.ListenStr != "" {
+		clusterURL, err := url.Parse(opts.Cluster.ListenStr)
+		if err != nil {
+			return err
 		}
-		opts.Cluster.Password = pass
+		h, p, err := net.SplitHostPort(clusterURL.Host)
+		if err != nil {
+			return err
+		}
+		opts.Cluster.Host = h
+		_, err = fmt.Sscan(p, &opts.Cluster.Port)
+		if err != nil {
+			return err
+		}
 
-		user := clusterURL.User.Username()
-		opts.Cluster.Username = user
+		if clusterURL.User != nil {
+			pass, hasPassword := clusterURL.User.Password()
+			if !hasPassword {
+				return fmt.Errorf("expected cluster password to be set")
+			}
+			opts.Cluster.Password = pass
+
+			user := clusterURL.User.Username()
+			opts.Cluster.Username = user
+		} else {
+			// Since we override from flag and there is no user/pwd, make
+			// sure we clear what we may have gotten from config file.
+			opts.Cluster.Username = ""
+			opts.Cluster.Password = ""
+		}
 	}
 
 	// If we have routes but no config file, fill in here.
@@ -1166,8 +1270,9 @@ func (s *StanServer) startNATSServer(opts *server.Options) error {
 // ensureRunningStandAlone prevents this streaming server from starting
 // if another is found using the same cluster ID - a possibility when
 // routing is enabled.
+// This runs under sever's lock so nothing should grab the server lock here.
 func (s *StanServer) ensureRunningStandAlone() error {
-	clusterID := s.ClusterID()
+	clusterID := s.info.ClusterID
 	hbInbox := nats.NewInbox()
 	timeout := time.Millisecond * 250
 
@@ -1497,13 +1602,13 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 		// to check on shutdown status. Note that s.wg is for all server's
 		// go routines, not specific to duplicate CID handling. Use server's
 		// lock here.
-		s.Lock()
+		s.mu.Lock()
 		shutdown := s.shutdown
 		if !shutdown {
 			// Assume we are going to start a go routine.
 			s.wg.Add(1)
 		}
-		s.Unlock()
+		s.mu.Unlock()
 
 		if shutdown {
 			// The client will timeout on connect
@@ -3235,23 +3340,54 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 	sub.Unlock()
 }
 
+// startGoRoutine starts the given function as a go routine if and only if
+// the server was not shutdown at that time. This is required because
+// we cannot increment the wait group after the shutdown process has started.
+func (s *StanServer) startGoRoutine(f func()) {
+	s.mu.Lock()
+	if !s.shutdown {
+		s.wg.Add(1)
+		go f()
+	}
+	s.mu.Unlock()
+}
+
 // ClusterID returns the STAN Server's ID.
 func (s *StanServer) ClusterID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.info.ClusterID
+}
+
+// State returns the state of this server.
+func (s *StanServer) State() State {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state
+}
+
+// FTStartupError returns the possible error that an FT standby server
+// got in the process of activating.
+func (s *StanServer) FTStartupError() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ftError
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.
 func (s *StanServer) Shutdown() {
 	Noticef("STAN: Shutting down.")
 
-	s.Lock()
+	s.mu.Lock()
 	if s.shutdown {
-		s.Unlock()
+		s.mu.Unlock()
 		return
 	}
 
 	// Allows Shutdown() to be idempotent
 	s.shutdown = true
+	// Change the state too
+	s.state = Shutdown
 
 	// We need to make sure that the storeIOLoop returns before
 	// closing the Store
@@ -3275,7 +3411,11 @@ func (s *StanServer) Shutdown() {
 	} else {
 		waitForIOStoreLoop = false
 	}
-	s.Unlock()
+	// In case we are running in FT mode.
+	if s.ftQuit != nil {
+		s.ftQuit <- struct{}{}
+	}
+	s.mu.Unlock()
 
 	// Make sure the StoreIOLoop returns before closing the Store
 	if waitForIOStoreLoop {

@@ -27,6 +27,7 @@ const (
 var (
 	ErrTooManyChannels = errors.New("too many channels")
 	ErrTooManySubs     = errors.New("too many subscriptions per channel")
+	ErrNotSupported    = errors.New("not supported")
 )
 
 // Noticef logs a notice statement
@@ -133,11 +134,42 @@ type ChannelStore struct {
 // implementations supporting recovery.
 //
 type Store interface {
+	// GetExclusiveLock is an advisory lock to prevent concurrent
+	// access to the store from multiple instances.
+	// This is not to protect individual API calls, instead, it
+	// is meant to protect the store for the entire duration the
+	// store is being used. This is why there is no `Unlock` API.
+	// The lock should be released when the store is closed.
+	//
+	// If an exclusive lock can be immediately acquired (that is,
+	// it should not block waiting for the lock to be acquired),
+	// this call will return `true` with no error. Once a store
+	// instance has acquired an exclusive lock, calling this
+	// function has no effect and `true` with no error will again
+	// be returned.
+	//
+	// If the lock cannot be acquired, this call will return
+	// `false` with no error: the caller can try again later.
+	//
+	// If, while trying to obtain the lock, an unexpected error occurs,
+	// this call should return `false` and the error.
+	//
+	// Implementations that do not support exclusive locks should
+	// return `false` and `ErrNotSupported`.
+	GetExclusiveLock() (bool, error)
+
 	// Init can be used to initialize the store with server's information.
 	Init(info *spb.ServerInfo) error
 
 	// Name returns the name type of this store (e.g: MEMORY, FILESTORE, etc...).
 	Name() string
+
+	// Recover returns the recovered state.
+	// Implementations that do not persist state and therefore cannot
+	// recover from a previous run MUST return nil, not an error.
+	// However, an error must be returned for implementions that are
+	// attempting to recover the state but fail to do so.
+	Recover() (*RecoveredState, error)
 
 	// SetLimits sets limits for this store. The action is not expected
 	// to be retroactive.
@@ -185,7 +217,8 @@ type Store interface {
 	// and returns it to the caller.
 	DeleteClient(clientID string) *Client
 
-	// Close closes all stores.
+	// Close closes this store (including all MsgStore and SubStore).
+	// If an exlusive lock was acquired, the lock shall be released.
 	Close() error
 }
 

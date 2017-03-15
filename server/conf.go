@@ -114,6 +114,21 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.AckSubsPoolSize = int(v.(int64))
+		case "ft_group", "ft_group_name":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.FTGroupName = v.(string)
+		case "ft_quorum", "ft_size":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.FTQuorum = int(v.(int64))
+		case "ft_logfile", "ft_log_file", "ft_log":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.FTLogFile = v.(string)
 		}
 	}
 	return nil
