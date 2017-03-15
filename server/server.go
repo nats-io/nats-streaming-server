@@ -933,7 +933,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			if err := s.ftWaitToBeLeader(); err != nil {
+			if err := s.ftStart(); err != nil {
 				s.setFTError(err)
 			}
 		}()
@@ -3338,6 +3338,18 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 	}
 	sub.LastSent = lastSent
 	sub.Unlock()
+}
+
+// startGoRoutine starts the given function as a go routine if and only if
+// the server was not shutdown at that time. This is required because
+// we cannot increment the wait group after the shutdown process has started.
+func (s *StanServer) startGoRoutine(f func()) {
+	s.mu.Lock()
+	if !s.shutdown {
+		s.wg.Add(1)
+		go f()
+	}
+	s.mu.Unlock()
 }
 
 // ClusterID returns the STAN Server's ID.

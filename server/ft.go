@@ -16,42 +16,86 @@ import (
 // correct behavior.
 var noPanic = false
 
+type raftCtx struct {
+	node            *graft.Node
+	stateChangeChan chan graft.StateChange
+	errChan         chan error
+}
+
 // ftWaitToBeLeader will return only when the RAFT algorithm has
 // elected this node as the leader and that the node can get
 // the store's exclusive lock.
 // This is running in a separate go-routine so if server state
 // changes, take care of using the server's lock.
-func (s *StanServer) ftWaitToBeLeader() error {
+func (s *StanServer) ftStart() error {
 	Noticef("STAN: Waiting for leader election...")
 	graftOpts := s.nc.Opts
 	graftOpts.Name = fmt.Sprintf("_NSS-%s-graft", s.opts.ID)
-graft_create_node:
-	node, stateChangeChan, errChan, err := s.ftCreateRAFTNode(&graftOpts)
-	if err != nil {
-		return fmt.Errorf("ft: error creating graft node: %v", err)
-	}
-	// The server was shutdown
-	if node == nil {
-		return nil
-	}
-	if node.State() != graft.LEADER {
-	waitForLeaderLoop:
-		for {
-			select {
-			case <-s.ftQuit:
-				node.Close()
-				return nil
-			case sc := <-stateChangeChan:
-				if sc.To == graft.LEADER {
-					break waitForLeaderLoop
-				}
-			case err := <-errChan:
-				node.Close()
-				return fmt.Errorf("ft: error: %v", err)
+
+	var err error
+	ctx := raftCtx{}
+
+	for {
+		ctx.node, ctx.stateChangeChan, ctx.errChan, err = s.ftCreateRAFTNode(&graftOpts)
+		if err != nil {
+			return fmt.Errorf("ft: error creating graft node: %v", err)
+		}
+		// The server was shutdown
+		if ctx.node == nil {
+			return nil
+		}
+		if ctx.node.State() != graft.LEADER {
+			isElected, err := s.ftWaitToBeLeader(&ctx)
+			// On shutdown, isElected would be false and error would be nil.
+			if !isElected || err != nil {
+				return err
 			}
 		}
+		Noticef("STAN: Server elected leader, locking store...")
+		locked, err := s.ftGetStoreLock(&ctx)
+		if err != nil {
+			return err
+		}
+		if locked {
+			break
+		}
+		// here, the node has been closed, reset to nil in context.
+		ctx.node = nil
 	}
-	Noticef("STAN: Server elected leader, getting store exclusive lock...")
+	Noticef("STAN: Server confirmed leader")
+	// Server could have been shutdown, so need to use startGoRoutine()
+	// which checks for that.
+	s.startGoRoutine(func() {
+		s.ftRaftLoop(&ctx)
+	})
+	// Start the recovery process, etc..
+	return s.start(FTActive)
+}
+
+// ftWaitToBeLeader returns for 3 reasons:
+// true, nil: the node is elected leader
+// false, nil: the server has been shutdown
+// false, err: there was a fatal error
+func (s *StanServer) ftWaitToBeLeader(ctx *raftCtx) (bool, error) {
+	for {
+		select {
+		case <-s.ftQuit:
+			ctx.node.Close()
+			return false, nil
+		case sc := <-ctx.stateChangeChan:
+			if sc.To == graft.LEADER {
+				return true, nil
+			}
+		case err := <-ctx.errChan:
+			ctx.node.Close()
+			return false, fmt.Errorf("ft: error: %v", err)
+		}
+	}
+}
+
+// ftGetStoreLock returns true if the server was able to get the
+// exclusive store lock, false othewise, or if there was a fatal error doing so.
+func (s *StanServer) ftGetStoreLock(ctx *raftCtx) (bool, error) {
 	// Normally, the store would be set early and is immutable, but some
 	// FT tests do set a mock store after the server is created, so use
 	// locking here to avoid race reports.
@@ -61,62 +105,53 @@ graft_create_node:
 	if ok, err := store.GetExclusiveLock(); !ok || err != nil {
 		// If there is an error, we have to stop now.
 		if err != nil {
-			node.Close()
-			return fmt.Errorf("ft: error getting the store lock: %v", err)
+			ctx.node.Close()
+			return false, fmt.Errorf("ft: error getting the store lock: %v", err)
 		}
 		// If ok is false, it means that we did not get the lock
 		// so we should be going back to standby.
 		Noticef("STAN: ft: unable to get store lock at this time, going back to standby")
-		node.Close()
-		goto graft_create_node
+		ctx.node.Close()
+		return false, nil
 	}
-	// Server could have been shutdown
-	s.mu.Lock()
-	if s.shutdown {
-		s.mu.Unlock()
-		return nil
-	}
-	s.wg.Add(1)
-	s.mu.Unlock()
-	Noticef("STAN: Server confirmed leader")
-	go func() {
-		// On shutdown, server is waiting on s.wg, so release when
-		// we exit this function.
-		defer s.wg.Done()
-		// We are going to care only about state changes here, and not the
-		// error channel. The reason is that for a leader, the only case
-		// where we would get an error is writting the state, which would
-		// happen if the leader gets demoted, which we handle in the state
-		// change case. So we will simply dequeue the error channel and
-		// print, but nothing else.
-		// Note that when we call "Fatalf", it is possible that the server
-		// was started programmatically, and that no logger is set, in which
-		// case "Fatalf" does nothing, so each "Fatalf" call is followed by
-		// a panic.
-		for {
-			select {
-			case sc := <-stateChangeChan:
-				if sc.To != graft.LEADER {
-					err = fmt.Errorf("ft: server demoted to %v, aborting", sc.To.String())
-					Fatalf("STAN: %v", err)
-					if noPanic {
-						node.Close()
-						s.setFTError(err)
-					} else {
-						panic(err)
-					}
+	return true, nil
+}
+
+func (s *StanServer) ftRaftLoop(ctx *raftCtx) {
+	// On shutdown, server is waiting on s.wg, so release when
+	// we exit this function.
+	defer s.wg.Done()
+	// We are going to care only about state changes here, and not the
+	// error channel. The reason is that for a leader, the only case
+	// where we would get an error is writing the state, which would
+	// happen if the leader gets demoted, which we handle in the state
+	// change case. So we will simply dequeue the error channel and
+	// print, but nothing else.
+	// Note that when we call "Fatalf", it is possible that the server
+	// was started programmatically, and that no logger is set, in which
+	// case "Fatalf" does nothing, so each "Fatalf" call is followed by
+	// a panic.
+	for {
+		select {
+		case sc := <-ctx.stateChangeChan:
+			if sc.To != graft.LEADER {
+				err := fmt.Errorf("ft: server demoted to %v, aborting", sc.To.String())
+				Fatalf("STAN: %v", err)
+				if noPanic {
+					ctx.node.Close()
+					s.setFTError(err)
+				} else {
+					panic(err)
 				}
-				Noticef("STAN: ft: state change, from %v to %v", sc.From.String(), sc.To.String())
-			case err := <-errChan:
-				Errorf("STAN: ft: error: %v", err)
-			case <-s.ftQuit:
-				node.Close()
-				return
 			}
+			Noticef("STAN: ft: state change, from %v to %v", sc.From.String(), sc.To.String())
+		case err := <-ctx.errChan:
+			Errorf("STAN: ft: error: %v", err)
+		case <-s.ftQuit:
+			ctx.node.Close()
+			return
 		}
-	}()
-	// Start the recovery process, etc..
-	return s.start(FTActive)
+	}
 }
 
 // ftCreateRAFTNode creates a RAFT node and returns required channels.
@@ -133,14 +168,14 @@ func (s *StanServer) ftCreateRAFTNode(opts *nats.Options) (*graft.Node, chan gra
 	)
 	// We need to have a NATS RPC in order for RAFT to work,
 	// so try until we succeed.
-	printCount := 0
+	attempts := 0
 	for {
 		rpc, err = graft.NewNatsRpc(opts)
 		if err != nil {
-			if printCount%10 == 0 {
+			if attempts%10 == 0 {
 				Errorf("STAN: ft: creating RPC failed (%v), trying again...", err)
 			}
-			printCount++
+			attempts++
 			select {
 			case <-s.ftQuit:
 				return nil, nil, nil, nil

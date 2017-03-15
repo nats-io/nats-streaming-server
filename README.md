@@ -74,7 +74,7 @@ This detail is important when it comes to Streaming clients connections to the S
 connection, the server knows if a client is connected based on heartbeats.
 
 ***It is therefore strongly recommended for clients to close their connection when the application exit, otherwise the server
-will consider these clients connected (sending data, etc...) until it detects the miss of hearbeats.***
+will consider these clients connected (sending data, etc...) until it detects missing hearbeats.***
 
 The streaming server creates internal subscriptions on specific subjects to communicate withs its clients and/or other servers.
 
@@ -116,7 +116,7 @@ In fact, messages are stored regardless of the presence of subscriptions on that
 
 ### Subscriptions
 
-A client creates a subscription on a given channel. Remember, there is no support for wildcard, so a subscription is really tied to
+A client creates a subscription on a given channel. Remember, there is no support for wildcards, so a subscription is really tied to
 one and only one channel. The server will maintain the subscription state on behalf of the client until the later closes the subscription (or its connection).
 
 If there are messages in the log for this channel, messages will be sent to the consumer when the subscription is created. The server will

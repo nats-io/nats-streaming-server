@@ -57,14 +57,14 @@ func TestFTConfig(t *testing.T) {
 	s, err = RunServerWithOpts(opts, nil)
 	if err == nil {
 		s.Shutdown()
-		t.Fatal("Expected server to fail due to negative group size")
+		t.Fatal("Expected server to fail due to negative quorum size")
 	}
 	// Try with size 0 too.
 	opts.FTQuorum = 0
 	s, err = RunServerWithOpts(opts, nil)
 	if err == nil {
 		s.Shutdown()
-		t.Fatal("Expected server to fail due to negative group size")
+		t.Fatal("Expected server to fail due to invalid quorum size")
 	}
 }
 
