@@ -4,8 +4,10 @@ package util
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 // ByteOrder specifies how to convert byte sequences into 16-, 32-, or 64-bit
@@ -14,6 +16,70 @@ var ByteOrder binary.ByteOrder
 
 func init() {
 	ByteOrder = binary.LittleEndian
+}
+
+// BackoffTimeCheck allows to execute some code, but not too often.
+type BackoffTimeCheck struct {
+	nextTime     time.Time
+	frequency    time.Duration
+	minFrequency time.Duration
+	maxFrequency time.Duration
+	factor       int
+}
+
+// NewBackoffTimeCheck creates an instance of BackoffTimeCheck.
+// The `minFrequency` indicates how frequently BackoffTimeCheck.Ok() can return true.
+// When Ok() returns true, the allowed frequency is multiplied by `factor`. The
+// resulting frequency is capped by `maxFrequency`.
+func NewBackoffTimeCheck(minFrequency time.Duration, factor int, maxFrequency time.Duration) (*BackoffTimeCheck, error) {
+	if minFrequency <= 0 || factor < 1 || maxFrequency < minFrequency {
+		return nil, fmt.Errorf("minFrequency must be positive, factor at least 1 and maxFrequency at least equal to minFrequency, got %v - %v - %v",
+			minFrequency, factor, maxFrequency)
+	}
+	return &BackoffTimeCheck{
+		frequency:    minFrequency,
+		minFrequency: minFrequency,
+		maxFrequency: maxFrequency,
+		factor:       factor,
+	}, nil
+}
+
+// Ok returns true for the first time it is invoked after creation of the object
+// or call to Reset(), or after an amount of time (based on the last success
+// and the allowed frequency) has elapsed.
+// When at the maximum frequency, if this call is made after a delay at least
+// equal to 3x the max frequency (or in other words, 2x after what was the target
+// for the next print), then the object is auto-reset.
+func (bp *BackoffTimeCheck) Ok() bool {
+	if bp.nextTime.IsZero() {
+		bp.nextTime = time.Now().Add(bp.minFrequency)
+		return true
+	}
+	now := time.Now()
+	if now.Before(bp.nextTime) {
+		return false
+	}
+	// If we are already at the max frequency and this call
+	// is made after 2x the max frequency, then auto-reset.
+	if bp.frequency == bp.maxFrequency &&
+		now.Sub(bp.nextTime) >= 2*bp.maxFrequency {
+		bp.Reset()
+		return true
+	}
+	if bp.frequency < bp.maxFrequency {
+		bp.frequency *= time.Duration(bp.factor)
+		if bp.frequency > bp.maxFrequency {
+			bp.frequency = bp.maxFrequency
+		}
+	}
+	bp.nextTime = now.Add(bp.frequency)
+	return true
+}
+
+// Reset the state so that next call to BackoffPrint.Ok() will return true.
+func (bp *BackoffTimeCheck) Reset() {
+	bp.nextTime = time.Time{}
+	bp.frequency = bp.minFrequency
 }
 
 // EnsureBufBigEnough checks that given buffer is big enough to hold 'needed'
