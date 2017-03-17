@@ -35,6 +35,7 @@ Streaming Server Options:
     -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
     -hbf, --hb_fail_count <number>   Number of failed heartbeats before server closes the client connection
           --ack_subs <number>        Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription)
+          --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 
 Streaming Server File Store Options:
     --file_compact_enabled           Enable file compaction
@@ -195,6 +196,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.Int64("file_fds_limit", stores.DefaultFileStoreOptions.FileDescriptorsLimit, "FileStoreOpts.FileDescriptorsLimit")
 	flag.Int("io_batch_size", stand.DefaultIOBatchSize, "IOBatchSize")
 	flag.Int64("io_sleep_time", stand.DefaultIOSleepTime, "IOSleepTime")
+	flag.String("ft_group", "", "FTGroupName")
 
 	// NATS options
 	var showVersion bool

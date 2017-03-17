@@ -160,6 +160,9 @@ func TestParseConfig(t *testing.T) {
 	if opts.AckSubsPoolSize != 3 {
 		t.Fatalf("Expected AckSubscriptions to be 3, got %v", opts.AckSubsPoolSize)
 	}
+	if opts.FTGroupName != "ft" {
+		t.Fatalf("Expected FTGroupName to be %q, got %q", "ft", opts.FTGroupName)
+	}
 }
 
 func TestParsePermError(t *testing.T) {
@@ -249,6 +252,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "hb_timeout: \"foo\"", wrongTimeErr)
 	expectFailureFor(t, "hb_fail_count: false", wrongTypeErr)
 	expectFailureFor(t, "ack_subs_pool_size: false", wrongTypeErr)
+	expectFailureFor(t, "ft_group: 123", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_channels:false}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_msgs:false}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_bytes:false}", wrongTypeErr)

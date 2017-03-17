@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,7 +21,6 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
-	"runtime"
 )
 
 var testDefaultServerInfo = spb.ServerInfo{
@@ -368,7 +368,11 @@ func newFileStore(t *testing.T, dataStore string, limits *StoreLimits, options .
 			return nil, nil, err
 		}
 	}
-	fs, state, err := NewFileStore(dataStore, limits, AllOptions(&opts))
+	fs, err := NewFileStore(dataStore, limits, AllOptions(&opts))
+	if err != nil {
+		return nil, nil, err
+	}
+	state, err := fs.Recover()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -418,6 +422,19 @@ func TestFSBasicCreate(t *testing.T) {
 	defer fs.Close()
 
 	testBasicCreate(t, fs, TypeFile)
+}
+
+func TestFSNoDirectoryError(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs, err := NewFileStore("", nil)
+	if err == nil || !strings.Contains(err.Error(), "specified") {
+		if fs != nil {
+			fs.Close()
+		}
+		t.Fatalf("Expected error about missing root directory, got: %v", err)
+	}
 }
 
 func TestFSInit(t *testing.T) {
@@ -566,7 +583,7 @@ func TestFSOptions(t *testing.T) {
 		FileDescriptorsLimit: 20,
 	}
 	// Create the file with custom options
-	fs, _, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits,
+	fs, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits,
 		BufferSize(expected.BufferSize),
 		CompactEnabled(expected.CompactEnabled),
 		CompactFragmentation(expected.CompactFragmentation),
@@ -598,11 +615,14 @@ func TestFSOptions(t *testing.T) {
 	fs.Close()
 	cleanupDatastore(t, defaultDataStore)
 	// Create the file with custom options, pass all of them at once
-	fs, _, err = NewFileStore(defaultDataStore, &testDefaultStoreLimits, AllOptions(&expected))
+	fs, err = NewFileStore(defaultDataStore, &testDefaultStoreLimits, AllOptions(&expected))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
 	defer fs.Close()
+	if _, err := fs.Recover(); err != nil {
+		t.Fatalf("Error recovering state: %v", err)
+	}
 	fs.RLock()
 	opts = fs.opts
 	fs.RUnlock()
@@ -987,7 +1007,7 @@ func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
 
 	limit := testDefaultStoreLimits
 	limit.MaxMsgs = 100
-	fs, _, err := NewFileStore(defaultDataStore, &limit)
+	fs, err := NewFileStore(defaultDataStore, &limit)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1001,11 +1021,14 @@ func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
 	fs.Close()
 
 	limit.MaxMsgs = 10
-	fs, _, err = NewFileStore(defaultDataStore, &limit)
+	fs, err = NewFileStore(defaultDataStore, &limit)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	defer fs.Close()
+	if _, err := fs.Recover(); err != nil {
+		t.Fatalf("Unable to recover state: %v", err)
+	}
 
 	for i := 0; i < 10; i++ {
 		storeMsg(t, fs, "foo", msg)
@@ -3052,7 +3075,7 @@ func TestFSFileSlicesClosed(t *testing.T) {
 
 	limits := testDefaultStoreLimits
 	limits.MaxMsgs = 50
-	fs, _, err := NewFileStore(defaultDataStore, &limits,
+	fs, err := NewFileStore(defaultDataStore, &limits,
 		SliceConfig(10, 0, 0, ""))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
@@ -4340,4 +4363,47 @@ func TestFSMsgStoreBackgroundTaskCrash(t *testing.T) {
 	// Wait for background task to execute
 	time.Sleep(1500 * time.Millisecond)
 	// It should not have crashed.
+}
+
+// Test with 2 processes trying to acquire the lock are tested
+// in the server package (FT tests) with coverpkg set to stores
+// for code coverage.
+func TestFSGetExclusiveLock(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+	for i := 0; i < 2; i++ {
+		// GetExclusiveLock should return true even if called more than once
+		locked, err := fs.GetExclusiveLock()
+		if err != nil {
+			t.Fatalf("Error getting exclusing lock: %v", err)
+		}
+		if !locked {
+			t.Fatal("Should have been locked")
+		}
+	}
+	fs.RLock()
+	lockFile := fs.lockFile
+	fs.RUnlock()
+	// Close store
+	fs.Close()
+	// This should release the lock.
+	if !lockFile.IsClosed() {
+		t.Fatal("LockFile should have been closed")
+	}
+
+	fLockName := filepath.Join(defaultDataStore, "ft.lck")
+	defer os.Chmod(fLockName, 0666)
+	os.Chmod(fLockName, 0400)
+	fs = createDefaultFileStore(t)
+	defer fs.Close()
+	locked, err := fs.GetExclusiveLock()
+	if err == nil {
+		t.Fatal("Expected error getting the store lock, got none")
+	}
+	if locked {
+		t.Fatal("Locked should be false")
+	}
 }

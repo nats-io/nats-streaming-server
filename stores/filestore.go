@@ -356,6 +356,7 @@ type FileStore struct {
 	cliDeleteRecs int // Number of deleted client records
 	cliCompactTS  time.Time
 	crcTable      *crc32.Table
+	lockFile      util.LockFile
 }
 
 type subscription struct {
@@ -998,17 +999,20 @@ func (fm *filesManager) close() error {
 // FileStore methods
 ////////////////////////////////////////////////////////////////////////////
 
-// NewFileStore returns a factory for stores backed by files, and recovers
-// any state present.
+// NewFileStore returns a factory for stores backed by files.
 // If not limits are provided, the store will be created with
 // DefaultStoreLimits.
-func NewFileStore(rootDir string, limits *StoreLimits, options ...FileStoreOption) (*FileStore, *RecoveredState, error) {
+func NewFileStore(rootDir string, limits *StoreLimits, options ...FileStoreOption) (*FileStore, error) {
+	if rootDir == "" {
+		return nil, fmt.Errorf("for %v stores, root directory must be specified", TypeFile)
+	}
+
 	fs := &FileStore{opts: DefaultFileStoreOptions}
 	fs.init(TypeFile, limits)
 
 	for _, opt := range options {
 		if err := opt(&fs.opts); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	// Create filesManager based on options' FD limit
@@ -1023,17 +1027,23 @@ func NewFileStore(rootDir string, limits *StoreLimits, options ...FileStoreOptio
 	}
 
 	if err := os.MkdirAll(rootDir, os.ModeDir+os.ModePerm); err != nil && !os.IsExist(err) {
-		return nil, nil, fmt.Errorf("unable to create the root directory [%s]: %v", rootDir, err)
+		return nil, fmt.Errorf("unable to create the root directory [%s]: %v", rootDir, err)
 	}
+	return fs, nil
+}
 
-	var err error
-	var recoveredState *RecoveredState
-	var serverInfo *spb.ServerInfo
-	var recoveredClients []*Client
-	var recoveredSubs = make(RecoveredSubscriptions)
-	var channels []os.FileInfo
-	var msgStore *FileMsgStore
-	var subStore *FileSubStore
+// Recover implements the Store interface
+func (fs *FileStore) Recover() (*RecoveredState, error) {
+	var (
+		err              error
+		recoveredState   *RecoveredState
+		serverInfo       *spb.ServerInfo
+		recoveredClients []*Client
+		recoveredSubs    = make(RecoveredSubscriptions)
+		channels         []os.FileInfo
+		msgStore         *FileMsgStore
+		subStore         *FileSubStore
+	)
 
 	// Ensure store is closed in case of return with error
 	defer func() {
@@ -1052,36 +1062,36 @@ func NewFileStore(rootDir string, limits *StoreLimits, options ...FileStoreOptio
 	// in APPEND mode to allow truncate to work).
 	fs.serverFile, err = fs.fm.createFile(serverFileName, os.O_RDWR|os.O_CREATE, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Open/Create the client file.
 	fs.clientsFile, err = fs.fm.createFile(clientsFileName, defaultFileFlags, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Recover the server file.
 	serverInfo, err = fs.recoverServerInfo(fs.serverFile.handle)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// If the server file is empty, then we are done
 	if serverInfo == nil {
 		// We return the file store instance, but no recovered state.
-		return fs, nil, nil
+		return nil, nil
 	}
 
 	// Recover the clients file
 	recoveredClients, err = fs.recoverClients(fs.clientsFile.handle)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Get the channels (there are subdirectories of rootDir)
-	channels, err = ioutil.ReadDir(rootDir)
+	channels, err = ioutil.ReadDir(fs.fm.rootDir)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// Go through the list
 	for _, c := range channels {
@@ -1091,7 +1101,7 @@ func NewFileStore(rootDir string, limits *StoreLimits, options ...FileStoreOptio
 		}
 
 		channel := c.Name()
-		channelDirName := filepath.Join(rootDir, channel)
+		channelDirName := filepath.Join(fs.fm.rootDir, channel)
 
 		// Recover messages for this channel
 		msgStore, err = fs.newFileMsgStore(channelDirName, channel, true)
@@ -1139,7 +1149,7 @@ func NewFileStore(rootDir string, limits *StoreLimits, options ...FileStoreOptio
 		}
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// Create the recovered state to return
 	recoveredState = &RecoveredState{
@@ -1147,7 +1157,27 @@ func NewFileStore(rootDir string, limits *StoreLimits, options ...FileStoreOptio
 		Clients: recoveredClients,
 		Subs:    recoveredSubs,
 	}
-	return fs, recoveredState, nil
+	return recoveredState, nil
+}
+
+// GetExclusiveLock implements the Store interface
+func (fs *FileStore) GetExclusiveLock() (bool, error) {
+	fs.Lock()
+	defer fs.Unlock()
+	if fs.lockFile != nil {
+		return true, nil
+	}
+	f, err := util.CreateLockFile(filepath.Join(fs.fm.rootDir, "ft.lck"))
+	if err != nil {
+		if err == util.ErrAlreadyLocked {
+			return false, nil
+		}
+		return false, err
+	}
+	// We must keep a reference to the file, otherwise, it `f` is GC'ed,
+	// its file descriptor is closed, which automatically releases the lock.
+	fs.lockFile = f
+	return true, nil
 }
 
 // Init is used to persist server's information after the first start
@@ -1460,12 +1490,16 @@ func (fs *FileStore) Close() error {
 	err := fs.genericStore.close()
 
 	fm := fs.fm
+	lockFile := fs.lockFile
 	fs.Unlock()
 
 	if fm != nil {
 		if fmerr := fm.close(); fmerr != nil && err == nil {
 			err = fmerr
 		}
+	}
+	if lockFile != nil {
+		err = util.CloseFile(err, lockFile)
 	}
 	return err
 }
