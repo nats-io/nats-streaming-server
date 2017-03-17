@@ -4,6 +4,7 @@ package util
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"time"
@@ -17,26 +18,30 @@ func init() {
 	ByteOrder = binary.LittleEndian
 }
 
-// BackoffPrint allows to print a statement but not too often.
-type BackoffPrint struct {
-	nextPrint    time.Time
+// BackoffTimeCheck allows to execute some code, but not too often.
+type BackoffTimeCheck struct {
+	nextTime     time.Time
 	frequency    time.Duration
 	minFrequency time.Duration
 	maxFrequency time.Duration
 	factor       int
 }
 
-// NewBackoffPrint creates an instance of BackoffPrint.
-// The `minFrequency` indicates how frequently BackoffPrint.Ok() can return true.
+// NewBackoffTimeCheck creates an instance of BackoffTimeCheck.
+// The `minFrequency` indicates how frequently BackoffTimeCheck.Ok() can return true.
 // When Ok() returns true, the allowed frequency is multiplied by `factor`. The
 // resulting frequency is capped by `maxFrequency`.
-func NewBackoffPrint(minFrequency time.Duration, factor int, maxFrequency time.Duration) *BackoffPrint {
-	return &BackoffPrint{
+func NewBackoffTimeCheck(minFrequency time.Duration, factor int, maxFrequency time.Duration) (*BackoffTimeCheck, error) {
+	if minFrequency <= 0 || factor < 1 || maxFrequency < minFrequency {
+		return nil, fmt.Errorf("minFrequency must be positive, factor at least 1 and maxFrequency at least equal to minFrequency, got %v - %v - %v",
+			minFrequency, factor, maxFrequency)
+	}
+	return &BackoffTimeCheck{
 		frequency:    minFrequency,
 		minFrequency: minFrequency,
 		maxFrequency: maxFrequency,
 		factor:       factor,
-	}
+	}, nil
 }
 
 // Ok returns true for the first time it is invoked after creation of the object
@@ -45,18 +50,19 @@ func NewBackoffPrint(minFrequency time.Duration, factor int, maxFrequency time.D
 // When at the maximum frequency, if this call is made after a delay at least
 // equal to 3x the max frequency (or in other words, 2x after what was the target
 // for the next print), then the object is auto-reset.
-func (bp *BackoffPrint) Ok() bool {
-	if bp.nextPrint.IsZero() {
-		bp.nextPrint = time.Now().Add(bp.minFrequency)
+func (bp *BackoffTimeCheck) Ok() bool {
+	if bp.nextTime.IsZero() {
+		bp.nextTime = time.Now().Add(bp.minFrequency)
 		return true
 	}
-	if time.Now().Before(bp.nextPrint) {
+	now := time.Now()
+	if now.Before(bp.nextTime) {
 		return false
 	}
 	// If we are already at the max frequency and this call
 	// is made after 2x the max frequency, then auto-reset.
 	if bp.frequency == bp.maxFrequency &&
-		time.Since(bp.nextPrint) >= 2*bp.maxFrequency {
+		now.Sub(bp.nextTime) >= 2*bp.maxFrequency {
 		bp.Reset()
 		return true
 	}
@@ -66,13 +72,13 @@ func (bp *BackoffPrint) Ok() bool {
 			bp.frequency = bp.maxFrequency
 		}
 	}
-	bp.nextPrint = time.Now().Add(bp.frequency)
+	bp.nextTime = now.Add(bp.frequency)
 	return true
 }
 
 // Reset the state so that next call to BackoffPrint.Ok() will return true.
-func (bp *BackoffPrint) Reset() {
-	bp.nextPrint = time.Time{}
+func (bp *BackoffTimeCheck) Reset() {
+	bp.nextTime = time.Time{}
 	bp.frequency = bp.minFrequency
 }
 

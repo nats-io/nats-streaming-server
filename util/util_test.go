@@ -88,8 +88,32 @@ func TestCloseFile(t *testing.T) {
 	}
 }
 
-func TestBackoffPrint(t *testing.T) {
-	print := NewBackoffPrint(20*time.Millisecond, 2, 100*time.Millisecond)
+func TestBackoffTimeCheck(t *testing.T) {
+	// Check invalid values
+	if btc, err := NewBackoffTimeCheck(-1, 1, time.Second); btc != nil || err == nil {
+		t.Fatalf("NewBackoffTimeCheck returned: %v, %v", btc, err)
+	}
+	if btc, err := NewBackoffTimeCheck(0, 1, time.Second); btc != nil || err == nil {
+		t.Fatalf("NewBackoffTimeCheck returned: %v, %v", btc, err)
+	}
+	if btc, err := NewBackoffTimeCheck(time.Second, 0, time.Second); btc != nil || err == nil {
+		t.Fatalf("NewBackoffTimeCheck returned: %v, %v", btc, err)
+	}
+	if btc, err := NewBackoffTimeCheck(time.Second, -1, time.Second); btc != nil || err == nil {
+		t.Fatalf("NewBackoffTimeCheck returned: %v, %v", btc, err)
+	}
+	if btc, err := NewBackoffTimeCheck(time.Second, 1, -1); btc != nil || err == nil {
+		t.Fatalf("NewBackoffTimeCheck returned: %v, %v", btc, err)
+	}
+	if btc, err := NewBackoffTimeCheck(time.Second, 1, 0); btc != nil || err == nil {
+		t.Fatalf("NewBackoffTimeCheck returned: %v, %v", btc, err)
+	}
+	if btc, err := NewBackoffTimeCheck(time.Second, 1, time.Millisecond); btc != nil || err == nil {
+		t.Fatalf("NewBackoffTimeCheck returned: %v, %v", btc, err)
+	}
+
+	// Create a time check for printing.
+	print, _ := NewBackoffTimeCheck(20*time.Millisecond, 2, 100*time.Millisecond)
 	start := time.Now()
 	if !print.Ok() {
 		t.Fatal("Should have returned true")
@@ -145,7 +169,7 @@ func TestBackoffPrint(t *testing.T) {
 		t.Fatal("Should have returned true")
 	}
 	// Check internals
-	if !print.nextPrint.IsZero() {
+	if !print.nextTime.IsZero() {
 		t.Fatal("No auto-reset done")
 	}
 }
