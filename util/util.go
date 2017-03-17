@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"time"
 )
 
 // ByteOrder specifies how to convert byte sequences into 16-, 32-, or 64-bit
@@ -14,6 +15,65 @@ var ByteOrder binary.ByteOrder
 
 func init() {
 	ByteOrder = binary.LittleEndian
+}
+
+// BackoffPrint allows to print a statement but not too often.
+type BackoffPrint struct {
+	nextPrint    time.Time
+	frequency    time.Duration
+	minFrequency time.Duration
+	maxFrequency time.Duration
+	factor       int
+}
+
+// NewBackoffPrint creates an instance of BackoffPrint.
+// The `minFrequency` indicates how frequently BackoffPrint.Ok() can return true.
+// When Ok() returns true, the allowed frequency is multiplied by `factor`. The
+// resulting frequency is capped by `maxFrequency`.
+func NewBackoffPrint(minFrequency time.Duration, factor int, maxFrequency time.Duration) *BackoffPrint {
+	return &BackoffPrint{
+		frequency:    minFrequency,
+		minFrequency: minFrequency,
+		maxFrequency: maxFrequency,
+		factor:       factor,
+	}
+}
+
+// Ok returns true for the first time it is invoked after creation of the object
+// or call to Reset(), or after an amount of time (based on the last success
+// and the allowed frequency) has elapsed.
+// When at the maximum frequency, if this call is made after a delay at least
+// equal to 3x the max frequency (or in other words, 2x after what was the target
+// for the next print), then the object is auto-reset.
+func (bp *BackoffPrint) Ok() bool {
+	if bp.nextPrint.IsZero() {
+		bp.nextPrint = time.Now().Add(bp.minFrequency)
+		return true
+	}
+	if time.Now().Before(bp.nextPrint) {
+		return false
+	}
+	// If we are already at the max frequency and this call
+	// is made after 2x the max frequency, then auto-reset.
+	if bp.frequency == bp.maxFrequency &&
+		time.Since(bp.nextPrint) >= 2*bp.maxFrequency {
+		bp.Reset()
+		return true
+	}
+	if bp.frequency < bp.maxFrequency {
+		bp.frequency *= time.Duration(bp.factor)
+		if bp.frequency > bp.maxFrequency {
+			bp.frequency = bp.maxFrequency
+		}
+	}
+	bp.nextPrint = time.Now().Add(bp.frequency)
+	return true
+}
+
+// Reset the state so that next call to BackoffPrint.Ok() will return true.
+func (bp *BackoffPrint) Reset() {
+	bp.nextPrint = time.Time{}
+	bp.frequency = bp.minFrequency
 }
 
 // EnsureBufBigEnough checks that given buffer is big enough to hold 'needed'
