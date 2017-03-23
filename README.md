@@ -16,7 +16,7 @@ NATS Streaming provides the following high-level feature set.
 - [Important Changes](#important-changes)
 - [Concepts](#concepts)
     * [Relation to NATS](#relation-to-nats)
-    * [Clients Connections](#clients-connections)
+    * [Client Connections](#client-connections)
     * [Channels](#channels)
         * [Message Log](#message-log)
         * [Subscriptions](#subscriptions)
@@ -76,14 +76,14 @@ connection, the server knows if a client is connected based on heartbeats.
 ***It is therefore strongly recommended for clients to close their connection when the application exit, otherwise the server
 will consider these clients connected (sending data, etc...) until it detects missing hearbeats.***
 
-The streaming server creates internal subscriptions on specific subjects to communicate withs its clients and/or other servers.
+The streaming server creates internal subscriptions on specific subjects to communicate with its clients and/or other servers.
 
 Note that NATS clients and NATS Streaming clients cannot exchange data between each other. That is, if a streaming client
 publishes on `foo`, a NATS client subscribing on that same subject will not receive the messages. Streaming messages are NATS
 messages made of a protobuf. The streaming server is expected to send ACKs back to producers and receive ACKs from consumers.
 If messages were freely exchanged with the NATS clients, this would cause problems.
 
-## Clients Connections
+## Client Connections
 
 As described, clients are not directly connected to the streaming server. Instead, they send connection requests. The request
 includes a `client ID` which is used by the server to uniquely identify, and restrict, a given client. That is, no two
@@ -151,7 +151,7 @@ given by the client when creating the durable subscription.
 
 #### Queue Group
 
-When consumers want to consume from the same channel but each receive a different message - as opposed to all receiving the same messages -,
+When consumers want to consume from the same channel but each receive a different message, as opposed to all receiving the same messages,
 they need to create a queue subscription. When a queue group name is specified, the server will send each messages from the log to a single
 consumer in the group. The distribution of these messages is not specified, therefore applications should not rely on an expected delivery
 scheme.
@@ -227,7 +227,7 @@ different FT groups for servers with the same cluster ID. For now, use it to sim
 
 ### Active Server
 
-There is a single Active server in the group. This server is elected and ensures that it can get an exclusive lock for the storage.
+There is a single Active server in the group. This server was the first to obtain the exclusive lock for storage.
 For the `FileStore` implementation, it means trying to get an advisory lock for a file located in the shared datastore. If the
 elected server fails to grab this lock because it is already locked, it will go back to standby.
 
@@ -322,8 +322,6 @@ Streaming Server Options:
     -hbf, --hb_fail_count <number>   Number of failed heartbeats before server closes the client connection
           --ack_subs <number>        Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription)
           --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
-          --ft_quorum <number>       Number of servers needed in order to elect a leader.
-          --ft_logfile <string>      FT logfile of this member (used for leader election). This file must not be shared by members.
 
 Streaming Server File Store Options:
     --file_compact_enabled           Enable file compaction

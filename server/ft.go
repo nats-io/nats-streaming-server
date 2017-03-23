@@ -65,7 +65,10 @@ func (s *StanServer) ftStart() (retErr error) {
 			// Since we are in standby, should just keep trying? It could
 			// be that the storage is temporarily unavailable. Right now,
 			// we return an error which means that process will exit.
-			return err
+			if print.Ok() {
+				Errorf("STAN: ft: error getting store lock, going back to standby (err=%v)", err)
+			}
+			continue
 		} else if locked {
 			break
 		}

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,7 +18,6 @@ import (
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
-	"sync/atomic"
 )
 
 // A mock store that we use to override GetExclusiveLock() behavior.
@@ -453,11 +453,9 @@ func TestFTGetStoreLockReturnsError(t *testing.T) {
 	replaceWithMockedStore(s, false, fmt.Errorf("on purpose"))
 	ftReleasePause()
 	waitForGetLockAttempt()
-	checkState(t, s, FTFailed)
-	// Should get an error about getting an error getting the store lock
-	if err := s.FTError(); err == nil || !strings.Contains(err.Error(), "store lock") {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	// We opted to have the standby keep trying regardless of the type of error
+	// returned by GetExclusiveLock.
+	checkState(t, s, FTStandby)
 }
 
 func TestFTStayStandbyIfStoreAlreadyLocked(t *testing.T) {
