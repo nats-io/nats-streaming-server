@@ -5834,9 +5834,9 @@ func TestFileStoreAcksPool(t *testing.T) {
 	checkPoolSize()
 
 	// Check total subs and each sub's ackSub is pooled or not as expected.
-	checkAckSubs := func(total int, checkSubFunc func(sub *subState) error) {
+	checkAckSubs := func(total int32, checkSubFunc func(sub *subState) error) {
 		subs := s.clients.GetSubs(clientName)
-		if len(subs) != total {
+		if len(subs) != int(total) {
 			stackFatalf(t, "Expected %d subs, got %v", total, len(subs))
 		}
 		for _, sub := range subs {
@@ -5854,41 +5854,46 @@ func TestFileStoreAcksPool(t *testing.T) {
 	defer nc.Close()
 	defer sc.Close()
 
-	totalSubs := 10
+	totalSubs := int32(10)
 	errCh := make(chan error, totalSubs)
 	ch := make(chan bool)
 	count := int32(0)
 	cb := func(m *stan.Msg) {
 		if m.Redelivered {
 			errCh <- fmt.Errorf("Unexpected redelivered message: %v", m)
-		} else if atomic.AddInt32(&count, 1) == int32(totalSubs) {
+		} else if atomic.AddInt32(&count, 1) == atomic.LoadInt32(&totalSubs) {
 			ch <- true
 		}
 	}
 	// Create 10 subs
-	for i := 0; i < totalSubs; i++ {
+	for i := 0; i < int(totalSubs); i++ {
 		sub, err := sc.Subscribe("foo", cb, stan.AckWait(time.Second))
 		if err != nil {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
 		allSubs = append(allSubs, sub)
 	}
-	// Send 1 message
-	if err := sc.Publish("foo", []byte("hello")); err != nil {
-		t.Fatalf("Unexpected error on publish: %v", err)
+	checkReceived := func(subs int32) {
+		atomic.StoreInt32(&count, 0)
+		atomic.StoreInt32(&totalSubs, subs)
+		// Send 1 message
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			stackFatalf(t, "Unexpected error on publish: %v", err)
+		}
+		// Wait for all messages to be received
+		if err := Wait(ch); err != nil {
+			stackFatalf(t, "Did not get our messages")
+		}
+		// Wait for more than redelivery time
+		time.Sleep(1500 * time.Millisecond)
+		// Check that there was no error
+		select {
+		case e := <-errCh:
+			stackFatalf(t, e.Error())
+		default:
+		}
 	}
-	// Wait for all messages to be received
-	if err := Wait(ch); err != nil {
-		t.Fatal("Did not get our messages")
-	}
-	// Wait for more than redelivery time
-	time.Sleep(1500 * time.Millisecond)
-	// Check that there was no error
-	select {
-	case e := <-errCh:
-		t.Fatal(e)
-	default:
-	}
+	checkReceived(totalSubs)
 	// Check that server's subs have nil ackSub
 	checkAckSubs(totalSubs, func(sub *subState) error {
 		if sub.ackSub != nil {
@@ -5917,6 +5922,7 @@ func TestFileStoreAcksPool(t *testing.T) {
 		}
 		return nil
 	})
+	checkReceived(totalSubs)
 	// Restart server with no acksSub pool
 	s.Shutdown()
 	opts.AckSubsPoolSize = 0
@@ -5930,6 +5936,7 @@ func TestFileStoreAcksPool(t *testing.T) {
 		}
 		return nil
 	})
+	checkReceived(totalSubs)
 	// Add another subscriber
 	sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {})
 	if err != nil {
@@ -5941,7 +5948,7 @@ func TestFileStoreAcksPool(t *testing.T) {
 	s = runServerWithOpts(t, opts, nil)
 	// Check that the new sub's AckInbox is _INBOX as usual.
 	checkAckSubs(totalSubs+1, func(sub *subState) error {
-		if int(sub.ID) > totalSubs {
+		if int(sub.ID) > int(totalSubs) {
 			if sub.AckInbox[:len(nats.InboxPrefix)] != nats.InboxPrefix {
 				return fmt.Errorf("Unexpected AckInbox: %v", sub)
 			}
@@ -5965,9 +5972,10 @@ func TestFileStoreAcksPool(t *testing.T) {
 	}
 	// Create a subscription without call unsubscribe and make
 	// sure it does not prevent closing of connection.
-	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+	if _, err := sc.Subscribe("foo", cb, stan.AckWait(time.Second)); err != nil {
 		t.Fatalf("Error on subscribe: %v", err)
 	}
+	checkReceived(1)
 	// Close the client connection
 	sc.Close()
 	nc.Close()

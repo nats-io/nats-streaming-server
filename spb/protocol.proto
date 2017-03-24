@@ -47,6 +47,7 @@ message ServerInfo {
   string Unsubscribe = 5; // Subject server receives unsubscribe requests on.
   string Close       = 6; // Subject server receives close requests on.
   string SubClose    = 7; // Subject server receives subscription close requests on.
+  string AcksSubs    = 8; // Subject prefix server receives subscription acks when using pool of ack subscribers.
 }
 
 // ClientInfo contains information related to a Client

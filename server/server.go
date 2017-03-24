@@ -42,6 +42,10 @@ const (
 	DefaultClosePrefix    = "_STAN.close"
 	DefaultStoreType      = stores.TypeMemory
 
+	// The prefixes should not have been made public (since we do not expose ways
+	// to change them). Add the new ones as private.
+	acksSubsPoolPrefix = "_STAN.subacks"
+
 	// DefaultHeartBeatInterval is the interval at which server sends heartbeat to a client
 	DefaultHeartBeatInterval = 30 * time.Second
 	// DefaultClientHBTimeout is how long server waits for a heartbeat response
@@ -896,6 +900,11 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 			// Update the store with the server info
 			callStoreInit = true
 		}
+		// Same for AcksSubs (use of pool of subscriptions for subscriptions' acks)
+		if s.info.AcksSubs == "" {
+			s.info.AcksSubs = fmt.Sprintf("%s.%s", acksSubsPoolPrefix, nuid.Next())
+			callStoreInit = true
+		}
 
 		// Restore clients state
 		s.processRecoveredClients(recoveredState.Clients)
@@ -912,6 +921,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (*StanServer
 		s.info.SubClose = fmt.Sprintf("%s.%s", DefaultSubClosePrefix, nuid.Next())
 		s.info.Unsubscribe = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, nuid.Next())
 		s.info.Close = fmt.Sprintf("%s.%s", DefaultClosePrefix, nuid.Next())
+		s.info.AcksSubs = fmt.Sprintf("%s.%s", acksSubsPoolPrefix, nuid.Next())
 
 		callStoreInit = true
 	}
@@ -1301,23 +1311,31 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 				ackSubject := sub.AckInbox
 				createSub := ackSubject[0] == natsInboxFirstChar
 				if !createSub {
-					ackSubIndex := 0
-					// This server instance could have been started with a
-					// pool size lower than before. We need to make sure
-					// that if the AckInbox is for a ackSubIndex that is
-					// higher than the current max, we create an individual
-					// ack subscription.
-					ackSubIndexEnd := strings.Index(sub.AckInbox, ".")
-					if ackSubIndexEnd != -1 {
-						ackSubIndexStr := sub.AckInbox[:ackSubIndexEnd]
-						ackSubIndex, err = strconv.Atoi(ackSubIndexStr)
-						if err == nil {
-							createSub = ackSubIndex >= s.acksSubsPoolSize
-							ackSubject = s.acksSubsPrefix + sub.AckInbox
+					// The saved AckInbox indicates that this was for a pool
+					// of acksSubs. If the server is currently not running
+					// in that mode, we need to create the subscription.
+					createSub = s.acksSubsPoolSize == 0
+					// If not, check that the recovered AckInbox index is
+					// below the pool size, otherwise we need to create an
+					// individual subscription.
+					if !createSub {
+						ackSubIndex := 0
+						ackSubIndexEnd := strings.Index(sub.AckInbox, ".")
+						if ackSubIndexEnd != -1 {
+							ackSubIndexStr := sub.AckInbox[:ackSubIndexEnd]
+							ackSubIndex, err = strconv.Atoi(ackSubIndexStr)
+							if err == nil {
+								createSub = ackSubIndex >= s.acksSubsPoolSize
+							}
+						}
+						if ackSubIndexEnd == -1 || err != nil {
+							err = fmt.Errorf("invalid ack inbox: %s", sub.AckInbox)
 						}
 					}
-					if ackSubIndexEnd == -1 || err != nil {
-						err = fmt.Errorf("invalid ack inbox: %s", sub.AckInbox)
+					// If we need to create an individual subscription,
+					// set the appropriate ack subject.
+					if err == nil && createSub {
+						ackSubject = s.acksSubsPrefix + sub.AckInbox
 					}
 				}
 				if err == nil && createSub {
@@ -1438,10 +1456,12 @@ func (s *StanServer) initSubscriptions() error {
 	if err != nil {
 		return fmt.Errorf("could not subscribe to close request subject, %v", err)
 	}
+	// We need to set this regardless if server is currently running
+	// with the pool or not (since we may need those when recovering subscriptions)
+	s.acksSubsPrefix = s.info.AcksSubs + "."
+	s.acksSubsPrefixLen = len(s.acksSubsPrefix)
 	// Optionally receive ACKs from clients using this pool of ack subscribers.
 	if s.acksSubsPoolSize > 0 {
-		s.acksSubsPrefix = "_STAN.subacks." + s.info.ClusterID + "."
-		s.acksSubsPrefixLen = len(s.acksSubsPrefix)
 		for i := 0; i < s.acksSubsPoolSize; i++ {
 			ackSub, err := s.nc.Subscribe(fmt.Sprintf("%s%d.>", s.acksSubsPrefix, i),
 				s.processAckMsg)
