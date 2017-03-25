@@ -86,6 +86,16 @@ func TestFTConfig(t *testing.T) {
 		s.Shutdown()
 		t.Fatal("Server should have failed to start with FT mode and MemStore")
 	}
+
+	opts = getTestFTDefaultOptions()
+	// set wrong ftHBMissedInterval and ftHBInterval values
+	defer setFTTestsHBInterval()
+	ftHBMissedInterval = time.Duration(float64(ftHBInterval) * 1.05)
+	s, err = RunServerWithOpts(opts, nil)
+	if s != nil || err == nil {
+		s.Shutdown()
+		t.Fatal("Server should have failed to start due to incorrect HB values")
+	}
 }
 
 func getFTActiveServer(t *testing.T, servers ...*StanServer) *StanServer {
@@ -187,7 +197,7 @@ func checkState(t *testing.T, s *StanServer, expectedState State) {
 }
 
 func waitForGetLockAttempt() {
-	time.Sleep(ftHBMissedInterval + 25*time.Millisecond)
+	time.Sleep(time.Duration(float64(ftHBMissedInterval)*1.1) + 25*time.Millisecond)
 }
 
 func TestFTCanStopFTStandby(t *testing.T) {
@@ -453,9 +463,11 @@ func TestFTGetStoreLockReturnsError(t *testing.T) {
 	replaceWithMockedStore(s, false, fmt.Errorf("on purpose"))
 	ftReleasePause()
 	waitForGetLockAttempt()
-	// We opted to have the standby keep trying regardless of the type of error
-	// returned by GetExclusiveLock.
-	checkState(t, s, FTStandby)
+	checkState(t, s, FTFailed)
+	// We should get an error about not being able to get the store lock
+	if err := s.FTError(); err == nil || !strings.Contains(err.Error(), "store lock") {
+		t.Fatalf("Unexpected error: %v", err)
+	}
 }
 
 func TestFTStayStandbyIfStoreAlreadyLocked(t *testing.T) {

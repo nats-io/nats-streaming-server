@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// ErrAlreadyLocked is used to indicate that a lock cannot be
+// ErrUnableToLockNow is used to indicate that a lock cannot be
 // immediately acquired.
-var ErrAlreadyLocked = errors.New("unable to acquire the lock")
+var ErrUnableToLockNow = errors.New("unable to acquire the lock at the moment")
 
 // LockFile is an interface for lock files utility.
 type LockFile interface {

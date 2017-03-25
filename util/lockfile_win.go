@@ -37,7 +37,7 @@ func CreateLockFile(file string) (LockFile, error) {
 		// find how to get Windows error codes (also syscall.GetLastError()
 		// returns nil here).
 		if strings.Contains(err.Error(), "used by another process") {
-			err = ErrAlreadyLocked
+			err = ErrUnableToLockNow
 		}
 		syscall.CloseHandle(f)
 		return nil, err

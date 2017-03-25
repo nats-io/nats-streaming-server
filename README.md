@@ -223,7 +223,15 @@ of servers with one acting as the active server (accessing the store) and handli
 acting as standby servers.
 
 To start a server in Fault Tolerance (FT) mode, you specify an FT group name. This is so that in the future, one could have
-different FT groups for servers with the same cluster ID. For now, use it to simply enable Fault Tolerance mode.<br>
+different FT groups for servers with the same cluster ID. For now, use it to simply enable Fault Tolerance mode.
+
+Here is an example on how starting 2 servers in FT mode running on the same host and embedding the NATS servers:
+
+```
+nats-streaming-server -store file -dir datastore -ft_group "ft" -cluster nats://localhost:6222 -routes nats://localhost:6223 -p 4222
+
+nats-streaming-server -store file -dir datastore -ft_group "ft" -cluster nats://localhost:6223 -routes nats://localhost:6222 -p 4223
+```
 
 ### Active Server
 
@@ -243,12 +251,18 @@ Actual file replication to multiple disks is not handled by the Streaming server
 
 ### Failover
 
-When the active server fails, one of the standby will be elected leader. In that role, it is going to attempt to get an exclusive lock
-to the store. If it succeeds, it becomes active and goes through the process of recovering the store and service clients. It is as if a server in standalone mode was automatically restarted. If it fails to get the store lock, it will go back to standby mode. Another election will shortly occur and the process repeats until a standby is fully promoted to active server.
+When the active server fails, all standby servers will try to activate. The process consists of trying to get an exclusive lock
+on the storage.
 
-By default, the quorum for the FT group is set to 1, but you can configure this number. The quorum is the number of servers required
-for an election to take place. It can be useful to minimize risk of network partitions by forcing a certain number of servers reachable
-in the group in order to have an election.
+The first server that succeeds will become active and go through the process of recovering the store and service clients.
+It is as if a server in standalone mode was automatically restarted.
+
+All other servers that failed to get the store lock will go back to standby mode and stay in this mode until they stop
+receiving heartbeats from the current active server.
+
+It is possible that a standby trying to activate is not able to immediately acquire the store lock. When that happens,
+it goes back into standby mode, but if it fails to receive heartbeats from an active server, it will try again to
+acquire the store lock. The interval is random but as of now set to a bit more than a second.
 
 # Getting Started
 

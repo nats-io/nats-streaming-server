@@ -4,6 +4,7 @@ package server
 
 import (
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/nats-io/go-nats"
@@ -56,19 +57,13 @@ func (s *StanServer) ftStart() (retErr error) {
 		case <-s.ftHBCh:
 			// go back to the beginning of the for loop
 			continue
-		case <-time.After(ftHBMissedInterval):
+		case <-time.After(s.ftHBMissedInterval):
 			// try to lock the store
 		}
 		locked, err := s.ftGetStoreLock()
 		if err != nil {
-			// TODO: This means that we got an error not related to locking.
-			// Since we are in standby, should just keep trying? It could
-			// be that the storage is temporarily unavailable. Right now,
-			// we return an error which means that process will exit.
-			if print.Ok() {
-				Errorf("STAN: ft: error getting store lock, going back to standby (err=%v)", err)
-			}
-			continue
+			// This is considered a fatal error and we exit
+			return err
 		} else if locked {
 			break
 		}
@@ -105,7 +100,7 @@ func (s *StanServer) ftGetStoreLock() (bool, error) {
 		// We got an error not related to locking (could be not supported,
 		// permissions error, file not reachable, etc..)
 		if err != nil {
-			return false, fmt.Errorf("ft: error getting the store lock: %v", err)
+			return false, fmt.Errorf("ft: fatal error getting the store lock: %v", err)
 		}
 		// If ok is false, it means that we did not get the lock.
 		return false, nil
@@ -164,7 +159,7 @@ func (s *StanServer) ftSendHBLoop(activationTime time.Time) {
 					Errorf(err.Error())
 				}
 			}
-		case <-time.After(ftHBInterval):
+		case <-time.After(s.ftHBInterval):
 		// We'll send the ping at the top of the for loop
 		case <-s.ftQuit:
 			return
@@ -194,7 +189,20 @@ func (s *StanServer) ftSetup() error {
 	if s.opts.StoreType != stores.TypeFile {
 		return fmt.Errorf("ft: only %v stores supported in FT mode", stores.TypeFile)
 	}
-	s.ftSubject = "_STAN.ft." + s.opts.ID + "." + s.opts.FTGroupName
+	// So far, those are not exposed to users, just used in tests.
+	// Still make sure that the missed HB interval is > than the HB
+	// interval.
+	if ftHBMissedInterval < time.Duration(float64(ftHBInterval)*1.1) {
+		return fmt.Errorf("ft: the missed heartbeat interval needs to be"+
+			" at least 10%% of the heartbeat interval (hb=%v missed hb=%v",
+			ftHBInterval, ftHBMissedInterval)
+	}
+	// Set the HB and MissedHB intervals, using a bit of randomness
+	rand.Seed(time.Now().UnixNano())
+	s.ftHBInterval = ftGetRandomInterval(ftHBInterval)
+	s.ftHBMissedInterval = ftGetRandomInterval(ftHBMissedInterval)
+	// Subscribe to FT subject
+	s.ftSubject = fmt.Sprintf("%s.%s.%s", ftHBPrefix, s.opts.ID, s.opts.FTGroupName)
 	s.ftHBCh = make(chan *nats.Msg)
 	sub, err := s.ftnc.Subscribe(s.ftSubject, func(m *nats.Msg) {
 		// Dropping incoming FT HBs is not crucial, we will then check for
@@ -214,4 +222,15 @@ func (s *StanServer) ftSetup() error {
 	// Set the state as standby initially
 	s.state = FTStandby
 	return nil
+}
+
+// ftGetRandomInterval returns a random interval with at most +/- 10%
+// of the given interval.
+func ftGetRandomInterval(interval time.Duration) time.Duration {
+	tenPercent := int(float64(interval) * 0.10)
+	random := time.Duration(rand.Intn(tenPercent))
+	if rand.Intn(2) == 1 {
+		return interval + random
+	}
+	return interval - random
 }

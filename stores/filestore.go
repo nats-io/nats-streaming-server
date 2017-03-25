@@ -1169,7 +1169,7 @@ func (fs *FileStore) GetExclusiveLock() (bool, error) {
 	}
 	f, err := util.CreateLockFile(filepath.Join(fs.fm.rootDir, "ft.lck"))
 	if err != nil {
-		if err == util.ErrAlreadyLocked {
+		if err == util.ErrUnableToLockNow {
 			return false, nil
 		}
 		return false, err

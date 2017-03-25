@@ -151,8 +151,15 @@ type Store interface {
 	// If the lock cannot be acquired, this call will return
 	// `false` with no error: the caller can try again later.
 	//
-	// If, while trying to obtain the lock, an unexpected error occurs,
-	// this call should return `false` and the error.
+	// If, however, the lock cannot be acquired due to a fatal
+	// error, this call should return `false` and the error.
+	//
+	// It is important to note that the implementation should
+	// make an effort to distinguish error conditions deemed
+	// fatal (and therefore trying again would invariabily result
+	// in the same error) and those deemed transient, in which
+	// case no error should be returned to indicate that the
+	// caller could try later.
 	//
 	// Implementations that do not support exclusive locks should
 	// return `false` and `ErrNotSupported`.

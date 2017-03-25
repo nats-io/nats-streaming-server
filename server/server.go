@@ -46,6 +46,9 @@ const (
 	// to change them). Add the new ones as private.
 	acksSubsPoolPrefix = "_STAN.subacks"
 
+	// Prefix of subject active server is sending HBs to
+	ftHBPrefix = "_STAN.ft"
+
 	// DefaultHeartBeatInterval is the interval at which server sends heartbeat to a client
 	DefaultHeartBeatInterval = 30 * time.Second
 	// DefaultClientHBTimeout is how long server waits for a heartbeat response
@@ -259,11 +262,13 @@ type StanServer struct {
 	acksSubsPrefixLen int
 
 	// For FT mode
-	ftnc      *nats.Conn
-	ftSubject string
-	ftHBCh    chan *nats.Msg
-	ftQuit    chan struct{}
-	ftError   error
+	ftnc               *nats.Conn
+	ftSubject          string
+	ftHBInterval       time.Duration
+	ftHBMissedInterval time.Duration
+	ftHBCh             chan *nats.Msg
+	ftQuit             chan struct{}
+	ftError            error
 
 	state State
 

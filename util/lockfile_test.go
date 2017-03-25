@@ -50,8 +50,8 @@ func TestLockFile(t *testing.T) {
 		if err == nil {
 			t.Fatal("CreateLockFile should have failed while other process holds lock")
 		}
-		if !strings.Contains(string(out), ErrAlreadyLocked.Error()) {
-			t.Fatalf("Error should contain: %q, got %q", ErrAlreadyLocked.Error(), string(out))
+		if !strings.Contains(string(out), ErrUnableToLockNow.Error()) {
+			t.Fatalf("Error should contain: %q, got %q", ErrUnableToLockNow.Error(), string(out))
 		}
 	} else {
 		// If the child process, wait a bit while parent process
@@ -88,5 +88,34 @@ func TestLockFile(t *testing.T) {
 			t.Fatal("Expected CreateLockFile to fail, it did not")
 		}
 		wg.Wait()
+	}
+}
+
+func TestLockFileFatalErrors(t *testing.T) {
+	// Specifying a wrong path should return an error
+	lf, err := CreateLockFile("dummy/lock.lck")
+	if lf != nil || err == nil {
+		if lf != nil {
+			lf.Close()
+		}
+		t.Fatalf("Expected no file and error, got %v, %v", lf, err)
+	}
+
+	// Try with permission error. First, create a file
+	fileName := "test.lck"
+	defer os.Remove(fileName)
+	defer os.Chmod(fileName, 0666)
+	file, err := os.Create(fileName)
+	if err != nil {
+		t.Fatalf("Unable to create file: %v", err)
+	}
+	file.Close()
+	os.Chmod(fileName, 0400)
+	lf, err = CreateLockFile(fileName)
+	if lf != nil || err == nil {
+		if lf != nil {
+			lf.Close()
+		}
+		t.Fatalf("Expected no file and error, got %v, %v", lf, err)
 	}
 }

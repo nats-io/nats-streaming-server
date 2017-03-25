@@ -23,7 +23,12 @@ type lockFile struct {
 func CreateLockFile(file string) (LockFile, error) {
 	f, err := os.Create(file)
 	if err != nil {
-		return nil, err
+		// Consider those fatal, others may be considered transient
+		// (for instance FD limit reached, etc...)
+		if os.IsNotExist(err) || os.IsPermission(err) {
+			return nil, err
+		}
+		return nil, ErrUnableToLockNow
 	}
 	spec := &syscall.Flock_t{
 		Type:   syscall.F_WRLCK,
@@ -32,10 +37,17 @@ func CreateLockFile(file string) (LockFile, error) {
 		Len:    0, // 0 means to lock the entire file.
 	}
 	if err := syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, spec); err != nil {
-		if err == syscall.EAGAIN || err == syscall.EACCES {
-			err = ErrAlreadyLocked
+		// Try to gather all errors that we deem transient and return
+		// ErrUnableToLockNow in this case to indicate the caller that
+		// the lock could not be acquired at this time but it could
+		// try later.
+		// Basing this from possible ERRORS from this page:
+		// http://pubs.opengroup.org/onlinepubs/009695399/functions/fcntl.html
+		if err == syscall.EAGAIN || err == syscall.EACCES ||
+			err == syscall.EINTR || err == syscall.ENOLCK {
+			err = ErrUnableToLockNow
 		}
-		// TODO: If error is not ErrAlreadyLocked, it may mean that
+		// TODO: If error is not ErrUnableToLockNow, it may mean that
 		// the call is not supported on that platform, etc...
 		// We should have another level of verification, for instance
 		// check content of the lockfile is not being updated by the
