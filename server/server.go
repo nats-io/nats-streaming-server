@@ -176,7 +176,7 @@ const (
 	Standalone State = iota
 	FTActive
 	FTStandby
-	FTFailed
+	Failed
 	Shutdown
 )
 
@@ -188,8 +188,8 @@ func (state State) String() string {
 		return "FT_ACTIVE"
 	case FTStandby:
 		return "FT_STANDBY"
-	case FTFailed:
-		return "FT_FAILED"
+	case Failed:
+		return "FAILED"
 	case Shutdown:
 		return "SHUTDOWN"
 	default:
@@ -268,9 +268,12 @@ type StanServer struct {
 	ftHBMissedInterval time.Duration
 	ftHBCh             chan *nats.Msg
 	ftQuit             chan struct{}
-	ftError            error
 
 	state State
+	// This is in cases where a fatal error occurs after the server was
+	// started. We call Fatalf, but for users starting the server
+	// programmatically, it is a way to report what the error was.
+	lastError error
 
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
@@ -960,7 +963,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		go func() {
 			defer s.wg.Done()
 			if err := s.ftStart(); err != nil {
-				s.ftSetError(err)
+				s.setLastError(err)
 			}
 		}()
 	} else {
@@ -3395,14 +3398,22 @@ func (s *StanServer) State() State {
 	return s.state
 }
 
-// FTError returns the possible error that an FT standby server
-// got in the process of activating, or in tests conditions,
-// if the active server exited due to detection of more than
-// one active servers.
-func (s *StanServer) FTError() error {
+// setLastError sets the last fatal error that occurred. This is
+// used in case of an async error that cannot directly be reported
+// to the user.
+func (s *StanServer) setLastError(err error) {
+	s.mu.Lock()
+	s.lastError = err
+	s.state = Failed
+	s.mu.Unlock()
+	Fatalf("STAN: %v", err)
+}
+
+// LastError returns the last fatal error the server experienced.
+func (s *StanServer) LastError() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.ftError
+	return s.lastError
 }
 
 // Shutdown will close our NATS connection and shutdown any embedded NATS server.

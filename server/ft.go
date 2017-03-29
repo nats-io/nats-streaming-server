@@ -149,9 +149,8 @@ func (s *StanServer) ftSendHBLoop(activationTime time.Time) {
 				err := fmt.Errorf("ft: serverID %q claims to be active", hb.ServerID)
 				if peerActivationTime.Before(activationTime) {
 					err = fmt.Errorf("%s, aborting", err)
-					Fatalf("STAN: %v", err)
 					if ftNoPanic {
-						s.ftSetError(err)
+						s.setLastError(err)
 						return
 					}
 					panic(err)
@@ -165,19 +164,6 @@ func (s *StanServer) ftSendHBLoop(activationTime time.Time) {
 			return
 		}
 	}
-}
-
-// ftSetError is used in FT mode when a server fails for some reasons.
-// The state is set to FTFailed unless the server was already shutdown.
-func (s *StanServer) ftSetError(err error) {
-	s.mu.Lock()
-	s.ftError = err
-	// Don't override the state if server was shutdown before it got
-	// the FT failure.
-	if s.state != Shutdown {
-		s.state = FTFailed
-	}
-	s.mu.Unlock()
 }
 
 // ftSetup checks that all required FT parameters have been specified and

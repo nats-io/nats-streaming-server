@@ -187,12 +187,12 @@ func TestFTBasic(t *testing.T) {
 func checkState(t *testing.T, s *StanServer, expectedState State) {
 	if state := s.State(); state != expectedState {
 		stackFatalf(t, "Expected server state to be %v, got %v (ft error=%v)",
-			expectedState.String(), state.String(), s.FTError())
+			expectedState.String(), state.String(), s.LastError())
 	}
 	// Repeat test with String() too...
 	if stateStr := s.State().String(); stateStr != expectedState.String() {
 		stackFatalf(t, "Expected server state to be %v, got %v (ft error=%v)",
-			expectedState.String(), stateStr, s.FTError())
+			expectedState.String(), stateStr, s.LastError())
 	}
 }
 
@@ -245,7 +245,7 @@ func TestFTCanStopFTStandby(t *testing.T) {
 	// Check state, should be shutdown
 	checkState(t, s, Shutdown)
 	// Since server did not try to activate, there should not be any FT startup error
-	if err := s.FTError(); err != nil {
+	if err := s.LastError(); err != nil {
 		t.Fatalf("FT startup error should be nil, got: %v", err)
 	}
 }
@@ -434,8 +434,8 @@ func TestFTFailedStartup(t *testing.T) {
 	waitForGetLockAttempt()
 	// to be more reliable, wait one more time.
 	waitForGetLockAttempt()
-	checkState(t, s, FTFailed)
-	if err := s.FTError(); err == nil || !strings.Contains(err.Error(), "does not match") {
+	checkState(t, s, Failed)
+	if err := s.LastError(); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("Expected error regarding non matching cluster ID, got %v", err)
 	}
 }
@@ -463,9 +463,9 @@ func TestFTGetStoreLockReturnsError(t *testing.T) {
 	replaceWithMockedStore(s, false, fmt.Errorf("on purpose"))
 	ftReleasePause()
 	waitForGetLockAttempt()
-	checkState(t, s, FTFailed)
+	checkState(t, s, Failed)
 	// We should get an error about not being able to get the store lock
-	if err := s.FTError(); err == nil || !strings.Contains(err.Error(), "store lock") {
+	if err := s.LastError(); err == nil || !strings.Contains(err.Error(), "store lock") {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 }
@@ -531,8 +531,8 @@ func TestFTSteppingDown(t *testing.T) {
 	time.Sleep(time.Second)
 	// Since s1 activated before s2, we want s1 to stay and s2 to exit.
 	checkState(t, s1, FTActive)
-	checkState(t, s2, FTFailed)
-	if err := s2.FTError(); err == nil || !strings.Contains(err.Error(), "aborting") {
+	checkState(t, s2, Failed)
+	if err := s2.LastError(); err == nil || !strings.Contains(err.Error(), "aborting") {
 		t.Fatalf("Expected server to have exited due to both servers being active, got %v", err)
 	}
 }
