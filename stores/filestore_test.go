@@ -285,6 +285,10 @@ func TestFSFilesManager(t *testing.T) {
 	if !fm.remove(testcloseOrOpenedFile) {
 		t.Fatal("Should have been able to remove file")
 	}
+	// Trying to open a removed file should fail.
+	if err := fm.openFile(testcloseOrOpenedFile); err == nil {
+		t.Fatal("Should have been unable to open a removed file")
+	}
 
 	// Following tests are supposed to produce panic
 	file, err := fm.createFile("failure", defaultFileFlags, nil)
@@ -326,15 +330,6 @@ func TestFSFilesManager(t *testing.T) {
 	if !fm.remove(file) {
 		t.Fatal("File should have been removed")
 	}
-	lockRemovedFile := func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("Locking a removed file should panic")
-			}
-		}()
-		fm.lockFile(file)
-	}
-	lockRemovedFile()
 	fm.close()
 	fm.Lock()
 	lenMap = len(fm.files)

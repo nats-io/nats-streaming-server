@@ -783,15 +783,20 @@ func (fm *filesManager) createFile(name string, flags int, bfc beforeFileClose) 
 }
 
 // openFile opens the given file and sets its state to `fileInUse`.
-// If the file's handle is not nil or entry state is not `fileClosed`,
-// this call will panic.
+// If the file manager has been closed or the file removed, this call
+// returns an error.
+// Otherwise, if the file's state is not `fileClosed` this call will panic.
 // This call will possibly cause opened but unused files to be closed if the
 // number of open file requests is above the set limit.
 func (fm *filesManager) openFile(file *file) error {
 	fm.Lock()
 	if fm.isClosed {
 		fm.Unlock()
-		return fmt.Errorf("unable to create file %q, store is being closed", file.name)
+		return fmt.Errorf("unable to open file %q, store is being closed", file.name)
+	}
+	if _, exists := fm.files[file.id]; !exists {
+		fm.Unlock()
+		return fmt.Errorf("unable to open file %q, it has been removed", file.name)
 	}
 	if curState := atomic.LoadInt32(&file.state); curState != fileClosed || file.handle != nil {
 		fm.Unlock()
