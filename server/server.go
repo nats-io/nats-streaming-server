@@ -3432,6 +3432,7 @@ func (s *StanServer) Shutdown() {
 	// we won't panic.
 	ncs := s.ncs
 	nc := s.nc
+	ftnc := s.ftnc
 
 	// Stop processing subscriptions start requests
 	s.subStartQuit <- struct{}{}
@@ -3464,6 +3465,9 @@ func (s *StanServer) Shutdown() {
 	}
 	if nc != nil {
 		nc.Close()
+	}
+	if ftnc != nil {
+		ftnc.Close()
 	}
 	if ns != nil {
 		ns.Shutdown()
