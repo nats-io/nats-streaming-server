@@ -27,6 +27,7 @@ import (
 // Package globals for performance checks
 var trace int32
 var debug int32
+const LogPrefix = "STREAM: "
 
 // The STAN logger, encapsulates a NATS logger
 var stanLog = struct {
@@ -145,5 +146,5 @@ func executeLogCall(f func(logger natsd.Logger, format string, v ...interface{})
 	if stanLog.logger == nil {
 		return
 	}
-	f(stanLog.logger, format, args...)
+	f(stanLog.logger, LogPrefix + format, args...)
 }

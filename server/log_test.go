@@ -147,8 +147,12 @@ func TestLogOutput(t *testing.T) {
 	d := &dummyLogger{}
 
 	checkLogger := func(output string) {
-		if d.msg != output {
-			t.Fatalf("Unexpected logger message: %v", d.msg)
+		checkMsg := output
+		if checkMsg != "" {
+			checkMsg =  LogPrefix + checkMsg
+		}
+		if checkMsg != d.msg {
+			t.Fatalf("Unexpected logger message: \"%v\" != \"%v\"", d.msg, checkMsg)
 		}
 		d.Reset()
 	}

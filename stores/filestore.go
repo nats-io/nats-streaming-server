@@ -2434,9 +2434,9 @@ func (ms *FileMsgStore) removeFirstSlice() {
 				cmd := exec.Command(script, subj, dat, idx)
 				output, err := cmd.CombinedOutput()
 				if err != nil {
-					Noticef("STAN: Error invoking archive script %q: %v (output=%v)", script, err, string(output))
+					Noticef("Error invoking archive script %q: %v (output=%v)", script, err, string(output))
 				} else {
-					Noticef("STAN: Output of archive script for %s (%s and %s): %v", subj, dat, idx, string(output))
+					Noticef("Output of archive script for %s (%s and %s): %v", subj, dat, idx, string(output))
 				}
 			}(ms.subject, datBak, idxBak)
 		}
