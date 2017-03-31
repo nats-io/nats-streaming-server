@@ -147,8 +147,9 @@ func TestLogOutput(t *testing.T) {
 	d := &dummyLogger{}
 
 	checkLogger := func(output string) {
-		if d.msg != output {
-			t.Fatalf("Unexpected logger message: %v", d.msg)
+		prefixRemoved := strings.TrimPrefix(d.msg, LogPrefix)
+		if output != prefixRemoved {
+			stackFatalf(t,"Unexpected logger message: \"%v\" != \"%v\"", prefixRemoved, output)
 		}
 		d.Reset()
 	}
