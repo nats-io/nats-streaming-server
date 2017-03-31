@@ -37,17 +37,20 @@ const (
 	CtrlMsg_SubUnsubscribe CtrlMsg_Type = 0
 	CtrlMsg_SubClose       CtrlMsg_Type = 1
 	CtrlMsg_ConnClose      CtrlMsg_Type = 2
+	CtrlMsg_FTHeartbeat    CtrlMsg_Type = 3
 )
 
 var CtrlMsg_Type_name = map[int32]string{
 	0: "SubUnsubscribe",
 	1: "SubClose",
 	2: "ConnClose",
+	3: "FTHeartbeat",
 }
 var CtrlMsg_Type_value = map[string]int32{
 	"SubUnsubscribe": 0,
 	"SubClose":       1,
 	"ConnClose":      2,
+	"FTHeartbeat":    3,
 }
 
 func (x CtrlMsg_Type) String() string {

@@ -71,6 +71,12 @@ func (gs *genericStore) init(name string, limits *StoreLimits) {
 	gs.clients = make(map[string]*Client)
 }
 
+// GetExclusiveLock implements the Store interface.
+func (gs *genericStore) GetExclusiveLock() (bool, error) {
+	// Need to be implementation specific.
+	return false, ErrNotSupported
+}
+
 // Init can be used to initialize the store with server's information.
 func (gs *genericStore) Init(info *spb.ServerInfo) error {
 	return nil
@@ -79,6 +85,13 @@ func (gs *genericStore) Init(info *spb.ServerInfo) error {
 // Name returns the type name of this store
 func (gs *genericStore) Name() string {
 	return gs.name
+}
+
+// Recover implements the Store interface.
+func (gs *genericStore) Recover() (*RecoveredState, error) {
+	// Implementations that can recover their state need to
+	// override this.
+	return nil, nil
 }
 
 // setLimits makes a copy of the given StoreLimits,
