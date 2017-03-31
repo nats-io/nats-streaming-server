@@ -4394,7 +4394,7 @@ func TestFSGetExclusiveLock(t *testing.T) {
 		t.Fatal("LockFile should have been closed")
 	}
 
-	fLockName := filepath.Join(defaultDataStore, "ft.lck")
+	fLockName := filepath.Join(defaultDataStore, lockFileName)
 	defer os.Chmod(fLockName, 0666)
 	os.Chmod(fLockName, 0400)
 	fs = createDefaultFileStore(t)

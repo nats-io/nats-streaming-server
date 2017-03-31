@@ -94,6 +94,9 @@ const (
 
 	// defaultFileFlags are the default file flags used when opening a file
 	defaultFileFlags = os.O_RDWR | os.O_CREATE | os.O_APPEND
+
+	// Lock file name
+	lockFileName = ".rootdir.lck"
 )
 
 // FileStoreOption is a function on the options for a File Store
@@ -1167,7 +1170,7 @@ func (fs *FileStore) GetExclusiveLock() (bool, error) {
 	if fs.lockFile != nil {
 		return true, nil
 	}
-	f, err := util.CreateLockFile(filepath.Join(fs.fm.rootDir, "ft.lck"))
+	f, err := util.CreateLockFile(filepath.Join(fs.fm.rootDir, lockFileName))
 	if err != nil {
 		if err == util.ErrUnableToLockNow {
 			return false, nil
