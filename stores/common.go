@@ -60,15 +60,18 @@ type genericMsgStore struct {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes the structure of a generic store
-func (gs *genericStore) init(name string, limits *StoreLimits) {
+func (gs *genericStore) init(name string, limits *StoreLimits) error {
 	gs.name = name
 	if limits == nil {
 		limits = &DefaultStoreLimits
 	}
-	gs.setLimits(limits)
+	if err := gs.setLimits(limits); err != nil {
+		return err
+	}
 	// Do not use limits values to create the map.
 	gs.channels = make(map[string]*ChannelStore)
 	gs.clients = make(map[string]*Client)
+	return nil
 }
 
 // GetExclusiveLock implements the Store interface.

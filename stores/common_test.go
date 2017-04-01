@@ -876,3 +876,27 @@ func testIncrementalTimestamp(t *testing.T, s Store) {
 		}
 	}
 }
+
+func testNegativeLimit(t *testing.T, s Store) {
+	limits := DefaultStoreLimits
+
+	checkLimitError := func() {
+		if err := s.SetLimits(&limits); err == nil {
+			stackFatalf(t, "Setting negative limit should have failed")
+		}
+	}
+	limits.MaxAge, _ = time.ParseDuration("-1.5h")
+	checkLimitError()
+	limits = DefaultStoreLimits
+	limits.MaxBytes = -1000
+	checkLimitError()
+	limits = DefaultStoreLimits
+	limits.MaxChannels = -1000
+	checkLimitError()
+	limits = DefaultStoreLimits
+	limits.MaxMsgs = -1000
+	checkLimitError()
+	limits = DefaultStoreLimits
+	limits.MaxSubscriptions = -1000
+	checkLimitError()
+}

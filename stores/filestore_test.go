@@ -4402,3 +4402,21 @@ func TestFSGetExclusiveLock(t *testing.T) {
 		t.Fatal("Locked should be false")
 	}
 }
+
+func TestFSNegativeLimits(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	limits := DefaultStoreLimits
+	limits.MaxMsgs = -1000
+	if fs, err := NewFileStore(defaultDataStore, &limits); fs != nil || err == nil {
+		if fs != nil {
+			fs.Close()
+		}
+		t.Fatal("Should have failed to create store with a negative limit")
+	}
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	testNegativeLimit(t, fs)
+}
