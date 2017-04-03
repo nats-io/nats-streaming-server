@@ -292,19 +292,20 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[79856] 2017/01/17 16:25:30.111311 [INF] Starting nats-streaming-server[test-cluster] version 0.3.8
-[79856] 2017/01/17 16:25:30.111620 [INF] Starting nats-server version 0.9.6
-[79856] 2017/01/17 16:25:30.111632 [INF] Listening for client connections on 0.0.0.0:4222
-[79856] 2017/01/17 16:25:30.111706 [INF] Server is ready
-[79856] 2017/01/17 16:25:30.395811 [INF] STAN: Message store is MEMORY
-[79856] 2017/01/17 16:25:30.395828 [INF] STAN: --------- Store Limits ---------
-[79856] 2017/01/17 16:25:30.395836 [INF] STAN: Channels:                  100 *
-[79856] 2017/01/17 16:25:30.395840 [INF] STAN: -------- channels limits -------
-[79856] 2017/01/17 16:25:30.395845 [INF] STAN:   Subscriptions:          1000 *
-[79856] 2017/01/17 16:25:30.395850 [INF] STAN:   Messages     :       1000000 *
-[79856] 2017/01/17 16:25:30.395873 [INF] STAN:   Bytes        :     976.56 MB *
-[79856] 2017/01/17 16:25:30.395878 [INF] STAN:   Age          :     unlimited *
-[79856] 2017/01/17 16:25:30.395881 [INF] STAN: --------------------------------
+[59824] 2017/04/01 10:24:31.361848 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.4.0
+[59824] 2017/04/01 10:24:31.361925 [INF] STREAM: ServerID: x2KSRErzlqdQZDURmWPOYw
+[59824] 2017/04/01 10:24:31.362084 [INF] Starting nats-server version 0.9.6
+[59824] 2017/04/01 10:24:31.362095 [INF] Listening for client connections on 0.0.0.0:4222
+[59824] 2017/04/01 10:24:31.362158 [INF] Server is ready
+[59824] 2017/04/01 10:24:31.645747 [INF] STREAM: Message store is MEMORY
+[59824] 2017/04/01 10:24:31.645765 [INF] STREAM: --------- Store Limits ---------
+[59824] 2017/04/01 10:24:31.645772 [INF] STREAM: Channels:                  100 *
+[59824] 2017/04/01 10:24:31.645776 [INF] STREAM: -------- channels limits -------
+[59824] 2017/04/01 10:24:31.645781 [INF] STREAM:   Subscriptions:          1000 *
+[59824] 2017/04/01 10:24:31.645788 [INF] STREAM:   Messages     :       1000000 *
+[59824] 2017/04/01 10:24:31.645808 [INF] STREAM:   Bytes        :     976.56 MB *
+[59824] 2017/04/01 10:24:31.645813 [INF] STREAM:   Age          :     unlimited *
+[59824] 2017/04/01 10:24:31.645817 [INF] STREAM: --------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
@@ -317,86 +318,94 @@ Note that you do not need to start the embedded NATS Server. It is started autom
 
 The NATS Streaming Server accepts command line arguments to control its behavior. There is a set of parameters specific to the NATS Streaming Server and some to the embedded NATS Server.
 
+***Note about parameters types***
+
+| Type | Remark |
+|:----|:----|
+|`<bool>`| For booleans, either simply specify the parameter with value to enable (e.g `-SD`), or specify `=false` to disable|
+|`<size>` | You can specify as a number `1024` or as a size `1KB`|
+|`<duration>` | Values must be expressed in the form `_h_m_s`, such as `1h` or `20s` or `1h30m`, or `1.5h`, etc...|
+
 ```
 Usage: nats-streaming-server [options]
 
 Streaming Server Options:
-    -cid, --cluster_id  <cluster ID> Cluster ID (default: test-cluster)
-    -st,  --store <type>             Store type: MEMORY|FILE (default: MEMORY)
-          --dir <directory>          For FILE store type, this is the root directory
-    -mc,  --max_channels <number>    Max number of channels (0 for unlimited)
-    -msu, --max_subs <number>        Max number of subscriptions per channel (0 for unlimited)
-    -mm,  --max_msgs <number>        Max number of messages per channel (0 for unlimited)
-    -mb,  --max_bytes <number>       Max messages total size per channel (0 for unlimited)
-    -ma,  --max_age <seconds>        Max duration a message can be stored ("0s" for unlimited)
-    -ns,  --nats_server <url>        Connect to this external NATS Server (embedded otherwise)
-    -sc,  --stan_config <file>       Streaming server configuration file
+    -cid, --cluster_id  <string>     Cluster ID (default: test-cluster)
+    -st,  --store <string>           Store type: MEMORY|FILE (default: MEMORY)
+          --dir <string>             For FILE store type, this is the root directory
+    -mc,  --max_channels <int>       Max number of channels (0 for unlimited)
+    -msu, --max_subs <int>           Max number of subscriptions per channel (0 for unlimited)
+    -mm,  --max_msgs <int>           Max number of messages per channel (0 for unlimited)
+    -mb,  --max_bytes <size>         Max messages total size per channel (0 for unlimited)
+    -ma,  --max_age <duration>       Max duration a message can be stored ("0s" for unlimited)
+    -ns,  --nats_server <string>     Connect to this external NATS Server URL (embedded otherwise)
+    -sc,  --stan_config <string>     Streaming server configuration file
     -hbi, --hb_interval <duration>   Interval at which server sends heartbeat to a client
     -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
-    -hbf, --hb_fail_count <number>   Number of failed heartbeats before server closes the client connection
-          --ack_subs <number>        Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription)
+    -hbf, --hb_fail_count <int>      Number of failed heartbeats before server closes the client connection
+          --ack_subs <int>           Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription)
           --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 
 Streaming Server File Store Options:
-    --file_compact_enabled           Enable file compaction
-    --file_compact_frag              File fragmentation threshold for compaction
-    --file_compact_interval <int>    Minimum interval (in seconds) between file compactions
-    --file_compact_min_size <int>    Minimum file size for compaction
-    --file_buffer_size <int>         File buffer size (in bytes)
-    --file_crc                       Enable file CRC-32 checksum
-    --file_crc_poly <int>            Polynomial used to make the table used for CRC-32 checksum
-    --file_sync                      Enable File.Sync on Flush
-    --file_slice_max_msgs            Maximum number of messages per file slice (subject to channel limits)
-    --file_slice_max_bytes           Maximum file slice size - including index file (subject to channel limits)
-    --file_slice_max_age             Maximum file slice duration starting when the first message is stored (subject to channel limits)
-    --file_slice_archive_script      Path to script to use if you want to archive a file slice being removed
-    --file_fds_limit                 Store will try to use no more file descriptors than this given limit
+    --file_compact_enabled <bool>        Enable file compaction
+    --file_compact_frag <int>            File fragmentation threshold for compaction
+    --file_compact_interval <int>        Minimum interval (in seconds) between file compactions
+    --file_compact_min_size <size>       Minimum file size for compaction
+    --file_buffer_size <size>            File buffer size (in bytes)
+    --file_crc <bool>                    Enable file CRC-32 checksum
+    --file_crc_poly <int>                Polynomial used to make the table used for CRC-32 checksum
+    --file_sync <bool>                   Enable File.Sync on Flush
+    --file_slice_max_msgs <int>          Maximum number of messages per file slice (subject to channel limits)
+    --file_slice_max_bytes <size>        Maximum file slice size - including index file (subject to channel limits)
+    --file_slice_max_age <duration>      Maximum file slice duration starting when the first message is stored (subject to channel limits)
+    --file_slice_archive_script <string> Path to script to use if you want to archive a file slice being removed
+    --file_fds_limit <int>               Store will try to use no more file descriptors than this given limit
 
 Streaming Server TLS Options:
-    -secure                          Use a TLS connection to the NATS server without
+    -secure <bool>                   Use a TLS connection to the NATS server without
                                      verification; weaker than specifying certificates.
-    -tls_client_key                  Client key for the streaming server
-    -tls_client_cert                 Client certificate for the streaming server
-    -tls_client_cacert               Client certificate CA for the streaming server
+    -tls_client_key <string>         Client key for the streaming server
+    -tls_client_cert <string>        Client certificate for the streaming server
+    -tls_client_cacert <string>      Client certificate CA for the streaming server
 
 Streaming Server Logging Options:
-    -SD, --stan_debug                Enable STAN debugging output
-    -SV, --stan_trace                Trace the raw STAN protocol
+    -SD, --stan_debug=<bool>         Enable STAN debugging output
+    -SV, --stan_trace=<bool>         Trace the raw STAN protocol
     -SDV                             Debug and trace STAN
     (See additional NATS logging options below)
 
 Embedded NATS Server Options:
-    -a, --addr <host>                Bind to host address (default: 0.0.0.0)
-    -p, --port <port>                Use port for clients (default: 4222)
-    -P, --pid <file>                 File to store PID
-    -m, --http_port <port>           Use port for http monitoring
-    -ms,--https_port <port>          Use port for https monitoring
-    -c, --config <file>              Configuration file
+    -a, --addr <string>              Bind to host address (default: 0.0.0.0)
+    -p, --port <int>                 Use port for clients (default: 4222)
+    -P, --pid <string>               File to store PID
+    -m, --http_port <int>            Use port for http monitoring
+    -ms,--https_port <int>           Use port for https monitoring
+    -c, --config <string>            Configuration file
 
 Logging Options:
-    -l, --log <file>                 File to redirect log output
-    -T, --logtime                    Timestamp log entries (default: true)
-    -s, --syslog                     Enable syslog as log method
-    -r, --remote_syslog <addr>       Syslog server addr (udp://localhost:514)
-    -D, --debug                      Enable debugging output
-    -V, --trace                      Trace the raw protocol
+    -l, --log <string>               File to redirect log output
+    -T, --logtime=<bool>             Timestamp log entries (default: true)
+    -s, --syslog <string>            Enable syslog as log method
+    -r, --remote_syslog <string>     Syslog server addr (udp://localhost:514)
+    -D, --debug=<bool>               Enable debugging output
+    -V, --trace=<bool>               Trace the raw protocol
     -DV                              Debug and trace
 
 Authorization Options:
-        --user <user>                User required for connections
-        --pass <password>            Password required for connections
-        --auth <token>               Authorization token required for connections
+        --user <string>              User required for connections
+        --pass <string>              Password required for connections
+        --auth <string>              Authorization token required for connections
 
 TLS Options:
-        --tls                        Enable TLS, do not verify clients (default: false)
-        --tlscert <file>             Server certificate file
-        --tlskey <file>              Private key for server certificate
-        --tlsverify                  Enable TLS, verify client certificates
-        --tlscacert <file>           Client certificate CA for verification
+        --tls=<bool>                 Enable TLS, do not verify clients (default: false)
+        --tlscert <string>           Server certificate file
+        --tlskey <string>            Private key for server certificate
+        --tlsverify=<bool>           Enable TLS, verify client certificates
+        --tlscacert <string>         Client certificate CA for verification
 
 NATS Clustering Options:
-        --routes <rurl-1, rurl-2>    Routes to solicit and connect
-        --cluster <cluster-url>      Cluster URL for solicited routes
+        --routes <string, ...>       Routes to solicit and connect
+        --cluster <string>           Cluster URL for solicited routes
 
 Common Options:
     -h, --help                       Show this message
@@ -649,24 +658,24 @@ limit to indicate that the limit was inherited (either from global or default li
 This is what would be displayed with the above store limits configuration:
 
 ```
-[53904] 2016/10/18 10:10:50.581799 [INF] STAN: --------- Store Limits ---------
-[53904] 2016/10/18 10:10:50.581807 [INF] STAN: Channels:                   10
-[53904] 2016/10/18 10:10:50.581810 [INF] STAN: -------- channels limits -------
-[53904] 2016/10/18 10:10:50.581816 [INF] STAN:   Subscriptions:          1000 *
-[53904] 2016/10/18 10:10:50.581821 [INF] STAN:   Messages     :         10000
-[53904] 2016/10/18 10:10:50.581846 [INF] STAN:   Bytes        :      10.00 MB
-[53904] 2016/10/18 10:10:50.581859 [INF] STAN:   Age          :        1h0m0s
-[53904] 2016/10/18 10:10:50.581867 [INF] STAN: Channel: "foo"
-[53904] 2016/10/18 10:10:50.581872 [INF] STAN:   Subscriptions:            50
-[53904] 2016/10/18 10:10:50.581877 [INF] STAN:   Messages     :           300
-[53904] 2016/10/18 10:10:50.581883 [INF] STAN:   Bytes        :      10.00 MB *
-[53904] 2016/10/18 10:10:50.581889 [INF] STAN:   Age          :        1h0m0s *
-[53904] 2016/10/18 10:10:50.581893 [INF] STAN: Channel: "bar"
-[53904] 2016/10/18 10:10:50.581897 [INF] STAN:   Subscriptions:          1000 *
-[53904] 2016/10/18 10:10:50.581902 [INF] STAN:   Messages     :            50
-[53904] 2016/10/18 10:10:50.581916 [INF] STAN:   Bytes        :        1000 B
-[53904] 2016/10/18 10:10:50.581926 [INF] STAN:   Age          :        1h0m0s *
-[53904] 2016/10/18 10:10:50.581930 [INF] STAN: --------------------------------
+[59872] 2017/04/01 10:25:18.747822 [INF] STREAM: --------- Store Limits ---------
+[59872] 2017/04/01 10:25:18.747830 [INF] STREAM: Channels:                   10
+[59872] 2017/04/01 10:25:18.747834 [INF] STREAM: -------- channels limits -------
+[59872] 2017/04/01 10:25:18.747839 [INF] STREAM:   Subscriptions:          1000 *
+[59872] 2017/04/01 10:25:18.747845 [INF] STREAM:   Messages     :         10000
+[59872] 2017/04/01 10:25:18.747863 [INF] STREAM:   Bytes        :      10.00 MB
+[59872] 2017/04/01 10:25:18.747887 [INF] STREAM:   Age          :        1h0m0s
+[59872] 2017/04/01 10:25:18.747904 [INF] STREAM: Channel: "foo"
+[59872] 2017/04/01 10:25:18.747908 [INF] STREAM:   Subscriptions:            50
+[59872] 2017/04/01 10:25:18.747924 [INF] STREAM:   Messages     :           300
+[59872] 2017/04/01 10:25:18.747927 [INF] STREAM:   Bytes        :      10.00 MB *
+[59872] 2017/04/01 10:25:18.747930 [INF] STREAM:   Age          :        1h0m0s *
+[59872] 2017/04/01 10:25:18.747932 [INF] STREAM: Channel: "bar"
+[59872] 2017/04/01 10:25:18.747935 [INF] STREAM:   Subscriptions:          1000 *
+[59872] 2017/04/01 10:25:18.747937 [INF] STREAM:   Messages     :            50
+[59872] 2017/04/01 10:25:18.747941 [INF] STREAM:   Bytes        :        1000 B
+[59872] 2017/04/01 10:25:18.747944 [INF] STREAM:   Age          :        1h0m0s *
+[59872] 2017/04/01 10:25:18.747946 [INF] STREAM: --------------------------------
 ```
 
 
