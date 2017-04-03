@@ -185,14 +185,29 @@ func TestFTBasic(t *testing.T) {
 }
 
 func checkState(t *testing.T, s *StanServer, expectedState State) {
-	if state := s.State(); state != expectedState {
-		stackFatalf(t, "Expected server state to be %v, got %v (ft error=%v)",
-			expectedState.String(), state.String(), s.LastError())
+	timeout := time.Now().Add(5 * time.Second)
+	ok := false
+	var state State
+	var stateStr string
+	for time.Now().Before(timeout) {
+		state = s.State()
+		stateStr = s.State().String()
+		if state == expectedState && stateStr == expectedState.String() {
+			ok = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	// Repeat test with String() too...
-	if stateStr := s.State().String(); stateStr != expectedState.String() {
-		stackFatalf(t, "Expected server state to be %v, got %v (ft error=%v)",
-			expectedState.String(), stateStr, s.LastError())
+	if !ok {
+		if state != expectedState {
+			stackFatalf(t, "Expected server state to be %v, got %v (ft error=%v)",
+				expectedState.String(), state.String(), s.LastError())
+		}
+		// Repeat test with String() too...
+		if stateStr != expectedState.String() {
+			stackFatalf(t, "Expected server state to be %v, got %v (ft error=%v)",
+				expectedState.String(), stateStr, s.LastError())
+		}
 	}
 }
 
@@ -215,7 +230,6 @@ func TestFTCanStopFTStandby(t *testing.T) {
 
 	// Make sure that it did not become active, even after more than the
 	// attempt to get the store lock.
-	waitForGetLockAttempt()
 	checkState(t, s, FTStandby)
 	// Make sure we can shut it down
 	err := make(chan error, 1)
@@ -282,9 +296,6 @@ func TestFTPartition(t *testing.T) {
 	s := runServerWithOpts(t, sOpts, nil)
 	defer s.Shutdown()
 
-	// Wait for election and check state
-	waitForGetLockAttempt()
-
 	if parentProcess {
 		// We should be the active server
 		checkState(t, s, FTActive)
@@ -303,7 +314,7 @@ func TestFTPartition(t *testing.T) {
 		}()
 
 		// Give a bit of chance for child process to start and be the standby
-		waitForGetLockAttempt()
+		time.Sleep(500 * time.Millisecond)
 		// Kill our NATS server, the standby should try to become active but
 		// fail due to file lock
 		ns.Shutdown()
@@ -323,9 +334,7 @@ func TestFTPartition(t *testing.T) {
 		// The active server's NATS server will be killed in the parent
 		// process. The standby is going to try to become active, but should
 		// fail.
-		// Let's wait twice the normal time
-		waitForGetLockAttempt()
-		waitForGetLockAttempt()
+		time.Sleep(time.Second)
 		checkState(t, s, FTStandby)
 	}
 }
@@ -362,7 +371,7 @@ func TestFTPartitionReversed(t *testing.T) {
 		errCh := make(chan error, 1)
 		go func() {
 			defer wg.Done()
-			// Start a process that will be the standby
+			// Start a process that will act as the active server
 			out, err := exec.Command(os.Args[0], "-ft_partition", ds,
 				"-test.v", "-test.run=TestFTPartitionReversed$").CombinedOutput()
 			if err != nil {
@@ -370,22 +379,20 @@ func TestFTPartitionReversed(t *testing.T) {
 			}
 		}()
 
-		// Wait for the child process to become active server.
-		waitForGetLockAttempt()
+		// Give a chance to the other process to become active
+		time.Sleep(250 * time.Millisecond)
 
 		sOpts := getTestFTDefaultOptions()
 		sOpts.NATSServerURL = natsURL
 		sOpts.FilestoreDir = ds
 		s := runServerWithOpts(t, sOpts, nil)
 		defer s.Shutdown()
-
-		waitForGetLockAttempt()
 		checkState(t, s, FTStandby)
 
 		// The active server's NATS server is going to be killed.
 		// The standby here will try to become active, but should fail
 		// to do so and stay standby
-		waitForGetLockAttempt()
+		time.Sleep(250 * time.Millisecond)
 		checkState(t, s, FTStandby)
 
 		wg.Wait()
@@ -401,8 +408,7 @@ func TestFTPartitionReversed(t *testing.T) {
 		s := runServerWithOpts(t, sOpts, nil)
 		defer s.Shutdown()
 
-		// Wait this process to be the active server
-		waitForGetLockAttempt()
+		// Wait for this process to be the active server
 		checkState(t, s, FTActive)
 
 		// Shutdown NATS server to cause standby to try to become active
@@ -411,6 +417,9 @@ func TestFTPartitionReversed(t *testing.T) {
 		ns = natsdTest.RunServer(&nOpts)
 		waitForGetLockAttempt()
 		checkState(t, s, FTActive)
+		// Stay active for a while so we can check that standby server
+		// stayed standby
+		time.Sleep(time.Second)
 	}
 }
 
@@ -431,9 +440,6 @@ func TestFTFailedStartup(t *testing.T) {
 	// does not match the one stored.
 	s = runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
-	waitForGetLockAttempt()
-	// to be more reliable, wait one more time.
-	waitForGetLockAttempt()
 	checkState(t, s, Failed)
 	if err := s.LastError(); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("Expected error regarding non matching cluster ID, got %v", err)
@@ -462,7 +468,6 @@ func TestFTGetStoreLockReturnsError(t *testing.T) {
 	defer s.Shutdown()
 	replaceWithMockedStore(s, false, fmt.Errorf("on purpose"))
 	ftReleasePause()
-	waitForGetLockAttempt()
 	checkState(t, s, Failed)
 	// We should get an error about not being able to get the store lock
 	if err := s.LastError(); err == nil || !strings.Contains(err.Error(), "store lock") {
