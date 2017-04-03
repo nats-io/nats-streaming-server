@@ -4,6 +4,8 @@ package stores
 
 import (
 	"fmt"
+
+	"github.com/nats-io/nats-streaming-server/util"
 )
 
 // AddPerChannel stores limits for the given channel `name` in the StoreLimits.
@@ -27,7 +29,7 @@ func (sl *StoreLimits) Build() error {
 	if sl.MaxChannels < 0 {
 		return fmt.Errorf("max channels limit cannot be negative")
 	}
-	if err := sl.checkChannelLimits(&sl.ChannelLimits, ""); err != nil {
+	if err := sl.checkChannelLimits(&sl.ChannelLimits, "", true); err != nil {
 		return err
 	}
 	// If there is no per-channel, we are done.
@@ -39,7 +41,7 @@ func (sl *StoreLimits) Build() error {
 			len(sl.PerChannel), sl.MaxChannels)
 	}
 	for cn, cl := range sl.PerChannel {
-		if err := sl.checkChannelLimits(cl, cn); err != nil {
+		if err := sl.checkChannelLimits(cl, cn, false); err != nil {
 			return err
 		}
 	}
@@ -62,7 +64,11 @@ func (sl *StoreLimits) Build() error {
 	return nil
 }
 
-func (sl *StoreLimits) checkChannelLimits(cl *ChannelLimits, channelName string) error {
+func (sl *StoreLimits) checkChannelLimits(cl *ChannelLimits, channelName string, isGlobal bool) error {
+	// If not checking global limits, check for channel name validity.
+	if !isGlobal && !util.IsSubjectValid(channelName) {
+		return fmt.Errorf("invalid channel name %q", channelName)
+	}
 	// Check that there is no per-channel unlimited limit if corresponding
 	// limit is not.
 	if err := verifyLimit("subscriptions", channelName,

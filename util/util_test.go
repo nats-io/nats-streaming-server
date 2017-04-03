@@ -173,3 +173,32 @@ func TestBackoffTimeCheck(t *testing.T) {
 		t.Fatal("No auto-reset done")
 	}
 }
+
+func TestIsSubjectValid(t *testing.T) {
+	subject := ""
+	for i := 0; i < 100; i++ {
+		subject += "foo."
+	}
+	subject += "foo"
+	if !IsSubjectValid(subject) {
+		t.Fatalf("Subject %q should be valid", subject)
+	}
+	subjects := []string{
+		"foo.bar*",
+		"foo.bar>",
+		"foo.bar.*",
+		"foo.bar.>",
+		"foo*.bar",
+		"foo>.bar",
+		"foo..bar",
+		".foo.bar",
+		"foo.bar.",
+		"..",
+		".",
+	}
+	for _, s := range subjects {
+		if IsSubjectValid(s) {
+			t.Fatalf("Subject %q expected to be invalid", s)
+		}
+	}
+}

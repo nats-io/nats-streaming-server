@@ -1,3 +1,5 @@
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
+
 package server
 
 import (
@@ -4836,30 +4838,6 @@ func TestFileStoreDurableQueueSubRedeliveryOnRejoin(t *testing.T) {
 	// Message should be redelivered
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our message")
-	}
-}
-
-func TestIsValidSubject(t *testing.T) {
-	subject := ""
-	for i := 0; i < 100; i++ {
-		subject += "foo."
-	}
-	subject += "foo"
-	if !isValidSubject(subject) {
-		t.Fatalf("Subject %q should be valid", subject)
-	}
-	subjects := []string{
-		"foo.bar*",
-		"foo.bar>",
-		"foo.bar.*",
-		"foo.bar.>",
-		"foo*.bar",
-		"foo>.bar",
-	}
-	for _, s := range subjects {
-		if isValidSubject(s) {
-			t.Fatalf("Subject %q expected to be invalid", s)
-		}
 	}
 }
 
