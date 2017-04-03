@@ -1048,7 +1048,7 @@ func (s *StanServer) start(runningState State) error {
 	if callStoreInit {
 		// Initialize the store with the server info
 		if err := s.store.Init(&s.info); err != nil {
-			return fmt.Errorf("Unable to initialize the store: %v", err)
+			return fmt.Errorf("unable to initialize the store: %v", err)
 		}
 	}
 
