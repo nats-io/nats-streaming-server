@@ -1016,7 +1016,9 @@ func NewFileStore(rootDir string, limits *StoreLimits, options ...FileStoreOptio
 	}
 
 	fs := &FileStore{opts: DefaultFileStoreOptions}
-	fs.init(TypeFile, limits)
+	if err := fs.init(TypeFile, limits); err != nil {
+		return nil, err
+	}
 
 	for _, opt := range options {
 		if err := opt(&fs.opts); err != nil {

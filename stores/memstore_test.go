@@ -246,3 +246,18 @@ func TestMSRecover(t *testing.T) {
 		t.Fatalf("State should be nil, got %v", state)
 	}
 }
+
+func TestMSNegativeLimits(t *testing.T) {
+	limits := DefaultStoreLimits
+	limits.MaxMsgs = -1000
+	if ms, err := NewMemoryStore(&limits); ms != nil || err == nil {
+		if ms != nil {
+			ms.Close()
+		}
+		t.Fatal("Should have failed to create store with a negative limit")
+	}
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+
+	testNegativeLimit(t, ms)
+}

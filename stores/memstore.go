@@ -37,7 +37,9 @@ type MemoryMsgStore struct {
 // DefaultStoreLimits.
 func NewMemoryStore(limits *StoreLimits) (*MemoryStore, error) {
 	ms := &MemoryStore{}
-	ms.init(TypeMemory, limits)
+	if err := ms.init(TypeMemory, limits); err != nil {
+		return nil, err
+	}
 	return ms, nil
 }
 
