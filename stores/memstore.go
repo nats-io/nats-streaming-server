@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/util"
 )
 
 // MemoryStore is a factory for message and subscription stores.
@@ -118,7 +119,8 @@ func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
 			ms.removeFirstMsg()
 			if !ms.hitLimit {
 				ms.hitLimit = true
-				Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs, ms.totalBytes, ms.limits.MaxBytes)
+				Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs,
+					util.FriendlyBytes(int64(ms.totalBytes)), util.FriendlyBytes(ms.limits.MaxBytes))
 			}
 		}
 	}
