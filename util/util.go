@@ -135,3 +135,22 @@ func CloseFile(err error, f io.Closer) error {
 	}
 	return err
 }
+
+// IsSubjectValid returns false if the string if any of this condition apply:
+// - is empty
+// - contains wildcards `*` or `>`
+// - token separator `.` is first or last
+// - there are two consecutives token separators `.`
+func IsSubjectValid(subject string) bool {
+	if subject == "" || subject[0] == '.' {
+		return false
+	}
+	for i := 0; i < len(subject); i++ {
+		c := subject[i]
+		if c == '*' || c == '>' ||
+			(c == '.' && (i == len(subject)-1 || subject[i+1] == '.')) {
+			return false
+		}
+	}
+	return true
+}

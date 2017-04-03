@@ -1,4 +1,4 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
 
 package server
 
@@ -11,6 +11,7 @@ import (
 
 	"github.com/nats-io/gnatsd/conf"
 	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/nats-io/nats-streaming-server/util"
 )
 
 // ProcessConfigFile parses the configuration file `configFile` and updates
@@ -232,6 +233,9 @@ func parsePerChannelLimits(itf interface{}, opts *Options) error {
 		limitsMap, ok := limits.(map[string]interface{})
 		if !ok {
 			return fmt.Errorf("expected channel limits to be a map/struct, got %v", limits)
+		}
+		if !util.IsSubjectValid(channelName) {
+			return fmt.Errorf("invalid channel name %q", channelName)
 		}
 		cl := &stores.ChannelLimits{}
 		for k, v := range limitsMap {

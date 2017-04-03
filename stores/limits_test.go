@@ -147,6 +147,22 @@ func TestBuildErrors(t *testing.T) {
 	sl.AddPerChannel("foo", cl)
 	sl.AddPerChannel("bar", &cl2)
 	expectError("Max subscriptions for channel \"foo\"")
+
+	// Reset sl
+	sl = testDefaultStoreLimits
+	cl = &ChannelLimits{}
+	sl.AddPerChannel("foo.*", cl)
+	expectError("invalid channel name")
+
+	sl = testDefaultStoreLimits
+	cl = &ChannelLimits{}
+	sl.AddPerChannel("foo.>", cl)
+	expectError("invalid channel name")
+
+	sl = testDefaultStoreLimits
+	cl = &ChannelLimits{}
+	sl.AddPerChannel("foo.", cl)
+	expectError("invalid channel name")
 }
 
 func TestAppliedInheritance(t *testing.T) {

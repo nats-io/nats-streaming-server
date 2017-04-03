@@ -1955,7 +1955,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	}
 
 	// Make sure we have a clientID, guid, etc.
-	if pm.Guid == "" || !s.clients.IsValid(pm.ClientID) || !isValidSubject(pm.Subject) {
+	if pm.Guid == "" || !s.clients.IsValid(pm.ClientID) || !util.IsSubjectValid(pm.Subject) {
 		Errorf("Received invalid client publish message %v", pm)
 		s.sendPublishErr(m.Reply, pm.Guid, ErrInvalidPubReq)
 		return
@@ -2749,20 +2749,6 @@ func (s *StanServer) sendSubscriptionResponseErr(reply string, err error) {
 	s.ncs.Publish(reply, b)
 }
 
-// Check for valid subjects
-func isValidSubject(subject string) bool {
-	if subject == "" {
-		return false
-	}
-	for i := 0; i < len(subject); i++ {
-		c := subject[i]
-		if c == '*' || c == '>' {
-			return false
-		}
-	}
-	return true
-}
-
 // Clear the ackTimer.
 // sub Lock held in entry.
 func (sub *subState) clearAckTimer() {
@@ -2929,7 +2915,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 
 	// Make sure subject is valid
-	if !isValidSubject(sr.Subject) {
+	if !util.IsSubjectValid(sr.Subject) {
 		Errorf("[Client:%s] Invalid Subject %q in subscription request from %s",
 			sr.ClientID, sr.Subject, m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubject)
