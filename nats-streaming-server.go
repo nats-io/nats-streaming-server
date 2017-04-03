@@ -290,7 +290,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	// what is found in the file, possibly overriding the defaults.
 	if stanConfigFile != "" {
 		if err := stand.ProcessConfigFile(stanConfigFile, stanOpts); err != nil {
-			natsd.PrintAndDie(err.Error())
+			natsd.PrintAndDie(fmt.Sprintf("Configuration error: %v", err.Error()))
 		}
 	}
 	// Now apply all parameters provided on the command line.

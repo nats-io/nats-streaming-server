@@ -128,7 +128,7 @@ func (gs *genericStore) SetLimits(limits *StoreLimits) error {
 // `true` to indicate that the channel is new, false if it already exists.
 func (gs *genericStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, bool, error) {
 	// no-op
-	return nil, false, fmt.Errorf("Generic store, feature not implemented")
+	return nil, false, fmt.Errorf("generic store: feature not implemented")
 }
 
 // LookupChannel returns a ChannelStore for the given channel.
