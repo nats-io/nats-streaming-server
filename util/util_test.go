@@ -5,6 +5,7 @@ package util
 import (
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -201,4 +202,20 @@ func TestIsSubjectValid(t *testing.T) {
 			t.Fatalf("Subject %q expected to be invalid", s)
 		}
 	}
+}
+
+func TestFriendlyBytes(t *testing.T) {
+	check := func(val int64, expectedSuffix string) {
+		res := FriendlyBytes(val)
+		if !strings.HasSuffix(res, expectedSuffix) {
+			t.Fatalf("For %v, expected suffix to be %v, got %v", val, expectedSuffix, res)
+		}
+	}
+	check(1000, " B")
+	check(2000, " KB")
+	check(10<<20, " MB")
+	check(10<<30, " GB")
+	check(10<<40, " TB")
+	check(10<<50, " PB")
+	check(0xFFFFFFFFFFFFFFF, " EB")
 }

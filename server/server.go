@@ -5,7 +5,6 @@ package server
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net"
 	"net/url"
 	"regexp"
@@ -1131,7 +1130,7 @@ func getLimitStr(isGlobal bool, val, parentVal int64, limitType int) string {
 	} else {
 		switch limitType {
 		case limitBytes:
-			valStr = friendlyBytes(val)
+			valStr = util.FriendlyBytes(val)
 		case limitDuration:
 			valStr = fmt.Sprintf("%v", time.Duration(val))
 		default:
@@ -1139,20 +1138,6 @@ func getLimitStr(isGlobal bool, val, parentVal int64, limitType int) string {
 		}
 	}
 	return fmt.Sprintf("%13s%s", valStr, inherited)
-}
-
-func friendlyBytes(msgbytes int64) string {
-	bytes := float64(msgbytes)
-	base := 1024
-	pre := []string{"K", "M", "G", "T", "P", "E"}
-	var post = "B"
-	if bytes < float64(base) {
-		return fmt.Sprintf("%v B", bytes)
-	}
-	exp := int(math.Log(bytes) / math.Log(float64(base)))
-	index := exp - 1
-	units := pre[index] + post
-	return fmt.Sprintf("%.2f %s", bytes/math.Pow(float64(base), float64(exp)), units)
 }
 
 // TODO:  Explore parameter passing in gnatsd.  Keep seperate for now.

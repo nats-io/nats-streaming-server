@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"time"
 )
 
@@ -153,4 +154,18 @@ func IsSubjectValid(subject string) bool {
 		}
 	}
 	return true
+}
+
+// FriendlyBytes returns a string with the given bytes int64
+// represented as a size, such as 1KB, 10MB, etc...
+func FriendlyBytes(bytes int64) string {
+	fbytes := float64(bytes)
+	base := 1024
+	pre := []string{"K", "M", "G", "T", "P", "E"}
+	if fbytes < float64(base) {
+		return fmt.Sprintf("%v B", fbytes)
+	}
+	exp := int(math.Log(fbytes) / math.Log(float64(base)))
+	index := exp - 1
+	return fmt.Sprintf("%.2f %sB", fbytes/math.Pow(float64(base), float64(exp)), pre[index])
 }
