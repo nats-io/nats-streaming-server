@@ -397,7 +397,7 @@ func overrideWithCmdLineParams(opts *stand.Options) error {
 					return
 				}
 				o.SetInt(int64(resVal.(int64)))
-			case "MaxAge", "ClientHBInterval", "ClientHBTimeout":
+			case "MaxAge", "ClientHBInterval", "ClientHBTimeout", "FileStoreOpts.SliceMaxAge":
 				var dur time.Duration
 				dur, err = time.ParseDuration(val.(string))
 				if err != nil {
