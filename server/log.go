@@ -27,6 +27,8 @@ import (
 // Package globals for performance checks
 var trace int32
 var debug int32
+
+// LogPrefix is prefixed to all NATS Streaming log messages
 const LogPrefix = "STREAM: "
 
 // The STAN logger, encapsulates a NATS logger
@@ -146,5 +148,5 @@ func executeLogCall(f func(logger natsd.Logger, format string, v ...interface{})
 	if stanLog.logger == nil {
 		return
 	}
-	f(stanLog.logger, LogPrefix + format, args...)
+	f(stanLog.logger, LogPrefix+format, args...)
 }
