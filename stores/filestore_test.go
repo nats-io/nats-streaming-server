@@ -9,11 +9,13 @@ import (
 	"hash/crc32"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -288,6 +290,39 @@ func TestFSFilesManager(t *testing.T) {
 	// Trying to open a removed file should fail.
 	if err := fm.openFile(testcloseOrOpenedFile); err == nil {
 		t.Fatal("Should have been unable to open a removed file")
+	}
+	// Try to do concurrent lock/unlock while file is being removed
+	for i := 0; i < 20; i++ {
+		fileToRemove, err := fm.createFile("concurrentremove", defaultFileFlags, nil)
+		if err != nil {
+			t.Fatalf("Error creating file: %v", err)
+		}
+		fm.unlockFile(fileToRemove)
+		wg := sync.WaitGroup{}
+		wg.Add(1)
+		ch := make(chan bool)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ch:
+					return
+				default:
+					if _, err := fm.lockFile(fileToRemove); err == nil {
+						fm.unlockFile(fileToRemove)
+					}
+				}
+			}
+		}()
+		time.Sleep(time.Duration(rand.Intn(45)+5) * time.Millisecond)
+		removed := fm.remove(fileToRemove)
+		ch <- true
+		wg.Wait()
+		if !removed {
+			fm.remove(fileToRemove)
+		}
+		fileToRemove.handle.Close()
+		os.Remove(fileToRemove.name)
 	}
 
 	// Following tests are supposed to produce panic
