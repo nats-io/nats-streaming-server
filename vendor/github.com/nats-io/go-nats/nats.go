@@ -117,38 +117,101 @@ type Option func(*Options) error
 
 // Options can be used to create a customized connection.
 type Options struct {
-	Url            string
-	Servers        []string
-	NoRandomize    bool
-	Name           string
-	Verbose        bool
-	Pedantic       bool
-	Secure         bool
-	TLSConfig      *tls.Config
-	AllowReconnect bool
-	MaxReconnect   int
-	ReconnectWait  time.Duration
-	Timeout        time.Duration
-	PingInterval   time.Duration // disabled if 0 or negative
-	MaxPingsOut    int
-	ClosedCB       ConnHandler
-	DisconnectedCB ConnHandler
-	ReconnectedCB  ConnHandler
-	AsyncErrorCB   ErrHandler
 
-	// Size of the backing bufio buffer during reconnect. Once this
+	// Url represents a single NATS server url to which the client
+	// will be connecting. If Servers is also set, it then becomes
+	// the first server in the array.
+	Url string
+
+	// Servers is the configured set of servers which are
+	// available when attempting to connect.
+	Servers []string
+
+	// NoRandomize configures whether we will be randomizing
+	// the server pool of servers.
+	NoRandomize bool
+
+	// Name is the optional name label which will be sent to the server
+	// on CONNECT to identify the client.
+	Name string
+
+	// Verbose enables the server whether it should reply back
+	// OK on commands successfully being processed.
+	Verbose bool
+
+	// Pedantic sets pedantic flag option sent on connect to signal server
+	// whether it should be doing further validation of subjects.
+	Pedantic bool
+
+	// Secure enable TLS secure connections that skip server
+	// verification by default.
+	Secure bool
+
+	// TLSConfig is the custom TLS configuration to use for
+	// the secure transport.
+	TLSConfig *tls.Config
+
+	// AllowReconnect enables reconnection logic for when server we were
+	// connected to fails.
+	AllowReconnect bool
+
+	// MaxReconnect sets the number of connect attempts that will be
+	// tried before giving up connecting further to a server in the pool.
+	// If negative, then it will never give up trying to connect.
+	MaxReconnect int
+
+	// ReconnectWait sets the time to backoff after attempting to reconnect
+	// to a server that we were already connected to previously.
+	ReconnectWait time.Duration
+
+	// Timeout sets the timeout for Dial on a connection.
+	Timeout time.Duration
+
+	// FlusherTimeout is the maximum time to wait for the flusher loop
+	// to be able to finish writing to the underlying socket.
+	FlusherTimeout time.Duration
+
+	// PingInterval is the period at which the server will be sending ping
+	// commands to the server, disabled if 0 or negative.
+	PingInterval time.Duration
+
+	// MaxPingsOut is the maximum number of pending ping commands waiting
+	// for a response back before raising a ErrStaleConnection error.
+	MaxPingsOut int
+
+	// ClosedCB sets the closed handler called when client will
+	// no longer be connected.
+	ClosedCB ConnHandler
+
+	// DisconnectedCB sets the disconnected handler called whenever we
+	// are disconnected.
+	DisconnectedCB ConnHandler
+
+	// ReconnectedCB sets the reconnected handler called whenever
+	// successfully reconnected.
+	ReconnectedCB ConnHandler
+
+	// AsyncErrorCB sets the async error handler (e.g. slow consumer errors)
+	AsyncErrorCB ErrHandler
+
+	// ReconnectBufSize of the backing bufio buffer during reconnect. Once this
 	// has been exhausted publish operations will error.
 	ReconnectBufSize int
 
-	// The size of the buffered channel used between the socket
+	// SubChanLen is the size of the buffered channel used between the socket
 	// Go routine and the message delivery for SyncSubscriptions.
 	// NOTE: This does not affect AsyncSubscriptions which are
 	// dictated by PendingLimits()
 	SubChanLen int
 
-	User     string
+	// User sets the user to be used when connecting to the server.
+	User string
+
+	// Password sets the password to be used when connecting to a server.
 	Password string
-	Token    string
+
+	// Token sets the token to be used when connecting to a server.
+	Token string
 
 	// Dialer allows users setting a custom Dialer
 	Dialer *net.Dialer
@@ -183,7 +246,7 @@ type Conn struct {
 	Statistics
 	mu      sync.Mutex
 	Opts    Options
-	wg      sync.WaitGroup
+	wg      *sync.WaitGroup
 	url     *url.URL
 	conn    net.Conn
 	srvPool []*srv
@@ -809,7 +872,7 @@ func (nc *Conn) makeTLSConn() {
 
 // waitForExits will wait for all socket watcher Go routines to
 // be shutdown before proceeding.
-func (nc *Conn) waitForExits() {
+func (nc *Conn) waitForExits(wg *sync.WaitGroup) {
 	// Kick old flusher forcefully.
 	select {
 	case nc.fch <- true:
@@ -817,7 +880,9 @@ func (nc *Conn) waitForExits() {
 	}
 
 	// Wait for any previous go routines.
-	nc.wg.Wait()
+	if wg != nil {
+		wg.Wait()
+	}
 }
 
 // spinUpGoRoutines will launch the Go routines responsible for
@@ -827,14 +892,16 @@ func (nc *Conn) waitForExits() {
 // reconnect when the previous ones have exited.
 func (nc *Conn) spinUpGoRoutines() {
 	// Make sure everything has exited.
-	nc.waitForExits()
+	nc.waitForExits(nc.wg)
 
+	// Create a new waitGroup instance for this run.
+	nc.wg = &sync.WaitGroup{}
 	// We will wait on both.
 	nc.wg.Add(2)
 
 	// Spin up the readLoop and the socket flusher.
-	go nc.readLoop()
-	go nc.flusher()
+	go nc.readLoop(nc.wg)
+	go nc.flusher(nc.wg)
 
 	nc.mu.Lock()
 	if nc.Opts.PingInterval > 0 {
@@ -1006,12 +1073,7 @@ func (nc *Conn) processExpectedInfo() error {
 		return err
 	}
 
-	err = nc.checkForSecure()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return nc.checkForSecure()
 }
 
 // Sends a protocol control message by queuing into the bufio writer
@@ -1174,7 +1236,10 @@ func (nc *Conn) flushReconnectPendingItems() {
 func (nc *Conn) doReconnect() {
 	// We want to make sure we have the other watchers shutdown properly
 	// here before we proceed past this point.
-	nc.waitForExits()
+	nc.mu.Lock()
+	wg := nc.wg
+	nc.mu.Unlock()
+	nc.waitForExits(wg)
 
 	// FIXME(dlc) - We have an issue here if we have
 	// outstanding flush points (pongs) and they were not
@@ -1365,9 +1430,9 @@ func (nc *Conn) asyncDispatch() {
 // readLoop() will sit on the socket reading and processing the
 // protocol from the server. It will dispatch appropriately based
 // on the op type.
-func (nc *Conn) readLoop() {
+func (nc *Conn) readLoop(wg *sync.WaitGroup) {
 	// Release the wait group on exit
-	defer nc.wg.Done()
+	defer wg.Done()
 
 	// Create a parseState if needed.
 	nc.mu.Lock()
@@ -1571,15 +1636,16 @@ func (nc *Conn) processPermissionsViolation(err string) {
 
 // flusher is a separate Go routine that will process flush requests for the write
 // bufio. This allows coalescing of writes to the underlying socket.
-func (nc *Conn) flusher() {
+func (nc *Conn) flusher(wg *sync.WaitGroup) {
 	// Release the wait group
-	defer nc.wg.Done()
+	defer wg.Done()
 
 	// snapshot the bw and conn since they can change from underneath of us.
 	nc.mu.Lock()
 	bw := nc.bw
 	conn := nc.conn
 	fch := nc.fch
+	flusherTimeout := nc.Opts.FlusherTimeout
 	nc.mu.Unlock()
 
 	if conn == nil || bw == nil {
@@ -1598,11 +1664,18 @@ func (nc *Conn) flusher() {
 			return
 		}
 		if bw.Buffered() > 0 {
+			// Allow customizing how long we should wait for a flush to be done
+			// to prevent unhealthy connections blocking the client for too long.
+			if flusherTimeout > 0 {
+				conn.SetWriteDeadline(time.Now().Add(flusherTimeout))
+			}
+
 			if err := bw.Flush(); err != nil {
 				if nc.err == nil {
 					nc.err = err
 				}
 			}
+			conn.SetWriteDeadline(time.Time{})
 		}
 		nc.mu.Unlock()
 	}
@@ -1646,18 +1719,24 @@ func (nc *Conn) processInfo(info string) error {
 	if err := json.Unmarshal([]byte(info), &nc.info); err != nil {
 		return err
 	}
-	updated := false
 	urls := nc.info.ConnectURLs
-	for _, curl := range urls {
-		if _, present := nc.urls[curl]; !present {
-			if err := nc.addURLToPool(fmt.Sprintf("nats://%s", curl), true); err != nil {
-				continue
+	if len(urls) > 0 {
+		// If randomization is allowed, shuffle the received array, not the
+		// entire pool. We want to preserve the pool's order up to this point
+		// (this would otherwise be problematic for the (re)connect loop).
+		if !nc.Opts.NoRandomize {
+			for i := range urls {
+				j := rand.Intn(i + 1)
+				urls[i], urls[j] = urls[j], urls[i]
 			}
-			updated = true
 		}
-	}
-	if updated && !nc.Opts.NoRandomize {
-		nc.shufflePool()
+		for _, curl := range urls {
+			if _, present := nc.urls[curl]; !present {
+				if err := nc.addURLToPool(fmt.Sprintf("nats://%s", curl), true); err != nil {
+					continue
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -1754,8 +1833,7 @@ func (nc *Conn) publish(subj, reply string, data []byte) error {
 	nc.mu.Lock()
 
 	// Proactively reject payloads over the threshold set by server.
-	var msgSize int64
-	msgSize = int64(len(data))
+	msgSize := int64(len(data))
 	if msgSize > nc.info.MaxPayload {
 		nc.mu.Unlock()
 		return ErrMaxPayload
@@ -1806,7 +1884,6 @@ func (nc *Conn) publish(subj, reply string, data []byte) error {
 	msgh = append(msgh, b[i:]...)
 	msgh = append(msgh, _CRLF_...)
 
-	// FIXME, do deadlines here
 	_, err := nc.bw.Write(msgh)
 	if err == nil {
 		_, err = nc.bw.Write(data)
