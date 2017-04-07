@@ -798,11 +798,12 @@ func (fm *filesManager) openFile(file *file) error {
 		fm.Unlock()
 		return fmt.Errorf("unable to open file %q, store is being closed", file.name)
 	}
-	if _, exists := fm.files[file.id]; !exists {
+	curState := atomic.LoadInt32(&file.state)
+	if curState == fileRemoved {
 		fm.Unlock()
 		return fmt.Errorf("unable to open file %q, it has been removed", file.name)
 	}
-	if curState := atomic.LoadInt32(&file.state); curState != fileClosed || file.handle != nil {
+	if curState != fileClosed || file.handle != nil {
 		fm.Unlock()
 		panic(fmt.Errorf("request to open file %q but invalid state: handle=%v - state=%v", file.name, file.handle, file.state))
 	}
@@ -942,11 +943,12 @@ func (fm *filesManager) trySwitchState(file *file, newState int32) (bool, error)
 // for its state). So it is still possible for caller to read/write (if handle is
 // valid) or close this file.
 func (fm *filesManager) remove(file *file) bool {
+	fm.Lock()
 	wasOpened, err := fm.trySwitchState(file, fileRemoved)
 	if err != nil {
+		fm.Unlock()
 		return false
 	}
-	fm.Lock()
 	// With code above, we can't be removing a file twice, so no need to check if
 	// file is present in map.
 	delete(fm.files, file.id)
