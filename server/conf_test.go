@@ -226,7 +226,7 @@ func TestParseStoreType(t *testing.T) {
 	defer os.Remove(confFile)
 	opts = Options{}
 	if err := ProcessConfigFile(confFile, &opts); err == nil {
-		t.Fatal("Expected failure due to unkown store type, got none")
+		t.Fatal("Expected failure due to unknown store type, got none")
 	}
 }
 
