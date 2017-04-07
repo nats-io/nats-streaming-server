@@ -139,6 +139,15 @@ func (gs *genericStore) LookupChannel(channel string) *ChannelStore {
 	return cs
 }
 
+// IsPredeclaredChannel returns true if this store has
+// pre-declared this channel in store_limits.channels hash.
+func (gs *genericStore) IsPredeclaredChannel(channel string) (ok bool) {
+	gs.RLock()
+	_, ok = gs.limits.PerChannel[channel]
+	gs.RUnlock()
+	return
+}
+
 // HasChannel returns true if this store has any channel
 func (gs *genericStore) HasChannel() bool {
 	gs.RLock()

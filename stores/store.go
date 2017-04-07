@@ -41,6 +41,8 @@ type StoreLimits struct {
 	MaxChannels int
 	// Global limits. Any 0 value means that the limit is ignored (unlimited).
 	ChannelLimits
+	// Channels not referenced in PerChannel cannot be subscribed.
+	UnknownChannelsDisallowed bool
 	// Per-channel limits. If a limit for a channel in this map is 0,
 	// the corresponding global limit (specified above) is used.
 	PerChannel map[string]*ChannelLimits
@@ -87,6 +89,7 @@ var DefaultStoreLimits = StoreLimits{
 			MaxSubscriptions: 1000,
 		},
 	},
+	false,
 	nil,
 }
 
@@ -194,6 +197,10 @@ type Store interface {
 	// LookupChannel returns a ChannelStore for the given channel, nil if channel
 	// does not exist.
 	LookupChannel(channel string) *ChannelStore
+
+	// IsPredeclaredChannel returns true if this store has
+	// predeclared this channel in store_limits.channels hash.
+	IsPredeclaredChannel(channel string) bool
 
 	// HasChannel returns true if this store has any channel.
 	HasChannel() bool

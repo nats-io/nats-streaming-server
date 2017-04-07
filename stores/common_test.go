@@ -26,6 +26,7 @@ var testDefaultStoreLimits = StoreLimits{
 			MaxSubscriptions: 1000,
 		},
 	},
+	false,
 	nil,
 }
 
@@ -817,7 +818,15 @@ func testPerChannelLimits(t *testing.T, s Store) {
 		t.Fatalf("Unexpected error setting limits: %v", err)
 	}
 
-	checkLimitsForChannel := func(channelName string, maxMsgs, maxSubs int) {
+	checkLimitsForChannel := func(channelName string, declared bool, maxMsgs, maxSubs int) {
+		if s.IsPredeclaredChannel(channelName) != declared {
+			if declared {
+				stackFatalf(t, "Channel %s expected pre-declared, got no", channelName)
+			} else {
+				stackFatalf(t, "Channel %s expected NOT pre-declared, got yes", channelName)
+			}
+		}
+
 		cs, _, err := s.CreateChannel(channelName, nil)
 		if err != nil {
 			stackFatalf(t, "Unexpected error on create channel: %v", err)
@@ -843,12 +852,12 @@ func testPerChannelLimits(t *testing.T, s Store) {
 			}
 		}
 	}
-	checkLimitsForChannel("foo", fooLimits.MaxMsgs, fooLimits.MaxSubscriptions)
-	checkLimitsForChannel("bar", barLimits.MaxMsgs, barLimits.MaxSubscriptions)
-	checkLimitsForChannel("baz", noSubsOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
-	checkLimitsForChannel("abc", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
-	checkLimitsForChannel("def", noMaxBytesOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
-	checkLimitsForChannel("global", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+	checkLimitsForChannel("foo", true, fooLimits.MaxMsgs, fooLimits.MaxSubscriptions)
+	checkLimitsForChannel("bar", true, barLimits.MaxMsgs, barLimits.MaxSubscriptions)
+	checkLimitsForChannel("baz", true, noSubsOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+	checkLimitsForChannel("abc", true, storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+	checkLimitsForChannel("def", true, noMaxBytesOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+	checkLimitsForChannel("global", false, storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
 }
 
 func testIncrementalTimestamp(t *testing.T, s Store) {

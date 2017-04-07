@@ -120,6 +120,7 @@ var (
 	ErrDupDurable         = errors.New("stan: duplicate durable registration")
 	ErrInvalidDurName     = errors.New("stan: durable name of a durable queue subscriber can't contain the character ':'")
 	ErrUnknownClient      = errors.New("stan: unknown clientID")
+	ErrUnknownChannel     = errors.New("stan: unknown channel")
 )
 
 // Shared regular expression to check clientID validity.
@@ -338,6 +339,9 @@ type subState struct {
 func (s *StanServer) lookupOrCreateChannel(channel string) (*stores.ChannelStore, error) {
 	if cs := s.store.LookupChannel(channel); cs != nil {
 		return cs, nil
+	}
+	if s.opts.UnknownChannelsDisallowed && !s.store.IsPredeclaredChannel(channel) {
+		return nil, ErrUnknownChannel
 	}
 	// It's possible that more than one go routine comes here at the same
 	// time. `ss` will then be simply gc'ed.
