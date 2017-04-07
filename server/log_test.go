@@ -149,7 +149,7 @@ func TestLogOutput(t *testing.T) {
 	checkLogger := func(output string) {
 		prefixRemoved := strings.TrimPrefix(d.msg, LogPrefix)
 		if output != prefixRemoved {
-			stackFatalf(t,"Unexpected logger message: \"%v\" != \"%v\"", prefixRemoved, output)
+			stackFatalf(t, "Unexpected logger message: \"%v\" != \"%v\"", prefixRemoved, output)
 		}
 		d.Reset()
 	}

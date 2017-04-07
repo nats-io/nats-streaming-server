@@ -97,7 +97,7 @@ func TestFSFilesManager(t *testing.T) {
 		t.Fatal("Got nil file on success")
 	}
 	// Check content
-	// The callback cannot be checked, we need to temporarly set to nil
+	// The callback cannot be checked, we set it to nil for the DeepEqual call.
 	firstFile.beforeClose = nil
 	expectedFile := file{
 		id:     fileID(1),
@@ -3329,7 +3329,7 @@ func TestFSFirstEmptySliceRemovedOnCreateNewSlice(t *testing.T) {
 		t.Fatalf("Message should have expired")
 	}
 
-	// First slice should still exist altough empty
+	// First slice should still exist although empty
 	ms := cs.Msgs.(*FileMsgStore)
 	ms.RLock()
 	numFiles := len(ms.files)

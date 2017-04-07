@@ -2287,20 +2287,24 @@ func TestStartPositionFirstSequence(t *testing.T) {
 	defer sub2.Unsubscribe()
 
 	first := true
-	select {
-	case m := <-mch:
-		if first {
-			if string(m.Data) != "msg1" {
-				t.Fatalf("Expected msg1 first, got %v", string(m.Data))
+	for {
+		select {
+		case m := <-mch:
+			if first {
+				if string(m.Data) != "msg1" {
+					t.Fatalf("Expected msg1 first, got %v", string(m.Data))
+				}
+				first = false
+			} else {
+				if string(m.Data) != "msg2" {
+					t.Fatalf("Expected msg2 second, got %v", string(m.Data))
+				}
+				// We are done!
+				return
 			}
-			first = false
-		} else {
-			if string(m.Data) != "msg2" {
-				t.Fatalf("Expected msg2 second, got %v", string(m.Data))
-			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Did not get our message")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Did not get our message")
 	}
 }
 

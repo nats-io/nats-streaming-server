@@ -148,7 +148,7 @@ type FileStoreOptions struct {
 	// slice (and the corresponding index file) is going to be removed.
 	// The script will be invoked with the channel name and names of data and
 	// index files (which both have been previously renamed with a '.bak'
-	// extension). It is the responsability of the script to move/remove
+	// extension). It is the responsibility of the script to move/remove
 	// those files.
 	SliceArchiveScript string
 
@@ -1467,7 +1467,7 @@ func (fs *FileStore) compactClientFile(orgFileName string) error {
 	if err := os.Rename(tmpFile.Name(), orgFileName); err != nil {
 		return err
 	}
-	// Avoid unnecesary attempt to cleanup
+	// Avoid unnecessary attempt to cleanup
 	tmpFile = nil
 
 	fs.cliDeleteRecs = 0

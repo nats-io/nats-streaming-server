@@ -509,7 +509,7 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 		} else {
 			now := time.Now().UnixNano()
 			// If there are pending messages in this sub, they need to be
-			// transfered to remaining queue subscribers.
+			// transferred to remaining queue subscribers.
 			numQSubs := len(qs.subs)
 			idx := 0
 			sub.RLock()
@@ -533,7 +533,7 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 					qsub.Unlock()
 					continue
 				}
-				// We don't need to update if the sub's lastSent is transfered
+				// We don't need to update if the sub's lastSent is transferred
 				// to another queue subscriber.
 				if storageUpdate && m.Sequence == qs.lastSent {
 					storageUpdate = false
@@ -544,7 +544,7 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 				}
 				// As of now, members can have different AckWait values.
 				expirationTime := pm.expire
-				// If the member the message is transfered to has a higher AckWait,
+				// If the member the message is transferred to has a higher AckWait,
 				// keep original expiration time, otherwise check that it is smaller
 				// than the new AckWait.
 				if sub.ackWait > qsub.ackWait && expirationTime-now > 0 {
@@ -930,7 +930,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		return nil, err
 	}
 	// StanServer.store (s.store here) is of type stores.Store, which is an
-	// interace. If we assign s.store in the call of the constructor and there
+	// interface. If we assign s.store in the call of the constructor and there
 	// is an error, although the call returns "nil" for the store, we can no
 	// longer have a test such as "if s.store != nil" (as we do in shutdown).
 	// This is because the constructors return a store implementention.
@@ -1140,7 +1140,7 @@ func getLimitStr(isGlobal bool, val, parentVal int64, limitType int) string {
 	return fmt.Sprintf("%13s%s", valStr, inherited)
 }
 
-// TODO:  Explore parameter passing in gnatsd.  Keep seperate for now.
+// TODO:  Explore parameter passing in gnatsd.  Keep separate for now.
 func (s *StanServer) configureClusterOpts(opts *server.Options) error {
 	// If we don't have cluster defined in the configuration
 	// file and no cluster listen string override, but we do
@@ -2056,7 +2056,7 @@ func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force b
 	return sub, didSend, sendMore
 }
 
-// processMsg will proces a message, and possibly send to clients, etc.
+// processMsg will process a message, and possibly send to clients, etc.
 func (s *StanServer) processMsg(cs *stores.ChannelStore) {
 	ss := cs.UserData.(*subStore)
 
@@ -3122,7 +3122,7 @@ func (s *StanServer) processSubscriptionsStart() {
 			qs := subStart.qs
 			isDurable := subStart.isDurable
 			if isDurable {
-				// Redeliver any oustanding.
+				// Redeliver any outstanding.
 				s.performDurableRedelivery(cs, sub)
 			}
 			// publish messages to this subscriber
