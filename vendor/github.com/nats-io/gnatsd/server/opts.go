@@ -82,13 +82,15 @@ type Options struct {
 	TLSKey         string        `json:"-"`
 	TLSCaCert      string        `json:"-"`
 	TLSConfig      *tls.Config   `json:"-"`
+	WriteDeadline  time.Duration `json:"-"`
 }
 
 // Configuration file authorization section.
 type authorization struct {
 	// Singles
-	user string
-	pass string
+	user  string
+	pass  string
+	token string
 	// Multiple Users
 	users              []*User
 	timeout            float64
@@ -173,11 +175,18 @@ func ProcessConfigFile(configFile string) (*Options, error) {
 			}
 			opts.Username = auth.user
 			opts.Password = auth.pass
+			opts.Authorization = auth.token
+			if (auth.user != "" || auth.pass != "") && auth.token != "" {
+				return nil, fmt.Errorf("Cannot have a user/pass and token")
+			}
 			opts.AuthTimeout = auth.timeout
 			// Check for multiple users defined
 			if auth.users != nil {
 				if auth.user != "" {
 					return nil, fmt.Errorf("Can not have a single user/pass and a users array")
+				}
+				if auth.token != "" {
+					return nil, fmt.Errorf("Can not have a token and a users array")
 				}
 				opts.Users = auth.users
 			}
@@ -234,6 +243,8 @@ func ProcessConfigFile(configFile string) (*Options, error) {
 				return nil, err
 			}
 			opts.TLSTimeout = tc.Timeout
+		case "write_deadline":
+			opts.WriteDeadline = time.Duration(v.(int64)) * time.Second
 		}
 	}
 	return opts, nil
@@ -337,6 +348,8 @@ func parseAuthorization(am map[string]interface{}) (*authorization, error) {
 			auth.user = mv.(string)
 		case "pass", "password":
 			auth.pass = mv.(string)
+		case "token":
+			auth.token = mv.(string)
 		case "timeout":
 			at := float64(1)
 			switch mv.(type) {
@@ -622,7 +635,7 @@ func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 			return nil, err
 		}
 		pool := x509.NewCertPool()
-		ok := pool.AppendCertsFromPEM([]byte(rootPEM))
+		ok := pool.AppendCertsFromPEM(rootPEM)
 		if !ok {
 			return nil, fmt.Errorf("failed to parse root ca certificate")
 		}
@@ -840,5 +853,8 @@ func processOptions(opts *Options) {
 	}
 	if opts.MaxPayload == 0 {
 		opts.MaxPayload = MAX_PAYLOAD_SIZE
+	}
+	if opts.WriteDeadline == time.Duration(0) {
+		opts.WriteDeadline = DEFAULT_FLUSH_DEADLINE
 	}
 }

@@ -399,12 +399,6 @@ type Varz struct {
 	HTTPReqStats     map[string]uint64 `json:"http_req_stats"`
 }
 
-type usage struct {
-	CPU   float32
-	Cores int
-	Mem   int64
-}
-
 func myUptime(d time.Duration) string {
 	// Just use total seconds for uptime, and display days / years
 	tsecs := d / time.Second
@@ -473,11 +467,11 @@ func (s *Server) HandleVarz(w http.ResponseWriter, r *http.Request) {
 	v.TotalConnections = s.totalClients
 	v.Routes = len(s.routes)
 	v.Remotes = len(s.remotes)
-	v.InMsgs = s.inMsgs
-	v.InBytes = s.inBytes
-	v.OutMsgs = s.outMsgs
-	v.OutBytes = s.outBytes
-	v.SlowConsumers = s.slowConsumers
+	v.InMsgs = atomic.LoadInt64(&s.inMsgs)
+	v.InBytes = atomic.LoadInt64(&s.inBytes)
+	v.OutMsgs = atomic.LoadInt64(&s.outMsgs)
+	v.OutBytes = atomic.LoadInt64(&s.outBytes)
+	v.SlowConsumers = atomic.LoadInt64(&s.slowConsumers)
 	v.Subscriptions = s.sl.Count()
 	s.httpReqStats[VarzPath]++
 	// Need a copy here since s.httpReqStas can change while doing

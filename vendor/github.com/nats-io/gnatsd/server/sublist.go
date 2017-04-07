@@ -505,9 +505,9 @@ func (s *Sublist) Stats() *SublistStats {
 	st.NumCache = uint32(len(s.cache))
 	st.NumInserts = s.inserts
 	st.NumRemoves = s.removes
-	st.NumMatches = s.matches
-	if s.matches > 0 {
-		st.CacheHitRate = float64(s.cacheHits) / float64(s.matches)
+	st.NumMatches = atomic.LoadUint64(&s.matches)
+	if st.NumMatches > 0 {
+		st.CacheHitRate = float64(atomic.LoadUint64(&s.cacheHits)) / float64(st.NumMatches)
 	}
 	// whip through cache for fanout stats
 	tot, max := 0, 0
@@ -571,7 +571,7 @@ func IsValidSubject(subject string) bool {
 		return false
 	}
 	sfwc := false
-	tokens := strings.Split(string(subject), tsep)
+	tokens := strings.Split(subject, tsep)
 	for _, t := range tokens {
 		if len(t) == 0 || sfwc {
 			return false
@@ -589,7 +589,7 @@ func IsValidSubject(subject string) bool {
 
 // IsValidLiteralSubject returns true if a subject is valid and literal (no wildcards), false otherwise
 func IsValidLiteralSubject(subject string) bool {
-	tokens := strings.Split(string(subject), tsep)
+	tokens := strings.Split(subject, tsep)
 	for _, t := range tokens {
 		if len(t) == 0 {
 			return false
@@ -636,8 +636,5 @@ func matchLiteral(literal, subject string) bool {
 		li++
 	}
 	// Make sure we have processed all of the literal's chars..
-	if li < ll {
-		return false
-	}
-	return true
+	return li >= ll
 }
