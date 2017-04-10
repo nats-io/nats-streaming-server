@@ -292,20 +292,21 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[59824] 2017/04/01 10:24:31.361848 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.4.0
-[59824] 2017/04/01 10:24:31.361925 [INF] STREAM: ServerID: x2KSRErzlqdQZDURmWPOYw
-[59824] 2017/04/01 10:24:31.362084 [INF] Starting nats-server version 0.9.6
-[59824] 2017/04/01 10:24:31.362095 [INF] Listening for client connections on 0.0.0.0:4222
-[59824] 2017/04/01 10:24:31.362158 [INF] Server is ready
-[59824] 2017/04/01 10:24:31.645747 [INF] STREAM: Message store is MEMORY
-[59824] 2017/04/01 10:24:31.645765 [INF] STREAM: --------- Store Limits ---------
-[59824] 2017/04/01 10:24:31.645772 [INF] STREAM: Channels:                  100 *
-[59824] 2017/04/01 10:24:31.645776 [INF] STREAM: -------- channels limits -------
-[59824] 2017/04/01 10:24:31.645781 [INF] STREAM:   Subscriptions:          1000 *
-[59824] 2017/04/01 10:24:31.645788 [INF] STREAM:   Messages     :       1000000 *
-[59824] 2017/04/01 10:24:31.645808 [INF] STREAM:   Bytes        :     976.56 MB *
-[59824] 2017/04/01 10:24:31.645813 [INF] STREAM:   Age          :     unlimited *
-[59824] 2017/04/01 10:24:31.645817 [INF] STREAM: --------------------------------
+[99150] 2017/04/10 13:09:13.942327 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.4.0
+[99150] 2017/04/10 13:09:13.942401 [INF] STREAM: ServerID: toeTi8GZnRyIpaEM3cwcgY
+[99150] 2017/04/10 13:09:13.942403 [INF] STREAM: Go version: go1.8.1
+[99150] 2017/04/10 13:09:13.943473 [INF] Starting nats-server version 0.9.6
+[99150] 2017/04/10 13:09:13.943483 [INF] Listening for client connections on 0.0.0.0:4222
+[99150] 2017/04/10 13:09:13.943786 [INF] Server is ready
+[99150] 2017/04/10 13:09:14.228880 [INF] STREAM: Message store is MEMORY
+[99150] 2017/04/10 13:09:14.228894 [INF] STREAM: --------- Store Limits ---------
+[99150] 2017/04/10 13:09:14.228904 [INF] STREAM: Channels:                  100 *
+[99150] 2017/04/10 13:09:14.228906 [INF] STREAM: -------- channels limits -------
+[99150] 2017/04/10 13:09:14.228909 [INF] STREAM:   Subscriptions:          1000 *
+[99150] 2017/04/10 13:09:14.228912 [INF] STREAM:   Messages     :       1000000 *
+[99150] 2017/04/10 13:09:14.228928 [INF] STREAM:   Bytes        :     976.56 MB *
+[99150] 2017/04/10 13:09:14.228931 [INF] STREAM:   Age          :     unlimited *
+[99150] 2017/04/10 13:09:14.228933 [INF] STREAM: --------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
@@ -826,7 +827,7 @@ Here is the list of NATS Streaming clients, supported by Apcera. We may add addi
 
 The MIT License (MIT)
 
-Copyright (c) 2016 Apcera Inc.
+Copyright (c) 2016-2017 Apcera Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in
