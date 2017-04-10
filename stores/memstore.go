@@ -58,22 +58,13 @@ func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*Cha
 		return nil, false, err
 	}
 
-	// Defaults to the global limits
-	msgStoreLimits := ms.limits.MsgStoreLimits
-	subStoreLimits := ms.limits.SubStoreLimits
-	// See if there is an override
-	thisChannelLimits, exists := ms.limits.PerChannel[channel]
-	if exists {
-		// Use this channel specific limits
-		msgStoreLimits = thisChannelLimits.MsgStoreLimits
-		subStoreLimits = thisChannelLimits.SubStoreLimits
-	}
+	channelLimits := ms.genericStore.getChannelLimits(channel)
 
 	msgStore := &MemoryMsgStore{msgs: make(map[uint64]*pb.MsgProto, 64)}
-	msgStore.init(channel, &msgStoreLimits)
+	msgStore.init(channel, &channelLimits.MsgStoreLimits)
 
 	subStore := &MemorySubStore{}
-	subStore.init(channel, &subStoreLimits)
+	subStore.init(channel, &channelLimits.SubStoreLimits)
 
 	channelStore = &ChannelStore{
 		Subs:     subStore,

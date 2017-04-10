@@ -1,4 +1,4 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
 //
 // Uses https://github.com/gogo/protobuf
 // compiled via `protoc -I=. -I=$GOPATH/src  --gogofaster_out=. protocol.proto`
@@ -66,6 +66,7 @@ message CtrlMsg {
     SubClose       = 1; // Subscription Close request.
     ConnClose      = 2; // Connection Close request.
     FTHeartbeat    = 3; // FT heartbeats.
+    Partitioning   = 4; // When partitioning is enabled, server sends this to other servers with same cluster ID.
   }
   Type    MsgType  = 1; // Type of the control message.
   string  ServerID = 2; // Allows a server to detect if it is the intended receipient.

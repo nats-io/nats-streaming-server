@@ -499,13 +499,15 @@ func TestFSInit(t *testing.T) {
 }
 
 func TestFSUseDefaultLimits(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
 	fs, _, err := newFileStore(t, defaultDataStore, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	defer fs.Close()
-	if !reflect.DeepEqual(fs.limits, DefaultStoreLimits) {
-		t.Fatalf("Default limits are not used: %v\n", fs.limits)
+	if !reflect.DeepEqual(*fs.limits, DefaultStoreLimits) {
+		t.Fatalf("Default limits are not used: %v\n", *fs.limits)
 	}
 }
 
@@ -4517,6 +4519,14 @@ func TestFSNegativeLimits(t *testing.T) {
 	defer fs.Close()
 
 	testNegativeLimit(t, fs)
+}
+
+func TestFSLimitWithWildcardsInConfig(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+	testLimitWithWildcardsInConfig(t, fs)
 }
 
 func TestFSParallelRecovery(t *testing.T) {

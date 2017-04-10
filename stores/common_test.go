@@ -900,3 +900,35 @@ func testNegativeLimit(t *testing.T, s Store) {
 	limits.MaxSubscriptions = -1000
 	checkLimitError()
 }
+
+func testLimitWithWildcardsInConfig(t *testing.T, s Store) {
+	lv := DefaultStoreLimits
+	l := &lv
+	cl := &ChannelLimits{}
+	cl.MaxMsgs = 3
+	l.AddPerChannel(">", cl)
+	cl2 := &ChannelLimits{}
+	cl2.MaxMsgs = 2
+	l.AddPerChannel("foo.>", cl2)
+	s.SetLimits(l)
+	foobar := "foo.bar"
+	m1 := storeMsg(t, s, foobar, []byte("msg1"))
+	storeMsg(t, s, foobar, []byte("msg2"))
+	// This should kick out m1 since for foo.bar, limit will be 2
+	storeMsg(t, s, foobar, []byte("msg3"))
+	cs := s.LookupChannel(foobar)
+	if cs.Msgs.Lookup(m1.Sequence) != nil {
+		stackFatalf(t, "M1 should have been removed")
+	}
+	// For bar, however, we should be able to store 3 messages
+	bar := "bar"
+	m1 = storeMsg(t, s, bar, []byte("msg1"))
+	storeMsg(t, s, bar, []byte("msg2"))
+	storeMsg(t, s, bar, []byte("msg3"))
+	// Now, a 4th one should evict m1
+	storeMsg(t, s, bar, []byte("msg4"))
+	cs = s.LookupChannel(bar)
+	if cs.Msgs.Lookup(m1.Sequence) != nil {
+		stackFatalf(t, "M1 should have been removed")
+	}
+}

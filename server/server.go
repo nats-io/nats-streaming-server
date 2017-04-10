@@ -30,7 +30,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.4.1"
+	VERSION = "0.5.0"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -96,13 +96,6 @@ const (
 	honorMaxInFlight = false
 )
 
-// Used for display of limits
-const (
-	limitCount = iota
-	limitBytes
-	limitDuration
-)
-
 // Errors.
 var (
 	ErrInvalidSubject     = errors.New("stan: invalid subject")
@@ -121,6 +114,7 @@ var (
 	ErrDupDurable         = errors.New("stan: duplicate durable registration")
 	ErrInvalidDurName     = errors.New("stan: durable name of a durable queue subscriber can't contain the character ':'")
 	ErrUnknownClient      = errors.New("stan: unknown clientID")
+	ErrNoChannel          = errors.New("stan: no configured channel")
 )
 
 // Shared regular expression to check clientID validity.
@@ -231,7 +225,8 @@ type StanServer struct {
 	clients *clientStore
 
 	// Store
-	store stores.Store
+	store       stores.Store
+	storeLimits *stores.StoreLimits
 
 	// IO Channel
 	ioChannel     chan *ioPendingMsg
@@ -274,6 +269,9 @@ type StanServer struct {
 	// started. We call Fatalf, but for users starting the server
 	// programmatically, it is a way to report what the error was.
 	lastError error
+
+	// Will be created only when running in partitioning mode.
+	partitions *partitions
 
 	// Use these flags for Debug/Trace in places where speed matters.
 	// Normally, Debugf and Tracef will check an atomic variable to
@@ -649,6 +647,7 @@ type Options struct {
 	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
 	AckSubsPoolSize    int           // Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription).
 	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
 }
 
 // DefaultOptions are default options for the STAN server
@@ -853,15 +852,20 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		return nil, err
 	}
 
-	// Run a nats server by default
-	sOpts := stanOpts
-	nOpts := natsOpts
-
+	var sOpts *Options
+	var nOpts *server.Options
+	// Make a copy of the options so we own them.
 	if stanOpts == nil {
 		sOpts = GetDefaultOptions()
+	} else {
+		so := *stanOpts
+		sOpts = &so
 	}
 	if natsOpts == nil {
 		no := DefaultNatsServerOptions
+		nOpts = &no
+	} else {
+		no := *natsOpts
 		nOpts = &no
 	}
 
@@ -908,8 +912,11 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		}
 	}()
 
-	// Get the store limits
-	limits := &sOpts.StoreLimits
+	// StoreLimits in Options are stored as a struct and making
+	// the copy of the options as a whole does not make a deep copy
+	// of the store limits (due to map of PerChannel limits). Get
+	// a clone of the store limits and store them in separate field.
+	s.storeLimits = (&sOpts.StoreLimits).Clone()
 
 	var (
 		err   error
@@ -922,10 +929,10 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// Create the store. So far either memory or file-based.
 	switch sOpts.StoreType {
 	case stores.TypeFile:
-		store, err = stores.NewFileStore(sOpts.FilestoreDir, limits,
+		store, err = stores.NewFileStore(sOpts.FilestoreDir, s.storeLimits,
 			stores.AllOptions(&sOpts.FileStoreOpts))
 	case stores.TypeMemory:
-		store, err = stores.NewMemoryStore(limits)
+		store, err = stores.NewMemoryStore(s.storeLimits)
 	default:
 		err = fmt.Errorf("unsupported store type: %v", sOpts.StoreType)
 	}
@@ -954,6 +961,14 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// Create our connections
 	if err := s.createNatsConnections(sOpts, nOpts); err != nil {
 		return nil, err
+	}
+
+	// If using partitioning, try our best to find out that on startup that
+	// no other server with same cluster ID has any channel that we own.
+	if sOpts.Partitioning {
+		if err := s.initPartitions(sOpts, nOpts, s.storeLimits.PerChannel); err != nil {
+			return nil, err
+		}
 	}
 
 	// In FT mode, server cannot recover the store until it is elected leader.
@@ -999,15 +1014,15 @@ func (s *StanServer) start(runningState State) error {
 		callStoreInit  bool
 	)
 
-	limits := &s.opts.StoreLimits
-
 	// Recover the state.
 	recoveredState, err = s.store.Recover()
 	if err != nil {
 		return err
 	}
 	subjID := s.opts.ID
-	if runningState == Standalone {
+	// In FT or with static channels (aka partitioning), we use the cluster ID
+	// as part of the subjects prefix, not a NUID.
+	if runningState == Standalone && s.partitions == nil {
 		subjID = nuid.Next()
 	}
 	if recoveredState != nil {
@@ -1057,7 +1072,9 @@ func (s *StanServer) start(runningState State) error {
 		}
 	}
 
-	if runningState == Standalone {
+	// We don't do the check if we are running FT and/or if
+	// static channels (partitioning) is in play.
+	if runningState == Standalone && s.partitions == nil {
 		if err := s.ensureRunningStandAlone(); err != nil {
 			return err
 		}
@@ -1089,19 +1106,10 @@ func (s *StanServer) start(runningState State) error {
 	}
 
 	Noticef("Message store is %s", s.store.Name())
-	Noticef("--------- Store Limits ---------")
-	Noticef("Channels:        %s",
-		getLimitStr(int64(limits.MaxChannels),
-			int64(stores.DefaultStoreLimits.MaxChannels),
-			limitCount))
-	Noticef("-------- channels limits -------")
-	printLimits(&limits.ChannelLimits,
-		&stores.DefaultStoreLimits.ChannelLimits)
-	for cn, cl := range limits.PerChannel {
-		Noticef("Channel: %q", cn)
-		printLimits(cl, &limits.ChannelLimits)
+	storeLimitsLines := s.storeLimits.Print()
+	for _, l := range storeLimitsLines {
+		Noticef(l)
 	}
-	Noticef("--------------------------------")
 
 	// Execute (in a go routine) redelivery of unacknowledged messages,
 	// and release newOnHold
@@ -1109,38 +1117,6 @@ func (s *StanServer) start(runningState State) error {
 	go s.performRedeliveryOnStartup(recoveredSubs)
 	s.state = runningState
 	return nil
-}
-
-func printLimits(limits, parentLimits *stores.ChannelLimits) {
-	plMaxSubs := int64(parentLimits.MaxSubscriptions)
-	plMaxMsgs := int64(parentLimits.MaxMsgs)
-	plMaxBytes := parentLimits.MaxBytes
-	plMaxAge := parentLimits.MaxAge
-	Noticef("  Subscriptions: %s", getLimitStr(int64(limits.MaxSubscriptions), plMaxSubs, limitCount))
-	Noticef("  Messages     : %s", getLimitStr(int64(limits.MaxMsgs), plMaxMsgs, limitCount))
-	Noticef("  Bytes        : %s", getLimitStr(limits.MaxBytes, plMaxBytes, limitBytes))
-	Noticef("  Age          : %s", getLimitStr(int64(limits.MaxAge), int64(plMaxAge), limitDuration))
-}
-
-func getLimitStr(val, parentVal int64, limitType int) string {
-	valStr := ""
-	inherited := ""
-	if val == parentVal {
-		inherited = " *"
-	}
-	if val == 0 {
-		valStr = "unlimited"
-	} else {
-		switch limitType {
-		case limitBytes:
-			valStr = util.FriendlyBytes(val)
-		case limitDuration:
-			valStr = fmt.Sprintf("%v", time.Duration(val))
-		default:
-			valStr = fmt.Sprintf("%v", val)
-		}
-	}
-	return fmt.Sprintf("%13s%s", valStr, inherited)
 }
 
 // TODO:  Explore parameter passing in gnatsd.  Keep separate for now.
@@ -1514,13 +1490,21 @@ func (s *StanServer) initSubscriptions() error {
 	if err != nil {
 		return fmt.Errorf("could not subscribe to discover subject, %v", err)
 	}
-	// Receive published messages from clients.
-	pubSubject := fmt.Sprintf("%s.>", s.info.Publish)
-	pubSub, err := s.nc.Subscribe(pubSubject, s.processClientPublish)
-	if err != nil {
-		return fmt.Errorf("could not subscribe to publish subject, %v", err)
+	if s.partitions != nil {
+		// Receive published messages from clients, but only on the list
+		// of static channels.
+		if err := s.partitions.initSubscriptions(); err != nil {
+			return err
+		}
+	} else {
+		// Receive published messages from clients.
+		pubSubject := fmt.Sprintf("%s.>", s.info.Publish)
+		pubSub, err := s.nc.Subscribe(pubSubject, s.processClientPublish)
+		if err != nil {
+			return fmt.Errorf("could not subscribe to publish subject, %v", err)
+		}
+		pubSub.SetPendingLimits(-1, -1)
 	}
-	pubSub.SetPendingLimits(-1, -1)
 	// Receive subscription requests from clients.
 	_, err = s.nc.Subscribe(s.info.Subscribe, s.processSubscriptionRequest)
 	if err != nil {
@@ -1558,7 +1542,13 @@ func (s *StanServer) initSubscriptions() error {
 		}
 	}
 	Debugf("Discover subject:           %s", s.info.Discovery)
-	Debugf("Publish subject:            %s", pubSubject)
+	// For partitions, we actually print the list of channels
+	// in the startup banner, so we don't need to repeat them here.
+	if s.partitions != nil {
+		Debugf("Publish subjects root:      %s", s.info.Publish)
+	} else {
+		Debugf("Publish subject:            %s.>", s.info.Publish)
+	}
 	Debugf("Subscribe subject:          %s", s.info.Subscribe)
 	Debugf("Subscription Close subject: %s", s.info.SubClose)
 	Debugf("Unsubscribe subject:        %s", s.info.Unsubscribe)
@@ -1839,11 +1829,19 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	ctrlBytes, _ := ctrlMsg.Marshal()
 
 	ctrlMsgNatsMsg := &nats.Msg{
-		Subject: s.info.Publish + ".close", // any pub subject will do
-		Reply:   m.Reply,
-		Data:    ctrlBytes,
+		Reply: m.Reply,
+		Data:  ctrlBytes,
 	}
-
+	// When using static channels, the server listens to a specific
+	// sets of subjects. We have created a special one that we can
+	// send those control messages to.
+	if s.partitions != nil {
+		ctrlMsgNatsMsg.Subject = s.partitions.ctrlMsgSubject
+	} else {
+		// Server is listening to s.info.Publish + ".>", so use any
+		// dummy subject suffix.
+		ctrlMsgNatsMsg.Subject = s.info.Publish + ".close"
+	}
 	refs := 0
 	if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
 		refs++
@@ -1928,7 +1926,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	}
 
 	// Make sure we have a clientID, guid, etc.
-	if pm.Guid == "" || !s.clients.IsValid(pm.ClientID) || !util.IsSubjectValid(pm.Subject) {
+	if pm.Guid == "" || !s.clients.IsValid(pm.ClientID) || !util.IsSubjectValid(pm.Subject, false) {
 		Errorf("Received invalid client publish message %v", pm)
 		s.sendPublishErr(m.Reply, pm.Guid, ErrInvalidPubReq)
 		return
@@ -2633,6 +2631,15 @@ func (s *StanServer) processSubCloseRequest(m *nats.Msg) {
 // performSubUnsubOrClose either schedules the request to the
 // subscriber's AckInbox subscriber, or processes the request in place.
 func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule bool, m *nats.Msg, req *pb.UnsubscribeRequest) {
+	// With partitioning, first verify that this server is handling this
+	// channel. If not, do not return an error, since another server will
+	// handle it. If no other server is, the client will get a timeout.
+	if s.partitions != nil {
+		if r := s.partitions.sl.Match(req.Subject); len(r) == 0 {
+			return
+		}
+	}
+
 	action := "unsub"
 	isSubClose := false
 	if reqType == spb.CtrlMsg_SubClose {
@@ -2888,11 +2895,21 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 
 	// Make sure subject is valid
-	if !util.IsSubjectValid(sr.Subject) {
+	if !util.IsSubjectValid(sr.Subject, false) {
 		Errorf("[Client:%s] Invalid Subject %q in subscription request from %s",
 			sr.ClientID, sr.Subject, m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubject)
 		return
+	}
+
+	// In partitioning mode, do not fail the subscription request
+	// if this server does not have the channel. It could be that there
+	// is another server out there that will accept the subscription.
+	// If not, the client will get a subscription request timeout.
+	if s.partitions != nil {
+		if r := s.partitions.sl.Match(sr.Subject); len(r) == 0 {
+			return
+		}
 	}
 
 	// Grab channel state, create a new one if needed.
@@ -3416,6 +3433,10 @@ func (s *StanServer) Shutdown() {
 	// In case we are running in FT mode.
 	if s.ftQuit != nil {
 		s.ftQuit <- struct{}{}
+	}
+	// In case we are running in Partitioning mode
+	if s.partitions != nil {
+		s.partitions.shutdown()
 	}
 	s.mu.Unlock()
 

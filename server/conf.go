@@ -120,6 +120,11 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.FTGroupName = v.(string)
+		case "partitioning":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.Partitioning = v.(bool)
 		}
 	}
 	return nil
@@ -246,7 +251,7 @@ func parsePerChannelLimits(itf interface{}, opts *Options) error {
 		if !ok {
 			return fmt.Errorf("expected channel limits to be a map/struct, got %v", limits)
 		}
-		if !util.IsSubjectValid(channelName) {
+		if !util.IsSubjectValid(channelName, true) {
 			return fmt.Errorf("invalid channel name %q", channelName)
 		}
 		cl := &stores.ChannelLimits{}

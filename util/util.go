@@ -137,19 +137,49 @@ func CloseFile(err error, f io.Closer) error {
 	return err
 }
 
-// IsSubjectValid returns false if the string if any of this condition apply:
+// IsSubjectValid returns false if any of these conditions apply:
 // - is empty
-// - contains wildcards `*` or `>`
 // - token separator `.` is first or last
 // - there are two consecutives token separators `.`
-func IsSubjectValid(subject string) bool {
-	if subject == "" || subject[0] == '.' {
+// if wildcardsAllowed is false:
+// - contains wildcards `*` or `>`
+// if wildcardsAllowed is true:
+// - '*' or '>' are not a token in their own
+// - `>` is not the last token
+func IsSubjectValid(subject string, wildcardsAllowed bool) bool {
+	if subject == "" || subject[0] == btsep {
 		return false
 	}
 	for i := 0; i < len(subject); i++ {
 		c := subject[i]
-		if c == '*' || c == '>' ||
-			(c == '.' && (i == len(subject)-1 || subject[i+1] == '.')) {
+		if (c == btsep) && (i == len(subject)-1 || subject[i+1] == btsep) {
+			return false
+		}
+		if !wildcardsAllowed {
+			if c == pwc || c == fwc {
+				return false
+			}
+		} else if c == pwc || c == fwc {
+			if i > 0 && subject[i-1] != btsep {
+				return false
+			}
+			if c == fwc && i != len(subject)-1 {
+				return false
+			}
+			if i < len(subject)-1 && subject[i+1] != btsep {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// IsSubjectLiteral returns true if the subject is a literal (that is,
+// it does not contain any wildcard).
+// The subject is assumed to be valid.
+func IsSubjectLiteral(subject string) bool {
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == pwc || subject[i] == fwc {
 			return false
 		}
 	}
