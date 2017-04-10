@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -884,6 +885,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// for instance with FT. Some err/warn messages may be printed
 	// regarding other instance's ID, so print it on startup.
 	Noticef("ServerID: %v", s.serverID)
+	Noticef("Go version: %v", runtime.Version())
 
 	// Ensure that we shutdown the server if there is a panic/error during startup.
 	// This will ensure that stores are closed (which otherwise would cause
