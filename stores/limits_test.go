@@ -3,6 +3,7 @@
 package stores
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -201,4 +202,22 @@ func TestAppliedInheritance(t *testing.T) {
 	checkPerChannel(0, 10, 0, 0)
 	checkPerChannel(0, 0, 10, 0)
 	checkPerChannel(0, 0, 0, 10)
+}
+
+func TestLimitsUnlimited(t *testing.T) {
+	sl := &StoreLimits{}
+	// All global are unlimited. We should be able to set any other
+	// value for a Per-Channel limit
+	cl := &ChannelLimits{}
+	cl.MaxMsgs = 1000000
+	cl.MaxBytes = int64(cl.MaxMsgs * 1024)
+	cl.MaxSubscriptions = 1000000
+	cl.MaxAge = time.Duration(1000000) * time.Hour
+	// Add 10 channels
+	for i := 0; i < 10; i++ {
+		sl.AddPerChannel(fmt.Sprintf("foo.%d", i), cl)
+	}
+	if err := sl.Build(); err != nil {
+		t.Fatalf("Unexpected error on build: %v", err)
+	}
 }
