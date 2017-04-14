@@ -46,7 +46,7 @@ NATS Streaming provides the following high-level feature set.
         * [File Store](#file-store)
             * [File Store Options](#file-store-options)
 - [Clients](#clients)
-- [Licence](#license)
+- [License](#license)
 
 # Important Changes
 
@@ -142,7 +142,7 @@ maintain the state for this subscription even after the client connection is clo
 
 ***Note: The starting position given by the client when restarting a durable subscription is ignored.***
 
-When the application wants to stop receving messages on a durable subscription, it should close - but *not unsubscribe*- this subscription.
+When the application wants to stop receiving messages on a durable subscription, it should close - but *not unsubscribe*- this subscription.
 If a given client library does not have the option to close a subscription, the application should close the connection instead.
 
 When the application wants to delete the subscription, it must unsubscribe it. Once unsubscribed, the state is removed and it is then
@@ -585,7 +585,7 @@ file: {
     # Define the location and name of a script to be invoked when the
     # server discards a file slice due to limits. The script is invoked
     # with the name of the channel, the name of data and index files.
-    # It is the responsability of the script to then remove the unused
+    # It is the responsibility of the script to then remove the unused
     # files.
     # Can be slice_archive_script, slice_archive, slice_script
     slice_archive_script: "/home/nats-streaming/archive/script.sh"
