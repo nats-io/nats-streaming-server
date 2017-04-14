@@ -36,7 +36,7 @@ func (sl *StoreLimits) Build() error {
 	if len(sl.PerChannel) == 0 {
 		return nil
 	}
-	if len(sl.PerChannel) > sl.MaxChannels {
+	if sl.MaxChannels > 0 && len(sl.PerChannel) > sl.MaxChannels {
 		return fmt.Errorf("too many channels defined (%v). The max channels limit is set to %v",
 			len(sl.PerChannel), sl.MaxChannels)
 	}
@@ -107,9 +107,9 @@ func verifyLimit(errText, channelName string, limit, globalLimit int64) error {
 		return fmt.Errorf("max %s for channel %q cannot be negative. "+
 			"Set it to 0 to be equal to the global limit of %v", errText, channelName, globalLimit)
 	}
-	if limit > globalLimit {
-		return fmt.Errorf("max %s for channel %q cannot be higher than global limit "+
-			"of %v", errText, channelName, globalLimit)
+	if globalLimit > 0 && limit > globalLimit {
+		return fmt.Errorf("max %s for channel %q cannot be higher than global limit of %v",
+			errText, channelName, globalLimit)
 	}
 	return nil
 }
