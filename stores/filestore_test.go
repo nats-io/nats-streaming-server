@@ -2964,7 +2964,7 @@ func TestFSWriteRecord(t *testing.T) {
 		t.Fatalf("Unexpected content: %v", retBuf[recordHeaderSize:])
 	}
 
-	// Check for marshalling error
+	// Check for marshaling error
 	w.reset()
 	errReturned := fmt.Errorf("Fake error")
 	corruptRec := &recordProduceErrorOnMarshal{errToReturn: errReturned}
@@ -3602,7 +3602,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 			}
 			// Cause buffer to expand again
 			fillBuffer()
-			// Check that request should have been cancelled.
+			// Check that request should have been canceled.
 			ss.RLock()
 			shrinkReq = ss.bw.shrinkReq
 			ss.RUnlock()
@@ -3763,7 +3763,7 @@ func TestFSMsgStoreVariousBufferSizes(t *testing.T) {
 			}
 			// Cause buffer to expand again
 			fillBuffer()
-			// Check that request should have been cancelled.
+			// Check that request should have been canceled.
 			ms.RLock()
 			shrinkReq = ms.bw.shrinkReq
 			ms.RUnlock()
