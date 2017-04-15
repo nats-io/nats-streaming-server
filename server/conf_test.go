@@ -5,6 +5,7 @@ package server
 import (
 	"io/ioutil"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -227,6 +228,33 @@ func TestParseStoreType(t *testing.T) {
 	opts = Options{}
 	if err := ProcessConfigFile(confFile, &opts); err == nil {
 		t.Fatal("Expected failure due to unknown store type, got none")
+	}
+}
+
+func TestParsePerChannelLimitsSetToZero(t *testing.T) {
+	confFile := "config.conf"
+	defer os.Remove(confFile)
+	if err := ioutil.WriteFile(confFile,
+		[]byte("store_limits: {channels: {foo: {max_msgs: 0, max_bytes: 0, max_age: \"0\", max_subs: 0}}}"), 0660); err != nil {
+		t.Fatalf("Unexpected error creating conf file: %v", err)
+	}
+	opts := Options{}
+	if err := ProcessConfigFile(confFile, &opts); err != nil {
+		t.Fatalf("Unexpected failure: %v", err)
+	}
+	cl := opts.StoreLimits.PerChannel["foo"]
+	if cl == nil {
+		t.Fatal("PerChannel foo should exist")
+	}
+	// The config should set all the limits to -1 since they are
+	// set to 0 (unlimited) in the config file.
+	expected := stores.ChannelLimits{}
+	expected.MaxMsgs = -1
+	expected.MaxBytes = -1
+	expected.MaxAge = -1
+	expected.MaxSubscriptions = -1
+	if !reflect.DeepEqual(*cl, expected) {
+		t.Fatalf("Expected channel limits for foo to be %v, got %v", expected, *cl)
 	}
 }
 

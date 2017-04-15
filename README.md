@@ -611,7 +611,8 @@ The `store_limits` section in the configuration file (or the command line parame
 These limits somewhat offer some upper bound on the size of the storage. By multiplying
 the limits per channel with the maximum number of channels, you will get a total limit.
 
-It is also possible to define specific limits per channel. Here is how:
+It is not the case, though, if you override limits of some channels. Indeed, it is possible
+to define specific limits per channel. Here is how:
 
 ```
 ...
@@ -619,64 +620,91 @@ store_limits: {
     # Override some global limits
     max_channels: 10
     max_msgs: 10000
-    max_bytes: 10485760
+    max_bytes: 10MB
     max_age: "1h"
 
     # Per channel configuration.
     # Can be channels, channels_limits, per_channel, per_channel_limits or ChannelsLimits
     channels: {
-        # Configuration for channel "foo"
         "foo": {
-            # Possible options are the same than in the store_limits section
-            # except for max_channels.
+            # Possible options are the same than in the store_limits section, except
+            # for max_channels. Not all limits need to be specified.
             max_msgs: 300
             max_subs: 50
         }
         "bar": {
             max_msgs:50
-            max_bytes:1000
+            max_bytes:1KB
+        }
+        "baz": {
+            # Set to 0 for ignored (or unlimited)
+            max_msgs: 0
+            # Override with a lower limit
+            max_bytes: 1MB
+            # Override with a higher limit
+            max_age: "2h"
         }
     }
 }
 ...
 ```
 
-Note the following restrictions:
-- The total of channels configured must be less than the store's maximum number of channels.
-- No limit can be negative.
-- No limit can be greater than its corresponding global limit.
+Note that the number of defined channels cannot be greater than the stores' maximum number
+of channels.
+
+Channels limits can override global limits by being either higher, lower or even set to
+unlimited.
+
+***An unlimited value applies to the specified limit, not to the whole channel***
+
+That is, in the configuration above, `baz` has the maximum number of messages set
+to 0, which means ignored or unlimited. Yet, other limits such as max bytes, max age
+and max subscriptions (inherited in this case) still apply. What that means is that
+the store will not check the number of messages but still check the other limits.
+
+For a truly unlimited channel *all* limits need to be set to 0.
 
 ### Limits inheritance
 
-Global limits that are not specified (configuration file or command line parameters)
-are inherited from default limits selected by the server.
+When starting the server from the command line, global limits that are not specified
+(configuration file or command line parameters) are inherited from default limits
+selected by the server.
 
 Per-channel limits that are not explicitly configured inherit from the corresponding
 global limit (which can itself be inherited from default limit).
+
+If a per-channel limit is set to 0 in the configuration file (or negative value
+programmatically), then it becomes unlimited, regardless of the corresponding
+global limit.
 
 On startup the server displays the store limits. Notice the `*` at the right of a
 limit to indicate that the limit was inherited (either from global or default limits).
 This is what would be displayed with the above store limits configuration:
 
 ```
-[59872] 2017/04/01 10:25:18.747822 [INF] STREAM: --------- Store Limits ---------
-[59872] 2017/04/01 10:25:18.747830 [INF] STREAM: Channels:                   10
-[59872] 2017/04/01 10:25:18.747834 [INF] STREAM: -------- channels limits -------
-[59872] 2017/04/01 10:25:18.747839 [INF] STREAM:   Subscriptions:          1000 *
-[59872] 2017/04/01 10:25:18.747845 [INF] STREAM:   Messages     :         10000
-[59872] 2017/04/01 10:25:18.747863 [INF] STREAM:   Bytes        :      10.00 MB
-[59872] 2017/04/01 10:25:18.747887 [INF] STREAM:   Age          :        1h0m0s
-[59872] 2017/04/01 10:25:18.747904 [INF] STREAM: Channel: "foo"
-[59872] 2017/04/01 10:25:18.747908 [INF] STREAM:   Subscriptions:            50
-[59872] 2017/04/01 10:25:18.747924 [INF] STREAM:   Messages     :           300
-[59872] 2017/04/01 10:25:18.747927 [INF] STREAM:   Bytes        :      10.00 MB *
-[59872] 2017/04/01 10:25:18.747930 [INF] STREAM:   Age          :        1h0m0s *
-[59872] 2017/04/01 10:25:18.747932 [INF] STREAM: Channel: "bar"
-[59872] 2017/04/01 10:25:18.747935 [INF] STREAM:   Subscriptions:          1000 *
-[59872] 2017/04/01 10:25:18.747937 [INF] STREAM:   Messages     :            50
-[59872] 2017/04/01 10:25:18.747941 [INF] STREAM:   Bytes        :        1000 B
-[59872] 2017/04/01 10:25:18.747944 [INF] STREAM:   Age          :        1h0m0s *
-[59872] 2017/04/01 10:25:18.747946 [INF] STREAM: --------------------------------
+[94641] 2017/04/14 18:20:10.836191 [INF] STREAM: --------- Store Limits ---------
+[94641] 2017/04/14 18:20:10.836200 [INF] STREAM: Channels:                   10
+[94641] 2017/04/14 18:20:10.836203 [INF] STREAM: -------- channels limits -------
+[94641] 2017/04/14 18:20:10.836208 [INF] STREAM:   Subscriptions:          1000 *
+[94641] 2017/04/14 18:20:10.836213 [INF] STREAM:   Messages     :         10000
+[94641] 2017/04/14 18:20:10.836235 [INF] STREAM:   Bytes        :      10.00 MB
+[94641] 2017/04/14 18:20:10.836251 [INF] STREAM:   Age          :        1h0m0s
+[94641] 2017/04/14 18:20:10.836257 [INF] STREAM: Channel: "foo"
+[94641] 2017/04/14 18:20:10.836262 [INF] STREAM:   Subscriptions:            50
+[94641] 2017/04/14 18:20:10.836266 [INF] STREAM:   Messages     :           300
+[94641] 2017/04/14 18:20:10.836272 [INF] STREAM:   Bytes        :      10.00 MB *
+[94641] 2017/04/14 18:20:10.836280 [INF] STREAM:   Age          :        1h0m0s *
+[94641] 2017/04/14 18:20:10.836284 [INF] STREAM: Channel: "bar"
+[94641] 2017/04/14 18:20:10.836288 [INF] STREAM:   Subscriptions:          1000 *
+[94641] 2017/04/14 18:20:10.836293 [INF] STREAM:   Messages     :            50
+[94641] 2017/04/14 18:20:10.836298 [INF] STREAM:   Bytes        :       1.00 KB
+[94641] 2017/04/14 18:20:10.836311 [INF] STREAM:   Age          :        1h0m0s *
+[94641] 2017/04/14 18:20:10.836315 [INF] STREAM: Channel: "baz"
+[94641] 2017/04/14 18:20:10.836319 [INF] STREAM:   Subscriptions:          1000 *
+[94641] 2017/04/14 18:20:10.836324 [INF] STREAM:   Messages     :     unlimited
+[94641] 2017/04/14 18:20:10.836329 [INF] STREAM:   Bytes        :       1.00 MB
+[94641] 2017/04/14 18:20:10.836334 [INF] STREAM:   Age          :        2h0m0s
+[94641] 2017/04/14 18:20:10.836338 [INF] STREAM: --------------------------------
 ```
 
 

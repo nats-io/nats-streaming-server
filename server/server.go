@@ -1087,15 +1087,15 @@ func (s *StanServer) start(runningState State) error {
 	Noticef("Message store is %s", s.store.Name())
 	Noticef("--------- Store Limits ---------")
 	Noticef("Channels:        %s",
-		getLimitStr(true, int64(limits.MaxChannels),
+		getLimitStr(int64(limits.MaxChannels),
 			int64(stores.DefaultStoreLimits.MaxChannels),
 			limitCount))
 	Noticef("-------- channels limits -------")
-	printLimits(true, &limits.ChannelLimits,
+	printLimits(&limits.ChannelLimits,
 		&stores.DefaultStoreLimits.ChannelLimits)
 	for cn, cl := range limits.PerChannel {
 		Noticef("Channel: %q", cn)
-		printLimits(false, cl, &limits.ChannelLimits)
+		printLimits(cl, &limits.ChannelLimits)
 	}
 	Noticef("--------------------------------")
 
@@ -1107,23 +1107,20 @@ func (s *StanServer) start(runningState State) error {
 	return nil
 }
 
-func printLimits(isGlobal bool, limits, parentLimits *stores.ChannelLimits) {
+func printLimits(limits, parentLimits *stores.ChannelLimits) {
 	plMaxSubs := int64(parentLimits.MaxSubscriptions)
 	plMaxMsgs := int64(parentLimits.MaxMsgs)
 	plMaxBytes := parentLimits.MaxBytes
 	plMaxAge := parentLimits.MaxAge
-	Noticef("  Subscriptions: %s", getLimitStr(isGlobal, int64(limits.MaxSubscriptions), plMaxSubs, limitCount))
-	Noticef("  Messages     : %s", getLimitStr(isGlobal, int64(limits.MaxMsgs), plMaxMsgs, limitCount))
-	Noticef("  Bytes        : %s", getLimitStr(isGlobal, limits.MaxBytes, plMaxBytes, limitBytes))
-	Noticef("  Age          : %s", getLimitStr(isGlobal, int64(limits.MaxAge), int64(plMaxAge), limitDuration))
+	Noticef("  Subscriptions: %s", getLimitStr(int64(limits.MaxSubscriptions), plMaxSubs, limitCount))
+	Noticef("  Messages     : %s", getLimitStr(int64(limits.MaxMsgs), plMaxMsgs, limitCount))
+	Noticef("  Bytes        : %s", getLimitStr(limits.MaxBytes, plMaxBytes, limitBytes))
+	Noticef("  Age          : %s", getLimitStr(int64(limits.MaxAge), int64(plMaxAge), limitDuration))
 }
 
-func getLimitStr(isGlobal bool, val, parentVal int64, limitType int) string {
+func getLimitStr(val, parentVal int64, limitType int) string {
 	valStr := ""
 	inherited := ""
-	if !isGlobal && val == 0 {
-		val = parentVal
-	}
 	if val == parentVal {
 		inherited = " *"
 	}

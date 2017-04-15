@@ -21,15 +21,12 @@ func (sl *StoreLimits) AddPerChannel(name string, cl *ChannelLimits) {
 
 // Build sets the global limits into per-channel limits that are set
 // to zero. This call also validates the limits. An error is returned if:
-// * any limit is set to a negative value.
+// * any global limit is set to a negative value.
 // * the number of per-channel is higher than StoreLimits.MaxChannels.
-// * any per-channel limit is higher than the corresponding global limit.
+// * a per-channel name is invalid
 func (sl *StoreLimits) Build() error {
 	// Check that there is no negative value
-	if sl.MaxChannels < 0 {
-		return fmt.Errorf("max channels limit cannot be negative")
-	}
-	if err := sl.checkChannelLimits(&sl.ChannelLimits, "", true); err != nil {
+	if err := sl.checkGlobalLimits(); err != nil {
 		return err
 	}
 	// If there is no per-channel, we are done.
@@ -40,76 +37,54 @@ func (sl *StoreLimits) Build() error {
 		return fmt.Errorf("too many channels defined (%v). The max channels limit is set to %v",
 			len(sl.PerChannel), sl.MaxChannels)
 	}
-	for cn, cl := range sl.PerChannel {
-		if err := sl.checkChannelLimits(cl, cn, false); err != nil {
-			return err
+	for cn := range sl.PerChannel {
+		if !util.IsSubjectValid(cn) {
+			return fmt.Errorf("invalid channel name %q", cn)
 		}
 	}
+
 	// If we are here, it means that there was no error,
 	// so we now apply inheritance.
 	for _, cl := range sl.PerChannel {
-		if cl.MaxSubscriptions == 0 {
+		if cl.MaxSubscriptions < 0 {
+			cl.MaxSubscriptions = 0
+		} else if cl.MaxSubscriptions == 0 {
 			cl.MaxSubscriptions = sl.MaxSubscriptions
 		}
-		if cl.MaxMsgs == 0 {
+		if cl.MaxMsgs < 0 {
+			cl.MaxMsgs = 0
+		} else if cl.MaxMsgs == 0 {
 			cl.MaxMsgs = sl.MaxMsgs
 		}
-		if cl.MaxBytes == 0 {
+		if cl.MaxBytes < 0 {
+			cl.MaxBytes = 0
+		} else if cl.MaxBytes == 0 {
 			cl.MaxBytes = sl.MaxBytes
 		}
-		if cl.MaxAge == 0 {
+		if cl.MaxAge < 0 {
+			cl.MaxAge = 0
+		} else if cl.MaxAge == 0 {
 			cl.MaxAge = sl.MaxAge
 		}
 	}
 	return nil
 }
 
-func (sl *StoreLimits) checkChannelLimits(cl *ChannelLimits, channelName string, isGlobal bool) error {
-	// If not checking global limits, check for channel name validity.
-	if !isGlobal && !util.IsSubjectValid(channelName) {
-		return fmt.Errorf("invalid channel name %q", channelName)
+func (sl *StoreLimits) checkGlobalLimits() error {
+	if sl.MaxChannels < 0 {
+		return fmt.Errorf("max channels limit cannot be negative (%v)", sl.MaxChannels)
 	}
-	// Check that there is no per-channel unlimited limit if corresponding
-	// limit is not.
-	if err := verifyLimit("subscriptions", channelName,
-		int64(cl.MaxSubscriptions), int64(sl.MaxSubscriptions)); err != nil {
-		return err
+	if sl.MaxSubscriptions < 0 {
+		return fmt.Errorf("max subscriptions limit cannot be negative (%v)", sl.MaxSubscriptions)
 	}
-	if err := verifyLimit("messages", channelName,
-		int64(cl.MaxMsgs), int64(sl.MaxMsgs)); err != nil {
-		return err
+	if sl.MaxMsgs < 0 {
+		return fmt.Errorf("max messages limit cannot be negative (%v)", sl.MaxMsgs)
 	}
-	if err := verifyLimit("bytes", channelName,
-		cl.MaxBytes, sl.MaxBytes); err != nil {
-		return err
+	if sl.MaxBytes < 0 {
+		return fmt.Errorf("max bytes limit cannot be negative (%v)", sl.MaxBytes)
 	}
-	if err := verifyLimit("age", channelName,
-		int64(cl.MaxAge), int64(sl.MaxAge)); err != nil {
-		return err
-	}
-	return nil
-}
-
-func verifyLimit(errText, channelName string, limit, globalLimit int64) error {
-	// No limit can be negative. If channelName is "" we are
-	// verifying the global limit (in this case limit == globalLimit).
-	// Otherwise, we verify a given per-channel limit. Make
-	// sure that the value is not greater than the corresponding
-	// global limit.
-	if channelName == "" {
-		if limit < 0 {
-			return fmt.Errorf("max %s for global limit cannot be negative", errText)
-		}
-		return nil
-	}
-	// Per-channel limit specific here.
-	if limit < 0 {
-		return fmt.Errorf("max %s for channel %q cannot be negative. "+
-			"Set it to 0 to be equal to the global limit of %v", errText, channelName, globalLimit)
-	}
-	if globalLimit > 0 && limit > globalLimit {
-		return fmt.Errorf("max %s for channel %q cannot be higher than global limit of %v",
-			errText, channelName, globalLimit)
+	if sl.MaxAge < 0 {
+		return fmt.Errorf("max age limit cannot be negative (%v)", sl.MaxAge)
 	}
 	return nil
 }
