@@ -184,7 +184,7 @@ func parseStoreLimits(itf interface{}, opts *Options) error {
 			}
 		default:
 			// Check for the global limits (MaxMsgs, MaxBytes, etc..)
-			if err := parseChannelLimits(&opts.ChannelLimits, k, name, v); err != nil {
+			if err := parseChannelLimits(&opts.ChannelLimits, k, name, v, true); err != nil {
 				return err
 			}
 		}
@@ -193,23 +193,32 @@ func parseStoreLimits(itf interface{}, opts *Options) error {
 }
 
 // parseChannelLimits updates `cl` with channel limits.
-func parseChannelLimits(cl *stores.ChannelLimits, k, name string, v interface{}) error {
+func parseChannelLimits(cl *stores.ChannelLimits, k, name string, v interface{}, isGlobal bool) error {
 	switch name {
 	case "msu", "max_subs", "max_subscriptions", "maxsubscriptions":
 		if err := checkType(k, reflect.Int64, v); err != nil {
 			return err
 		}
 		cl.MaxSubscriptions = int(v.(int64))
+		if !isGlobal && cl.MaxSubscriptions == 0 {
+			cl.MaxSubscriptions = -1
+		}
 	case "mm", "max_msgs", "maxmsgs", "max_count", "maxcount":
 		if err := checkType(k, reflect.Int64, v); err != nil {
 			return err
 		}
 		cl.MaxMsgs = int(v.(int64))
+		if !isGlobal && cl.MaxMsgs == 0 {
+			cl.MaxMsgs = -1
+		}
 	case "mb", "max_bytes", "maxbytes":
 		if err := checkType(k, reflect.Int64, v); err != nil {
 			return err
 		}
 		cl.MaxBytes = v.(int64)
+		if !isGlobal && cl.MaxBytes == 0 {
+			cl.MaxBytes = -1
+		}
 	case "ma", "max_age", "maxage":
 		if err := checkType(k, reflect.String, v); err != nil {
 			return err
@@ -219,6 +228,9 @@ func parseChannelLimits(cl *stores.ChannelLimits, k, name string, v interface{})
 			return err
 		}
 		cl.MaxAge = dur
+		if !isGlobal && cl.MaxAge == 0 {
+			cl.MaxAge = -1
+		}
 	}
 	return nil
 }
@@ -240,7 +252,7 @@ func parsePerChannelLimits(itf interface{}, opts *Options) error {
 		cl := &stores.ChannelLimits{}
 		for k, v := range limitsMap {
 			name := strings.ToLower(k)
-			if err := parseChannelLimits(cl, k, name, v); err != nil {
+			if err := parseChannelLimits(cl, k, name, v, false); err != nil {
 				return err
 			}
 		}

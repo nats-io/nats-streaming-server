@@ -41,8 +41,9 @@ type StoreLimits struct {
 	MaxChannels int
 	// Global limits. Any 0 value means that the limit is ignored (unlimited).
 	ChannelLimits
-	// Per-channel limits. If a limit for a channel in this map is 0,
-	// the corresponding global limit (specified above) is used.
+	// Per-channel limits. Special values for limits in this map:
+	// - == 0 means that the corresponding global limit is used.
+	// -  < 0 means that limit is ignored (unlimited).
 	PerChannel map[string]*ChannelLimits
 }
 
