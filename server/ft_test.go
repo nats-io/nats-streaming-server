@@ -279,11 +279,36 @@ func TestFTPartition(t *testing.T) {
 		nOpts.Cluster.ListenStr = "nats://localhost:6222"
 		nOpts.RoutesStr = "nats://localhost:6223"
 		natsURL = "nats://localhost:4222"
+
+		// Use a separate NATS server for communication between
+		// processes for the test
+		ipcOpts := natsdTest.DefaultTestOptions
+		ipcOpts.Port = 5222
+		ipcNATS := natsdTest.RunServer(&ipcOpts)
+		defer ipcNATS.Shutdown()
 	} else {
 		nOpts.Port = 4223
 		nOpts.Cluster.ListenStr = "nats://localhost:6223"
 		nOpts.RoutesStr = "nats://localhost:6222"
 		natsURL = "nats://localhost:4223"
+	}
+	// Create NATS client just for synchronization between the
+	// two processes.
+	syncNC, err := nats.Connect("nats://localhost:5222")
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer syncNC.Close()
+	psubj := "test.sync.p"
+	csubj := "test.sync.c"
+	var syncSub *nats.Subscription
+	if parentProcess {
+		syncSub, err = syncNC.SubscribeSync(psubj)
+	} else {
+		syncSub, err = syncNC.SubscribeSync(csubj)
+	}
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
 	}
 
 	// Start NATS server independently
@@ -313,12 +338,19 @@ func TestFTPartition(t *testing.T) {
 			}
 		}()
 
-		// Give a bit of chance for child process to start and be the standby
-		time.Sleep(500 * time.Millisecond)
+		// Wait for the other process to start as standby
+		if _, err := syncSub.NextMsg(5 * time.Second); err != nil {
+			t.Fatal("Did not receive notification")
+		}
 		// Kill our NATS server, the standby should try to become active but
 		// fail due to file lock
 		ns.Shutdown()
-		waitForGetLockAttempt()
+		// Notify the other process
+		syncNC.Publish(csubj, nil)
+		// Wait for the other process being done with checking
+		if _, err := syncSub.NextMsg(5 * time.Second); err != nil {
+			t.Fatal("Did not receive notification")
+		}
 		ns = natsdTest.RunServer(&nOpts)
 		waitForGetLockAttempt()
 		checkState(t, s, FTActive)
@@ -331,11 +363,18 @@ func TestFTPartition(t *testing.T) {
 	} else {
 		// Wait this process to be the standby server
 		checkState(t, s, FTStandby)
+		// Notify other process that we are standby
+		syncNC.Publish(psubj, nil)
 		// The active server's NATS server will be killed in the parent
 		// process. The standby is going to try to become active, but should
-		// fail.
-		time.Sleep(time.Second)
+		// fail. Wait for the notification.
+		if _, err := syncSub.NextMsg(5 * time.Second); err != nil {
+			t.Fatal("Did not receive notification")
+		}
+		waitForGetLockAttempt()
 		checkState(t, s, FTStandby)
+		// Notify that we are done.
+		syncNC.Publish(psubj, nil)
 	}
 }
 
@@ -354,11 +393,36 @@ func TestFTPartitionReversed(t *testing.T) {
 		nOpts.Cluster.ListenStr = "nats://localhost:6222"
 		nOpts.RoutesStr = "nats://localhost:6223"
 		natsURL = "nats://localhost:4222"
+
+		// Use a separate NATS server for communication between
+		// processes for the test
+		ipcOpts := natsdTest.DefaultTestOptions
+		ipcOpts.Port = 5222
+		ipcNATS := natsdTest.RunServer(&ipcOpts)
+		defer ipcNATS.Shutdown()
 	} else {
 		nOpts.Port = 4223
 		nOpts.Cluster.ListenStr = "nats://localhost:6223"
 		nOpts.RoutesStr = "nats://localhost:6222"
 		natsURL = "nats://localhost:4223"
+	}
+	// Create NATS client just for synchronization between the
+	// two processes.
+	syncNC, err := nats.Connect("nats://localhost:5222")
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer syncNC.Close()
+	psubj := "test.sync.p"
+	csubj := "test.sync.c"
+	var syncSub *nats.Subscription
+	if parentProcess {
+		syncSub, err = syncNC.SubscribeSync(psubj)
+	} else {
+		syncSub, err = syncNC.SubscribeSync(csubj)
+	}
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
 	}
 
 	// Start NATS server independently
@@ -379,9 +443,12 @@ func TestFTPartitionReversed(t *testing.T) {
 			}
 		}()
 
-		// Give a chance to the other process to become active
-		time.Sleep(250 * time.Millisecond)
+		// Wait for the active server to tell us that it is active
+		if _, err := syncSub.NextMsg(5 * time.Second); err != nil {
+			t.Fatal("Did not receive notification")
+		}
 
+		// Now start our streaming server, it should be a standby
 		sOpts := getTestFTDefaultOptions()
 		sOpts.NATSServerURL = natsURL
 		sOpts.FilestoreDir = ds
@@ -389,11 +456,28 @@ func TestFTPartitionReversed(t *testing.T) {
 		defer s.Shutdown()
 		checkState(t, s, FTStandby)
 
-		// The active server's NATS server is going to be killed.
-		// The standby here will try to become active, but should fail
-		// to do so and stay standby
-		time.Sleep(250 * time.Millisecond)
+		// Let the other process know that we have checked that
+		// we are standby on startup.
+		syncNC.Publish(csubj, nil)
+
+		// Wait for the signal that NATS server was stopped.
+		if _, err := syncSub.NextMsg(5 * time.Second); err != nil {
+			t.Fatal("Did not receive notification")
+		}
+		// Try to become active, but it should fail and so we should still be standby
+		waitForGetLockAttempt()
 		checkState(t, s, FTStandby)
+
+		// Notify that it can restart the NATS server now
+		syncNC.Publish(csubj, nil)
+
+		// Wait for signal
+		if _, err := syncSub.NextMsg(5 * time.Second); err != nil {
+			t.Fatal("Did not receive notification")
+		}
+
+		// Ok, we are done, so notify the other process that it can stop.
+		syncNC.Publish(csubj, nil)
 
 		wg.Wait()
 		select {
@@ -411,15 +495,37 @@ func TestFTPartitionReversed(t *testing.T) {
 		// Wait for this process to be the active server
 		checkState(t, s, FTActive)
 
+		// Let the other process know that we are active, so it can start
+		// its own streaming server
+		syncNC.Publish(psubj, nil)
+
+		// And wait to receive a notification so we can shutdown the NATS server
+		if _, err := syncSub.NextMsg(5 * time.Second); err != nil {
+			t.Fatal("Did not receive notification")
+		}
+
 		// Shutdown NATS server to cause standby to try to become active
 		ns.Shutdown()
-		waitForGetLockAttempt()
+
+		// Notify the other process
+		syncNC.Publish(psubj, nil)
+
+		// Wait the green light for us to restart the NATS server
+		if _, err := syncSub.NextMsg(5 * time.Second); err != nil {
+			t.Fatal("Did not receive notification")
+		}
+
 		ns = natsdTest.RunServer(&nOpts)
 		waitForGetLockAttempt()
 		checkState(t, s, FTActive)
-		// Stay active for a while so we can check that standby server
-		// stayed standby
-		time.Sleep(time.Second)
+
+		// Again, notify that it was restarted.
+		syncNC.Publish(psubj, nil)
+
+		// Wait for the green light that we can stop.
+		if _, err := syncSub.NextMsg(5 * time.Second); err != nil {
+			t.Fatal("Did not receive notification")
+		}
 	}
 }
 
