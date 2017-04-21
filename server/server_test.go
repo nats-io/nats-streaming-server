@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/gnatsd/auth"
 	natsd "github.com/nats-io/gnatsd/server"
 	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats"
@@ -4013,8 +4012,6 @@ func TestDontEmbedNATSMultipleURLs(t *testing.T) {
 	nOpts.Password = "pwd"
 	natsServer := natsdTest.RunServer(&nOpts)
 	defer natsServer.Shutdown()
-	auth := &auth.Plain{Username: nOpts.Username, Password: nOpts.Password}
-	natsServer.SetClientAuthMethod(auth)
 
 	sOpts := GetDefaultOptions()
 

@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/gnatsd/auth"
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming/pb"
@@ -1231,22 +1230,6 @@ func (s *StanServer) configureNATSServerTLS(opts *server.Options) error {
 	return nil
 }
 
-// configureNATSServerAuth sets up user authentication for the NATS Server.
-func (s *StanServer) configureNATSServerAuth(opts *server.Options) server.Auth {
-	// setup authorization
-	var a server.Auth
-	if opts.Authorization != "" {
-		a = &auth.Token{Token: opts.Authorization}
-	}
-	if opts.Username != "" {
-		a = &auth.Plain{Username: opts.Username, Password: opts.Password}
-	}
-	if opts.Users != nil {
-		a = auth.NewMultiUser(opts.Users)
-	}
-	return a
-}
-
 // startNATSServer massages options as necessary, and starts the embedded
 // NATS server.
 func (s *StanServer) startNATSServer(opts *server.Options) error {
@@ -1256,13 +1239,9 @@ func (s *StanServer) startNATSServer(opts *server.Options) error {
 	if err := s.configureNATSServerTLS(opts); err != nil {
 		return err
 	}
-	a := s.configureNATSServerAuth(opts)
 	s.natsServer = server.New(opts)
 	if s.natsServer == nil {
 		return fmt.Errorf("no NATS Server object returned")
-	}
-	if a != nil {
-		s.natsServer.SetClientAuthMethod(a)
 	}
 	// Run server in Go routine.
 	go s.natsServer.Start()

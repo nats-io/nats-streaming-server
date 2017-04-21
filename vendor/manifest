@@ -41,7 +41,7 @@
 			"importpath": "github.com/nats-io/gnatsd",
 			"repository": "https://github.com/nats-io/gnatsd",
 			"vcs": "git",
-			"revision": "e35c4204fc1a9ac0e51b0333f6ece4227afb38ee",
+			"revision": "55404c70b0418a7017d05c504cf4a647afe91e25",
 			"branch": "master",
 			"notests": true
 		},
@@ -49,7 +49,7 @@
 			"importpath": "github.com/nats-io/go-nats",
 			"repository": "https://github.com/nats-io/go-nats",
 			"vcs": "git",
-			"revision": "6949c8e06a246e4177961aab22940b5c411e48f0",
+			"revision": "f3801cfe56be7d73e544dc3165758b6f4a316ca8",
 			"branch": "master",
 			"notests": true
 		},
