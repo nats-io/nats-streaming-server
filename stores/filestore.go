@@ -293,9 +293,9 @@ func FileDescriptorsLimit(limit int64) FileStoreOption {
 }
 
 // ParallelRecovery is a FileStore option that allows the parallel
-// recovery of channels. If running with SSDs, try to use a higher
-// value than the default number of 1. If running with HDDs,
-// performance will be better if it stays at 1.
+// recovery of channels. When running with SSDs, try to use a higher
+// value than the default number of 1. When running with HDDs,
+// performance may be better if it stays at 1.
 func ParallelRecovery(count int) FileStoreOption {
 	return func(o *FileStoreOptions) error {
 		if count <= 0 {
