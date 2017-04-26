@@ -135,6 +135,18 @@ func init() {
 	}
 }
 
+// For testing of signal handling
+var (
+	signalMu     = sync.RWMutex{}
+	signalNoExit = false
+)
+
+func setSignalNoExit(noExit bool) {
+	signalMu.Lock()
+	signalNoExit = noExit
+	signalMu.Unlock()
+}
+
 // ioPendingMsg is a record that embeds the pointer to the incoming
 // NATS Message, the PubMsg and PubAck structures so we reduce the
 // number of memory allocations to 1 when processing a message from
@@ -635,6 +647,7 @@ type Options struct {
 	stores.StoreLimits               // Store limits (MaxChannels, etc..)
 	Trace              bool          // Verbose trace
 	Debug              bool          // Debug trace
+	HandleSignals      bool          // Should the server setup a signal handler (for Ctrl+C, etc...)
 	Secure             bool          // Create a TLS enabled connection w/o server verification
 	ClientCert         string        // Client Certificate for TLS
 	ClientKey          string        // Client Key for TLS
@@ -970,6 +983,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		if err := s.start(Standalone); err != nil {
 			return nil, err
 		}
+	}
+	if s.opts.HandleSignals {
+		s.handleSignals()
 	}
 	return &s, nil
 }

@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"reflect"
 	"runtime"
 	"strings"
@@ -112,25 +111,17 @@ func usage() {
 }
 
 func main() {
-
 	// Parse flags
 	sOpts, nOpts := parseFlags()
-	// override the NoSigs for NATS since we have our own signal handler below
+	// Force the streaming server to setup its own signal handler
+	sOpts.HandleSignals = true
+	// override the NoSigs for NATS since Streaming has its own signal handler
 	nOpts.NoSigs = true
 	stand.ConfigureLogger(sOpts, nOpts)
-	s, err := stand.RunServerWithOpts(sOpts, nOpts)
-	if err != nil {
+	if _, err := stand.RunServerWithOpts(sOpts, nOpts); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	go func() {
-		<-c
-		s.Shutdown()
-		os.Exit(0)
-	}()
-
 	runtime.Goexit()
 }
 
@@ -307,13 +298,6 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 		natsOpts = *natsd.MergeOptions(fileOpts, &natsOpts)
 	}
 
-	// Remove any host/ip that points to itself in Route
-	newroutes, err := natsd.RemoveSelfReference(natsOpts.Cluster.Port, natsOpts.Routes)
-	if err != nil {
-		natsd.PrintAndDie(err.Error())
-	}
-	natsOpts.Routes = newroutes
-
 	// One flag can set multiple options.
 	if natsDebugAndTrace {
 		natsOpts.Trace, natsOpts.Debug = true, true
@@ -322,32 +306,12 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	// for now, key off of one flag - the NATS flag to disable logging.
 	natsOpts.NoLog = false
 
-	//
-	// STAN server special option handling
-	//
-	// Ensure some options are set based on selected store type
-	checkStoreOpts(stanOpts)
-
 	// One flag can set multiple options.
 	if stanDebugAndTrace {
 		stanOpts.Trace, stanOpts.Debug = true, true
 	}
 
 	return stanOpts, &natsOpts
-}
-
-func checkStoreOpts(opts *stand.Options) {
-	// Convert the user input to upper case
-	storeType := strings.ToUpper(opts.StoreType)
-
-	// If FILE, check some parameters
-	if storeType == stores.TypeFile {
-		if opts.FilestoreDir == "" {
-			fmt.Printf("\nFor %v stores, option \"-dir\" must be specified\n", stores.TypeFile)
-			flag.Usage()
-			os.Exit(0)
-		}
-	}
 }
 
 // overrideWithCmdLineParams applies the flags passed in the command line
