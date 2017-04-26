@@ -1,4 +1,4 @@
-// Copyright 2012-2016 Apcera Inc. All rights reserved.
+// Copyright 2012-2017 Apcera Inc. All rights reserved.
 
 package server
 
@@ -16,20 +16,6 @@ import (
 
 	"github.com/nats-io/gnatsd/conf"
 )
-
-// For multiple accounts/users.
-type User struct {
-	Username    string       `json:"user"`
-	Password    string       `json:"password"`
-	Permissions *Permissions `json:"permissions"`
-}
-
-// Authorization are the allowed subjects on a per
-// publish or subscribe basis.
-type Permissions struct {
-	Publish   []string `json:"publish"`
-	Subscribe []string `json:"subscribe"`
-}
 
 // Options for clusters.
 type ClusterOpts struct {
@@ -411,7 +397,7 @@ func parseUsers(mv interface{}) ([]*User, error) {
 				user.Username = v.(string)
 			case "pass", "password":
 				user.Password = v.(string)
-			case "permission", "permissions", "authroization":
+			case "permission", "permissions", "authorization":
 				pm, ok := v.(map[string]interface{})
 				if !ok {
 					return nil, fmt.Errorf("Expected user permissions to be a map/struct, got %+v", v)
