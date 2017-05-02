@@ -110,6 +110,7 @@ var (
 	ErrInvalidSub         = errors.New("stan: invalid subscription")
 	ErrInvalidClient      = errors.New("stan: clientID already registered")
 	ErrMissingClient      = errors.New("stan: clientID missing")
+	ErrInvalidClientID    = errors.New("stan: invalid clientID: only alphanumeric and `-` or `_` characters allowed")
 	ErrInvalidAckWait     = errors.New("stan: invalid ack wait time, should be >= 1s")
 	ErrInvalidMaxInflight = errors.New("stan: invalid MaxInflight, should be >= 1")
 	ErrInvalidConnReq     = errors.New("stan: invalid connection request")
@@ -1581,17 +1582,22 @@ func (s *StanServer) initSubscriptions() error {
 func (s *StanServer) connectCB(m *nats.Msg) {
 	req := &pb.ConnectRequest{}
 	err := req.Unmarshal(m.Data)
-	if err != nil || !clientIDRegEx.MatchString(req.ClientID) || req.HeartbeatInbox == "" {
-		Debugf("[Client:?] Invalid conn request: ClientID=%s, Inbox=%s, err=%v",
+	if err != nil || req.HeartbeatInbox == "" {
+		Errorf("[Client:?] Invalid conn request: ClientID=%s, Inbox=%s, err=%v",
 			req.ClientID, req.HeartbeatInbox, err)
 		s.sendConnectErr(m.Reply, ErrInvalidConnReq.Error())
+		return
+	}
+	if !clientIDRegEx.MatchString(req.ClientID) {
+		Errorf("[Client:%s] Invalid ClientID, only alphanumeric and `-` or `_` characters allowed", req.ClientID)
+		s.sendConnectErr(m.Reply, ErrInvalidClientID.Error())
 		return
 	}
 
 	// Try to register
 	client, isNew, err := s.clients.Register(req.ClientID, req.HeartbeatInbox)
 	if err != nil {
-		Debugf("[Client:%s] Error registering client: %v", req.ClientID, err)
+		Errorf("[Client:%s] Error registering client: %v", req.ClientID, err)
 		s.sendConnectErr(m.Reply, err.Error())
 		return
 	}
@@ -1604,7 +1610,7 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 
 		// Yes, fail this request here.
 		if inProgress {
-			Debugf("[Client:%s] Connect failed; already connected", req.ClientID)
+			Errorf("[Client:%s] Connect failed; already connected", req.ClientID)
 			s.sendConnectErr(m.Reply, ErrInvalidClient.Error())
 			return
 		}
