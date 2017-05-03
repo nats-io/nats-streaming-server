@@ -428,7 +428,7 @@ func TestClientIDIsValid(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Unexpected response object: %v", err)
 		}
-		if r.Error == "" {
+		if r.Error != ErrInvalidClientID.Error() {
 			t.Fatal("Expected error, got none")
 		}
 	}
