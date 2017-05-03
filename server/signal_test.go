@@ -14,22 +14,6 @@ import (
 	natsd "github.com/nats-io/gnatsd/server"
 )
 
-func TestSignalInterrupt(t *testing.T) {
-	defer setSignalNoExit(false)
-	setSignalNoExit(true)
-	opts := GetDefaultOptions()
-	opts.HandleSignals = true
-	s := runServerWithOpts(t, opts, nil)
-	defer s.Shutdown()
-	// Send Ctrl+C
-	syscall.Kill(syscall.Getpid(), syscall.SIGINT)
-	// Check server is Shutdown
-	time.Sleep(250 * time.Millisecond)
-	if state := s.State(); state != Shutdown {
-		t.Fatalf("Expected state to be %v, got %v", Shutdown.String(), state.String())
-	}
-}
-
 func TestSignalIgnoreUnknown(t *testing.T) {
 	opts := GetDefaultOptions()
 	opts.HandleSignals = true

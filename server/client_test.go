@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nuid"
-	"sync/atomic"
 )
 
 func createClientStore() *clientStore {

@@ -136,18 +136,6 @@ func init() {
 	}
 }
 
-// For testing of signal handling
-var (
-	signalMu     = sync.RWMutex{}
-	signalNoExit = false
-)
-
-func setSignalNoExit(noExit bool) {
-	signalMu.Lock()
-	signalNoExit = noExit
-	signalMu.Unlock()
-}
-
 // ioPendingMsg is a record that embeds the pointer to the incoming
 // NATS Message, the PubMsg and PubAck structures so we reduce the
 // number of memory allocations to 1 when processing a message from

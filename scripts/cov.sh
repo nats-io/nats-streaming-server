@@ -3,8 +3,7 @@
 
 rm -rf ./cov
 mkdir cov
-go test -v -covermode=count -coverprofile=./cov/server.out -run=Test[^Signal] ./server
-go test -v -covermode=count -coverprofile=./cov/server2.out -run=TestSignal ./server
+go test -v -covermode=count -coverprofile=./cov/server.out ./server
 # repeat these server FT tests but focus on stores package
 go test -v -covermode=count -coverprofile=./cov/stores1.out -run=TestFTPartition -coverpkg=./stores ./server
 go test -v -covermode=count -coverprofile=./cov/stores2.out ./stores
