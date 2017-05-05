@@ -611,6 +611,7 @@ func TestFSOptions(t *testing.T) {
 		SliceMaxAge:          time.Second,
 		SliceArchiveScript:   "myscript.sh",
 		FileDescriptorsLimit: 20,
+		ParallelRecovery:     5,
 	}
 	// Create the file with custom options
 	fs, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits,
@@ -623,7 +624,20 @@ func TestFSOptions(t *testing.T) {
 		CRCPolynomial(expected.CRCPolynomial),
 		DoSync(expected.DoSync),
 		SliceConfig(100, 1024*1024, time.Second, "myscript.sh"),
-		FileDescriptorsLimit(20))
+		FileDescriptorsLimit(20),
+		ParallelRecovery(5))
+	if err != nil {
+		t.Fatalf("Unexpected error on file store create: %v", err)
+	}
+	defer fs.Close()
+	fs.RLock()
+	opts = fs.opts
+	fs.RUnlock()
+	checkOpts(expected, opts)
+
+	fs.Close()
+	fs, err = NewFileStore(defaultDataStore, &testDefaultStoreLimits,
+		AllOptions(&expected))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
@@ -666,6 +680,55 @@ func TestFSOptions(t *testing.T) {
 	opts = *ss.opts
 	ss.RUnlock()
 	checkOpts(expected, opts)
+	fs.Close()
+
+	expectError := func(opts *FileStoreOptions, errTxt string) {
+		f, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits, AllOptions(opts))
+		if f != nil {
+			f.Close()
+		}
+		if err == nil || !strings.Contains(err.Error(), errTxt) {
+			stackFatalf(t, "Expected error to contain %q, got %v", errTxt, err)
+		}
+	}
+	badOpts := DefaultFileStoreOptions
+	badOpts.BufferSize = -1
+	expectError(&badOpts, "buffer size")
+	badOpts = DefaultFileStoreOptions
+	badOpts.CompactFragmentation = -1
+	expectError(&badOpts, "compact fragmentation")
+	badOpts.CompactFragmentation = 0
+	expectError(&badOpts, "compact fragmentation")
+	badOpts = DefaultFileStoreOptions
+	badOpts.CompactInterval = -1
+	expectError(&badOpts, "compact interval")
+	badOpts.CompactInterval = 0
+	expectError(&badOpts, "compact interval")
+	badOpts = DefaultFileStoreOptions
+	badOpts.CompactMinFileSize = -1
+	expectError(&badOpts, "compact minimum file size")
+	badOpts = DefaultFileStoreOptions
+	badOpts.CRCPolynomial = 0
+	expectError(&badOpts, "crc polynomial")
+	badOpts.CRCPolynomial = 0xFFFFFFFF + 10
+	expectError(&badOpts, "crc polynomial")
+	badOpts = DefaultFileStoreOptions
+	badOpts.FileDescriptorsLimit = -1
+	expectError(&badOpts, "file descriptor")
+	badOpts = DefaultFileStoreOptions
+	badOpts.ParallelRecovery = -1
+	expectError(&badOpts, "parallel recovery")
+	badOpts.ParallelRecovery = 0
+	expectError(&badOpts, "parallel recovery")
+	badOpts = DefaultFileStoreOptions
+	badOpts.SliceMaxMsgs = -1
+	expectError(&badOpts, "slice max values")
+	badOpts = DefaultFileStoreOptions
+	badOpts.SliceMaxBytes = -1
+	expectError(&badOpts, "slice max values")
+	badOpts = DefaultFileStoreOptions
+	badOpts.SliceMaxAge = -1
+	expectError(&badOpts, "slice max values")
 }
 
 func TestFSNothingRecoveredOnFreshStart(t *testing.T) {
@@ -4454,4 +4517,44 @@ func TestFSNegativeLimits(t *testing.T) {
 	defer fs.Close()
 
 	testNegativeLimit(t, fs)
+}
+
+func TestFSParallelRecovery(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	fs := createDefaultFileStore(t, FileDescriptorsLimit(50))
+	defer fs.Close()
+	numChannels := 100
+	numMsgsPerChannel := 1000
+	msg := []byte("msg")
+	for i := 0; i < numChannels; i++ {
+		chanName := fmt.Sprintf("foo.%v", i)
+		for j := 0; j < numMsgsPerChannel; j++ {
+			storeMsg(t, fs, chanName, msg)
+		}
+	}
+	fs.Close()
+
+	fs, state := openDefaultFileStore(t, ParallelRecovery(10))
+	defer fs.Close()
+	if state == nil {
+		t.Fatal("Expected state, got none")
+	}
+	n, _, err := fs.MsgsState(AllChannels)
+	if err != nil {
+		t.Fatalf("Error getting msg state: %v", err)
+	}
+	if n != numChannels*numMsgsPerChannel {
+		t.Fatalf("Expected %v messages, got %v", numChannels*numMsgsPerChannel, n)
+	}
+	fs.Close()
+
+	// Make several channels fail to recover
+	fname := fmt.Sprintf("%s.1.%s", msgFilesPrefix, datSuffix)
+	ioutil.WriteFile(filepath.Join(defaultDataStore, "foo.50", fname), []byte("dummy"), 0666)
+	ioutil.WriteFile(filepath.Join(defaultDataStore, "foo.51", fname), []byte("dummy"), 0666)
+	if _, _, err := newFileStore(t, defaultDataStore, &testDefaultStoreLimits, ParallelRecovery(10)); err == nil {
+		t.Fatalf("Recovery should have failed")
+	}
 }

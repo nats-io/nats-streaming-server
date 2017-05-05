@@ -361,6 +361,7 @@ Streaming Server File Store Options:
     --file_slice_max_age <duration>      Maximum file slice duration starting when the first message is stored (subject to channel limits)
     --file_slice_archive_script <string> Path to script to use if you want to archive a file slice being removed
     --file_fds_limit <int>               Store will try to use no more file descriptors than this given limit
+    --file_parallel_recovery <int>       On startup, number of channels that can be recovered in parallel
 
 Streaming Server TLS Options:
     -secure <bool>                   Use a TLS connection to the NATS server without
@@ -600,6 +601,12 @@ file: {
     # a performance impact.
     # Can be file_descriptors_limit, fds_limit
     fds_limit: 100
+
+    # When the server starts, the recovery of channels (directories) is
+    # done sequentially. However, when using SSDs, it may be worth
+    # setting this value to something higher than 1 to perform channels
+    # recovery in parallel.
+    parallel_recovery: 4
 }
 ```
 

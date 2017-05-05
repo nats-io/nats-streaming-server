@@ -100,6 +100,9 @@ func TestParseConfig(t *testing.T) {
 	if opts.FileStoreOpts.FileDescriptorsLimit != 8 {
 		t.Fatalf("Expected FileDescriptorsLimit to be 8, got %v", opts.FileStoreOpts.FileDescriptorsLimit)
 	}
+	if opts.FileStoreOpts.ParallelRecovery != 9 {
+		t.Fatalf("Expected ParallelRecovery to be 9, got %v", opts.FileStoreOpts.ParallelRecovery)
+	}
 	if opts.MaxChannels != 11 {
 		t.Fatalf("Expected MaxChannels to be 11, got %v", opts.MaxChannels)
 	}
@@ -313,6 +316,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "file:{slice_max_age:\"1h:0m\"}", wrongTimeErr)
 	expectFailureFor(t, "file:{slice_archive_script:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{fds_limit:false}", wrongTypeErr)
+	expectFailureFor(t, "file:{parallel_recovery:false}", wrongTypeErr)
 }
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {
