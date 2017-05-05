@@ -21,12 +21,6 @@ func (s *StanServer) handleSignals() {
 			switch sig {
 			case syscall.SIGINT:
 				s.Shutdown()
-				signalMu.RLock()
-				noExit := signalNoExit
-				signalMu.RUnlock()
-				if noExit {
-					return
-				}
 				os.Exit(0)
 			case syscall.SIGUSR1:
 				// File log re-open for rotating file logs.

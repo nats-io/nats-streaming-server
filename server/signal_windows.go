@@ -17,12 +17,6 @@ func (s *StanServer) handleSignals() {
 		// only the ones that are registered.
 		<-c
 		s.Shutdown()
-		signalMu.RLock()
-		noExit := signalNoExit
-		signalMu.RUnlock()
-		if noExit {
-			return
-		}
 		os.Exit(0)
 	}()
 }
