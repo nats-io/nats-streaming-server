@@ -55,8 +55,8 @@ func TestMSUseDefaultLimits(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	defer ms.Close()
-	if !reflect.DeepEqual(ms.limits, DefaultStoreLimits) {
-		t.Fatalf("Default limits are not used: %v\n", ms.limits)
+	if !reflect.DeepEqual(*ms.limits, DefaultStoreLimits) {
+		t.Fatalf("Default limits are not used: %v\n", *ms.limits)
 	}
 }
 
@@ -260,4 +260,10 @@ func TestMSNegativeLimits(t *testing.T) {
 	defer ms.Close()
 
 	testNegativeLimit(t, ms)
+}
+
+func TestMSLimitWithWildcardsInConfig(t *testing.T) {
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+	testLimitWithWildcardsInConfig(t, ms)
 }

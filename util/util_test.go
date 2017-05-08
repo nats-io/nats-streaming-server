@@ -5,10 +5,29 @@ package util
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func stackFatalf(t *testing.T, f string, args ...interface{}) {
+	lines := make([]string, 0, 32)
+	msg := fmt.Sprintf(f, args...)
+	lines = append(lines, msg)
+
+	// Generate the Stack of callers:
+	for i := 1; true; i++ {
+		_, file, line, ok := runtime.Caller(i)
+		if !ok {
+			break
+		}
+		msg := fmt.Sprintf("%d - %s:%d", i, file, line)
+		lines = append(lines, msg)
+	}
+
+	t.Fatalf("%s", strings.Join(lines, "\n"))
+}
 
 func TestEnsureBufBigEnough(t *testing.T) {
 	buf := make([]byte, 3)
@@ -181,7 +200,7 @@ func TestIsSubjectValid(t *testing.T) {
 		subject += "foo."
 	}
 	subject += "foo"
-	if !IsSubjectValid(subject) {
+	if !IsSubjectValid(subject, false) {
 		t.Fatalf("Subject %q should be valid", subject)
 	}
 	subjects := []string{
@@ -198,8 +217,62 @@ func TestIsSubjectValid(t *testing.T) {
 		".",
 	}
 	for _, s := range subjects {
-		if IsSubjectValid(s) {
+		if IsSubjectValid(s, false) {
 			t.Fatalf("Subject %q expected to be invalid", s)
+		}
+	}
+	subjects = []string{
+		"foo.bar*",
+		"foo.bar>",
+		"foo*.bar",
+		"foo>.bar",
+		"foo.*bar",
+		"foo.>bar",
+		"foo.>.bar",
+		">.",
+		">.>",
+		"foo..bar",
+		".foo.bar",
+		"foo.bar.",
+		"..",
+		".",
+	}
+	for _, s := range subjects {
+		if IsSubjectValid(s, true) {
+			t.Fatalf("Subject %q expected to be invalid", s)
+		}
+	}
+
+	// Test valid wildcard subjects
+	subjects = []string{
+		"foo.*",
+		"foo.*.*",
+		"foo.>",
+		"foo.*.>",
+		"*",
+		">",
+		"*.bar.*",
+		"*.bar.>",
+		"*.>",
+	}
+	for _, s := range subjects {
+		if !IsSubjectValid(s, true) {
+			t.Fatalf("Subject %q expected to be valid", s)
+		}
+	}
+}
+
+func TestIsSubjectLiteral(t *testing.T) {
+	subjects := []string{"foo.*", "foo.>", "foo.*.bar", "foo.bar.*"}
+	for _, s := range subjects {
+		if IsSubjectLiteral(s) {
+			t.Fatalf("IsSubjectLiteral for %q should have returned false", s)
+		}
+	}
+	subjects = []string{"foo.bar", "foo.baz", "foo.baz.bar", "foo.bar.baz"}
+	for _, s := range subjects {
+		if !IsSubjectLiteral(s) {
+			t.Fatalf("IsSubjectLiteral for %q should have returned true", s)
 		}
 	}
 }

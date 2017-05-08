@@ -5030,9 +5030,13 @@ func TestPerChannelLimits(t *testing.T) {
 		clfoo.MaxMsgs = 2
 		clbar := stores.ChannelLimits{}
 		clbar.MaxBytes = 1000
+		clbaz := stores.ChannelLimits{}
+		clbaz.MaxSubscriptions = 1
+		clbaz.MaxAge = time.Second
 		sl := &opts.StoreLimits
 		sl.AddPerChannel("foo", &clfoo)
 		sl.AddPerChannel("bar", &clbar)
+		sl.AddPerChannel("baz", &clbaz)
 
 		s := runServerWithOpts(t, opts, nil)
 		defer s.Shutdown()
@@ -5081,6 +5085,29 @@ func TestPerChannelLimits(t *testing.T) {
 		// The size should be lower than clbar.MaxBytes
 		if b > uint64(clbar.MaxBytes) {
 			t.Fatalf("Expected less than %v bytes, got %v", clbar.MaxBytes, b)
+		}
+
+		// Number of subscriptions on baz should be limited to 1
+		for i := 0; i < 2; i++ {
+			if _, err := sc.Subscribe("baz", func(_ *stan.Msg) {}); i == 1 && err == nil {
+				t.Fatal("Expected max subscriptions to be 1")
+			}
+		}
+		// Max Age for baz should be 1sec.
+		if err := sc.Publish("baz", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+		// Wait more than max age
+		time.Sleep(1500 * time.Millisecond)
+		// Check state
+		s.mu.RLock()
+		n, _, err = s.store.MsgsState("baz")
+		s.mu.RUnlock()
+		if err != nil {
+			t.Fatalf("Unexpected error getting state: %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("Message should have expired")
 		}
 	}
 	for i := 0; i < 2; i++ {

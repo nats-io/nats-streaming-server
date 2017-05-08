@@ -1191,13 +1191,14 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 			}
 			channel := c.Name()
 			channelDirName := filepath.Join(fs.fm.rootDir, channel)
+			limits := fs.genericStore.getChannelLimits(channel)
 			// This will block if the max number of go-routines is reached.
 			// When one of the go-routine finishes, it will add back to the
 			// pool and we will be able to start the recovery of another
 			// channel.
 			<-poolCh
 			wg.Add(1)
-			go fs.recoverOneChannel(channelDirName, channel, ctx)
+			go fs.recoverOneChannel(channelDirName, channel, limits, ctx)
 			// Fail as soon as we detect that a go routine has encountered
 			// an error
 			if len(errCh) > 0 {
@@ -1246,7 +1247,7 @@ func initParalleRecovery(maxGoRoutines, foundChannels int) (*sync.WaitGroup, cha
 	return &wg, poolCh, errCh, recoverCh
 }
 
-func (fs *FileStore) recoverOneChannel(dir, name string, ctx *channelRecoveryCtx) {
+func (fs *FileStore) recoverOneChannel(dir, name string, limits *ChannelLimits, ctx *channelRecoveryCtx) {
 	var (
 		msgStore *FileMsgStore
 		subStore *FileSubStore
@@ -1262,11 +1263,11 @@ func (fs *FileStore) recoverOneChannel(dir, name string, ctx *channelRecoveryCtx
 		ctx.poolCh <- struct{}{}
 		ctx.wg.Done()
 	}()
-	msgStore, err = fs.newFileMsgStore(dir, name, true)
+	msgStore, err = fs.newFileMsgStore(dir, name, &limits.MsgStoreLimits, true)
 	if err != nil {
 		return
 	}
-	subStore, err = fs.newFileSubStore(name, true)
+	subStore, err = fs.newFileSubStore(name, &limits.SubStoreLimits, true)
 	if err != nil {
 		msgStore.Close()
 		return
@@ -1464,11 +1465,13 @@ func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*Chann
 	var msgStore MsgStore
 	var subStore SubStore
 
-	msgStore, err = fs.newFileMsgStore(channelDirName, channel, false)
+	channelLimits := fs.genericStore.getChannelLimits(channel)
+
+	msgStore, err = fs.newFileMsgStore(channelDirName, channel, &channelLimits.MsgStoreLimits, false)
 	if err != nil {
 		return nil, false, err
 	}
-	subStore, err = fs.newFileSubStore(channel, false)
+	subStore, err = fs.newFileSubStore(channel, &channelLimits.SubStoreLimits, false)
 	if err != nil {
 		msgStore.Close()
 		return nil, false, err
@@ -1657,7 +1660,7 @@ func (fs *FileStore) Close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // newFileMsgStore returns a new instace of a file MsgStore.
-func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover bool) (*FileMsgStore, error) {
+func (fs *FileStore) newFileMsgStore(channelDirName, channel string, limits *MsgStoreLimits, doRecover bool) (*FileMsgStore, error) {
 	// Create an instance and initialize
 	ms := &FileMsgStore{
 		fm:           fs.fm,
@@ -1669,15 +1672,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, doRecover b
 		bkgTasksDone: make(chan bool, 1),
 		bkgTasksWake: make(chan bool, 1),
 	}
-	// Defaults to the global limits
-	msgStoreLimits := fs.limits.MsgStoreLimits
-	// See if there is an override
-	thisChannelLimits, exists := fs.limits.PerChannel[channel]
-	if exists {
-		// Use this channel specific limits
-		msgStoreLimits = thisChannelLimits.MsgStoreLimits
-	}
-	ms.init(channel, &msgStoreLimits)
+	ms.init(channel, limits)
 
 	ms.setSliceLimits()
 	ms.initCache()
@@ -3025,22 +3020,14 @@ func (ms *FileMsgStore) Flush() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // newFileSubStore returns a new instace of a file SubStore.
-func (fs *FileStore) newFileSubStore(channel string, doRecover bool) (*FileSubStore, error) {
+func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doRecover bool) (*FileSubStore, error) {
 	ss := &FileSubStore{
 		fm:       fs.fm,
 		subs:     make(map[uint64]*subscription),
 		opts:     &fs.opts,
 		crcTable: fs.crcTable,
 	}
-	// Defaults to the global limits
-	subStoreLimits := fs.limits.SubStoreLimits
-	// See if there is an override
-	thisChannelLimits, exists := fs.limits.PerChannel[channel]
-	if exists {
-		// Use this channel specific limits
-		subStoreLimits = thisChannelLimits.SubStoreLimits
-	}
-	ss.init(channel, &subStoreLimits)
+	ss.init(channel, limits)
 	// Convert the CompactInterval in time.Duration
 	ss.compactItvl = time.Duration(ss.opts.CompactInterval) * time.Second
 
