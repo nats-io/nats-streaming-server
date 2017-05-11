@@ -248,8 +248,8 @@ func DoCRC(enableCRC bool) FileStoreOption {
 // See https://golang.org/pkg/hash/crc32/#MakeTable
 func CRCPolynomial(polynomial int64) FileStoreOption {
 	return func(o *FileStoreOptions) error {
-		if polynomial <= 0 || polynomial > 0xFFFFFFFF {
-			return fmt.Errorf("crc polynomial should be between 1 and %v", 0xFFFFFFFF)
+		if polynomial <= 0 || polynomial > int64(0xFFFFFFFF) {
+			return fmt.Errorf("crc polynomial should be between 1 and %v", int64(0xFFFFFFFF))
 		}
 		o.CRCPolynomial = polynomial
 		return nil
