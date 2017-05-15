@@ -196,7 +196,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	var showVersion bool
 	var natsDebugAndTrace bool
 	var showTLSHelp bool
-	var configFile string
+	var gnatsdConfigFile string
 
 	natsOpts := natsd.Options{}
 
@@ -226,8 +226,8 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.IntVar(&natsOpts.HTTPPort, "http_port", 0, "")
 	flag.IntVar(&natsOpts.HTTPSPort, "ms", 0, "")
 	flag.IntVar(&natsOpts.HTTPSPort, "https_port", 0, "")
-	flag.StringVar(&configFile, "c", "", "")
-	flag.StringVar(&configFile, "config", "", "")
+	flag.StringVar(&gnatsdConfigFile, "c", "", "")
+	flag.StringVar(&gnatsdConfigFile, "config", "", "")
 	flag.StringVar(&natsOpts.PidFile, "P", "", "")
 	flag.StringVar(&natsOpts.PidFile, "pid", "", "")
 	flag.StringVar(&natsOpts.LogFile, "l", "", "")
@@ -279,10 +279,17 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 		usage()
 	}
 
+	// If user provides explicit config files for "-sc" and "-c" then use
+	// given config file only, otherwise, try to parse the same config file
+	// for each components.
+	cfgFile := stanConfigFile
+	if cfgFile == "" && gnatsdConfigFile != "" {
+		cfgFile = gnatsdConfigFile
+	}
 	// Parse NATS Streaming configuration file, updating stanOpts with
 	// what is found in the file, possibly overriding the defaults.
-	if stanConfigFile != "" {
-		if err := stand.ProcessConfigFile(stanConfigFile, stanOpts); err != nil {
+	if cfgFile != "" {
+		if err := stand.ProcessConfigFile(cfgFile, stanOpts); err != nil {
 			natsd.PrintAndDie(fmt.Sprintf("Configuration error: %v", err.Error()))
 		}
 	}
@@ -292,8 +299,12 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	}
 
 	// Parse NATS config if given
-	if configFile != "" {
-		fileOpts, err := natsd.ProcessConfigFile(configFile)
+	cfgFile = gnatsdConfigFile
+	if cfgFile == "" && stanConfigFile != "" {
+		cfgFile = stanConfigFile
+	}
+	if cfgFile != "" {
+		fileOpts, err := natsd.ProcessConfigFile(cfgFile)
 		if err != nil {
 			natsd.PrintAndDie(err.Error())
 		}
