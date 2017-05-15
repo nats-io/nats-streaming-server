@@ -3418,8 +3418,7 @@ func TestFileStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
 		stan.SetManualAckMode()); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
-	// Create this subscriber that will receive and ack the message
-	sub2, err = sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(time.Second),
+	sub2, err = sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(10*time.Second),
 		stan.SetManualAckMode())
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
@@ -3433,6 +3432,7 @@ func TestFileStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
 	// Wait for sub2 to receive the message.
 	select {
 	case <-sub2Recv:
+		waitForAcks(t, s, clientName, 1, 0)
 		break
 	case e := <-errs:
 		t.Fatalf("%v", e)
