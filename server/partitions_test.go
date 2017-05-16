@@ -516,7 +516,7 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	mu.Unlock()
 
 	// Wait for ns1 and ns2 to report that the route is established
-	timeout := time.Now().Add(3 * time.Second)
+	timeout := time.Now().Add(4 * time.Second)
 	ok := false
 	for time.Now().Before(timeout) {
 		if ns1.NumRoutes() == 1 && ns2.NumRoutes() == 1 {
@@ -533,23 +533,34 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	// After the route is established, each server should resend
 	// their list, so the total of times each server receives
 	// the list should be 2.
-	time.Sleep(500 * time.Millisecond)
-	mu.Lock()
-	cs1 := fooFromS1
-	cs2 := fooFromS2
-	mu.Unlock()
+	var (
+		cs1, cs2     int
+		s1Err, s2Err error
+	)
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		mu.Lock()
+		cs1 = fooFromS1
+		cs2 = fooFromS2
+		mu.Unlock()
+		s1Err = s1.LastError()
+		s2Err = s2.LastError()
+		if cs1 != 2 || cs2 != 2 || s1Err == nil || s2Err == nil {
+			continue
+		}
+		// pre-conditions are ok
+		break
+	}
 	if cs1 != 2 {
 		t.Fatalf("Expected to receive foo from S1 only twice, got %v", cs1)
 	}
 	if cs2 != 2 {
 		t.Fatalf("Expected to receive foo from S2 only twice, got %v", cs2)
 	}
-	// Now one or 2 of the servers should have failed.
-	s1Err := s1.LastError()
-	s2Err := s2.LastError()
 	if s1Err == nil || s2Err == nil {
 		t.Fatal("Both servers should have stopped")
 	}
+	// One more check...
 	if !strings.Contains(s1Err.Error(), "foo") {
 		t.Fatalf("Expected error about channel foo already defined, got %v", s1Err)
 	}
