@@ -427,6 +427,9 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	setPartitionsVarsForTest()
 	defer resetDefaultPartitionsVars()
 
+	// For this test, use a larger value than other tests
+	partitionsRequestTimeout = 500 * time.Millisecond
+
 	ncOpts1 := natsdTest.DefaultTestOptions
 	ncOpts1.Cluster.Host = "localhost"
 	ncOpts1.Cluster.Port = 6222
@@ -511,7 +514,17 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	opts2.Partitioning = true
 	opts2.AddPerChannel("foo", &stores.ChannelLimits{})
 	mu.Lock()
-	s2 = runServerWithOpts(t, opts2, nil)
+	s2, err = RunServerWithOpts(opts2, nil)
+	if err != nil {
+		// The purpose of this test was to verify that protocols are resent
+		// after the route is established. If, due to timing, the route
+		// happens to be established before s2 starts, s2 would correctly
+		// fail to start. We don't want to fail the test for that.
+		if strings.Contains(err.Error(), "foo") {
+			return
+		}
+		t.Fatalf("Unexpected error on startup: %v", err)
+	}
 	defer s2.Shutdown()
 	mu.Unlock()
 
