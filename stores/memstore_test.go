@@ -267,3 +267,9 @@ func TestMSLimitWithWildcardsInConfig(t *testing.T) {
 	defer ms.Close()
 	testLimitWithWildcardsInConfig(t, ms)
 }
+
+func TestMSGetChannels(t *testing.T) {
+	ms := createDefaultMemStore(t)
+	defer ms.Close()
+	testGetChannels(t, ms)
+}

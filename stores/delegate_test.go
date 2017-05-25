@@ -40,6 +40,12 @@ func TestDelegateStore(t *testing.T) {
 	if !ds.HasChannel() {
 		t.Fatal("HasChannel should have returned true")
 	}
+	if channels := ds.GetChannels(); len(channels) != 1 || channels["foo"] == nil {
+		t.Fatalf("GetChannels returned: %v", channels)
+	}
+	if count := ds.GetChannelsCount(); count != 1 {
+		t.Fatalf("GetChannelsCount returned: %v", count)
+	}
 	if n, s, err := ds.MsgsState("foo"); n != 0 || s != 0 || err != nil {
 		t.Fatalf("MsgState returned: %v - %v - %v", n, s, err)
 	}

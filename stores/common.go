@@ -167,6 +167,25 @@ func (gs *genericStore) HasChannel() bool {
 	return l > 0
 }
 
+// GetChannelNames implements the Store interface.
+func (gs *genericStore) GetChannels() map[string]*ChannelStore {
+	gs.RLock()
+	defer gs.RUnlock()
+	res := make(map[string]*ChannelStore, len(gs.channels))
+	for k, v := range gs.channels {
+		copyVal := *v
+		res[k] = &copyVal
+	}
+	return res
+}
+
+// GetChannelsCount implements the Store interface.
+func (gs *genericStore) GetChannelsCount() int {
+	gs.RLock()
+	defer gs.RUnlock()
+	return len(gs.channels)
+}
+
 // State returns message store statistics for a given channel ('*' for all)
 func (gs *genericStore) MsgsState(channel string) (numMessages int, byteSize uint64, err error) {
 	numMessages = 0

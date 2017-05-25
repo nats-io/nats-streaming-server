@@ -38,13 +38,13 @@ func Noticef(format string, v ...interface{}) {
 // StoreLimits define limits for a store.
 type StoreLimits struct {
 	// How many channels are allowed.
-	MaxChannels int
+	MaxChannels int `json:"max_channels"`
 	// Global limits. Any 0 value means that the limit is ignored (unlimited).
 	ChannelLimits
 	// Per-channel limits. Special values for limits in this map:
 	// - == 0 means that the corresponding global limit is used.
 	// -  < 0 means that limit is ignored (unlimited).
-	PerChannel map[string]*ChannelLimits
+	PerChannel map[string]*ChannelLimits `json:"channels,omitempty"`
 }
 
 // ChannelLimits defines limits for a given channel
@@ -61,17 +61,17 @@ type ChannelLimits struct {
 // limit is used.
 type MsgStoreLimits struct {
 	// How many messages are allowed.
-	MaxMsgs int
+	MaxMsgs int `json:"max_msgs"`
 	// How many bytes are allowed.
-	MaxBytes int64
+	MaxBytes int64 `json:"max_bytes"`
 	// How long messages are kept in the log (unit is seconds)
-	MaxAge time.Duration
+	MaxAge time.Duration `json:"max_age"`
 }
 
 // SubStoreLimits defines limits for a SubStore
 type SubStoreLimits struct {
 	// How many subscriptions are allowed.
-	MaxSubscriptions int
+	MaxSubscriptions int `json:"max_subscriptions"`
 }
 
 // DefaultStoreLimits are the limits that a Store must
@@ -198,6 +198,13 @@ type Store interface {
 
 	// HasChannel returns true if this store has any channel.
 	HasChannel() bool
+
+	// GetChannels returns a map of ChannelStore, keyed by the name
+	// of the channel.
+	GetChannels() map[string]*ChannelStore
+
+	// GetChannelsCount returns the number of channels currently stored.
+	GetChannelsCount() int
 
 	// MsgsState returns message store statistics for a given channel, or all
 	// if 'channel' is AllChannels.
