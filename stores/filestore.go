@@ -2420,10 +2420,12 @@ func (ms *FileMsgStore) expireMsgs(now, maxAge int64) int64 {
 		elapsed := now - m.timestamp
 		if elapsed >= maxAge {
 			ms.removeFirstMsg(m, false)
-		} else if elapsed < 0 {
-			ms.expiration = m.timestamp + maxAge
 		} else {
-			ms.expiration = now + (maxAge - elapsed)
+			if elapsed < 0 {
+				ms.expiration = m.timestamp + maxAge
+			} else {
+				ms.expiration = now + (maxAge - elapsed)
+			}
 			break
 		}
 	}
