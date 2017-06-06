@@ -190,10 +190,12 @@ func (ms *MemoryMsgStore) expireMsgs() {
 		elapsed := now - m.Timestamp
 		if elapsed >= maxAge {
 			ms.removeFirstMsg()
-		} else if elapsed < 0 {
-			ms.ageTimer.Reset(time.Duration(m.Timestamp - now + maxAge))
 		} else {
-			ms.ageTimer.Reset(time.Duration(maxAge - elapsed))
+			if elapsed < 0 {
+				ms.ageTimer.Reset(time.Duration(m.Timestamp - now + maxAge))
+			} else {
+				ms.ageTimer.Reset(time.Duration(maxAge - elapsed))
+			}
 			return
 		}
 	}
