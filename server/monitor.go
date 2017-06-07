@@ -4,6 +4,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -17,11 +18,11 @@ import (
 
 // Routes for the monitoring pages
 const (
-	RootPath     = "/nss"
-	ServerPath   = RootPath + "/server"
-	StorePath    = RootPath + "/store"
-	ClientsPath  = RootPath + "/clients"
-	ChannelsPath = RootPath + "/channels"
+	RootPath     = "/streaming"
+	ServerPath   = RootPath + "/serverz"
+	StorePath    = RootPath + "/storez"
+	ClientsPath  = RootPath + "/clientsz"
+	ChannelsPath = RootPath + "/channelsz"
 
 	defaultMonitorListLimit = 1024
 )
@@ -75,18 +76,6 @@ type Clientz struct {
 
 // Channelsz lists the name of all NATS Streaming Channelsz
 type Channelsz struct {
-	ClusterID string    `json:"cluster_id"`
-	ServerID  string    `json:"server_id"`
-	Now       time.Time `json:"now"`
-	Offset    int       `json:"offset"`
-	Limit     int       `json:"limit"`
-	Count     int       `json:"count"`
-	Total     int       `json:"total"`
-	Channels  []string  `json:"channels"`
-}
-
-// ChannelsWithSubsz list detailed channels along with subscriptions on each channel
-type ChannelsWithSubsz struct {
 	ClusterID string      `json:"cluster_id"`
 	ServerID  string      `json:"server_id"`
 	Now       time.Time   `json:"now"`
@@ -94,7 +83,8 @@ type ChannelsWithSubsz struct {
 	Limit     int         `json:"limit"`
 	Count     int         `json:"count"`
 	Total     int         `json:"total"`
-	Channels  []*Channelz `json:"channels"`
+	Names     []string    `json:"names,omitempty"`
+	Channels  []*Channelz `json:"channels,omitempty"`
 }
 
 // Channelz describes a NATS Streaming Channel
@@ -132,17 +122,10 @@ func (s *StanServer) startMonitoring(nOpts *gnatsd.Options) error {
 		}
 		hh = s.natsServer.HTTPHandler()
 	} else {
-		// We may need to wait for the HTTPHandler to be ready.
-		timeout := time.Now().Add(10 * time.Second)
-		for time.Now().Before(timeout) {
-			if hh = s.natsServer.HTTPHandler(); hh != nil {
-				break
-			}
-			time.Sleep(250 * time.Millisecond)
-		}
+		hh = s.natsServer.HTTPHandler()
 	}
 	if hh == nil {
-		return fmt.Errorf("unable to start monitoring server")
+		return errors.New("unable to start monitoring server")
 	}
 
 	mux := hh.(*http.ServeMux)
@@ -258,20 +241,12 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 			clientz = getMonitorClient(client, subsOption)
 		}
 		if clientz == nil {
-			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte(fmt.Sprintf("Client %s not found", singleClient)))
+			http.Error(w, fmt.Sprintf("Client %s not found", singleClient), http.StatusNotFound)
 			return
 		}
 		sendResponse(w, r, clientz)
 	} else {
-		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-		if offset < 0 {
-			offset = 0
-		}
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		if limit <= 0 {
-			limit = defaultMonitorListLimit
-		}
+		offset, limit := getOffsetAndLimit(r)
 		clients := s.store.GetClients()
 		totalClients := len(clients)
 		carr := make([]*Clientz, 0, totalClients)
@@ -281,14 +256,7 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Sort(byClientID(carr))
 
-		minoff := offset
-		if minoff > totalClients {
-			minoff = totalClients
-		}
-		maxoff := offset + limit
-		if maxoff > totalClients {
-			maxoff = totalClients
-		}
+		minoff, maxoff := getMinMaxOffset(offset, limit, totalClients)
 		carr = carr[minoff:maxoff]
 
 		for _, c := range carr {
@@ -316,8 +284,8 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 func getMonitorClient(c *stores.Client, subsOption int) *Clientz {
 	cli := c.UserData.(*client)
 	cli.RLock()
+	defer cli.RUnlock()
 	if cli.unregistered {
-		cli.RUnlock()
 		return nil
 	}
 	cz := &Clientz{
@@ -327,7 +295,6 @@ func getMonitorClient(c *stores.Client, subsOption int) *Clientz {
 	if subsOption == 1 {
 		cz.Subscriptions = getMonitorClientSubs(cli, false)
 	}
-	cli.RUnlock()
 	return cz
 }
 
@@ -406,36 +373,22 @@ func (a byChannelName) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a byChannelName) Less(i, j int) bool { return a[i].Name < a[j].Name }
 
 func (s *StanServer) handleChannelsz(w http.ResponseWriter, r *http.Request) {
-	oneChannel := r.URL.Query().Get("channel")
+	channelName := r.URL.Query().Get("channel")
 	subsOption, _ := strconv.Atoi(r.URL.Query().Get("subs"))
-	if oneChannel != "" {
-		cs := s.store.LookupChannel(oneChannel)
-		if cs == nil {
-			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte(fmt.Sprintf("Channel %s not found", oneChannel)))
-			return
-		}
-		channelz := &Channelz{Name: oneChannel}
-		updateChannelz(channelz, cs, subsOption)
-		sendResponse(w, r, channelz)
+	if channelName != "" {
+		s.handleOneChannel(w, r, channelName, subsOption)
 	} else {
-		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-		if offset < 0 {
-			offset = 0
-		}
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		if limit <= 0 {
-			limit = defaultMonitorListLimit
-		}
+		offset, limit := getOffsetAndLimit(r)
 		channels := s.store.GetChannels()
 		totalChannels := len(channels)
-		minoff := offset
-		if minoff > totalChannels {
-			minoff = totalChannels
-		}
-		maxoff := offset + limit
-		if maxoff > totalChannels {
-			maxoff = totalChannels
+		minoff, maxoff := getMinMaxOffset(offset, limit, totalChannels)
+		channelsz := &Channelsz{
+			ClusterID: s.info.ClusterID,
+			ServerID:  s.serverID,
+			Now:       time.Now(),
+			Offset:    offset,
+			Limit:     limit,
+			Total:     totalChannels,
 		}
 		if subsOption == 1 {
 			carr := make([]*Channelz, 0, totalChannels)
@@ -449,17 +402,8 @@ func (s *StanServer) handleChannelsz(w http.ResponseWriter, r *http.Request) {
 				cs := channels[cz.Name]
 				updateChannelz(cz, cs, subsOption)
 			}
-			channelsWithSubsz := &ChannelsWithSubsz{
-				ClusterID: s.info.ClusterID,
-				ServerID:  s.serverID,
-				Now:       time.Now(),
-				Offset:    offset,
-				Limit:     limit,
-				Count:     len(carr),
-				Total:     totalChannels,
-				Channels:  carr,
-			}
-			sendResponse(w, r, channelsWithSubsz)
+			channelsz.Count = len(carr)
+			channelsz.Channels = carr
 		} else {
 			carr := make([]string, 0, totalChannels)
 			for cn := range channels {
@@ -467,19 +411,22 @@ func (s *StanServer) handleChannelsz(w http.ResponseWriter, r *http.Request) {
 			}
 			sort.Sort(byName(carr))
 			carr = carr[minoff:maxoff]
-			channelsz := &Channelsz{
-				ClusterID: s.info.ClusterID,
-				ServerID:  s.serverID,
-				Now:       time.Now(),
-				Offset:    offset,
-				Limit:     limit,
-				Count:     len(carr),
-				Total:     totalChannels,
-				Channels:  carr,
-			}
-			sendResponse(w, r, channelsz)
+			channelsz.Count = len(carr)
+			channelsz.Names = carr
 		}
+		sendResponse(w, r, channelsz)
 	}
+}
+
+func (s *StanServer) handleOneChannel(w http.ResponseWriter, r *http.Request, name string, subsOption int) {
+	cs := s.store.LookupChannel(name)
+	if cs == nil {
+		http.Error(w, fmt.Sprintf("Channel %s not found", name), http.StatusNotFound)
+		return
+	}
+	channelz := &Channelz{Name: name}
+	updateChannelz(channelz, cs, subsOption)
+	sendResponse(w, r, channelz)
 }
 
 func updateChannelz(cz *Channelz, cs *stores.ChannelStore, subsOption int) {
@@ -501,4 +448,28 @@ func sendResponse(w http.ResponseWriter, r *http.Request, content interface{}) {
 		Errorf("Error marshaling response to %q request: %v", r.URL, err)
 	}
 	gnatsd.ResponseHandler(w, r, b)
+}
+
+func getOffsetAndLimit(r *http.Request) (int, int) {
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = defaultMonitorListLimit
+	}
+	return offset, limit
+}
+
+func getMinMaxOffset(offset, limit, total int) (int, int) {
+	minoff := offset
+	if minoff > total {
+		minoff = total
+	}
+	maxoff := offset + limit
+	if maxoff > total {
+		maxoff = total
+	}
+	return minoff, maxoff
 }

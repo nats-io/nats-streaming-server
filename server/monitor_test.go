@@ -781,8 +781,10 @@ func TestMonitorChannelsz(t *testing.T) {
 			Count:     count,
 			Total:     totalChannels,
 		}
-		channelsz.Channels = make([]string, 0, len(channels))
-		channelsz.Channels = append(channelsz.Channels, channels...)
+		if channels != nil {
+			channelsz.Names = make([]string, 0, len(channels))
+			channelsz.Names = append(channelsz.Names, channels...)
+		}
 		return channelsz
 	}
 
@@ -791,7 +793,7 @@ func TestMonitorChannelsz(t *testing.T) {
 		generateExpectedCZ(0, defaultMonitorListLimit, totalChannels, channels),
 		generateExpectedCZ(0, defaultMonitorListLimit, totalChannels, channels),
 		generateExpectedCZ(1, defaultMonitorListLimit, totalChannels-1, channels[1:]),
-		generateExpectedCZ(10, defaultMonitorListLimit, 0, channels[totalChannels:]),
+		generateExpectedCZ(10, defaultMonitorListLimit, 0, nil),
 		generateExpectedCZ(0, defaultMonitorListLimit, totalChannels, channels),
 		generateExpectedCZ(0, 1, 1, channels[:1]),
 		generateExpectedCZ(1, 2, 2, channels[1:1+2]),
@@ -854,8 +856,8 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 	}
 	waitForNumSubs(t, s, clientName, totalSubs)
 
-	generateExpectedCZ := func(offset, limit, count int, channels []string) *ChannelsWithSubsz {
-		channelsz := &ChannelsWithSubsz{
+	generateExpectedCZ := func(offset, limit, count int, channels []string) *Channelsz {
+		channelsz := &Channelsz{
 			ClusterID: s.info.ClusterID,
 			ServerID:  s.serverID,
 			Offset:    offset,
@@ -863,45 +865,47 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 			Count:     count,
 			Total:     totalChannels,
 		}
-		channelsz.Channels = make([]*Channelz, 0, len(channels))
-		for _, c := range channels {
-			cs := s.store.LookupChannel(c)
-			if cs == nil {
-				continue
+		if channels != nil {
+			channelsz.Channels = make([]*Channelz, 0, len(channels))
+			for _, c := range channels {
+				cs := s.store.LookupChannel(c)
+				if cs == nil {
+					continue
+				}
+				msgs, bytes, _ := cs.Msgs.State()
+				firstSeq, lastSeq := cs.Msgs.FirstAndLastSequence()
+				channelz := &Channelz{
+					Name:     c,
+					FirstSeq: firstSeq,
+					LastSeq:  lastSeq,
+					Msgs:     msgs,
+					Bytes:    bytes,
+				}
+				ss := cs.UserData.(*subStore)
+				ss.RLock()
+				subscriptions := getChannelSubs(ss.psubs)
+				for _, dur := range ss.durables {
+					subscriptions = append(subscriptions, createSubz(dur))
+				}
+				for _, qsub := range ss.qsubs {
+					qsub.RLock()
+					subscriptions = append(subscriptions, getChannelSubs(qsub.subs)...)
+					qsub.RUnlock()
+				}
+				ss.RUnlock()
+				channelz.Subscriptions = subscriptions
+				channelsz.Channels = append(channelsz.Channels, channelz)
 			}
-			msgs, bytes, _ := cs.Msgs.State()
-			firstSeq, lastSeq := cs.Msgs.FirstAndLastSequence()
-			channelz := &Channelz{
-				Name:     c,
-				FirstSeq: firstSeq,
-				LastSeq:  lastSeq,
-				Msgs:     msgs,
-				Bytes:    bytes,
-			}
-			ss := cs.UserData.(*subStore)
-			ss.RLock()
-			subscriptions := getChannelSubs(ss.psubs)
-			for _, dur := range ss.durables {
-				subscriptions = append(subscriptions, createSubz(dur))
-			}
-			for _, qsub := range ss.qsubs {
-				qsub.RLock()
-				subscriptions = append(subscriptions, getChannelSubs(qsub.subs)...)
-				qsub.RUnlock()
-			}
-			ss.RUnlock()
-			channelz.Subscriptions = subscriptions
-			channelsz.Channels = append(channelsz.Channels, channelz)
 		}
 		return channelsz
 	}
 
 	paths := []string{"?subs=1", "?offset=-1&subs=1", "?offset=1&subs=1", "?offset=10&subs=1", "?limit=-1&subs=1", "?limit=1&subs=1", "?offset=1&limit=2&subs=1"}
-	expected := []*ChannelsWithSubsz{
+	expected := []*Channelsz{
 		generateExpectedCZ(0, defaultMonitorListLimit, totalChannels, channels),
 		generateExpectedCZ(0, defaultMonitorListLimit, totalChannels, channels),
 		generateExpectedCZ(1, defaultMonitorListLimit, totalChannels-1, channels[1:]),
-		generateExpectedCZ(10, defaultMonitorListLimit, 0, channels[totalChannels:]),
+		generateExpectedCZ(10, defaultMonitorListLimit, 0, nil),
 		generateExpectedCZ(0, defaultMonitorListLimit, totalChannels, channels),
 		generateExpectedCZ(0, 1, 1, channels[:1]),
 		generateExpectedCZ(1, 2, 2, channels[1:1+2]),
@@ -911,7 +915,7 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 		resp, body := getBody(t, ChannelsPath+paths[i], expectedJSON)
 		defer resp.Body.Close()
 
-		cz := ChannelsWithSubsz{}
+		cz := Channelsz{}
 		if err := json.Unmarshal(body, &cz); err != nil {
 			t.Fatalf("Got an error unmarshalling the body: %v", err)
 		}

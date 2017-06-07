@@ -199,8 +199,8 @@ type Store interface {
 	// HasChannel returns true if this store has any channel.
 	HasChannel() bool
 
-	// GetChannels returns a map of ChannelStore, keyed by the name
-	// of the channel.
+	// GetChannels returns a map of *ChannelStore, with channels' name as the key.
+	// The returned map is a copy of the state maintained by the store.
 	GetChannels() map[string]*ChannelStore
 
 	// GetChannelsCount returns the number of channels currently stored.
@@ -219,7 +219,8 @@ type Store interface {
 	// GetClient returns the stored Client, or nil if it does not exist.
 	GetClient(clientID string) *Client
 
-	// GetClients returns a map of all stored Client objects, keyed by client IDs.
+	// GetClients returns a map of all stored Client objects, with client IDs
+	// as the key.
 	// The returned map is a copy of the state maintained by the store so that
 	// it is safe for the caller to walk through the map while clients may be
 	// added/deleted from the store.
