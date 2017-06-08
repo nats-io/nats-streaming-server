@@ -4568,3 +4568,11 @@ func TestFSParallelRecovery(t *testing.T) {
 		t.Fatalf("Recovery should have failed")
 	}
 }
+
+func TestFSGetChannels(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+	testGetChannels(t, fs)
+}

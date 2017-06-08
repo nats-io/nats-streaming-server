@@ -56,6 +56,16 @@ func (ms *DelegateStore) HasChannel() bool {
 	return ms.S.HasChannel()
 }
 
+// GetChannels implements the Store interface
+func (ms *DelegateStore) GetChannels() map[string]*ChannelStore {
+	return ms.S.GetChannels()
+}
+
+// GetChannelsCount implements the Store interface
+func (ms *DelegateStore) GetChannelsCount() int {
+	return ms.S.GetChannelsCount()
+}
+
 // MsgsState implements the Store interface
 func (ms *DelegateStore) MsgsState(channel string) (numMessages int, byteSize uint64, err error) {
 	return ms.S.MsgsState(channel)

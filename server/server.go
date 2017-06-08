@@ -205,6 +205,7 @@ type StanServer struct {
 	info       spb.ServerInfo // Contains cluster ID and subjects
 	natsServer *server.Server
 	opts       *Options
+	startTime  time.Time
 
 	// For scalability, a dedicated connection is used to publish
 	// messages to subscribers.
@@ -227,6 +228,10 @@ type StanServer struct {
 	// Store
 	store       stores.Store
 	storeLimits *stores.StoreLimits
+
+	// Monitoring
+	monMu   sync.RWMutex
+	numSubs int
 
 	// IO Channel
 	ioChannel     chan *ioPendingMsg
@@ -884,6 +889,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		subStartCh:        make(chan *subStartInfo, defaultSubStartChanLen),
 		subStartQuit:      make(chan struct{}, 1),
 		acksSubsPoolSize:  sOpts.AckSubsPoolSize,
+		startTime:         time.Now(),
 	}
 
 	// ServerID is used to check that a brodcast protocol is not ours,
@@ -955,6 +961,12 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// If no NATS server url is provided, it means that we embed the NATS Server
 	if sOpts.NATSServerURL == "" {
 		if err := s.startNATSServer(nOpts); err != nil {
+			return nil, err
+		}
+	}
+	// Check for monitoring
+	if nOpts.HTTPPort != 0 || nOpts.HTTPSPort != 0 {
+		if err := s.startMonitoring(nOpts); err != nil {
 			return nil, err
 		}
 	}
@@ -1347,6 +1359,9 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 				// was left in the store in order to maintain the group's state.
 				if !sub.isShadowQueueDurable() {
 					allSubs = append(allSubs, sub)
+					s.monMu.Lock()
+					s.numSubs++
+					s.monMu.Unlock()
 				}
 			}
 		}
@@ -2708,6 +2723,9 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 	// Remove the subscription
 	unsubscribe := !isSubClose
 	ss.Remove(cs, sub, unsubscribe)
+	s.monMu.Lock()
+	s.numSubs--
+	s.monMu.Unlock()
 
 	if s.debug {
 		if isSubClose {
@@ -3044,6 +3062,10 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		Debugf("[Client:%s] Added subscription on subject=%s, inbox=%s",
 			sr.ClientID, sr.Subject, sr.Inbox)
 	}
+
+	s.monMu.Lock()
+	s.numSubs++
+	s.monMu.Unlock()
 
 	// In case this is a durable, sub already exists so we need to protect access
 	sub.Lock()

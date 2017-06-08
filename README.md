@@ -32,6 +32,9 @@ NATS Streaming provides the following high-level feature set.
         * [Shared State](#shared-state)
         * [Failover](#failover)
     * [Partitioning](#partitioning)
+    * [Monitoring](#monitoring)
+        * [Enabling](#enabling)
+        * [Endpoints](#endpoints)
 - [Getting Started](#getting-started)
     * [Building](#building)
     * [Running](#running)
@@ -50,6 +53,15 @@ NATS Streaming provides the following high-level feature set.
 - [License](#license)
 
 # Important Changes
+
+## Version `0.5.0`
+
+The Store interface was updated. There are 2 news APIs:
+
+* `GetChannels()`: Returns a map of `*ChannelStore`, keyed by channel names.<br>
+The implementation needs to return a copy to make it safe for the caller to manipulate
+the map without a risk of concurrent access.
+* `GetChannelsCount()`: Returns the number of channels currently stored.
 
 ## Version `0.4.0`
 
@@ -409,6 +421,287 @@ For connections, all servers handle them and the client library will receive a r
 cluster, but use the first one that it received.<br>
 For subscriptions, a server receiving the request for a channel that it does not handle will simply ignore
 the request. Again, if no server handle this channel, the client's subscription request will simply time out.
+
+## Monitoring
+
+To monitor the NATS streaming system, a lightweight HTTP server is used on a dedicated monitoring port.
+The monitoring server provides several endpoints, all returning a JSON object.
+
+The NATS monitoring endpoints support JSONP and CORS, making it easy to create single page monitoring web applications.
+
+### Enabling
+
+To enable the monitoring server, start the NATS Streaming Server with the monitoring flag -m (or -ms) and
+specify the monitoring port.
+
+Monitoring options
+```
+-m, --http_port PORT             HTTP PORT for monitoring
+-ms,--https_port PORT            Use HTTPS PORT for monitoring (requires TLS cert and key)
+```
+To enable monitoring via the configuration file, use `http: "host:port"` or `https: "host:port"` (there is
+no explicit configuration flag for the monitoring interface).
+
+For example, after running this:
+```
+nats-streaming-server -m 8222
+```
+you should see that the NATS Streaming server starts with the HTTP monitoring port enabled:
+
+```
+[19015] 2017/06/07 14:29:43.328760 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.5.0
+(...)
+[19015] 2017/06/07 14:29:43.329011 [INF] Starting http monitor on 0.0.0.0:8222
+[19015] 2017/06/07 14:29:43.329085 [INF] Listening for client connections on 0.0.0.0:4222
+(...)
+```
+You can then point your browser (or curl) to [http://localhost:8222/streaming](http://localhost:8222/streaming)
+
+### Endpoints
+
+The following sections describe each supported monitoring endpoint: serverz, storez, clientsz, and channelsz.
+
+#### /serverz
+
+The endpoint [http://localhost:8222/streaming/serverz](http://localhost:8222/streaming/serverz) reports
+various general statistics.
+```
+{
+  "cluster_id": "test-cluster",
+  "server_id": "J3Odi0wXYKWKFWz5D5uhH9",
+  "version": "0.5.0",
+  "go": "go1.7.5",
+  "state": "STANDALONE",
+  "now": "2017-06-07T14:45:29.472535266+02:00",
+  "start_time": "2017-06-07T14:44:49.936077607+02:00",
+  "uptime": "39s",
+  "clients": 11,
+  "subscriptions": 10,
+  "channels": 1,
+  "total_msgs": 85350,
+  "total_bytes": 12785990
+}
+```
+
+#### /storez
+
+The endpoint [http://localhost:8222/streaming/storez](http://localhost:8222/streaming/storez) reports
+information about the store.
+```
+{
+  "cluster_id": "test-cluster",
+  "server_id": "J3Odi0wXYKWKFWz5D5uhH9",
+  "now": "2017-06-07T14:45:46.738570607+02:00",
+  "type": "MEMORY",
+  "limits": {
+    "max_channels": 100,
+    "max_msgs": 1000000,
+    "max_bytes": 1024000000,
+    "max_age": 0,
+    "max_subscriptions": 1000
+  },
+  "total_msgs": 130691,
+  "total_bytes": 19587140
+}
+```
+
+#### /clientsz
+
+The endpoint [http://localhost:8222/streaming/clientsz](http://localhost:8222/streaming/clientsz) reports
+more detailed information about the connected clients.
+
+It uses a paging mechanism which defaults to 1024 clients.
+
+You can control these via URL arguments (limit and offset). For example: [http://localhost:8222/streaming/clientsz?limit=1&offset=1](http://localhost:8222/streaming/clientsz?limit=1&offset=1).
+```
+{
+  "cluster_id": "test-cluster",
+  "server_id": "J3Odi0wXYKWKFWz5D5uhH9",
+  "now": "2017-06-07T14:47:44.495254605+02:00",
+  "offset": 1,
+  "limit": 1,
+  "count": 1,
+  "total": 11,
+  "clients": [
+    {
+      "id": "benchmark-sub-0",
+      "hb_inbox": "_INBOX.jAHSY3hcL5EGFQGYmfayQK"
+    }
+  ]
+}
+```
+You can also report detailed subscription information on a per client basis using `subs=1`.
+For example: [http://localhost:8222/streaming/clientsz?limit=1&offset=1&subs=1](http://localhost:8222/streaming/clientsz?limit=1&offset=1&subs=1).
+```
+{
+  "cluster_id": "test-cluster",
+  "server_id": "J3Odi0wXYKWKFWz5D5uhH9",
+  "now": "2017-06-07T14:48:06.157468748+02:00",
+  "offset": 1,
+  "limit": 1,
+  "count": 1,
+  "total": 11,
+  "clients": [
+    {
+      "id": "benchmark-sub-0",
+      "hb_inbox": "_INBOX.jAHSY3hcL5EGFQGYmfayQK",
+      "subscriptions": {
+        "foo": [
+          {
+            "inbox": "_INBOX.jAHSY3hcL5EGFQGYmfayvC",
+            "ack_inbox": "_INBOX.J3Odi0wXYKWKFWz5D5uhem",
+            "is_durable": false,
+            "max_inflight": 1024,
+            "ack_wait": 30,
+            "last_sent": 505597,
+            "pending_count": 0,
+            "is_stalled": false
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+You can select a specific client based on its client ID with `client=<id>`, and get also get detailed statistics with `subs=1`.
+For example: [http://localhost:8222/streaming/clientsz?client=me&subs=1](http://localhost:8222/streaming/clientsz?client=me&subs=1).
+```
+{
+  "id": "me",
+  "hb_inbox": "_INBOX.HG0uDuNtAPxJQ1lVjIC2sr",
+  "subscriptions": {
+    "foo": [
+      {
+        "inbox": "_INBOX.HG0uDuNtAPxJQ1lVjIC389",
+        "ack_inbox": "_INBOX.Q9iH2gsDPN57ZEvqswiYSL",
+        "is_durable": false,
+        "max_inflight": 1024,
+        "ack_wait": 30,
+        "last_sent": 0,
+        "pending_count": 0,
+        "is_stalled": false
+      }
+    ]
+  }
+}
+```
+
+#### /channelsz
+
+The endpoint [http://localhost:8222/streaming/channelsz](http://localhost:8222/streaming/channelsz) reports
+the list of channels.
+```
+{
+  "cluster_id": "test-cluster",
+  "server_id": "J3Odi0wXYKWKFWz5D5uhH9",
+  "now": "2017-06-07T14:48:41.680592041+02:00",
+  "offset": 0,
+  "limit": 1024,
+  "count": 2,
+  "total": 2,
+  "names": [
+    "bar"
+    "foo"
+  ]
+}
+```
+It uses a paging mechanism which defaults to 1024 channels.
+
+You can control these via URL arguments (limit and offset).
+For example: [http://localhost:8222/streaming/channelsz?limit=1&offset=1](http://localhost:8222/streaming/channelsz?limit=1&offset=1).
+```
+{
+  "cluster_id": "test-cluster",
+  "server_id": "J3Odi0wXYKWKFWz5D5uhH9",
+  "now": "2017-06-07T14:48:41.680592041+02:00",
+  "offset": 1,
+  "limit": 1,
+  "count": 1,
+  "total": 2,
+  "names": [
+    "foo"
+  ]
+}
+```
+You can also get the list of subscriptions with `subs=1`.
+For example: [http://localhost:8222/streaming/channelsz?limit=1&offset=0&subs=1](http://localhost:8222/streaming/channelsz?limit=1&offset=0&subs=1).
+```
+{
+  "cluster_id": "test-cluster",
+  "server_id": "J3Odi0wXYKWKFWz5D5uhH9",
+  "now": "2017-06-07T15:01:02.166116959+02:00",
+  "offset": 0,
+  "limit": 1,
+  "count": 1,
+  "total": 2,
+  "channels": [
+    {
+      "name": "bar",
+      "msgs": 0,
+      "bytes": 0,
+      "first_seq": 0,
+      "last_seq": 0,
+      "subscriptions": [
+        {
+          "inbox": "_INBOX.S7kTJjOcToXiJAzGWgINit",
+          "ack_inbox": "_INBOX.Y04G5pZxlint3yPXrSTjTV",
+          "is_durable": false,
+          "max_inflight": 1024,
+          "ack_wait": 30,
+          "last_sent": 0,
+          "pending_count": 0,
+          "is_stalled": false
+        }
+      ]
+    }
+  ]
+}
+```
+You can select a specific channel based on its name with `channel=name`.
+For example: [http://localhost:8222/streaming/channelsz?channel=foo](http://localhost:8222/streaming/channelsz?channel=foo).
+```
+{
+  "name": "foo",
+  "msgs": 649234,
+  "bytes": 97368590,
+  "first_seq": 1,
+  "last_seq": 649234
+}
+```
+And again, you can get detailed subscriptions with `subs=1`.
+For example: [http://localhost:8222/streaming/channelsz?channel=foo&subs=1](http://localhost:8222/streaming/channelsz?channel=foo&subs=1).
+```
+{
+  "name": "foo",
+  "msgs": 704770,
+  "bytes": 105698990,
+  "first_seq": 1,
+  "last_seq": 704770,
+  "subscriptions": [
+    {
+      "inbox": "_INBOX.jAHSY3hcL5EGFQGYmfayvC",
+      "ack_inbox": "_INBOX.J3Odi0wXYKWKFWz5D5uhem",
+      "is_durable": false,
+      "max_inflight": 1024,
+      "ack_wait": 30,
+      "last_sent": 704770,
+      "pending_count": 0,
+      "is_stalled": false
+    },
+    {
+      "inbox": "_INBOX.jAHSY3hcL5EGFQGYmfaywG",
+      "ack_inbox": "_INBOX.J3Odi0wXYKWKFWz5D5uhjV",
+      "is_durable": false,
+      "max_inflight": 1024,
+      "ack_wait": 30,
+      "last_sent": 704770,
+      "pending_count": 0,
+      "is_stalled": false
+    },
+    (...)
+  ]
+}
+```
 
 # Getting Started
 

@@ -932,3 +932,26 @@ func testLimitWithWildcardsInConfig(t *testing.T, s Store) {
 		stackFatalf(t, "M1 should have been removed")
 	}
 }
+
+func testGetChannels(t *testing.T, s Store) {
+	cn := []string{"foo", "bar", "baz"}
+	css := []*ChannelStore{}
+	for _, name := range cn {
+		cs, _, _ := s.CreateChannel(name, nil)
+		css = append(css, cs)
+	}
+	if count := s.GetChannelsCount(); count != len(cn) {
+		stackFatalf(t, "Expected %d channels, got %v", len(cn), count)
+	}
+	channels := s.GetChannels()
+	if len(channels) != len(cn) {
+		stackFatalf(t, "Expected %d channels, got %v", len(cn), len(channels))
+	}
+	for i := 0; i < len(css); i++ {
+		expectedCS := css[i]
+		gotCS := channels[cn[i]]
+		if !reflect.DeepEqual(*expectedCS, *gotCS) {
+			stackFatalf(t, "Expected %v, got %v", *expectedCS, *gotCS)
+		}
+	}
+}
