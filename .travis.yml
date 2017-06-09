@@ -14,7 +14,7 @@ install:
 before_script:
 - EXCLUDE_VENDOR=$(go list ./... | grep -v "/vendor/")
 - go build
-- go fmt ./...
+- $(exit $(go fmt $EXCLUDE_VENDOR | wc -l))
 - go vet $EXCLUDE_VENDOR
 - ./misspell.sh
 - gosimple $EXCLUDE_VENDOR
