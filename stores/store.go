@@ -6,8 +6,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/server"
 	"github.com/nats-io/nats-streaming-server/spb"
 )
 
