@@ -731,21 +731,21 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[99150] 2017/04/10 13:09:13.942327 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.4.0
-[99150] 2017/04/10 13:09:13.942401 [INF] STREAM: ServerID: toeTi8GZnRyIpaEM3cwcgY
-[99150] 2017/04/10 13:09:13.942403 [INF] STREAM: Go version: go1.8.1
-[99150] 2017/04/10 13:09:13.943473 [INF] Starting nats-server version 0.9.6
-[99150] 2017/04/10 13:09:13.943483 [INF] Listening for client connections on 0.0.0.0:4222
-[99150] 2017/04/10 13:09:13.943786 [INF] Server is ready
-[99150] 2017/04/10 13:09:14.228880 [INF] STREAM: Message store is MEMORY
-[99150] 2017/04/10 13:09:14.228894 [INF] STREAM: --------- Store Limits ---------
-[99150] 2017/04/10 13:09:14.228904 [INF] STREAM: Channels:                  100 *
-[99150] 2017/04/10 13:09:14.228906 [INF] STREAM: -------- channels limits -------
-[99150] 2017/04/10 13:09:14.228909 [INF] STREAM:   Subscriptions:          1000 *
-[99150] 2017/04/10 13:09:14.228912 [INF] STREAM:   Messages     :       1000000 *
-[99150] 2017/04/10 13:09:14.228928 [INF] STREAM:   Bytes        :     976.56 MB *
-[99150] 2017/04/10 13:09:14.228931 [INF] STREAM:   Age          :     unlimited *
-[99150] 2017/04/10 13:09:14.228933 [INF] STREAM: --------------------------------
+[18648] 2017/06/27 12:28:25.989594 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.5.0
+[18648] 2017/06/27 12:28:25.989669 [INF] STREAM: ServerID: csSwT119qazk62IIen0oyB
+[18648] 2017/06/27 12:28:25.989672 [INF] STREAM: Go version: go1.7.5
+[18648] 2017/06/27 12:28:25.990300 [INF] Starting nats-server version 0.9.6
+[18648] 2017/06/27 12:28:25.991620 [INF] Listening for client connections on 0.0.0.0:4222
+[18648] 2017/06/27 12:28:25.992153 [INF] Server is ready
+[18648] 2017/06/27 12:28:26.279424 [INF] STREAM: Message store is MEMORY
+[18648] 2017/06/27 12:28:26.279491 [INF] STREAM: ---------- Store Limits ----------
+[18648] 2017/06/27 12:28:26.279496 [INF] STREAM: Channels:                  100 *
+[18648] 2017/06/27 12:28:26.279499 [INF] STREAM: --------- Channels Limits --------
+[18648] 2017/06/27 12:28:26.279503 [INF] STREAM:   Subscriptions:          1000 *
+[18648] 2017/06/27 12:28:26.279506 [INF] STREAM:   Messages     :       1000000 *
+[18648] 2017/06/27 12:28:26.279509 [INF] STREAM:   Bytes        :     976.56 MB *
+[18648] 2017/06/27 12:28:26.279512 [INF] STREAM:   Age          :     unlimited *
+[18648] 2017/06/27 12:28:26.279515 [INF] STREAM: ----------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
