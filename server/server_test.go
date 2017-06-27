@@ -23,6 +23,7 @@ import (
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nuid"
 )
@@ -6293,5 +6294,64 @@ func TestSingleConfFileForBoth(t *testing.T) {
 		cmd.Process.Kill()
 		cmd.Wait()
 		cmd = nil
+	}
+}
+
+func TestFileStoreMultipleShadowQSubs(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	opts := getTestDefaultOptsForFileStore()
+	s := runServerWithOpts(t, opts, nil)
+	s.Shutdown()
+
+	fs, err := stores.NewFileStore(defaultDataStore, &stores.DefaultStoreLimits)
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer fs.Close()
+	cs, _, err := fs.CreateChannel("foo", nil)
+	if err != nil {
+		t.Fatalf("Error creating channel: %v", err)
+	}
+	sub := spb.SubState{
+		ID:            1,
+		AckInbox:      nats.NewInbox(),
+		Inbox:         nats.NewInbox(),
+		AckWaitInSecs: 30,
+		MaxInFlight:   10,
+		LastSent:      1,
+		IsDurable:     true,
+		QGroup:        "dur:queue",
+	}
+	cs.Subs.CreateSub(&sub)
+	sub.ID = 2
+	sub.LastSent = 2
+	cs.Subs.CreateSub(&sub)
+	fs.Close()
+
+	// Should not panic
+	s = runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+	scs, err := s.lookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Error looking up channel: %v", err)
+	}
+	ss := scs.UserData.(*subStore)
+	ss.RLock()
+	qs := ss.qsubs["dur:queue"]
+	ss.RUnlock()
+	if qs == nil {
+		t.Fatal("Should have recovered queue group")
+	}
+	qs.RLock()
+	shadow := qs.shadow
+	lastSent := qs.lastSent
+	qs.RUnlock()
+	if shadow == nil {
+		t.Fatal("Should have recovered a shadow queue sub")
+	}
+	if shadow.ID != 2 || lastSent != 2 {
+		t.Fatalf("Recovered shadow queue sub should be ID 2, lastSent 2, got %v, %v", shadow.ID, lastSent)
 	}
 }

@@ -408,11 +408,15 @@ func (ss *subStore) updateState(sub *subState) {
 		// The recovered shadow queue sub will have ClientID=="",
 		// keep a reference to it until a member re-joins the group.
 		if sub.ClientID == "" {
-			// Should not happen, if it does, panic
-			if qs.shadow != nil {
-				panic(fmt.Errorf("there should be only one shadow subscriber for [%q] queue group", sub.QGroup))
+			// There should be only one shadow queue subscriber, but
+			// we found in https://github.com/nats-io/nats-streaming-server/issues/322
+			// that some datastore had 2 of those (not sure how this happened except
+			// maybe due to upgrades from much older releases that had bugs?).
+			// So don't panic and use as the shadow the one with the highest LastSent
+			// value.
+			if qs.shadow == nil || sub.LastSent > qs.lastSent {
+				qs.shadow = sub
 			}
-			qs.shadow = sub
 		} else {
 			qs.subs = append(qs.subs, sub)
 		}
