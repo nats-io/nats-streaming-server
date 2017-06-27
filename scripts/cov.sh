@@ -3,14 +3,14 @@
 
 rm -rf ./cov
 mkdir cov
-go test -v -covermode=count -coverprofile=./cov/server.out ./server
+go test -v -covermode=atomic -coverprofile=./cov/server.out ./server
 # repeat these server FT tests but focus on stores package
-go test -v -covermode=count -coverprofile=./cov/stores1.out -run=TestFTPartition -coverpkg=./stores ./server
-go test -v -covermode=count -coverprofile=./cov/stores2.out ./stores
-go test -v -covermode=count -coverprofile=./cov/stores3.out -run=TestFS ./stores -no_buffer
-go test -v -covermode=count -coverprofile=./cov/stores4.out -run=TestFS ./stores -set_fds_limit
-go test -v -covermode=count -coverprofile=./cov/stores5.out -run=TestFS ./stores -no_buffer -set_fds_limit
-go test -v -covermode=count -coverprofile=./cov/util.out ./util
+go test -v -covermode=atomic -coverprofile=./cov/stores1.out -run=TestFTPartition -coverpkg=./stores ./server
+go test -v -covermode=atomic -coverprofile=./cov/stores2.out ./stores
+go test -v -covermode=atomic -coverprofile=./cov/stores3.out -run=TestFS ./stores -no_buffer
+go test -v -covermode=atomic -coverprofile=./cov/stores4.out -run=TestFS ./stores -set_fds_limit
+go test -v -covermode=atomic -coverprofile=./cov/stores5.out -run=TestFS ./stores -no_buffer -set_fds_limit
+go test -v -covermode=atomic -coverprofile=./cov/util.out ./util
 gocovmerge ./cov/*.out > acc.out
 rm -rf ./cov
 

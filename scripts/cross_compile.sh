@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -e
 go get github.com/mitchellh/gox
 go get github.com/tcnksm/ghr
 
