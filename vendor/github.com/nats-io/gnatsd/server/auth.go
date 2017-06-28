@@ -3,6 +3,7 @@
 package server
 
 import (
+	"fmt"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -15,11 +16,41 @@ type User struct {
 	Permissions *Permissions `json:"permissions"`
 }
 
+// clone performs a deep copy of the User struct, returning a new clone with
+// all values copied.
+func (u *User) clone() *User {
+	if u == nil {
+		return nil
+	}
+	clone := &User{}
+	*clone = *u
+	clone.Permissions = u.Permissions.clone()
+	return clone
+}
+
 // Permissions are the allowed subjects on a per
 // publish or subscribe basis.
 type Permissions struct {
 	Publish   []string `json:"publish"`
 	Subscribe []string `json:"subscribe"`
+}
+
+// clone performs a deep copy of the Permissions struct, returning a new clone
+// with all values copied.
+func (p *Permissions) clone() *Permissions {
+	if p == nil {
+		return nil
+	}
+	clone := &Permissions{}
+	if p.Publish != nil {
+		clone.Publish = make([]string, len(p.Publish))
+		copy(clone.Publish, p.Publish)
+	}
+	if p.Subscribe != nil {
+		clone.Subscribe = make([]string, len(p.Subscribe))
+		copy(clone.Subscribe, p.Subscribe)
+	}
+	return clone
 }
 
 // configureAuthorization will do any setup needed for authorization.
@@ -28,16 +59,23 @@ func (s *Server) configureAuthorization() {
 	if s.opts == nil {
 		return
 	}
+
+	// Snapshot server options.
+	opts := s.getOpts()
+
 	// Check for multiple users first
 	// This just checks and sets up the user map if we have multiple users.
-	if s.opts.Users != nil {
+	if opts.Users != nil {
 		s.users = make(map[string]*User)
-		for _, u := range s.opts.Users {
+		for _, u := range opts.Users {
 			s.users[u.Username] = u
 		}
 		s.info.AuthRequired = true
-	} else if s.opts.Username != "" || s.opts.Authorization != "" {
+	} else if opts.Username != "" || opts.Authorization != "" {
 		s.info.AuthRequired = true
+	} else {
+		s.users = nil
+		s.info.AuthRequired = false
 	}
 }
 
@@ -57,6 +95,9 @@ func (s *Server) checkAuthorization(c *client) bool {
 // isClientAuthorized will check the client against the proper authorization method and data.
 // This could be token or username/password based.
 func (s *Server) isClientAuthorized(c *client) bool {
+	// Snapshot server options.
+	opts := s.getOpts()
+
 	// Check multiple users first, then token, then single user/pass.
 	if s.users != nil {
 		user, ok := s.users[c.opts.Username]
@@ -71,14 +112,14 @@ func (s *Server) isClientAuthorized(c *client) bool {
 		}
 		return ok
 
-	} else if s.opts.Authorization != "" {
-		return comparePasswords(s.opts.Authorization, c.opts.Authorization)
+	} else if opts.Authorization != "" {
+		return comparePasswords(opts.Authorization, c.opts.Authorization)
 
-	} else if s.opts.Username != "" {
-		if s.opts.Username != c.opts.Username {
+	} else if opts.Username != "" {
+		if opts.Username != c.opts.Username {
 			return false
 		}
-		return comparePasswords(s.opts.Password, c.opts.Password)
+		return comparePasswords(opts.Password, c.opts.Password)
 	}
 
 	return true
@@ -86,10 +127,46 @@ func (s *Server) isClientAuthorized(c *client) bool {
 
 // checkRouterAuth checks optional router authorization which can be nil or username/password.
 func (s *Server) isRouterAuthorized(c *client) bool {
-	if s.opts.Cluster.Username != c.opts.Username {
+	// Snapshot server options.
+	opts := s.getOpts()
+
+	if opts.Cluster.Username == "" {
+		return true
+	}
+
+	if opts.Cluster.Username != c.opts.Username {
 		return false
 	}
-	return comparePasswords(s.opts.Cluster.Password, c.opts.Password)
+	return comparePasswords(opts.Cluster.Password, c.opts.Password)
+}
+
+// removeUnauthorizedSubs removes any subscriptions the client has that are no
+// longer authorized, e.g. due to a config reload.
+func (s *Server) removeUnauthorizedSubs(c *client) {
+	c.mu.Lock()
+	if c.perms == nil {
+		c.mu.Unlock()
+		return
+	}
+
+	subs := make(map[string]*subscription, len(c.subs))
+	for sid, sub := range c.subs {
+		subs[sid] = sub
+	}
+	c.mu.Unlock()
+
+	for sid, sub := range subs {
+		if !c.canSubscribe(sub.subject) {
+			_ = s.sl.Remove(sub)
+			c.mu.Lock()
+			delete(c.subs, sid)
+			c.mu.Unlock()
+			c.sendErr(fmt.Sprintf("Permissions Violation for Subscription to %q (sid %s)",
+				sub.subject, sub.sid))
+			s.Noticef("Removed sub %q for user %q - not authorized",
+				string(sub.subject), c.opts.Username)
+		}
+	}
 }
 
 // Support for bcrypt stored passwords and tokens.

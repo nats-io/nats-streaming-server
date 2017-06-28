@@ -41,7 +41,7 @@
 			"importpath": "github.com/nats-io/gnatsd",
 			"repository": "https://github.com/nats-io/gnatsd",
 			"vcs": "git",
-			"revision": "d6069447d22cc48d7b70c144f4634784748852bb",
+			"revision": "0e557e215aa627305af283e3b411e05dd5e5bc04",
 			"branch": "master",
 			"notests": true
 		},
