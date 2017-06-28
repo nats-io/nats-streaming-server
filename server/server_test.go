@@ -23,6 +23,7 @@ import (
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nuid"
@@ -39,7 +40,10 @@ type tLogger interface {
 	Errorf(format string, args ...interface{})
 }
 
-var defaultDataStore string
+var (
+	defaultDataStore string
+	testLogger       logger.Logger
+)
 
 func init() {
 	tmpDir, err := ioutil.TempDir(".", "data_server_")
@@ -51,9 +55,12 @@ func init() {
 	}
 	defaultDataStore = tmpDir
 	// Set debug and trace for this file.
-	setDebugAndTraceToDefaultOptions(true)
+	defaultOptions.Trace = true
+	defaultOptions.Debug = true
 	// For FT tests, reduce the HB/Timeout intervals
 	setFTTestsHBInterval()
+	// Dummy/no-op Logger
+	testLogger = logger.NewStanLogger()
 }
 
 func stackFatalf(t tLogger, f string, args ...interface{}) {
@@ -249,7 +256,7 @@ func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) (*Sta
 	if opts == nil {
 		sOpts = GetDefaultOptions()
 	} else {
-		sOpts = opts
+		sOpts = opts.Clone()
 	}
 
 	nOpts := natsd.Options{}
@@ -259,9 +266,8 @@ func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) (*Sta
 	nOpts.NoLog = false
 	nOpts.NoSigs = true
 
-	ConfigureLogger(sOpts, &nOpts)
-
-	return RunServerWithOpts(sOpts, nil)
+	sOpts.EnableLogging = true
+	return RunServerWithOpts(sOpts, &nOpts)
 }
 
 func TestRunServer(t *testing.T) {
@@ -286,6 +292,99 @@ func TestRunServer(t *testing.T) {
 	nOpts.NoSigs = true
 	s = runServerWithOpts(t, nil, nOpts)
 	defer s.Shutdown()
+}
+
+type dummyLogger struct {
+	msg string
+}
+
+func (d *dummyLogger) Noticef(format string, args ...interface{}) {
+	d.msg = fmt.Sprintf(format, args...)
+}
+
+func (d *dummyLogger) Debugf(format string, args ...interface{}) {
+	d.msg = fmt.Sprintf(format, args...)
+}
+
+func (d *dummyLogger) Tracef(format string, args ...interface{}) {
+	d.msg = fmt.Sprintf(format, args...)
+}
+
+func (d *dummyLogger) Errorf(format string, args ...interface{}) {
+	d.msg = fmt.Sprintf(format, args...)
+}
+
+func (d *dummyLogger) Fatalf(format string, args ...interface{}) {
+	d.msg = fmt.Sprintf(format, args...)
+}
+
+func TestRunServerFailureLogsCause(t *testing.T) {
+	d := &dummyLogger{}
+
+	sOpts := GetDefaultOptions()
+	sOpts.NATSServerURL = "nats://localhost:4444"
+	sOpts.CustomLogger = d
+
+	// We expect the server to fail to start
+	s, err := RunServerWithOpts(sOpts, nil)
+	if err == nil {
+		s.Shutdown()
+		t.Fatal("Expected error, got none")
+	}
+	// We should get a trace in the log
+	if !strings.Contains(d.msg, "available for connection") {
+		t.Fatalf("Expected to get a cause as invalid connection, got: %v", d.msg)
+	}
+}
+
+func TestServerLoggerDebugAndTrace(t *testing.T) {
+	sOpts := GetDefaultOptions()
+	sOpts.EnableLogging = true
+	sOpts.Debug = true
+	sOpts.Trace = true
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	defer func() {
+		os.Stderr = oldStderr
+		r.Close()
+	}()
+	os.Stderr = w
+	done := make(chan bool, 1)
+	buf := make([]byte, 1024)
+	out := make([]byte, 0)
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				n, _ := r.Read(buf)
+				out = append(out, buf[:n]...)
+			}
+		}
+	}()
+	s, err := RunServerWithOpts(sOpts, nil)
+	if err != nil {
+		t.Fatalf("Error running server: %v", err)
+	}
+	s.Shutdown()
+	// Signal that we are done (the channel is buffered)
+	done <- true
+	// If the go routine is sitting on a read, make it break out
+	// (calling r.Close() would produce races)
+	w.Write([]byte("*"))
+
+	wg.Wait()
+	// This is a bit dependent on what we currently print with
+	// trace and debug. May need to be adjusted.
+	str := string(out)
+	if !strings.Contains(str, "NATS conn opts") || !strings.Contains(str, "Publish subject") {
+		t.Fatalf("Expected tracing to include debug and trace, got %v", out)
+	}
 }
 
 func TestDefaultOptions(t *testing.T) {
@@ -4279,7 +4378,7 @@ func TestNonDurableRemovedFromStoreOnConnClose(t *testing.T) {
 	s.Shutdown()
 	// Open the store directly and verify that the sub record is not even found.
 	limits := stores.DefaultStoreLimits
-	store, err := stores.NewFileStore(defaultDataStore, &limits)
+	store, err := stores.NewFileStore(testLogger, defaultDataStore, &limits)
 	if err != nil {
 		t.Fatalf("Error opening file: %v", err)
 	}
@@ -6305,7 +6404,7 @@ func TestFileStoreMultipleShadowQSubs(t *testing.T) {
 	s := runServerWithOpts(t, opts, nil)
 	s.Shutdown()
 
-	fs, err := stores.NewFileStore(defaultDataStore, &stores.DefaultStoreLimits)
+	fs, err := stores.NewFileStore(testLogger, defaultDataStore, &stores.DefaultStoreLimits)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}

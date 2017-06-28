@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
 )
@@ -1076,13 +1077,13 @@ func (fm *filesManager) close() error {
 // NewFileStore returns a factory for stores backed by files.
 // If not limits are provided, the store will be created with
 // DefaultStoreLimits.
-func NewFileStore(rootDir string, limits *StoreLimits, options ...FileStoreOption) (*FileStore, error) {
+func NewFileStore(log logger.Logger, rootDir string, limits *StoreLimits, options ...FileStoreOption) (*FileStore, error) {
 	if rootDir == "" {
 		return nil, fmt.Errorf("for %v stores, root directory must be specified", TypeFile)
 	}
 
 	fs := &FileStore{opts: DefaultFileStoreOptions}
-	if err := fs.init(TypeFile, limits); err != nil {
+	if err := fs.init(TypeFile, log, limits); err != nil {
 		return nil, err
 	}
 
@@ -1181,7 +1182,7 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 		return nil, err
 	}
 	if len(channels) > 0 {
-		Noticef("Recovering the state...")
+		fs.log.Noticef("Recovering the state...")
 		wg, poolCh, errCh, recoverCh := initParalleRecovery(fs.opts.ParallelRecovery, len(channels))
 		ctx := &channelRecoveryCtx{wg: wg, poolCh: poolCh, errCh: errCh, recoverCh: recoverCh}
 		for _, c := range channels {
@@ -1229,7 +1230,7 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 		Clients: recoveredClients,
 		Subs:    recoveredSubs,
 	}
-	Noticef("Recovered %v channels", len(fs.channels))
+	fs.log.Noticef("Recovered %v channels", len(fs.channels))
 	return recoveredState, nil
 }
 
@@ -1672,7 +1673,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, limits *Msg
 		bkgTasksDone: make(chan bool, 1),
 		bkgTasksWake: make(chan bool, 1),
 	}
-	ms.init(channel, limits)
+	ms.init(channel, fs.log, limits)
 
 	ms.setSliceLimits()
 	ms.initCache()
@@ -2453,7 +2454,7 @@ func (ms *FileMsgStore) enforceLimits(reportHitLimit, lockFile bool) error {
 		ms.removeFirstMsg(nil, lockFile)
 		if reportHitLimit && !ms.hitLimit {
 			ms.hitLimit = true
-			Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs,
+			ms.log.Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs,
 				util.FriendlyBytes(int64(ms.totalBytes)), util.FriendlyBytes(ms.limits.MaxBytes))
 		}
 	}
@@ -2572,9 +2573,9 @@ func (ms *FileMsgStore) removeFirstSlice() {
 				cmd := exec.Command(script, subj, dat, idx)
 				output, err := cmd.CombinedOutput()
 				if err != nil {
-					Noticef("Error invoking archive script %q: %v (output=%v)", script, err, string(output))
+					ms.log.Noticef("Error invoking archive script %q: %v (output=%v)", script, err, string(output))
 				} else {
-					Noticef("Output of archive script for %s (%s and %s): %v", subj, dat, idx, string(output))
+					ms.log.Noticef("Output of archive script for %s (%s and %s): %v", subj, dat, idx, string(output))
 				}
 			}(ms.subject, datBak, idxBak)
 		}
@@ -3029,7 +3030,7 @@ func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doR
 		opts:     &fs.opts,
 		crcTable: fs.crcTable,
 	}
-	ss.init(channel, limits)
+	ss.init(channel, fs.log, limits)
 	// Convert the CompactInterval in time.Duration
 	ss.compactItvl = time.Duration(ss.opts.CompactInterval) * time.Second
 

@@ -43,7 +43,7 @@ func ftReleasePause() {
 // This is running in a separate go-routine so if server state
 // changes, take care of using the server's lock.
 func (s *StanServer) ftStart() (retErr error) {
-	Noticef("Starting in standby mode")
+	s.log.Noticef("Starting in standby mode")
 	// For tests purposes
 	if ftPauseBeforeFirstAttempt {
 		<-ftPauseCh
@@ -70,7 +70,7 @@ func (s *StanServer) ftStart() (retErr error) {
 		// Here, we did not get the lock, print and go back to standby.
 		// Use some backoff for the printing to not fill up the log
 		if print.Ok() {
-			Noticef("ft: unable to get store lock at this time, going back to standby")
+			s.log.Noticef("ft: unable to get store lock at this time, going back to standby")
 		}
 	}
 	// Capture the time this server activated. It will be used in case several
@@ -79,7 +79,7 @@ func (s *StanServer) ftStart() (retErr error) {
 	// lock it means we are already in trouble, so just trying to minimize the
 	// possible store corruption...
 	activationTime := time.Now()
-	Noticef("Server is active")
+	s.log.Noticef("Server is active")
 	s.startGoRoutine(func() {
 		s.ftSendHBLoop(activationTime)
 	})
@@ -126,7 +126,7 @@ func (s *StanServer) ftSendHBLoop(activationTime time.Time) {
 	for {
 		if err := s.ftnc.Publish(s.ftSubject, ftHBBytes); err != nil {
 			if print.Ok() {
-				Errorf("Unable to send FT heartbeat: %v", err)
+				s.log.Errorf("Unable to send FT heartbeat: %v", err)
 			}
 		}
 	startSelect:
@@ -143,7 +143,7 @@ func (s *StanServer) ftSendHBLoop(activationTime time.Time) {
 			// Another server claims to be active
 			peerActivationTime := time.Time{}
 			if err := peerActivationTime.UnmarshalBinary(hb.Data); err != nil {
-				Errorf("Error decoding activation time: %v", err)
+				s.log.Errorf("Error decoding activation time: %v", err)
 			} else {
 				// Step down if the peer's activation time is earlier than ours.
 				err := fmt.Errorf("ft: serverID %q claims to be active", hb.ServerID)
@@ -155,7 +155,7 @@ func (s *StanServer) ftSendHBLoop(activationTime time.Time) {
 					}
 					panic(err)
 				} else {
-					Errorf(err.Error())
+					s.log.Errorf(err.Error())
 				}
 			}
 		case <-time.After(s.ftHBInterval):

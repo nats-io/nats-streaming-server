@@ -119,7 +119,7 @@ func (p *partitions) topologyChanged(_ *nats.Conn) {
 		// call will cause the process to exit. If the server
 		// is run programmatically and no logger has been set
 		// we need to exit with the panic.
-		Fatalf("Partitioning error: %v", err)
+		p.s.log.Fatalf("Partitioning error: %v", err)
 		// For tests
 		if partitionsNoPanic {
 			p.s.setLastError(err)
@@ -295,7 +295,7 @@ func (p *partitions) processChannelsListRequests(m *nats.Msg) {
 	}
 	req := spb.CtrlMsg{}
 	if err := req.Unmarshal(m.Data); err != nil {
-		Errorf("Error processing partitioning request: %v", err)
+		p.s.log.Errorf("Error processing partitioning request: %v", err)
 		return
 	}
 	// If this is our own request, ignore
@@ -304,7 +304,7 @@ func (p *partitions) processChannelsListRequests(m *nats.Msg) {
 	}
 	channels, err := decodeChannels(req.Data)
 	if err != nil {
-		Errorf("Error processing partitioning request: %v", err)
+		p.s.log.Errorf("Error processing partitioning request: %v", err)
 		return
 	}
 	// Check that we don't have any of these channels defined.
@@ -337,7 +337,7 @@ func (p *partitions) processChannelsListRequests(m *nats.Msg) {
 	// If there is no duplicate, reply.Data will be empty, which means
 	// that there was no conflict.
 	if err := p.nc.Publish(m.Reply, replyBytes); err != nil {
-		Errorf("Error sending reply to partitioning request: %v", err)
+		p.s.log.Errorf("Error sending reply to partitioning request: %v", err)
 	}
 }
 

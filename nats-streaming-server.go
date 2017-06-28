@@ -118,7 +118,8 @@ func main() {
 	sOpts.HandleSignals = true
 	// override the NoSigs for NATS since Streaming has its own signal handler
 	nOpts.NoSigs = true
-	stand.ConfigureLogger(sOpts, nOpts)
+	// Without this option set to true, the logger is not configured.
+	sOpts.EnableLogging = true
 	if _, err := stand.RunServerWithOpts(sOpts, nOpts); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -315,9 +316,6 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	if natsDebugAndTrace {
 		natsOpts.Trace, natsOpts.Debug = true, true
 	}
-
-	// for now, key off of one flag - the NATS flag to disable logging.
-	natsOpts.NoLog = false
 
 	// One flag can set multiple options.
 	if stanDebugAndTrace {

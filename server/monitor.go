@@ -185,7 +185,7 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 		TotalMsgs:     count,
 		TotalBytes:    bytes,
 	}
-	sendResponse(w, r, serverz)
+	s.sendResponse(w, r, serverz)
 }
 
 func myUptime(d time.Duration) string {
@@ -218,11 +218,11 @@ func (s *StanServer) handleStorez(w http.ResponseWriter, r *http.Request) {
 		ServerID:   s.serverID,
 		Now:        time.Now(),
 		Type:       s.store.Name(),
-		Limits:     *s.storeLimits,
+		Limits:     s.opts.StoreLimits,
 		TotalMsgs:  count,
 		TotalBytes: bytes,
 	}
-	sendResponse(w, r, storez)
+	s.sendResponse(w, r, storez)
 }
 
 type byClientID []*Clientz
@@ -244,7 +244,7 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Client %s not found", singleClient), http.StatusNotFound)
 			return
 		}
-		sendResponse(w, r, clientz)
+		s.sendResponse(w, r, clientz)
 	} else {
 		offset, limit := getOffsetAndLimit(r)
 		clients := s.store.GetClients()
@@ -277,7 +277,7 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 			Count:     len(carr),
 			Clients:   carr,
 		}
-		sendResponse(w, r, clientsz)
+		s.sendResponse(w, r, clientsz)
 	}
 }
 
@@ -414,7 +414,7 @@ func (s *StanServer) handleChannelsz(w http.ResponseWriter, r *http.Request) {
 			channelsz.Count = len(carr)
 			channelsz.Names = carr
 		}
-		sendResponse(w, r, channelsz)
+		s.sendResponse(w, r, channelsz)
 	}
 }
 
@@ -426,7 +426,7 @@ func (s *StanServer) handleOneChannel(w http.ResponseWriter, r *http.Request, na
 	}
 	channelz := &Channelz{Name: name}
 	updateChannelz(channelz, cs, subsOption)
-	sendResponse(w, r, channelz)
+	s.sendResponse(w, r, channelz)
 }
 
 func updateChannelz(cz *Channelz, cs *stores.ChannelStore, subsOption int) {
@@ -442,10 +442,10 @@ func updateChannelz(cz *Channelz, cs *stores.ChannelStore, subsOption int) {
 	}
 }
 
-func sendResponse(w http.ResponseWriter, r *http.Request, content interface{}) {
+func (s *StanServer) sendResponse(w http.ResponseWriter, r *http.Request, content interface{}) {
 	b, err := json.MarshalIndent(content, "", "  ")
 	if err != nil {
-		Errorf("Error marshaling response to %q request: %v", r.URL, err)
+		s.log.Errorf("Error marshaling response to %q request: %v", r.URL, err)
 	}
 	gnatsd.ResponseHandler(w, r, b)
 }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 )
@@ -29,11 +28,6 @@ var (
 	ErrTooManySubs     = errors.New("too many subscriptions per channel")
 	ErrNotSupported    = errors.New("not supported")
 )
-
-// Noticef logs a notice statement
-func Noticef(format string, v ...interface{}) {
-	server.Noticef(format, v...)
-}
 
 // StoreLimits define limits for a store.
 type StoreLimits struct {

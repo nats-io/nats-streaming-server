@@ -40,16 +40,13 @@ func TestSignalToReOpenLogFile(t *testing.T) {
 		NoSigs:  true,
 		LogFile: logFile,
 	}
+	sopts.EnableLogging = true
 	s := runServerWithOpts(t, sopts, nopts)
-	defer RemoveLogger()
 	defer s.Shutdown()
-
-	// Set the file log
-	ConfigureLogger(sopts, nopts)
 
 	// Add a trace
 	expectedStr := "This is a Notice"
-	Noticef(expectedStr)
+	s.log.Noticef(expectedStr)
 	buf, err := ioutil.ReadFile(logFile)
 	if err != nil {
 		t.Fatalf("Error reading file: %v", err)

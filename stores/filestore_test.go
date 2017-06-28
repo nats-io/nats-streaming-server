@@ -398,7 +398,7 @@ func newFileStore(t *testing.T, dataStore string, limits *StoreLimits, options .
 			return nil, nil, err
 		}
 	}
-	fs, err := NewFileStore(dataStore, limits, AllOptions(&opts))
+	fs, err := NewFileStore(testLogger, dataStore, limits, AllOptions(&opts))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -458,7 +458,7 @@ func TestFSNoDirectoryError(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
-	fs, err := NewFileStore("", nil)
+	fs, err := NewFileStore(nil, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "specified") {
 		if fs != nil {
 			fs.Close()
@@ -616,7 +616,7 @@ func TestFSOptions(t *testing.T) {
 		ParallelRecovery:     5,
 	}
 	// Create the file with custom options
-	fs, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits,
+	fs, err := NewFileStore(testLogger, defaultDataStore, &testDefaultStoreLimits,
 		BufferSize(expected.BufferSize),
 		CompactEnabled(expected.CompactEnabled),
 		CompactFragmentation(expected.CompactFragmentation),
@@ -638,7 +638,7 @@ func TestFSOptions(t *testing.T) {
 	checkOpts(expected, opts)
 
 	fs.Close()
-	fs, err = NewFileStore(defaultDataStore, &testDefaultStoreLimits,
+	fs, err = NewFileStore(testLogger, defaultDataStore, &testDefaultStoreLimits,
 		AllOptions(&expected))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
@@ -661,7 +661,7 @@ func TestFSOptions(t *testing.T) {
 	fs.Close()
 	cleanupDatastore(t, defaultDataStore)
 	// Create the file with custom options, pass all of them at once
-	fs, err = NewFileStore(defaultDataStore, &testDefaultStoreLimits, AllOptions(&expected))
+	fs, err = NewFileStore(testLogger, defaultDataStore, &testDefaultStoreLimits, AllOptions(&expected))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
@@ -685,7 +685,7 @@ func TestFSOptions(t *testing.T) {
 	fs.Close()
 
 	expectError := func(opts *FileStoreOptions, errTxt string) {
-		f, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits, AllOptions(opts))
+		f, err := NewFileStore(testLogger, defaultDataStore, &testDefaultStoreLimits, AllOptions(opts))
 		if f != nil {
 			f.Close()
 		}
@@ -1102,7 +1102,7 @@ func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
 
 	limit := testDefaultStoreLimits
 	limit.MaxMsgs = 100
-	fs, err := NewFileStore(defaultDataStore, &limit)
+	fs, err := NewFileStore(testLogger, defaultDataStore, &limit)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1116,7 +1116,7 @@ func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
 	fs.Close()
 
 	limit.MaxMsgs = 10
-	fs, err = NewFileStore(defaultDataStore, &limit)
+	fs, err = NewFileStore(testLogger, defaultDataStore, &limit)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -3170,7 +3170,7 @@ func TestFSFileSlicesClosed(t *testing.T) {
 
 	limits := testDefaultStoreLimits
 	limits.MaxMsgs = 50
-	fs, err := NewFileStore(defaultDataStore, &limits,
+	fs, err := NewFileStore(testLogger, defaultDataStore, &limits,
 		SliceConfig(10, 0, 0, ""))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
@@ -4509,7 +4509,7 @@ func TestFSNegativeLimits(t *testing.T) {
 
 	limits := DefaultStoreLimits
 	limits.MaxMsgs = -1000
-	if fs, err := NewFileStore(defaultDataStore, &limits); fs != nil || err == nil {
+	if fs, err := NewFileStore(testLogger, defaultDataStore, &limits); fs != nil || err == nil {
 		if fs != nil {
 			fs.Close()
 		}
