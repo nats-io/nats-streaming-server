@@ -229,7 +229,8 @@ type StanServer struct {
 	clients *clientStore
 
 	// Store
-	store stores.Store
+	store       stores.Store
+	storeLimits *stores.StoreLimits
 
 	// Monitoring
 	monMu   sync.RWMutex
@@ -281,7 +282,7 @@ type StanServer struct {
 	partitions *partitions
 
 	// Use these flags for Debug/Trace in places where speed matters.
-	// Normally, Debugf and Tracef will check an atomic variable to
+	// Normally, Debugf and Tracef will check an internal variable to
 	// figure out if the statement should be logged, however, the
 	// cost of calling Debugf/Tracef is still significant since there
 	// may be memory allocations to format the string passed to these
@@ -664,16 +665,6 @@ type Options struct {
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
 }
 
-// Clone returns a deep copy of the Options object.
-func (o *Options) Clone() *Options {
-	// A simple copy covers pretty much everything
-	clone := *o
-	// But we have the problem of the PerChannel map that needs
-	// to be copied.
-	clone.PerChannel = (&o.StoreLimits).ClonePerChannelMap()
-	return &clone
-}
-
 // DefaultOptions are default options for the STAN server
 var defaultOptions = Options{
 	ID:                DefaultClusterID,
@@ -716,9 +707,7 @@ func (s *StanServer) stanReconnectedHandler(nc *nats.Conn) {
 }
 
 func (s *StanServer) stanClosedHandler(nc *nats.Conn) {
-	if s.debug {
-		s.log.Debugf("connection %q has been closed", nc.Opts.Name)
-	}
+	s.log.Debugf("connection %q has been closed", nc.Opts.Name)
 }
 
 func (s *StanServer) stanErrorHandler(nc *nats.Conn, sub *nats.Subscription, err error) {
@@ -832,9 +821,7 @@ func (s *StanServer) createNatsClientConn(name string, sOpts *Options, nOpts *se
 		ncOpts.ReconnectBufSize = 128
 	}
 
-	if s.trace {
-		s.log.Tracef(" NATS conn opts: %v", ncOpts)
-	}
+	s.log.Tracef(" NATS conn opts: %v", ncOpts)
 
 	var nc *nats.Conn
 	if nc, err = ncOpts.Connect(); err != nil {
@@ -871,13 +858,15 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	if stanOpts == nil {
 		sOpts = GetDefaultOptions()
 	} else {
-		sOpts = stanOpts.Clone()
+		so := *stanOpts
+		sOpts = &so
 	}
 	if natsOpts == nil {
 		no := DefaultNatsServerOptions
 		nOpts = &no
 	} else {
-		nOpts = natsOpts.Clone()
+		no := *natsOpts
+		nOpts = &no
 	}
 
 	s := StanServer{
@@ -942,7 +931,11 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		}
 	}()
 
-	storeLimits := &s.opts.StoreLimits
+	// StoreLimits in Options are stored as a struct and making
+	// the copy of the options as a whole does not make a deep copy
+	// of the store limits (due to map of PerChannel limits). Get
+	// a clone of the store limits and store them in separate field.
+	s.storeLimits = (&sOpts.StoreLimits).Clone()
 
 	var (
 		err   error
@@ -955,10 +948,10 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// Create the store. So far either memory or file-based.
 	switch sOpts.StoreType {
 	case stores.TypeFile:
-		store, err = stores.NewFileStore(s.log, sOpts.FilestoreDir, storeLimits,
+		store, err = stores.NewFileStore(s.log, sOpts.FilestoreDir, s.storeLimits,
 			stores.AllOptions(&sOpts.FileStoreOpts))
 	case stores.TypeMemory:
-		store, err = stores.NewMemoryStore(s.log, storeLimits)
+		store, err = stores.NewMemoryStore(s.log, s.storeLimits)
 	default:
 		err = fmt.Errorf("unsupported store type: %v", sOpts.StoreType)
 	}
@@ -998,7 +991,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// If using partitioning, try our best to find out that on startup that
 	// no other server with same cluster ID has any channel that we own.
 	if sOpts.Partitioning {
-		if err := s.initPartitions(sOpts, nOpts, storeLimits.PerChannel); err != nil {
+		if err := s.initPartitions(sOpts, nOpts, s.storeLimits.PerChannel); err != nil {
 			return nil, err
 		}
 	}
@@ -1176,7 +1169,7 @@ func (s *StanServer) start(runningState State) error {
 	}
 
 	s.log.Noticef("Message store is %s", s.store.Name())
-	storeLimitsLines := (&s.opts.StoreLimits).Print()
+	storeLimitsLines := s.storeLimits.Print()
 	for _, l := range storeLimitsLines {
 		s.log.Noticef(l)
 	}
@@ -1617,20 +1610,18 @@ func (s *StanServer) initSubscriptions() error {
 			s.acksSubs = append(s.acksSubs, ackSub)
 		}
 	}
-	if s.debug {
-		s.log.Debugf("Discover subject:           %s", s.info.Discovery)
-		// For partitions, we actually print the list of channels
-		// in the startup banner, so we don't need to repeat them here.
-		if s.partitions != nil {
-			s.log.Debugf("Publish subjects root:      %s", s.info.Publish)
-		} else {
-			s.log.Debugf("Publish subject:            %s.>", s.info.Publish)
-		}
-		s.log.Debugf("Subscribe subject:          %s", s.info.Subscribe)
-		s.log.Debugf("Subscription Close subject: %s", s.info.SubClose)
-		s.log.Debugf("Unsubscribe subject:        %s", s.info.Unsubscribe)
-		s.log.Debugf("Close subject:              %s", s.info.Close)
+	s.log.Debugf("Discover subject:           %s", s.info.Discovery)
+	// For partitions, we actually print the list of channels
+	// in the startup banner, so we don't need to repeat them here.
+	if s.partitions != nil {
+		s.log.Debugf("Publish subjects root:      %s", s.info.Publish)
+	} else {
+		s.log.Debugf("Publish subject:            %s.>", s.info.Publish)
 	}
+	s.log.Debugf("Subscribe subject:          %s", s.info.Subscribe)
+	s.log.Debugf("Subscription Close subject: %s", s.info.SubClose)
+	s.log.Debugf("Unsubscribe subject:        %s", s.info.Unsubscribe)
+	s.log.Debugf("Close subject:              %s", s.info.Close)
 	return nil
 }
 
@@ -2199,9 +2190,7 @@ func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subS
 			durName = sub.QGroup
 		}
 		sub.RUnlock()
-		if s.debug {
-			s.log.Debugf("[Client:%s] Redelivering to durable %s", clientID, durName)
-		}
+		s.log.Debugf("[Client:%s] Redelivering to durable %s", clientID, durName)
 	}
 
 	// If we don't find the client, we are done.

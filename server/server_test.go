@@ -256,7 +256,7 @@ func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) (*Sta
 	if opts == nil {
 		sOpts = GetDefaultOptions()
 	} else {
-		sOpts = opts.Clone()
+		sOpts = opts
 	}
 
 	nOpts := natsd.Options{}
