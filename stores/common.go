@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
 )
@@ -21,6 +22,7 @@ var droppingMsgsFmt = "WARNING: Reached limits for store %q (msgs=%v/%v bytes=%v
 type commonStore struct {
 	sync.RWMutex
 	closed bool
+	log    logger.Logger
 }
 
 // genericStore is the generic store implementation with a map of channels.
@@ -62,7 +64,7 @@ type genericMsgStore struct {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes the structure of a generic store
-func (gs *genericStore) init(name string, limits *StoreLimits) error {
+func (gs *genericStore) init(name string, log logger.Logger, limits *StoreLimits) error {
 	gs.name = name
 	if limits == nil {
 		limits = &DefaultStoreLimits
@@ -70,6 +72,7 @@ func (gs *genericStore) init(name string, limits *StoreLimits) error {
 	if err := gs.setLimits(limits); err != nil {
 		return err
 	}
+	gs.log = log
 	// Do not use limits values to create the map.
 	gs.channels = make(map[string]*ChannelStore)
 	gs.clients = make(map[string]*Client)
@@ -310,9 +313,10 @@ func (gs *genericStore) close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes this generic message store
-func (gms *genericMsgStore) init(subject string, limits *MsgStoreLimits) {
+func (gms *genericMsgStore) init(subject string, log logger.Logger, limits *MsgStoreLimits) {
 	gms.subject = subject
 	gms.limits = *limits
+	gms.log = log
 }
 
 // createMsg creates a MsgProto with the given sequence number.
@@ -406,9 +410,10 @@ func (gms *genericMsgStore) Close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes the structure of a generic sub store
-func (gss *genericSubStore) init(channel string, limits *SubStoreLimits) {
+func (gss *genericSubStore) init(channel string, log logger.Logger, limits *SubStoreLimits) {
 	gss.subject = channel
 	gss.limits = *limits
+	gss.log = log
 }
 
 // CreateSub records a new subscription represented by SubState. On success,

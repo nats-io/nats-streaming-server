@@ -14,7 +14,7 @@ import (
 )
 
 func createClientStore() *clientStore {
-	store, _ := stores.NewMemoryStore(nil)
+	store, _ := stores.NewMemoryStore(testLogger, nil)
 	cs := &clientStore{store: store}
 	return cs
 }

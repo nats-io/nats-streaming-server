@@ -39,7 +39,7 @@ func RunServerWithDebugTrace(ID string, enableSTANDebug, enableSTANTrace, enable
 	sOpts.ID = ID
 
 	// enable logging
-	server.ConfigureLogger(sOpts, &nOpts)
+	sOpts.EnableLogging = true
 
 	s, err := server.RunServerWithOpts(sOpts, &nOpts)
 	if err != nil {

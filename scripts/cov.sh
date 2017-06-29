@@ -4,6 +4,7 @@
 rm -rf ./cov
 mkdir cov
 go test -v -covermode=atomic -coverprofile=./cov/server.out ./server
+go test -v -covermode=atomic -coverprofile=./cov/logger.out ./logger
 # repeat these server FT tests but focus on stores package
 go test -v -covermode=atomic -coverprofile=./cov/stores1.out -run=TestFTPartition -coverpkg=./stores ./server
 go test -v -covermode=atomic -coverprofile=./cov/stores2.out ./stores

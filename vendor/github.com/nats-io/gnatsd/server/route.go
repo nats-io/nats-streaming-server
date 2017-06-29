@@ -37,6 +37,7 @@ type route struct {
 	url          *url.URL
 	authRequired bool
 	tlsRequired  bool
+	closed       bool
 }
 
 type connectInfo struct {
@@ -236,11 +237,15 @@ func (s *Server) processImplicitRoute(info *Info) {
 	// Initiate the connection, using info.IP instead of info.URL here...
 	r, err := url.Parse(info.IP)
 	if err != nil {
-		Debugf("Error parsing URL from INFO: %v\n", err)
+		s.Debugf("Error parsing URL from INFO: %v\n", err)
 		return
 	}
+
+	// Snapshot server options.
+	opts := s.getOpts()
+
 	if info.AuthRequired {
-		r.User = url.UserPassword(s.opts.Cluster.Username, s.opts.Cluster.Password)
+		r.User = url.UserPassword(opts.Cluster.Username, opts.Cluster.Password)
 	}
 	s.startGoRoutine(func() { s.connectToRoute(r, false) })
 }
@@ -250,7 +255,7 @@ func (s *Server) processImplicitRoute(info *Info) {
 // Server lock is assumed to be held by caller.
 func (s *Server) hasThisRouteConfigured(info *Info) bool {
 	urlToCheckExplicit := strings.ToLower(net.JoinHostPort(info.Host, strconv.Itoa(info.Port)))
-	for _, ri := range s.opts.Routes {
+	for _, ri := range s.getOpts().Routes {
 		if strings.ToLower(ri.Host) == urlToCheckExplicit {
 			return true
 		}
@@ -306,9 +311,12 @@ func (s *Server) sendLocalSubsToRoute(route *client) {
 }
 
 func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
+	// Snapshot server options.
+	opts := s.getOpts()
+
 	didSolicit := rURL != nil
 	r := &route{didSolicit: didSolicit}
-	for _, route := range s.opts.Routes {
+	for _, route := range opts.Routes {
 		if rURL != nil && (strings.ToLower(rURL.Host) == strings.ToLower(route.Host)) {
 			r.routeType = Explicit
 		}
@@ -340,7 +348,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 	// Check for TLS
 	if tlsRequired {
 		// Copy off the config to add in ServerName if we
-		tlsConfig := util.CloneTLSConfig(s.opts.Cluster.TLSConfig)
+		tlsConfig := util.CloneTLSConfig(opts.Cluster.TLSConfig)
 
 		// If we solicited, we will act like the client, otherwise the server.
 		if didSolicit {
@@ -357,7 +365,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 		conn := c.nc.(*tls.Conn)
 
 		// Setup the timeout
-		ttl := secondsToDuration(s.opts.Cluster.TLSTimeout)
+		ttl := secondsToDuration(opts.Cluster.TLSTimeout)
 		time.AfterFunc(ttl, func() { tlsTimeout(c, conn) })
 		conn.SetReadDeadline(time.Now().Add(ttl))
 
@@ -419,7 +427,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 
 	// Check for Auth required state for incoming connections.
 	if authRequired && !didSolicit {
-		ttl := secondsToDuration(s.opts.Cluster.AuthTimeout)
+		ttl := secondsToDuration(opts.Cluster.AuthTimeout)
 		c.setAuthTimer(ttl)
 	}
 
@@ -547,7 +555,7 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 
 func (s *Server) broadcastInterestToRoutes(proto string) {
 	var arg []byte
-	if atomic.LoadInt32(&trace) == 1 {
+	if atomic.LoadInt32(&s.logging.trace) == 1 {
 		arg = []byte(proto[:len(proto)-LEN_CR_LF])
 	}
 	protoAsBytes := []byte(proto)
@@ -592,15 +600,51 @@ func (s *Server) broadcastUnSubscribe(sub *subscription) {
 }
 
 func (s *Server) routeAcceptLoop(ch chan struct{}) {
-	hp := net.JoinHostPort(s.opts.Cluster.Host, strconv.Itoa(s.opts.Cluster.Port))
-	Noticef("Listening for route connections on %s", hp)
+	// Snapshot server options.
+	opts := s.getOpts()
+
+	// Get all possible URLs (when server listens to 0.0.0.0).
+	// This is going to be sent to other Servers, so that they can let their
+	// clients know about us.
+	clientConnectURLs := s.getClientConnectURLs()
+
+	// Snapshot server options.
+	port := opts.Cluster.Port
+
+	if port == -1 {
+		port = 0
+	}
+
+	hp := net.JoinHostPort(opts.Cluster.Host, strconv.Itoa(port))
+	s.Noticef("Listening for route connections on %s", hp)
 	l, e := net.Listen("tcp", hp)
 	if e != nil {
 		// We need to close this channel to avoid a deadlock
 		close(ch)
-		Fatalf("Error listening on router port: %d - %v", s.opts.Cluster.Port, e)
+		s.Fatalf("Error listening on router port: %d - %v", opts.Cluster.Port, e)
 		return
 	}
+
+	// Check for TLSConfig
+	tlsReq := opts.Cluster.TLSConfig != nil
+	info := Info{
+		ID:                s.info.ID,
+		Version:           s.info.Version,
+		Host:              opts.Cluster.Host,
+		Port:              l.Addr().(*net.TCPAddr).Port,
+		AuthRequired:      false,
+		TLSRequired:       tlsReq,
+		SSLRequired:       tlsReq,
+		TLSVerify:         tlsReq,
+		MaxPayload:        s.info.MaxPayload,
+		ClientConnectURLs: clientConnectURLs,
+	}
+	// Check for Auth items
+	if opts.Cluster.Username != "" {
+		info.AuthRequired = true
+	}
+	s.routeInfo = info
+	s.generateRouteInfoJSON()
 
 	// Setup state that can enable shutdown
 	s.mu.Lock()
@@ -616,7 +660,7 @@ func (s *Server) routeAcceptLoop(ch chan struct{}) {
 		conn, err := l.Accept()
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				Debugf("Temporary Route Accept Errorf(%v), sleeping %dms",
+				s.Debugf("Temporary Route Accept Errorf(%v), sleeping %dms",
 					ne, tmpDelay/time.Millisecond)
 				time.Sleep(tmpDelay)
 				tmpDelay *= 2
@@ -624,7 +668,7 @@ func (s *Server) routeAcceptLoop(ch chan struct{}) {
 					tmpDelay = ACCEPT_MAX_SLEEP
 				}
 			} else if s.isRunning() {
-				Noticef("Accept error: %v", err)
+				s.Noticef("Accept error: %v", err)
 			}
 			continue
 		}
@@ -634,7 +678,7 @@ func (s *Server) routeAcceptLoop(ch chan struct{}) {
 			s.grWG.Done()
 		})
 	}
-	Debugf("Router accept loop exiting..")
+	s.Debugf("Router accept loop exiting..")
 	s.done <- true
 }
 
@@ -647,40 +691,13 @@ func (s *Server) StartRouting(clientListenReady chan struct{}) {
 	// the possible ephemeral port to be selected.
 	<-clientListenReady
 
-	// Get all possible URLs (when server listens to 0.0.0.0).
-	// This is going to be sent to other Servers, so that they can let their
-	// clients know about us.
-	clientConnectURLs := s.getClientConnectURLs()
-
-	// Check for TLSConfig
-	tlsReq := s.opts.Cluster.TLSConfig != nil
-	info := Info{
-		ID:                s.info.ID,
-		Version:           s.info.Version,
-		Host:              s.opts.Cluster.Host,
-		Port:              s.opts.Cluster.Port,
-		AuthRequired:      false,
-		TLSRequired:       tlsReq,
-		SSLRequired:       tlsReq,
-		TLSVerify:         tlsReq,
-		MaxPayload:        s.info.MaxPayload,
-		ClientConnectURLs: clientConnectURLs,
-	}
-	// Check for Auth items
-	if s.opts.Cluster.Username != "" {
-		info.AuthRequired = true
-	}
-	s.routeInfo = info
-	b, _ := json.Marshal(info)
-	s.routeInfoJSON = []byte(fmt.Sprintf(InfoProto, b))
-
 	// Spin up the accept loop
 	ch := make(chan struct{})
 	go s.routeAcceptLoop(ch)
 	<-ch
 
 	// Solicit Routes if needed.
-	s.solicitRoutes()
+	s.solicitRoutes(s.getOpts().Routes)
 }
 
 func (s *Server) reConnectToRoute(rURL *url.URL, rtype RouteType) {
@@ -692,19 +709,22 @@ func (s *Server) reConnectToRoute(rURL *url.URL, rtype RouteType) {
 }
 
 func (s *Server) connectToRoute(rURL *url.URL, tryForEver bool) {
+	// Snapshot server options.
+	opts := s.getOpts()
+
 	defer s.grWG.Done()
 	attempts := 0
 	for s.isRunning() && rURL != nil {
-		Debugf("Trying to connect to route on %s", rURL.Host)
+		s.Debugf("Trying to connect to route on %s", rURL.Host)
 		conn, err := net.DialTimeout("tcp", rURL.Host, DEFAULT_ROUTE_DIAL)
 		if err != nil {
-			Debugf("Error trying to connect to route: %v", err)
+			s.Debugf("Error trying to connect to route: %v", err)
 			if !tryForEver {
-				if s.opts.Cluster.ConnectRetries <= 0 {
+				if opts.Cluster.ConnectRetries <= 0 {
 					return
 				}
 				attempts++
-				if attempts > s.opts.Cluster.ConnectRetries {
+				if attempts > opts.Cluster.ConnectRetries {
 					return
 				}
 			}
@@ -728,8 +748,8 @@ func (c *client) isSolicitedRoute() bool {
 	return c.typ == ROUTER && c.route != nil && c.route.didSolicit
 }
 
-func (s *Server) solicitRoutes() {
-	for _, r := range s.opts.Routes {
+func (s *Server) solicitRoutes(routes []*url.URL) {
+	for _, r := range routes {
 		route := r
 		s.startGoRoutine(func() { s.connectToRoute(route, true) })
 	}

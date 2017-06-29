@@ -12,7 +12,7 @@ import (
 )
 
 func createDefaultMemStore(t *testing.T) *MemoryStore {
-	ms, err := NewMemoryStore(&testDefaultStoreLimits)
+	ms, err := NewMemoryStore(testLogger, &testDefaultStoreLimits)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestMSInit(t *testing.T) {
 }
 
 func TestMSUseDefaultLimits(t *testing.T) {
-	ms, err := NewMemoryStore(nil)
+	ms, err := NewMemoryStore(testLogger, nil)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestMSGetExclusiveLock(t *testing.T) {
 }
 
 func TestMSRecover(t *testing.T) {
-	ms, err := NewMemoryStore(nil)
+	ms, err := NewMemoryStore(testLogger, nil)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestMSRecover(t *testing.T) {
 func TestMSNegativeLimits(t *testing.T) {
 	limits := DefaultStoreLimits
 	limits.MaxMsgs = -1000
-	if ms, err := NewMemoryStore(&limits); ms != nil || err == nil {
+	if ms, err := NewMemoryStore(testLogger, &limits); ms != nil || err == nil {
 		if ms != nil {
 			ms.Close()
 		}

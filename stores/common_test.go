@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nuid"
 )
@@ -29,12 +30,19 @@ var testDefaultStoreLimits = StoreLimits{
 	nil,
 }
 
-var nuidGen *nuid.NUID
+var (
+	nuidGen    *nuid.NUID
+	testLogger logger.Logger
+)
 
 func init() {
 	nuidGen = nuid.New()
+	// Create an empty logger (no actual logger is set without calling SetLogger())
+	testLogger = logger.NewStanLogger()
 }
 
+// Used by both testing.B and testing.T so need to use
+// a common interface: tLogger
 type tLogger interface {
 	Fatalf(format string, args ...interface{})
 	Errorf(format string, args ...interface{})
@@ -739,7 +747,7 @@ func TestGSNoOps(t *testing.T) {
 	gs := &genericStore{}
 	defer gs.Close()
 	limits := DefaultStoreLimits
-	gs.init("test generic", &limits)
+	gs.init("test generic", testLogger, &limits)
 	if _, _, err := gs.CreateChannel("foo", nil); err == nil {
 		t.Fatal("Expected to get an error since this should not be implemented for generic store")
 	}
@@ -749,7 +757,7 @@ func TestGSNoOps(t *testing.T) {
 
 	gms := &genericMsgStore{}
 	defer gms.Close()
-	gms.init("foo", &limits.MsgStoreLimits)
+	gms.init("foo", testLogger, &limits.MsgStoreLimits)
 	if gms.Lookup(1) != nil || gms.FirstMsg() != nil || gms.LastMsg() != nil || gms.Flush() != nil ||
 		gms.GetSequenceFromTimestamp(0) != 0 || gms.Close() != nil {
 		t.Fatal("Expected no value since these should not be implemented for generic store")
@@ -757,7 +765,7 @@ func TestGSNoOps(t *testing.T) {
 
 	gss := &genericSubStore{}
 	defer gss.Close()
-	gss.init("foo", &limits.SubStoreLimits)
+	gss.init("foo", testLogger, &limits.SubStoreLimits)
 	if gss.AddSeqPending(1, 1) != nil || gss.AckSeqPending(1, 1) != nil || gss.Flush() != nil ||
 		gss.Close() != nil {
 		t.Fatal("Expected no value since these should not be implemented for generic store")

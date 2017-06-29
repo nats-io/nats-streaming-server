@@ -3,13 +3,14 @@
 package stores
 
 import (
-	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nats-streaming-server/spb"
 	"hash/crc32"
 	"math/rand"
 	"os"
 	"sync"
 	"testing"
+
+	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/spb"
 )
 
 func benchCleanupDatastore(b *testing.B, dir string) {
@@ -19,7 +20,7 @@ func benchCleanupDatastore(b *testing.B, dir string) {
 }
 
 func benchCreateDefaultFileStore(t *testing.B) *FileStore {
-	fs, err := NewFileStore(defaultDataStore, &testDefaultStoreLimits)
+	fs, err := NewFileStore(testLogger, defaultDataStore, &testDefaultStoreLimits)
 	if err != nil {
 		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 	}
@@ -131,7 +132,7 @@ func BenchmarkRecoverSubs(b *testing.B) {
 	// Measure recovery
 	b.N = count * numSubs
 	b.StartTimer()
-	s, err = NewFileStore(defaultDataStore, &testDefaultStoreLimits)
+	s, err = NewFileStore(testLogger, defaultDataStore, &testDefaultStoreLimits)
 	b.StopTimer()
 	if err != nil {
 		b.Fatalf("Unable to create a FileStore instance: %v", err)

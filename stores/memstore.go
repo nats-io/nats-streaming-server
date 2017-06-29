@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/util"
 )
 
@@ -36,9 +37,9 @@ type MemoryMsgStore struct {
 // NewMemoryStore returns a factory for stores held in memory.
 // If not limits are provided, the store will be created with
 // DefaultStoreLimits.
-func NewMemoryStore(limits *StoreLimits) (*MemoryStore, error) {
+func NewMemoryStore(log logger.Logger, limits *StoreLimits) (*MemoryStore, error) {
 	ms := &MemoryStore{}
-	if err := ms.init(TypeMemory, limits); err != nil {
+	if err := ms.init(TypeMemory, log, limits); err != nil {
 		return nil, err
 	}
 	return ms, nil
@@ -61,10 +62,10 @@ func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*Cha
 	channelLimits := ms.genericStore.getChannelLimits(channel)
 
 	msgStore := &MemoryMsgStore{msgs: make(map[uint64]*pb.MsgProto, 64)}
-	msgStore.init(channel, &channelLimits.MsgStoreLimits)
+	msgStore.init(channel, ms.log, &channelLimits.MsgStoreLimits)
 
 	subStore := &MemorySubStore{}
-	subStore.init(channel, &channelLimits.SubStoreLimits)
+	subStore.init(channel, ms.log, &channelLimits.SubStoreLimits)
 
 	channelStore = &ChannelStore{
 		Subs:     subStore,
@@ -110,7 +111,7 @@ func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
 			ms.removeFirstMsg()
 			if !ms.hitLimit {
 				ms.hitLimit = true
-				Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs,
+				ms.log.Noticef(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs,
 					util.FriendlyBytes(int64(ms.totalBytes)), util.FriendlyBytes(ms.limits.MaxBytes))
 			}
 		}

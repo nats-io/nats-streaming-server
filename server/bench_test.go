@@ -4,13 +4,14 @@ package server
 
 import (
 	"flag"
-	"github.com/nats-io/go-nats-streaming"
-	"github.com/nats-io/nats-streaming-server/stores"
 	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nats-io/go-nats-streaming"
+	"github.com/nats-io/nats-streaming-server/stores"
 )
 
 var storeType string
