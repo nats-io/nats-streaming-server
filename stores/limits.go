@@ -19,14 +19,21 @@ const (
 // Clone returns a copy of the store limits
 func (sl *StoreLimits) Clone() *StoreLimits {
 	cloned := *sl
-	if len(sl.PerChannel) > 0 {
-		cloned.PerChannel = make(map[string]*ChannelLimits, len(sl.PerChannel))
-		for k, v := range sl.PerChannel {
-			copyVal := *v
-			cloned.PerChannel[k] = &copyVal
-		}
-	}
+	cloned.PerChannel = sl.ClonePerChannelMap()
 	return &cloned
+}
+
+// ClonePerChannelMap returns a deep copy of the StoreLimits's PerChannel map
+func (sl *StoreLimits) ClonePerChannelMap() map[string]*ChannelLimits {
+	if sl.PerChannel == nil {
+		return nil
+	}
+	clone := make(map[string]*ChannelLimits, len(sl.PerChannel))
+	for k, v := range sl.PerChannel {
+		copyVal := *v
+		clone[k] = &copyVal
+	}
+	return clone
 }
 
 // AddPerChannel stores limits for the given channel `name` in the StoreLimits.

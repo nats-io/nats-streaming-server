@@ -229,8 +229,7 @@ type StanServer struct {
 	clients *clientStore
 
 	// Store
-	store       stores.Store
-	storeLimits *stores.StoreLimits
+	store stores.Store
 
 	// Monitoring
 	monMu   sync.RWMutex
@@ -665,6 +664,16 @@ type Options struct {
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
 }
 
+// Clone returns a deep copy of the Options object.
+func (o *Options) Clone() *Options {
+	// A simple copy covers pretty much everything
+	clone := *o
+	// But we have the problem of the PerChannel map that needs
+	// to be copied.
+	clone.PerChannel = (&o.StoreLimits).ClonePerChannelMap()
+	return &clone
+}
+
 // DefaultOptions are default options for the STAN server
 var defaultOptions = Options{
 	ID:                DefaultClusterID,
@@ -858,15 +867,13 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	if stanOpts == nil {
 		sOpts = GetDefaultOptions()
 	} else {
-		so := *stanOpts
-		sOpts = &so
+		sOpts = stanOpts.Clone()
 	}
 	if natsOpts == nil {
 		no := DefaultNatsServerOptions
 		nOpts = &no
 	} else {
-		no := *natsOpts
-		nOpts = &no
+		nOpts = natsOpts.Clone()
 	}
 
 	s := StanServer{
@@ -931,11 +938,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		}
 	}()
 
-	// StoreLimits in Options are stored as a struct and making
-	// the copy of the options as a whole does not make a deep copy
-	// of the store limits (due to map of PerChannel limits). Get
-	// a clone of the store limits and store them in separate field.
-	s.storeLimits = (&sOpts.StoreLimits).Clone()
+	storeLimits := &s.opts.StoreLimits
 
 	var (
 		err   error
@@ -948,10 +951,10 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// Create the store. So far either memory or file-based.
 	switch sOpts.StoreType {
 	case stores.TypeFile:
-		store, err = stores.NewFileStore(s.log, sOpts.FilestoreDir, s.storeLimits,
+		store, err = stores.NewFileStore(s.log, sOpts.FilestoreDir, storeLimits,
 			stores.AllOptions(&sOpts.FileStoreOpts))
 	case stores.TypeMemory:
-		store, err = stores.NewMemoryStore(s.log, s.storeLimits)
+		store, err = stores.NewMemoryStore(s.log, storeLimits)
 	default:
 		err = fmt.Errorf("unsupported store type: %v", sOpts.StoreType)
 	}
@@ -991,7 +994,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// If using partitioning, try our best to find out that on startup that
 	// no other server with same cluster ID has any channel that we own.
 	if sOpts.Partitioning {
-		if err := s.initPartitions(sOpts, nOpts, s.storeLimits.PerChannel); err != nil {
+		if err := s.initPartitions(sOpts, nOpts, storeLimits.PerChannel); err != nil {
 			return nil, err
 		}
 	}
@@ -1169,7 +1172,7 @@ func (s *StanServer) start(runningState State) error {
 	}
 
 	s.log.Noticef("Message store is %s", s.store.Name())
-	storeLimitsLines := s.storeLimits.Print()
+	storeLimitsLines := (&s.opts.StoreLimits).Print()
 	for _, l := range storeLimitsLines {
 		s.log.Noticef(l)
 	}
