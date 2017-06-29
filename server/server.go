@@ -1617,18 +1617,20 @@ func (s *StanServer) initSubscriptions() error {
 			s.acksSubs = append(s.acksSubs, ackSub)
 		}
 	}
-	s.log.Debugf("Discover subject:           %s", s.info.Discovery)
-	// For partitions, we actually print the list of channels
-	// in the startup banner, so we don't need to repeat them here.
-	if s.partitions != nil {
-		s.log.Debugf("Publish subjects root:      %s", s.info.Publish)
-	} else {
-		s.log.Debugf("Publish subject:            %s.>", s.info.Publish)
+	if s.debug {
+		s.log.Debugf("Discover subject:           %s", s.info.Discovery)
+		// For partitions, we actually print the list of channels
+		// in the startup banner, so we don't need to repeat them here.
+		if s.partitions != nil {
+			s.log.Debugf("Publish subjects root:      %s", s.info.Publish)
+		} else {
+			s.log.Debugf("Publish subject:            %s.>", s.info.Publish)
+		}
+		s.log.Debugf("Subscribe subject:          %s", s.info.Subscribe)
+		s.log.Debugf("Subscription Close subject: %s", s.info.SubClose)
+		s.log.Debugf("Unsubscribe subject:        %s", s.info.Unsubscribe)
+		s.log.Debugf("Close subject:              %s", s.info.Close)
 	}
-	s.log.Debugf("Subscribe subject:          %s", s.info.Subscribe)
-	s.log.Debugf("Subscription Close subject: %s", s.info.SubClose)
-	s.log.Debugf("Unsubscribe subject:        %s", s.info.Unsubscribe)
-	s.log.Debugf("Close subject:              %s", s.info.Close)
 	return nil
 }
 

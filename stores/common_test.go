@@ -30,14 +30,6 @@ var testDefaultStoreLimits = StoreLimits{
 	nil,
 }
 
-type noOpTestLogger struct{}
-
-func (l *noOpTestLogger) Fatalf(format string, args ...interface{})  {}
-func (l *noOpTestLogger) Errorf(format string, args ...interface{})  {}
-func (l *noOpTestLogger) Debugf(format string, args ...interface{})  {}
-func (l *noOpTestLogger) Tracef(format string, args ...interface{})  {}
-func (l *noOpTestLogger) Noticef(format string, args ...interface{}) {}
-
 var (
 	nuidGen    *nuid.NUID
 	testLogger logger.Logger
@@ -45,8 +37,8 @@ var (
 
 func init() {
 	nuidGen = nuid.New()
-	// Dummy/no-op logger
-	testLogger = &noOpTestLogger{}
+	// Create an empty logger (no actual logger is set without calling SetLogger())
+	testLogger = logger.NewStanLogger()
 }
 
 // Used by both testing.B and testing.T so need to use
