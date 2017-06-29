@@ -256,7 +256,7 @@ func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) (*Sta
 	if opts == nil {
 		sOpts = GetDefaultOptions()
 	} else {
-		sOpts = opts
+		sOpts = opts.Clone()
 	}
 
 	nOpts := natsd.Options{}
@@ -395,6 +395,46 @@ func TestDefaultOptions(t *testing.T) {
 	opts2 := GetDefaultOptions()
 	if opts2.Debug == opts.Debug {
 		t.Fatal("Modified original default options")
+	}
+}
+
+func TestOptionsClone(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.Trace = true
+	opts.PerChannel = make(map[string]*stores.ChannelLimits)
+	cl := &stores.ChannelLimits{}
+	cl.MaxMsgs = 100
+	opts.PerChannel["foo"] = cl
+
+	clone := opts.Clone()
+	if !reflect.DeepEqual(opts, clone) {
+		t.Fatalf("Expected %#v, got %#v", opts, clone)
+	}
+
+	// Change a field
+	opts.Trace = false
+	// Expecting the clone to now be different
+	if reflect.DeepEqual(opts, clone) {
+		t.Fatal("Expected clone to be different after original changed, was not")
+	}
+	// Revert the field change
+	opts.Trace = true
+	// Should be same again
+	if !reflect.DeepEqual(opts, clone) {
+		t.Fatalf("Expected %#v, got %#v", opts, clone)
+	}
+	// Change a per channel's element
+	cl.MaxMsgs = 50
+	// Expecting the clone to now be different
+	if reflect.DeepEqual(opts, clone) {
+		t.Fatal("Expected clone to be different after original changed, was not")
+	}
+	// Add one channel to original
+	cl2 := *cl
+	opts.PerChannel["bar"] = &cl2
+	// Verify it is not added to the cloned.
+	if _, exist := clone.PerChannel["bar"]; exist {
+		t.Fatal("The channel bar should not be in the cloned options")
 	}
 }
 
