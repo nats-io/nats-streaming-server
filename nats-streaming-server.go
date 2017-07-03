@@ -133,9 +133,6 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	var stanDebugAndTrace bool
 	var stanConfigFile string
 
-	// Start with default options
-	stanOpts := stand.GetDefaultOptions()
-
 	// Define the flags for STAN. We use the Usage (last field)
 	// as the actual Options name. We will then use reflection
 	// to apply any command line option to stanOpts, overriding
@@ -199,7 +196,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	var showTLSHelp bool
 	var gnatsdConfigFile string
 
-	natsOpts := natsd.Options{}
+	natsOpts := &natsd.Options{}
 
 	// TODO: Expose gnatsd parsing into server options
 	// (cls) This is a development placeholder until gnatsd
@@ -280,36 +277,18 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 		usage()
 	}
 
-	// If user provides explicit config files for "-sc" and "-c" then use
-	// given config file only, otherwise, try to parse the same config file
-	// for each components.
-	cfgFile := stanConfigFile
-	if cfgFile == "" && gnatsdConfigFile != "" {
-		cfgFile = gnatsdConfigFile
-	}
-	// Parse NATS Streaming configuration file, updating stanOpts with
-	// what is found in the file, possibly overriding the defaults.
-	if cfgFile != "" {
-		if err := stand.ProcessConfigFile(cfgFile, stanOpts); err != nil {
-			natsd.PrintAndDie(fmt.Sprintf("Configuration error: %v", err.Error()))
-		}
+	stanOpts, natsCfgOpts, err := stand.ProcessConfigFiles(stanConfigFile, gnatsdConfigFile)
+	if err != nil {
+		natsd.PrintAndDie(fmt.Sprintf("Configuration error: %v", err.Error()))
 	}
 	// Now apply all parameters provided on the command line.
 	if err := overrideWithCmdLineParams(stanOpts); err != nil {
 		natsd.PrintAndDie(err.Error())
 	}
 
-	// Parse NATS config if given
-	cfgFile = gnatsdConfigFile
-	if cfgFile == "" && stanConfigFile != "" {
-		cfgFile = stanConfigFile
-	}
-	if cfgFile != "" {
-		fileOpts, err := natsd.ProcessConfigFile(cfgFile)
-		if err != nil {
-			natsd.PrintAndDie(err.Error())
-		}
-		natsOpts = *natsd.MergeOptions(fileOpts, &natsOpts)
+	// Override NATS config file with options from command line
+	if natsCfgOpts != nil {
+		natsOpts = natsd.MergeOptions(natsCfgOpts, natsOpts)
 	}
 
 	// One flag can set multiple options.
@@ -322,7 +301,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 		stanOpts.Trace, stanOpts.Debug = true, true
 	}
 
-	return stanOpts, &natsOpts
+	return stanOpts, natsOpts
 }
 
 // overrideWithCmdLineParams applies the flags passed in the command line

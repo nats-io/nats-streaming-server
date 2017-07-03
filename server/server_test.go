@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"reflect"
 	"runtime"
 	"strconv"
@@ -6374,65 +6373,6 @@ func TestUnlimitedPerChannelLimits(t *testing.T) {
 	s.mu.RUnlock()
 	if n != 0 {
 		t.Fatalf("Expected 0 messages, store reports %v", n)
-	}
-}
-
-func TestSingleConfFileForBoth(t *testing.T) {
-	configFile := "config.cfg"
-	defer os.Remove(configFile)
-	content := []byte(`
-	port: 4223
-	store_limits: {
-		max_channels: 1
-	}`)
-	if err := ioutil.WriteFile(configFile, content, 0666); err != nil {
-		t.Fatalf("Error writing config file: %v", err)
-	}
-	var cmd *exec.Cmd
-	defer func() {
-		if cmd != nil {
-			cmd.Process.Kill()
-			cmd.Wait()
-		}
-	}()
-	param := []string{"-sc", "-c"}
-	for i := 0; i < 2; i++ {
-		cmd = exec.Command("nats-streaming-server", param[i], configFile)
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("Error starting process: %v", err)
-		}
-		var (
-			sc     stan.Conn
-			err    error
-			failed int
-		)
-		for {
-			sc, err = stan.Connect(clusterName, clientName,
-				stan.NatsURL("nats://localhost:4223"),
-				stan.ConnectWait(250*time.Millisecond))
-			if err != nil {
-				failed++
-				if failed < 10 {
-					time.Sleep(100 * time.Millisecond)
-					continue
-				}
-				t.Fatalf("Unable to connect: %v", err)
-			}
-			break
-		}
-		defer sc.Close()
-		// Should be able to create 1 channel
-		if err := sc.Publish("foo", []byte("hello")); err != nil {
-			t.Fatalf("Unexpected error on publish: %v", err)
-		}
-		// But not 2.
-		if err := sc.Publish("bar", []byte("hello")); err == nil {
-			t.Fatalf("Param %v, should have failed to create a 2nd channel", param[i])
-		}
-		sc.Close()
-		cmd.Process.Kill()
-		cmd.Wait()
-		cmd = nil
 	}
 }
 

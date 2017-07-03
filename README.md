@@ -862,7 +862,35 @@ Use the `-sc` or `-stan_config` command line parameter to specify the file to us
 
 For the embedded NATS Server, you can use another configuration file and pass it to the Streaming server using `-c` or `--config` command line parameters.
 
-However, since options do not overlap, it is possible to combine all options into a single file and specify this file using either the `-sc` or `-c` command line parameter.
+Since most options do not overlap, it is possible to combine all options into a single file and specify this file using either the `-sc` or `-c` command line parameter.
+
+However, the option named `tls` is common to NATS Server and NATS Streaming Server. If you plan to use a single configuration file and configure TLS,
+you should have all the streaming configuration included in a `streaming` map. This is actually a good practice regardless if you use TLS
+or not, to protect against possible addition of new options in NATS Server that would conflict with the names of NATS Streaming options.
+
+For instance, you could use a single configuration file with such content:
+```
+# Some NATS Server TLS Configuration
+listen: localhost:5222
+tls: {
+    cert_file: "/path/to/server/cert_file"
+    key_file: "/path/to/server/key_file"
+    verify: true
+    timeout: 2
+}
+
+# NATS Streaming Configuration
+streaming: {
+    cluster_id: my_cluster
+
+    tls: {
+        client_cert: "/path/to/client/cert_file"
+        client_key: "/path/to/client/key_file"
+    }
+}
+```
+
+However, if you want to avoid any possible conflict, simply use two different configuration files!
 
 Note the order in which options are applied during the start of a NATS Streaming server:
 
@@ -873,191 +901,86 @@ Note the order in which options are applied during the start of a NATS Streaming
   option will be used.
 3. Any command line parameter override all of the previous set options.
 
-In general the configuration parameters are the same as the command line arguments.
-But see an example configuration file below for more details:
+In general the configuration parameters are the same as the command line arguments. Below is the list of NATS Streaming parameters:
 
+| Parameter | Meaning | Possible values | Usage example |
+|:----|:----|:----|:----|
+| cluster_id | Cluster name | String, underscore possible | `cluster_id: "my_cluster_name"` |
+| discover_prefix | Subject prefix for server discovery by clients | NATS Subject | `discover_prefix: "_STAN.Discovery"` |
+| store | Store type | `file` or `memory` | `store: "file"` |
+| dir | When using a file store, this is the root directory | File path | `dir: "/path/to/storage` |
+| sd | Enable debug logging | `true` or `false` | `sd: true` |
+| sv | Enable trace logging | `true` or `false` | `sv: true` |
+| nats_server_url | If specified, connects to an external NATS Server, otherwise stats an embedded one | NATS URL | `nats_server_url: "nats://localhost:4222"` |
+| secure | If true, creates a TLS connection to the server but without the need to use TLS configuration (no NATS Server certificate verification) | `true` or `false` | `secure: true` |
+| tls | TLS Configuration | Map: `tls: { ... }` | **See details below** |
+| store_limits | Store Limits | Map: `store_limits: { ... }` | **See details below** |
+| file_options | File Store specific options | Map: `file_options: { ... }` | **See details below** |
+| hb_interval | Interval at which the server sends an heartbeat to a client | Duration | `hb_interval: "10s"` |
+| hb_timeout | How long the server waits for a heartbeat response from the client before considering it a failed heartbeat | Duration | `hb_timeout: "10s"` |
+| hb_fail_count | Count of failed heartbeats before server closes the client connection. The actual total wait is: (fail count + 1) * (hb interval + hb timeout) | Number | `hb_fail_count: 2` |
+| ack_subs_pool_size | Normally, when a client creates a subscription, the server creates an internal subscription to receive its ACKs. If lots of subscriptions are created, the number of internal subscriptions in the server could be very high. To curb this growth, use this parameter to configure a pool of internal ACKs subscriptions | Number | `ack_subs_pool_size: 10` |
+| ft_group | In Fault Tolerance mode, you can start a group of streaming servers with only one server being active while others are running in standby mode. This is the name of this FT group | String | `ft_group: "my_ft_group"` |
+| partitioning | If set to true, a list of channels must be defined in store_limits/channels section. This section then serves two purposes, overriding limits for a given channel or adding it to the partition | `true` or `false` | `partitioning: true` |
+
+TLS Configuration:
+
+Note that the Streaming server uses a connection to a NATS Server, and so the NATS Streaming TLS Configuration
+is in fact a client-side TLS configuration.
+
+| Parameter | Meaning | Possible values | Usage example |
+|:----|:----|:----|:----|
+| client_cert | Client key for the streaming server | File path | `client_cert: "/path/to/client/cert_file"` |
+| client_key | Client certificate for the streaming server | File path | `client_key: "/path/to/client/key_file"` |
+| client_ca | Client certificate CA for the streaming server | File path | `client_ca: "/path/to/client/ca_file"` |
+
+Store Limits Configuration:
+
+| Parameter | Meaning | Possible values | Usage example |
+|:----|:----|:----|:----|
+| max_channels | Maximum number of channels, 0 means unlimited | Number >= 0 | `max_channels: 100` |
+| max_subs | Maximum number of subscriptions per channel, 0 means unlimited | Number >= 0 | `max_subs: 100` |
+| max_msgs | Maximum number of messages per channel, 0 means unlimited | Number >= 0 | `max_msgs: 10000` |
+| max_bytes | Total size of messages per channel, 0 means unlimited | Number >= 0 | `max_bytes: 1GB` |
+| max_age | How long messages can stay in the log | Duration | `max_age: "24h"` |
+| channels | A map of channel names with specific limits | Map: `channels: { ... }` | **See details below** |
+
+The `channels` section is a map with the key being the channel name. For instance:
 ```
-# Define the cluster name.
-# Can be id, cid or cluster_id
-id: "my_cluster_name"
-
-# Store type
-# Can be st, store, store_type or StoreType
-# Possible values are file or memory (case insensitive)
-store: "file"
-
-# When using a file store, need to provide the root directory.
-# Can be dir or datastore
-dir: "/path/to/storage"
-
-# Debug flag.
-# Can be sd or stand_debug
-sd: false
-
-# Trace flag.
-# Can be sv or stan_trace
-sv: false
-
-# If specified, connects to an external NATS server, otherwise
-# starts and embedded server.
-# Can be ns, nats_server or nats_server_url
-ns: "nats://localhost:4222"
-
-# This flag creates a TLS connection to the server but without
-# the need to use a TLS configuration (no NATS server certificate verification).
-secure: false
-
-# Interval at which the server sends an heartbeat to a client,
-# expressed as a duration.
-# Can be hbi, hb_interval, server_to_client_hb_interval
-hb_interval: "10s"
-
-# How long the server waits for a heartbeat response from the client
-# before considering it a failed hearbeat. Expressed as a duration.
-# Can be hbt, hb_timeout, server_to_client_hb_timeout
-hb_timeout: "10s"
-
-# Count of failed hearbeats before server closes the client connection.
-# The actual total wait is: (fail count + 1) * (hb interval + hb timeout).
-# Can be hbf, hb_fail_count, server_to_client_hb_fail_count
-hb_fail_count: 2
-
-# Normally, when a client creates a subscription, the server creates
-# an internal subscription to receive its ACKs.
-# If lots of subscriptions are created, the number of internal
-# subscriptions in the server could be very high. To curb this growth,
-# use this parameter to configure a pool of internal ACKs subscriptions.
-# Can be ack_subs_pool_size, ack_subscriptions_pool_size
-ack_subs_pool_size: 10
-
-# In Fault Tolerance mode, you can start a group of streaming servers
-# with only one server being active while others are running in standby
-# mode. The FT group is named.
-# Can be ft_group, ft_group_name
-ft_group: "ft"
-
-# In order to use partitioning, this parameter needs to be set to true
-# and the list of channels defined in store_limits/channels section.
-# This section then serves two purposes, overriding limits for a given
-# channel or adding it to the partition.
-partitioning: true
-
-# Define store limits.
-# Can be limits, store_limits or StoreLimits.
-# See Store Limits chapter below for more details.
-store_limits: {
-    # Define maximum number of channels.
-    # Can be mc, max_channels or MaxChannels
-    max_channels: 100
-
-    # Define maximum number of subscriptions per channel.
-    # Can be msu, max_sybs, max_subscriptions or MaxSubscriptions
-    max_subs: 100
-
-    # Define maximum number of messages per channel.
-    # Can be mm, max_msgs, MaxMsgs, max_count or MaxCount
-    max_msgs: 10000
-
-    # Define total size of messages per channel.
-    # Can be mb, max_bytes or MaxBytes. Expressed in bytes
-    max_bytes: 10240000
-
-    # Define how long messages can stay in the log, expressed
-    # as a duration, for example: "24h" or "1h15m", etc...
-    # Can be ma, max_age, MaxAge.
-    max_age: "24h"
-}
-
-# TLS configuration.
-tls: {
-    client_cert: "/path/to/client/cert_file"
-    client_key: "/path/to/client/key_file"
-    # Can be client_ca or client_cacert
-    client_ca: "/path/to/client/ca_file"
-}
-
-# Configure file store specific options.
-# Can be file or file_options
-file: {
-    # Enable/disable file compaction.
-    # Can be compact or compact_enabled
-    compact: true
-
-    # Define compaction threshold (in percentage)
-    # Can be compact_frag or compact_fragmemtation
-    compact_frag: 50
-
-    # Define minimum interval between attempts to compact files.
-    # Expressed in seconds
-    compact_interval: 300
-
-    # Define minimum size of a file before compaction can be attempted
-    # Expressed in bytes
-    compact_min_size: 10485760
-
-    # Define the size of buffers that can be used to buffer write operations.
-    # Expressed in bytes
-    buffer_size: 2097152
-
-    # Define if CRC of records should be computed on reads.
-    # Can be crc or do_crc
-    crc: true
-
-    # You can select the CRC polynomial. Note that changing the value
-    # after records have been persisted would result in server failing
-    # to start complaining about data corruption.
-    crc_poly: 3988292384
-
-    # Define if server should perform "file sync" operations during a flush.
-    # Can be sync, do_sync, sync_on_flush
-    sync: true
-
-    # Define the file slice maximum number of messages. If set to 0 and a
-    # channel count limit is set, then the server will set a slice count
-    # limit automatically.
-    # Can be slice_max_msgs, slice_max_count, slice_msgs, slice_count
-    slice_max_msgs: 10000
-
-    # Define the file slice maximum size (including the size of index file).
-    # If set to 0 and a channel size limit is set, then the server will
-    # set a slice bytes limit automatically.
-    # Expressed in bytes.
-    # Can be slice_max_bytes, slice_max_size, slice_bytes, slice_size
-    slice_max_bytes: 67108864
-
-    # Define the period of time covered by a file slice, starting at when
-    # the first message is stored. If set to 0 and a channel age limit
-    # is set, then the server will set a slice age limit automatically.
-    # Expressed as a duration, such as "24h", etc..
-    # Can be  slice_max_age, slice_age, slice_max_time, slice_time_limit
-    slice_max_age: "24h"
-
-    # Define the location and name of a script to be invoked when the
-    # server discards a file slice due to limits. The script is invoked
-    # with the name of the channel, the name of data and index files.
-    # It is the responsibility of the script to then remove the unused
-    # files.
-    # Can be slice_archive_script, slice_archive, slice_script
-    slice_archive_script: "/home/nats-streaming/archive/script.sh"
-
-    # Channels translate to sub-directories under the file store's root
-    # directory. Each channel needs several files to maintain the state
-    # so the need for file descriptors increase with the number of
-    # channels. This option instructs the store to limit the concurrent
-    # use of file descriptors. Note that this is a soft limit and there
-    # may be cases when the store will use more than this number.
-    # A value of 0 means no limit. Setting a limit will probably have
-    # a performance impact.
-    # Can be file_descriptors_limit, fds_limit
-    fds_limit: 100
-
-    # When the server starts, the recovery of channels (directories) is
-    # done sequentially. However, when using SSDs, it may be worth
-    # setting this value to something higher than 1 to perform channels
-    # recovery in parallel.
-    parallel_recovery: 4
-}
+   channels: {
+       "foo": {
+           max_msgs: 100
+       }
+   }
 ```
+For a given channel, the possible parameters are:
+
+| Parameter | Meaning | Possible values | Usage example |
+|:----|:----|:----|:----|
+| max_subs | Maximum number of subscriptions per channel, 0 means unlimited | Number >= 0 | `max_subs: 100` |
+| max_msgs | Maximum number of messages per channel, 0 means unlimited | Number >= 0 | `max_msgs: 10000` |
+| max_bytes | Total size of messages per channel, 0 means unlimited | Bytes | `max_bytes: 1GB` |
+| max_age | How long messages can stay in the log | Duration | `max_age: "24h"` |
+
+
+File Options Configuration:
+
+| Parameter | Meaning | Possible values | Usage example |
+|:----|:----|:----|:----|
+| compact | Enable/disable file compaction. Only some of the files (`clients.dat` and `subs.dat`) are subject to compaction | `true` or `false` | `compact: true` |
+| compact_fragmemtation | Compaction threshold (in percentage) | Number >= 0 | `compact_fragmentation: 50` |
+| compact_interval | Minimum interval between attempts to compact files | Expressed in seconds | `compact_interval: 300` |
+| compact_min_size | Minimum size of a file before compaction can be attempted | Bytes | `compact_min_size: 1GB` |
+| buffer_size | Size of buffers that can be used to buffer write operations | Bytes | `buffer_size: 2MB` |
+| crc | Define if CRC of records should be computed on reads | `true` or `false` | `crc: true` |
+| crc_poly | You can select the CRC polynomial. Note that changing the value after records have been persisted would result in server failing to start complaining about data corruption | Number >= 0 | `crc_poly: 3988292384` |
+| sync_on_flush | Define if server should perform "file sync" operations during a flush | `true` or `false` | `sync_on_flush: true` |
+| slice_max_msgs | Define the file slice maximum number of messages. If set to 0 and a channel count limit is set, then the server will set a slice count limit automatically | Number >= 0 | `slice_max_msgs: 10000` |
+| slice_max_bytes | Define the file slice maximum size (including the size of index file). If set to 0 and a channel size limit is set, then the server will set a slice bytes limit automatically | Bytes | `slice_max_bytes: 64MB` |
+| slice_max_age | Define the period of time covered by a file slice, starting at when the first message is stored. If set to 0 and a channel age limit is set, then the server will set a slice age limit automatically | Duration | `slice_max_age: "24h"` |
+| slice_archive_script | Define the location and name of a script to be invoked when the server discards a file slice due to limits. The script is invoked with the name of the channel, the name of data and index files. It is the responsibility of the script to then remove the unused files | File paht | `slice_archive_script: "/home/nats-streaming/archive/script.sh"` |
+| file_descriptors_limit | Channels translate to sub-directories under the file store's root directory. Each channel needs several files to maintain the state so the need for file descriptors increase with the number of channels. This option instructs the store to limit the concurrent use of file descriptors. Note that this is a soft limit and there may be cases when the store will use more than this number. A value of 0 means no limit. Setting a limit will probably have a performance impact | Number >= 0 | `file_descriptors_limit: 100` |
+| parallel_recovery | When the server starts, the recovery of channels (directories) is done sequentially. However, when using SSDs, it may be worth setting this value to something higher than 1 to perform channels recovery in parallel | Number >= 1 | `parallel_recovery: 4` |
 
 ## Store Limits
 

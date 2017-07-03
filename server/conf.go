@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nats-io/gnatsd/conf"
+	natsd "github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nats-streaming-server/util"
 )
@@ -24,6 +25,19 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 	m, err := conf.Parse(string(data))
 	if err != nil {
 		return err
+	}
+	// Look for a "streaming" key. If so, use only the content of this
+	// map, otherwise, use all keys.
+	for k, v := range m {
+		name := strings.ToLower(k)
+		if name == "streaming" {
+			content, ok := v.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("expected streaming section to be a map/struct, got %v", v)
+			}
+			// Override `m` with the content of the streaming map.
+			m = content
+		}
 	}
 	for k, v := range m {
 		name := strings.ToLower(k)
@@ -352,4 +366,40 @@ func parseFileOptions(itf interface{}, opts *Options) error {
 		}
 	}
 	return nil
+}
+
+// ProcessConfigFiles parses the configuration files for both Streaming and NATS.
+// If both are specified, each configuration is applied individually.
+// If only one is specified, the configuration file is applied to
+// Streaming and NATS. This allows to have a consolidated configuration
+// file contanining both Streaming and NATS parameters.
+func ProcessConfigFiles(stanConfig, natsdConfig string) (*Options, *natsd.Options, error) {
+	stanOpts := GetDefaultOptions()
+	natsOpts := &natsd.Options{}
+
+	if stanConfig == "" && natsdConfig == "" {
+		return stanOpts, natsOpts, nil
+	}
+
+	// If stan config (-sc or --stan_config) file is provided, uses this one,
+	// otherwise, take the one given with -c (or --config) command line param.
+	cfgFile := stanConfig
+	if cfgFile == "" && natsdConfig != "" {
+		cfgFile = natsdConfig
+	}
+	if err := ProcessConfigFile(cfgFile, stanOpts); err != nil {
+		return nil, nil, err
+	}
+	// If NATS config (-c or --config) file is provided, uses this one,
+	// otherwise, take the one given with the -sc (or --stan_config) command line param.
+	cfgFile = natsdConfig
+	if cfgFile == "" && stanConfig != "" {
+		cfgFile = stanConfig
+	}
+	opts, err := natsd.ProcessConfigFile(cfgFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	natsOpts = opts
+	return stanOpts, natsOpts, nil
 }
