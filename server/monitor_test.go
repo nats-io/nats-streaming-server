@@ -873,7 +873,7 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 					continue
 				}
 				msgs, bytes, _ := cs.Msgs.State()
-				firstSeq, lastSeq := cs.Msgs.FirstAndLastSequence()
+				firstSeq, lastSeq, _ := cs.Msgs.FirstAndLastSequence()
 				channelz := &Channelz{
 					Name:     c,
 					FirstSeq: firstSeq,
@@ -969,7 +969,7 @@ func TestMonitorChannelz(t *testing.T) {
 			return nil
 		}
 		msgs, bytes, _ := cs.Msgs.State()
-		firstSeq, lastSeq := cs.Msgs.FirstAndLastSequence()
+		firstSeq, lastSeq, _ := cs.Msgs.FirstAndLastSequence()
 		channelz := &Channelz{
 			Name:     name,
 			FirstSeq: firstSeq,

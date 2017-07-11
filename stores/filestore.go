@@ -2720,10 +2720,10 @@ func (ms *FileMsgStore) backgroundTasks() {
 // lookup returns the message for the given sequence number, possibly
 // reading the message from disk.
 // Store write lock is assumed to be held on entry
-func (ms *FileMsgStore) lookup(seq uint64) *pb.MsgProto {
+func (ms *FileMsgStore) lookup(seq uint64) (*pb.MsgProto, error) {
 	// Reject message for sequence outside valid range
 	if seq < ms.first || seq > ms.last {
-		return nil
+		return nil, nil
 	}
 	// Check first if it's in the cache.
 	msg := ms.getFromCache(seq)
@@ -2739,11 +2739,11 @@ func (ms *FileMsgStore) lookup(seq uint64) *pb.MsgProto {
 	if msg == nil {
 		fslice := ms.getFileSliceForSeq(seq)
 		if fslice == nil {
-			return nil
+			return nil, nil
 		}
 		err := ms.lockFiles(fslice)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 		msgIndex := ms.readMsgIndex(fslice, seq)
 		if msgIndex != nil {
@@ -2756,71 +2756,73 @@ func (ms *FileMsgStore) lookup(seq uint64) *pb.MsgProto {
 		}
 		ms.unlockFiles(fslice)
 		if err != nil || msgIndex == nil {
-			return nil
+			return nil, err
 		}
 		// Recover this message
 		msg = &pb.MsgProto{}
 		err = msg.Unmarshal(ms.tmpMsgBuf[:msgIndex.msgSize])
 		if err != nil {
-			return nil
+			return nil, err
 		}
 		ms.addToCache(seq, msg, false)
 	}
-	return msg
+	return msg, nil
 }
 
 // Lookup returns the stored message with given sequence number.
-func (ms *FileMsgStore) Lookup(seq uint64) *pb.MsgProto {
+func (ms *FileMsgStore) Lookup(seq uint64) (*pb.MsgProto, error) {
 	ms.Lock()
-	msg := ms.lookup(seq)
+	msg, err := ms.lookup(seq)
 	ms.Unlock()
-	return msg
+	return msg, err
 }
 
 // FirstMsg returns the first message stored.
-func (ms *FileMsgStore) FirstMsg() *pb.MsgProto {
+func (ms *FileMsgStore) FirstMsg() (*pb.MsgProto, error) {
+	var err error
 	ms.RLock()
 	if ms.firstMsg == nil {
-		ms.firstMsg = ms.lookup(ms.first)
+		ms.firstMsg, err = ms.lookup(ms.first)
 	}
 	m := ms.firstMsg
 	ms.RUnlock()
-	return m
+	return m, err
 }
 
 // LastMsg returns the last message stored.
-func (ms *FileMsgStore) LastMsg() *pb.MsgProto {
+func (ms *FileMsgStore) LastMsg() (*pb.MsgProto, error) {
+	var err error
 	ms.RLock()
 	if ms.lastMsg == nil {
-		ms.lastMsg = ms.lookup(ms.last)
+		ms.lastMsg, err = ms.lookup(ms.last)
 	}
 	m := ms.lastMsg
 	ms.RUnlock()
-	return m
+	return m, err
 }
 
 // GetSequenceFromTimestamp returns the sequence of the first message whose
 // timestamp is greater or equal to given timestamp.
-func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
+func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error) {
 	ms.RLock()
 	defer ms.RUnlock()
 
 	// Quick check first
 	if ms.first == ms.last {
-		return 0
+		return 0, nil
 	}
 	// If we have some state, try to quickly get the sequence
 	if ms.firstMsg != nil && ms.firstMsg.Timestamp >= timestamp {
-		return ms.first
+		return ms.first, nil
 	}
 	if ms.lastMsg != nil && timestamp >= ms.lastMsg.Timestamp {
-		return ms.last + 1
+		return ms.last + 1, nil
 	}
 
 	// This will require disk access.
 	for _, slice := range ms.files {
 		if err := ms.lockIndexFile(slice); err != nil {
-			return 0
+			return 0, err
 		}
 		mindex := ms.getMsgIndex(slice, slice.firstSeq)
 		if timestamp >= mindex.timestamp {
@@ -2835,14 +2837,14 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
 					mindex = ms.getMsgIndex(slice, seq)
 					if mindex.timestamp >= timestamp {
 						ms.unlockIndexFile(slice)
-						return seq
+						return seq, nil
 					}
 				}
 			}
 		}
 		ms.unlockIndexFile(slice)
 	}
-	return ms.last + 1
+	return ms.last + 1, nil
 }
 
 // initCache initializes the message cache

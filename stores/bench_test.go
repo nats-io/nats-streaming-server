@@ -43,7 +43,11 @@ func benchStoreMsg(b *testing.B, ms MsgStore, data []byte) *pb.MsgProto {
 	if err != nil {
 		stackFatalf(b, "Error storing message: %v", err)
 	}
-	return ms.Lookup(seq)
+	m, err := ms.Lookup(seq)
+	if err != nil {
+		stackFatalf(b, "Error looking up message %v: %v", seq, err)
+	}
+	return m
 }
 
 func BenchmarkRecoverMsgs(b *testing.B) {

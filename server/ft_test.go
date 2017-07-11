@@ -22,8 +22,8 @@ import (
 
 // A mock store that we use to override GetExclusiveLock() behavior.
 type ftMockStore struct {
-	// We need to embed the stores' MockStore.
-	stores.DelegateStore
+	// We need to embed Store
+	stores.Store
 	sync.Mutex
 	result bool
 	err    error
@@ -38,9 +38,9 @@ func (ms *ftMockStore) GetExclusiveLock() (bool, error) {
 func replaceWithMockedStore(s *StanServer, result bool, err error) {
 	s.mu.Lock()
 	ms := &ftMockStore{
-		DelegateStore: stores.DelegateStore{S: s.store},
-		result:        result,
-		err:           err,
+		Store:  s.store,
+		result: result,
+		err:    err,
 	}
 	s.store = ms
 	s.mu.Unlock()

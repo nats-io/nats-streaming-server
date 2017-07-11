@@ -431,7 +431,7 @@ func (s *StanServer) handleOneChannel(w http.ResponseWriter, r *http.Request, na
 
 func updateChannelz(cz *Channelz, cs *stores.ChannelStore, subsOption int) {
 	msgs, bytes, _ := cs.Msgs.State()
-	fseq, lseq := cs.Msgs.FirstAndLastSequence()
+	fseq, lseq, _ := cs.Msgs.FirstAndLastSequence()
 	cz.Msgs = msgs
 	cz.Bytes = bytes
 	cz.FirstSeq = fseq

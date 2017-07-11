@@ -347,45 +347,45 @@ func (gms *genericMsgStore) State() (numMessages int, byteSize uint64, err error
 }
 
 // FirstSequence returns sequence for first message stored.
-func (gms *genericMsgStore) FirstSequence() uint64 {
+func (gms *genericMsgStore) FirstSequence() (uint64, error) {
 	gms.RLock()
 	first := gms.first
 	gms.RUnlock()
-	return first
+	return first, nil
 }
 
 // LastSequence returns sequence for last message stored.
-func (gms *genericMsgStore) LastSequence() uint64 {
+func (gms *genericMsgStore) LastSequence() (uint64, error) {
 	gms.RLock()
 	last := gms.last
 	gms.RUnlock()
-	return last
+	return last, nil
 }
 
 // FirstAndLastSequence returns sequences for the first and last messages stored.
-func (gms *genericMsgStore) FirstAndLastSequence() (uint64, uint64) {
+func (gms *genericMsgStore) FirstAndLastSequence() (uint64, uint64, error) {
 	gms.RLock()
 	first, last := gms.first, gms.last
 	gms.RUnlock()
-	return first, last
+	return first, last, nil
 }
 
 // Lookup returns the stored message with given sequence number.
-func (gms *genericMsgStore) Lookup(seq uint64) *pb.MsgProto {
+func (gms *genericMsgStore) Lookup(seq uint64) (*pb.MsgProto, error) {
 	// no-op
-	return nil
+	return nil, nil
 }
 
 // FirstMsg returns the first message stored.
-func (gms *genericMsgStore) FirstMsg() *pb.MsgProto {
+func (gms *genericMsgStore) FirstMsg() (*pb.MsgProto, error) {
 	// no-op
-	return nil
+	return nil, nil
 }
 
 // LastMsg returns the last message stored.
-func (gms *genericMsgStore) LastMsg() *pb.MsgProto {
+func (gms *genericMsgStore) LastMsg() (*pb.MsgProto, error) {
 	// no-op
-	return nil
+	return nil, nil
 }
 
 func (gms *genericMsgStore) Flush() error {
@@ -395,9 +395,9 @@ func (gms *genericMsgStore) Flush() error {
 
 // GetSequenceFromTimestamp returns the sequence of the first message whose
 // timestamp is greater or equal to given timestamp.
-func (gms *genericMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
+func (gms *genericMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error) {
 	// no-op
-	return 0
+	return 0, nil
 }
 
 // Close closes this store.
