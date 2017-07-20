@@ -66,6 +66,62 @@ func stackFatalf(t tLogger, f string, args ...interface{}) {
 	t.Fatalf("%s", strings.Join(lines, "\n"))
 }
 
+func msgStoreLookup(t tLogger, ms MsgStore, seq uint64) *pb.MsgProto {
+	m, err := ms.Lookup(seq)
+	if err != nil {
+		stackFatalf(t, "Error looking up message %v: %v", seq, err)
+	}
+	return m
+}
+
+func msgStoreFirstSequence(t tLogger, ms MsgStore) uint64 {
+	f, err := ms.FirstSequence()
+	if err != nil {
+		stackFatalf(t, "Error getting first sequence: %v", err)
+	}
+	return f
+}
+
+func msgStoreLastSequence(t tLogger, ms MsgStore) uint64 {
+	l, err := ms.LastSequence()
+	if err != nil {
+		stackFatalf(t, "Error getting last sequence: %v", err)
+	}
+	return l
+}
+
+func msgStoreFirstAndLastSequence(t tLogger, ms MsgStore) (uint64, uint64) {
+	f, l, err := ms.FirstAndLastSequence()
+	if err != nil {
+		stackFatalf(t, "Error getting first and last sequence: %v", err)
+	}
+	return f, l
+}
+
+func msgStoreGetSequenceFromTimestamp(t tLogger, ms MsgStore, timestamp int64) uint64 {
+	s, err := ms.GetSequenceFromTimestamp(timestamp)
+	if err != nil {
+		stackFatalf(t, "Error getting sequence from timestamp: %v", err)
+	}
+	return s
+}
+
+func msgStoreFirstMsg(t tLogger, ms MsgStore) *pb.MsgProto {
+	m, err := ms.FirstMsg()
+	if err != nil {
+		stackFatalf(t, "Error getting sequence first message: %v", err)
+	}
+	return m
+}
+
+func msgStoreLastMsg(t tLogger, ms MsgStore) *pb.MsgProto {
+	m, err := ms.LastMsg()
+	if err != nil {
+		stackFatalf(t, "Error getting sequence last message: %v", err)
+	}
+	return m
+}
+
 func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
 	cs := s.LookupChannel(channel)
 	if cs == nil {
@@ -80,11 +136,7 @@ func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
 	if err != nil {
 		stackFatalf(t, "Error storing message into channel [%v]: %v", channel, err)
 	}
-	m, err := ms.Lookup(seq)
-	if err != nil {
-		stackFatalf(t, "Error looking up message %v: %v", seq, err)
-	}
-	return m
+	return msgStoreLookup(t, ms, seq)
 }
 
 func storeSub(t *testing.T, s Store, channel string) uint64 {
@@ -232,24 +284,24 @@ func testBasicMsgStore(t *testing.T, s Store) {
 	ms := cs.Msgs
 
 	// No message is stored, verify expected values.
-	if m, err := ms.FirstMsg(); m != nil || err != nil {
-		t.Fatalf("Unexpected first message: %v vs %v (%v)", m, nil, err)
+	if m := msgStoreFirstMsg(t, ms); m != nil {
+		t.Fatalf("Unexpected first message: %v vs %v", m, nil)
 	}
 
-	if m, err := ms.LastMsg(); m != nil || err != nil {
-		t.Fatalf("Unexpected first message: %v vs %v (%v)", m, nil, err)
+	if m := msgStoreLastMsg(t, ms); m != nil {
+		t.Fatalf("Unexpected first message: %v vs %v", m, nil)
 	}
 
-	if seq, err := ms.FirstSequence(); seq != 0 || err != nil {
-		t.Fatalf("Unexpected first sequence: %v vs %v (%v)", seq, 0, err)
+	if seq := msgStoreFirstSequence(t, ms); seq != 0 {
+		t.Fatalf("Unexpected first sequence: %v vs %v", seq, 0)
 	}
 
-	if seq, err := ms.LastSequence(); seq != 0 || err != nil {
-		t.Fatalf("Unexpected first sequence: %v vs %v (%v)", seq, 0, err)
+	if seq := msgStoreLastSequence(t, ms); seq != 0 {
+		t.Fatalf("Unexpected first sequence: %v vs %v", seq, 0)
 	}
 
-	if s1, s2, err := ms.FirstAndLastSequence(); s1 != 0 || s2 != 0 || err != nil {
-		t.Fatalf("Unexpected sequences: %v,%v,%v", s1, s2, err)
+	if s1, s2 := msgStoreFirstAndLastSequence(t, ms); s1 != 0 || s2 != 0 {
+		t.Fatalf("Unexpected sequences: %v,%v", s1, s2)
 	}
 
 	payload1 := []byte("m1")
@@ -265,46 +317,34 @@ func testBasicMsgStore(t *testing.T, s Store) {
 		t.Fatalf("Unexpected payload: %v", string(m1.Data))
 	}
 
-	firstMsg, err := ms.FirstMsg()
-	if err != nil {
-		t.Fatalf("Error getting first msg: %v", err)
-	}
+	firstMsg := msgStoreFirstMsg(t, ms)
 	if !reflect.DeepEqual(firstMsg, m1) {
 		t.Fatalf("Unexpected first message: %v vs %v", firstMsg, m1)
 	}
 
-	lastMsg, err := ms.LastMsg()
-	if err != nil {
-		t.Fatalf("Error getting last msg: %v", err)
-	}
+	lastMsg := msgStoreLastMsg(t, ms)
 	if !reflect.DeepEqual(lastMsg, m2) {
 		t.Fatalf("Unexpected last message: %v vs %v", lastMsg, m2)
 	}
 
-	if seq, _ := ms.FirstSequence(); seq != m1.Sequence {
+	if seq := msgStoreFirstSequence(t, ms); seq != m1.Sequence {
 		t.Fatalf("Unexpected first sequence: %v vs %v", seq, m1.Sequence)
 	}
 
-	if seq, _ := ms.LastSequence(); seq != m2.Sequence {
+	if seq := msgStoreLastSequence(t, ms); seq != m2.Sequence {
 		t.Fatalf("Unexpected first sequence: %v vs %v", seq, m2.Sequence)
 	}
 
-	if s1, s2, _ := ms.FirstAndLastSequence(); s1 != m1.Sequence || s2 != m2.Sequence {
+	if s1, s2 := msgStoreFirstAndLastSequence(t, ms); s1 != m1.Sequence || s2 != m2.Sequence {
 		t.Fatalf("Unexpected sequences: %v,%v", s1, s2)
 	}
 
-	lm1, err := ms.Lookup(m1.Sequence)
-	if err != nil {
-		t.Fatalf("Error looking up message %v: %v", m1.Sequence, err)
-	}
+	lm1 := msgStoreLookup(t, ms, m1.Sequence)
 	if !reflect.DeepEqual(lm1, m1) {
 		t.Fatalf("Unexpected lookup result: %v instead of %v", lm1, m1)
 	}
 
-	lm2, err := ms.Lookup(m2.Sequence)
-	if err != nil {
-		t.Fatalf("Error looking up message %v: %v", m2.Sequence, err)
-	}
+	lm2 := msgStoreLookup(t, ms, m2.Sequence)
 	if !reflect.DeepEqual(lm2, m2) {
 		t.Fatalf("Unexpected lookup result: %v instead of %v", lm2, m2)
 	}
@@ -324,10 +364,7 @@ func testBasicMsgStore(t *testing.T, s Store) {
 
 	// Store one more mesasge to check that LastMsg is correctly updated
 	m3 := storeMsg(t, s, "foo", []byte("last"))
-	lastMsg, err = ms.LastMsg()
-	if err != nil {
-		t.Fatalf("Error getting last message: %v", err)
-	}
+	lastMsg = msgStoreLastMsg(t, ms)
 	if !reflect.DeepEqual(lastMsg, m3) {
 		t.Fatalf("Expected last message to be %v, got %v", m3, lastMsg)
 	}
@@ -415,35 +452,14 @@ func testMaxMsgs(t *testing.T, s Store) {
 	}
 
 	// Check that older messages are no longer avail.
-	if m, err := cs.Msgs.Lookup(1); m != nil || err != nil {
-		if err != nil {
-			t.Fatalf("Error looking up first message: %v", err)
-		}
-		t.Fatal("Older messages still available")
-	}
-	if m, err := cs.Msgs.Lookup(uint64(firstSeqAfterLimitReached - 1)); m != nil || err != nil {
-		if err != nil {
-			t.Fatalf("Error looking up first message: %v", err)
-		}
+	if msgStoreLookup(t, cs.Msgs, 1) != nil || msgStoreLookup(t, cs.Msgs, uint64(firstSeqAfterLimitReached-1)) != nil {
 		t.Fatal("Older messages still available")
 	}
 
-	firstMsg, err := cs.Msgs.FirstMsg()
-	if err != nil {
-		t.Fatalf("Error getting first message: %v", err)
-	}
-	firstSeq, err := cs.Msgs.FirstSequence()
-	if err != nil {
-		t.Fatalf("Error getting first sequence: %v", err)
-	}
-	lastMsg, err := cs.Msgs.LastMsg()
-	if err != nil {
-		t.Fatalf("Error getting last message: %v", err)
-	}
-	lastSeq, err := cs.Msgs.LastSequence()
-	if err != nil {
-		t.Fatalf("Error getting last sequence: %v", err)
-	}
+	firstMsg := msgStoreFirstMsg(t, cs.Msgs)
+	firstSeq := msgStoreFirstSequence(t, cs.Msgs)
+	lastMsg := msgStoreLastMsg(t, cs.Msgs)
+	lastSeq := msgStoreLastSequence(t, cs.Msgs)
 
 	if firstMsg == nil || firstMsg.Sequence != firstSeq || firstSeq != firstSeqAfterLimitReached {
 		t.Fatalf("Incorrect first message: msg=%v seq=%v", firstMsg, firstSeq)
@@ -610,7 +626,7 @@ func testMaxAge(t *testing.T, s Store) {
 	cs := s.LookupChannel("foo")
 	expectedFirst := uint64(11)
 	expectedLast := uint64(15)
-	first, last, _ := cs.Msgs.FirstAndLastSequence()
+	first, last := msgStoreFirstAndLastSequence(t, cs.Msgs)
 	if first != expectedFirst || last != expectedLast {
 		t.Fatalf("Expected first/last to be %v/%v, got %v/%v",
 			expectedFirst, expectedLast, first, last)
@@ -671,10 +687,7 @@ func testGetSeqFromStartTime(t *testing.T, s Store) {
 		t.Fatal("Channel foo should exist")
 	}
 	// Check before storing anything
-	seq, err := cs.Msgs.GetSequenceFromTimestamp(time.Now().UnixNano())
-	if err != nil {
-		t.Fatalf("Unexpected error getting sequence: %v", err)
-	}
+	seq := msgStoreGetSequenceFromTimestamp(t, cs.Msgs, time.Now().UnixNano())
 	if seq != 0 {
 		t.Fatalf("Invalid start sequence. Expected %v got %v", 0, seq)
 	}
@@ -689,24 +702,15 @@ func testGetSeqFromStartTime(t *testing.T, s Store) {
 	}
 
 	startMsg := msgs[count/2]
-	seq, err = cs.Msgs.GetSequenceFromTimestamp(startMsg.Timestamp)
-	if err != nil {
-		t.Fatalf("Unexpected error getting sequence: %v", err)
-	}
+	seq = msgStoreGetSequenceFromTimestamp(t, cs.Msgs, startMsg.Timestamp)
 	if seq != startMsg.Sequence {
 		t.Fatalf("Invalid start sequence. Expected %v got %v", startMsg.Sequence, seq)
 	}
-	seq, err = cs.Msgs.GetSequenceFromTimestamp(msgs[0].Timestamp - int64(time.Second))
-	if err != nil {
-		t.Fatalf("Unexpected error getting sequence: %v", err)
-	}
+	seq = msgStoreGetSequenceFromTimestamp(t, cs.Msgs, msgs[0].Timestamp-int64(time.Second))
 	if seq != msgs[0].Sequence {
 		t.Fatalf("Expected seq to be %v, got %v", msgs[0].Sequence, seq)
 	}
-	seq, err = cs.Msgs.GetSequenceFromTimestamp(msgs[count-1].Timestamp + int64(time.Second))
-	if err != nil {
-		t.Fatalf("Unexpected error getting sequence: %v", err)
-	}
+	seq = msgStoreGetSequenceFromTimestamp(t, cs.Msgs, msgs[count-1].Timestamp+int64(time.Second))
 	if seq != msgs[count-1].Sequence+1 {
 		t.Fatalf("Expected seq to be %v, got %v", msgs[count-1].Sequence+1, seq)
 	}
@@ -813,23 +817,12 @@ func TestGSNoOps(t *testing.T) {
 	gms := &genericMsgStore{}
 	defer gms.Close()
 	gms.init("foo", testLogger, &limits.MsgStoreLimits)
-	if m, _ := gms.Lookup(1); m != nil {
+	if msgStoreLookup(t, gms, 1) != nil || msgStoreFirstMsg(t, gms) != nil || msgStoreLastMsg(t, gms) != nil ||
+		gms.Flush() != nil || msgStoreGetSequenceFromTimestamp(t, gms, 0) != 0 || gms.Close() != nil {
 		t.Fatal("Expected no value since these should not be implemented for generic store")
 	}
-	if m, _ := gms.FirstMsg(); m != nil {
-		t.Fatal("Expected no value since these should not be implemented for generic store")
-	}
-	if m, _ := gms.LastMsg(); m != nil {
-		t.Fatal("Expected no value since these should not be implemented for generic store")
-	}
-	if gms.Flush() != nil {
-		t.Fatal("Expected no value since these should not be implemented for generic store")
-	}
-	if seq, _ := gms.GetSequenceFromTimestamp(0); seq != 0 {
-		t.Fatal("Expected no value since these should not be implemented for generic store")
-	}
-	if gms.Close() != nil {
-		t.Fatal("Expected no value since these should not be implemented for generic store")
+	if seq, err := gms.Store([]byte("hello")); seq != 0 || err != nil {
+		t.Fatal("Expected no value since this should not be implemented for generic store")
 	}
 
 	gss := &genericSubStore{}
@@ -945,8 +938,8 @@ func testIncrementalTimestamp(t *testing.T, s Store) {
 		if err1 != nil || err2 != nil {
 			t.Fatalf("Unexpected error on store: %v %v", err1, err2)
 		}
-		m1, _ := ms.Lookup(seq1)
-		m2, _ := ms.Lookup(seq2)
+		m1 := msgStoreLookup(t, ms, seq1)
+		m2 := msgStoreLookup(t, ms, seq2)
 		if m2.Timestamp < m1.Timestamp {
 			t.Fatalf("Timestamp of msg %v is smaller than previous one. Diff is %vms",
 				m2.Sequence, m1.Timestamp-m2.Timestamp)
@@ -994,7 +987,7 @@ func testLimitWithWildcardsInConfig(t *testing.T, s Store) {
 	// This should kick out m1 since for foo.bar, limit will be 2
 	storeMsg(t, s, foobar, []byte("msg3"))
 	cs := s.LookupChannel(foobar)
-	if m, _ := cs.Msgs.Lookup(m1.Sequence); m != nil {
+	if msgStoreLookup(t, cs.Msgs, m1.Sequence) != nil {
 		stackFatalf(t, "M1 should have been removed")
 	}
 	// For bar, however, we should be able to store 3 messages
@@ -1005,7 +998,7 @@ func testLimitWithWildcardsInConfig(t *testing.T, s Store) {
 	// Now, a 4th one should evict m1
 	storeMsg(t, s, bar, []byte("msg4"))
 	cs = s.LookupChannel(bar)
-	if m, _ := cs.Msgs.Lookup(m1.Sequence); m != nil {
+	if msgStoreLookup(t, cs.Msgs, m1.Sequence) != nil {
 		stackFatalf(t, "M1 should have been removed")
 	}
 }

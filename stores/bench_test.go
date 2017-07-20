@@ -43,7 +43,7 @@ func benchStoreMsg(b *testing.B, ms MsgStore, data []byte) *pb.MsgProto {
 	if err != nil {
 		stackFatalf(b, "Error storing message: %v", err)
 	}
-	m, err := ms.Lookup(seq)
+	m := msgStoreLookup(b, ms, seq)
 	if err != nil {
 		stackFatalf(b, "Error looking up message %v: %v", seq, err)
 	}

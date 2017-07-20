@@ -42,6 +42,7 @@ type tLogger interface {
 var (
 	defaultDataStore string
 	testLogger       logger.Logger
+	errOnPurpose     = errors.New("On purpose")
 )
 
 func init() {
@@ -78,6 +79,22 @@ func stackFatalf(t tLogger, f string, args ...interface{}) {
 	}
 
 	t.Fatalf("%s", strings.Join(lines, "\n"))
+}
+
+func msgStoreFirstAndLastSequence(t tLogger, ms stores.MsgStore) (uint64, uint64) {
+	f, l, err := ms.FirstAndLastSequence()
+	if err != nil {
+		stackFatalf(t, "Error getting first and last sequence: %v", err)
+	}
+	return f, l
+}
+
+func msgStoreFirstMsg(t tLogger, ms stores.MsgStore) *pb.MsgProto {
+	m, err := ms.FirstMsg()
+	if err != nil {
+		stackFatalf(t, "Error getting sequence first message: %v", err)
+	}
+	return m
 }
 
 // Helper function to shutdown last, a server that is being restarted in a test.
@@ -2471,7 +2488,7 @@ func TestStartPositionSequenceStart(t *testing.T) {
 		}
 	}
 	// Check first/last
-	firstSeq, lastSeq, _ := s.store.LookupChannel("foo").Msgs.FirstAndLastSequence()
+	firstSeq, lastSeq := msgStoreFirstAndLastSequence(t, s.store.LookupChannel("foo").Msgs)
 	if firstSeq != uint64(opts.MaxMsgs+1) {
 		t.Fatalf("Expected first sequence to be %v, got %v", uint64(opts.MaxMsgs+1), firstSeq)
 	}
@@ -3279,7 +3296,7 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	if cs == nil {
 		t.Fatal("Channel foo should have been recovered")
 	}
-	if m, _ := cs.Msgs.FirstMsg(); m == nil || m.Redelivered {
+	if m := msgStoreFirstMsg(t, cs.Msgs); m == nil || m.Redelivered {
 		t.Fatal("Message should have been recovered as not redelivered")
 	}
 
@@ -6466,7 +6483,7 @@ func (ms *mockedMsgStore) Lookup(seq uint64) (*pb.MsgProto, error) {
 	fail := ms.fail
 	ms.RUnlock()
 	if fail {
-		return nil, fmt.Errorf("On purpose")
+		return nil, errOnPurpose
 	}
 	return ms.MsgStore.Lookup(seq)
 }
@@ -6476,7 +6493,7 @@ func (ms *mockedMsgStore) FirstSequence() (uint64, error) {
 	fail := ms.fail
 	ms.RUnlock()
 	if fail {
-		return 0, fmt.Errorf("On purpose")
+		return 0, errOnPurpose
 	}
 	return ms.MsgStore.FirstSequence()
 }
@@ -6486,7 +6503,7 @@ func (ms *mockedMsgStore) LastSequence() (uint64, error) {
 	fail := ms.fail
 	ms.RUnlock()
 	if fail {
-		return 0, fmt.Errorf("On purpose")
+		return 0, errOnPurpose
 	}
 	return ms.MsgStore.LastSequence()
 }
@@ -6496,7 +6513,7 @@ func (ms *mockedMsgStore) FirstAndLastSequence() (uint64, uint64, error) {
 	fail := ms.fail
 	ms.RUnlock()
 	if fail {
-		return 0, 0, fmt.Errorf("On purpose")
+		return 0, 0, errOnPurpose
 	}
 	return ms.MsgStore.FirstAndLastSequence()
 }
@@ -6506,7 +6523,7 @@ func (ms *mockedMsgStore) GetSequenceFromTimestamp(startTime int64) (uint64, err
 	fail := ms.fail
 	ms.RUnlock()
 	if fail {
-		return 0, fmt.Errorf("On purpose")
+		return 0, errOnPurpose
 	}
 	return ms.MsgStore.GetSequenceFromTimestamp(startTime)
 }
@@ -6534,23 +6551,23 @@ func TestStartPositionFailures(t *testing.T) {
 	mms.Unlock()
 
 	// New only
-	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err == nil || !strings.Contains(err.Error(), "On purpose") {
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err == nil || !strings.Contains(err.Error(), errOnPurpose.Error()) {
 		t.Fatalf("Not failed as expected: %v", err)
 	}
 	// Last received
-	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartWithLastReceived()); err == nil || !strings.Contains(err.Error(), "On purpose") {
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartWithLastReceived()); err == nil || !strings.Contains(err.Error(), errOnPurpose.Error()) {
 		t.Fatalf("Not failed as expected: %v", err)
 	}
 	// Time delta
-	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartAtTimeDelta(time.Second)); err == nil || !strings.Contains(err.Error(), "On purpose") {
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartAtTimeDelta(time.Second)); err == nil || !strings.Contains(err.Error(), errOnPurpose.Error()) {
 		t.Fatalf("Not failed as expected: %v", err)
 	}
 	// Sequence start
-	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartAtSequence(1)); err == nil || !strings.Contains(err.Error(), "On purpose") {
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartAtSequence(1)); err == nil || !strings.Contains(err.Error(), errOnPurpose.Error()) {
 		t.Fatalf("Not failed as expected: %v", err)
 	}
 	// First
-	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartAt(pb.StartPosition_First)); err == nil || !strings.Contains(err.Error(), "On purpose") {
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartAt(pb.StartPosition_First)); err == nil || !strings.Contains(err.Error(), errOnPurpose.Error()) {
 		t.Fatalf("Not failed as expected: %v", err)
 	}
 }

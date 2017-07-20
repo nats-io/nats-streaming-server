@@ -346,6 +346,12 @@ func (gms *genericMsgStore) State() (numMessages int, byteSize uint64, err error
 	return c, b, nil
 }
 
+// Store implements the MsgStore interface
+func (gms *genericMsgStore) Store(data []byte) (uint64, error) {
+	// no-op
+	return 0, nil
+}
+
 // FirstSequence returns sequence for first message stored.
 func (gms *genericMsgStore) FirstSequence() (uint64, error) {
 	gms.RLock()

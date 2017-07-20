@@ -815,6 +815,20 @@ func TestMonitorChannelsz(t *testing.T) {
 			t.Fatalf("Iter=%v - Path=%q - Expected to get %v, got %v", i, ChannelsPath+paths[i], goal, cz)
 		}
 	}
+
+	cs := s.store.LookupChannel("foo")
+	// Produce store failure that prevents getting the list of channels
+	cs.Msgs = &msgStoreFailMsgState{MsgStore: cs.Msgs}
+
+	url := fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, ChannelsPath+"?subs=1")
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("Expected no error: Got %v\n", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("Expected a %d response, got %d\n", http.StatusInternalServerError, resp.StatusCode)
+	}
 }
 
 func TestMonitorChannelsWithSubsz(t *testing.T) {
@@ -873,7 +887,7 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 					continue
 				}
 				msgs, bytes, _ := cs.Msgs.State()
-				firstSeq, lastSeq, _ := cs.Msgs.FirstAndLastSequence()
+				firstSeq, lastSeq := msgStoreFirstAndLastSequence(t, cs.Msgs)
 				channelz := &Channelz{
 					Name:     c,
 					FirstSeq: firstSeq,
@@ -941,6 +955,22 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 	}
 }
 
+type msgStoreFailMsgState struct {
+	stores.MsgStore
+}
+
+func (ms *msgStoreFailMsgState) State() (int, uint64, error) {
+	return 0, 0, errOnPurpose
+}
+
+type msgStoreFailFirstAndLastSequence struct {
+	stores.MsgStore
+}
+
+func (ms *msgStoreFailFirstAndLastSequence) FirstAndLastSequence() (uint64, uint64, error) {
+	return 0, 0, errOnPurpose
+}
+
 func TestMonitorChannelz(t *testing.T) {
 	resetPreviousHTTPConnections()
 	s := runMonitorServer(t, GetDefaultOptions())
@@ -969,7 +999,7 @@ func TestMonitorChannelz(t *testing.T) {
 			return nil
 		}
 		msgs, bytes, _ := cs.Msgs.State()
-		firstSeq, lastSeq, _ := cs.Msgs.FirstAndLastSequence()
+		firstSeq, lastSeq := msgStoreFirstAndLastSequence(t, cs.Msgs)
 		channelz := &Channelz{
 			Name:     name,
 			FirstSeq: firstSeq,
@@ -1011,10 +1041,32 @@ func TestMonitorChannelz(t *testing.T) {
 	url := fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, ChannelsPath+"?channel=donotexist")
 	resp, err := http.Get(url)
 	if err != nil {
-		stackFatalf(t, "Expected no error: Got %v\n", err)
+		t.Fatalf("Expected no error: Got %v\n", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 404 {
-		stackFatalf(t, "Expected a 404 response, got %d\n", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("Expected a %d response, got %d\n", http.StatusNotFound, resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Produce various store failures
+	url = fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, ChannelsPath+"?channel=foo")
+	cs := s.store.LookupChannel("foo")
+	orgCS := cs.Msgs
+	msgStores := []stores.MsgStore{
+		&msgStoreFailMsgState{MsgStore: orgCS},
+		&msgStoreFailFirstAndLastSequence{MsgStore: orgCS},
+	}
+	for _, ms := range msgStores {
+		cs.Msgs = ms
+		resp, err = http.Get(url)
+		if err != nil {
+			t.Fatalf("Expected no error: Got %v\n", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("Expected a %d response, got %d\n", http.StatusInternalServerError, resp.StatusCode)
+		}
+		resp.Body.Close()
 	}
 }

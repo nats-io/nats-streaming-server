@@ -860,16 +860,16 @@ func TestFSBasicRecovery(t *testing.T) {
 	}
 	// In message store, the first message should still be foo1,
 	// regardless of what has been consumed.
-	m, _ := cs.Msgs.FirstMsg()
+	m := msgStoreFirstMsg(t, cs.Msgs)
 	if m == nil || m.Sequence != foo1.Sequence {
 		t.Fatalf("Unexpected message for foo channel: %v", m)
 	}
 	// Check that messages recovered from MsgStore are never
 	// marked as redelivered.
 	checkRedelivered := func(ms MsgStore) bool {
-		start, end, _ := ms.FirstAndLastSequence()
+		start, end := msgStoreFirstAndLastSequence(t, ms)
 		for i := start; i <= end; i++ {
-			if m, _ := ms.Lookup(i); m != nil && m.Redelivered {
+			if m := msgStoreLookup(t, ms, i); m != nil && m.Redelivered {
 				return true
 			}
 		}
@@ -885,7 +885,7 @@ func TestFSBasicRecovery(t *testing.T) {
 	}
 	// In message store, the first message should still be bar1,
 	// regardless of what has been consumed.
-	m, _ = cs.Msgs.FirstMsg()
+	m = msgStoreFirstMsg(t, cs.Msgs)
 	if m == nil || m.Sequence != bar1.Sequence {
 		t.Fatalf("Unexpected message for bar channel: %v", m)
 	}
@@ -1130,7 +1130,7 @@ func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
 	}
 
 	cs := fs.LookupChannel("foo")
-	first, last, _ := cs.Msgs.FirstAndLastSequence()
+	first, last := msgStoreFirstAndLastSequence(t, cs.Msgs)
 	expectedFirst := uint64(51)
 	expectedLast := uint64(60)
 	if first != expectedFirst || last != expectedLast {
@@ -3264,10 +3264,7 @@ func TestFSRecoverWithoutIndexFiles(t *testing.T) {
 		t.Fatal("Expected channel foo to be recovered")
 	}
 	for i := 0; i < total; i++ {
-		m, err := cs.Msgs.Lookup(uint64(i + 1))
-		if err != nil {
-			t.Fatalf("Error looking up message %v: %v", i+1, err)
-		}
+		m := msgStoreLookup(t, cs.Msgs, uint64(i+1))
 		if !reflect.DeepEqual(m, msgs[i]) {
 			t.Fatalf("Expected to get message %v, got %v", msgs[i], m)
 		}
@@ -3300,7 +3297,7 @@ func TestFSEmptySlice(t *testing.T) {
 	if cs == nil {
 		t.Fatalf("Expected to recover foo channel")
 	}
-	lm, err := cs.Msgs.Lookup(1)
+	lm := msgStoreLookup(t, cs.Msgs, 1)
 	if err != nil {
 		t.Fatalf("Error getting message 1: %v", err)
 	}
@@ -3382,10 +3379,10 @@ func TestFSRemoveFileSlices(t *testing.T) {
 	// Check first and last indexes
 	cs := fs.LookupChannel("foo")
 	ms := cs.Msgs.(*FileMsgStore)
-	if m, _ := ms.FirstMsg(); m.Sequence != expectedFirst {
+	if m := msgStoreFirstMsg(t, ms); m.Sequence != expectedFirst {
 		t.Fatalf("Expected message sequence to be %v, got %v", expectedFirst, m.Sequence)
 	}
-	if m, _ := ms.LastMsg(); m.Sequence != uint64(total) {
+	if m := msgStoreLastMsg(t, ms); m.Sequence != uint64(total) {
 		t.Fatalf("Expected message sequence to be %v, got %v", total, m.Sequence)
 	}
 	// Close store
@@ -3396,10 +3393,10 @@ func TestFSRemoveFileSlices(t *testing.T) {
 	defer fs.Close()
 	cs = fs.LookupChannel("foo")
 	ms = cs.Msgs.(*FileMsgStore)
-	if m, _ := ms.FirstMsg(); m.Sequence != expectedFirst {
+	if m := msgStoreFirstMsg(t, ms); m.Sequence != expectedFirst {
 		t.Fatalf("Expected message sequence to be %v, got %v", expectedFirst, m.Sequence)
 	}
-	if m, _ := ms.LastMsg(); m.Sequence != uint64(total) {
+	if m := msgStoreLastMsg(t, ms); m.Sequence != uint64(total) {
 		t.Fatalf("Expected message sequence to be %v, got %v", total, m.Sequence)
 	}
 }
@@ -4200,10 +4197,10 @@ func TestFirstAndLastMsg(t *testing.T) {
 	storeMsg(t, fs, "foo", msg)
 
 	cs := fs.LookupChannel("foo")
-	if m, _ := cs.Msgs.FirstMsg(); m.Sequence != 1 {
+	if m := msgStoreFirstMsg(t, cs.Msgs); m.Sequence != 1 {
 		t.Fatalf("Unexpected first message: %v", m)
 	}
-	if m, _ := cs.Msgs.LastMsg(); m.Sequence != 2 {
+	if m := msgStoreLastMsg(t, cs.Msgs); m.Sequence != 2 {
 		t.Fatalf("Unexpected last message: %v", m)
 	}
 	// Wait for all messages to expire
@@ -4395,10 +4392,7 @@ func TestFSMsgCache(t *testing.T) {
 		t.Fatal("Message not removed from cache")
 	}
 	// First lookup
-	lm, err := ms.Lookup(msg.Sequence)
-	if err != nil {
-		t.Fatalf("Error looking up message %v: %v", msg.Sequence, err)
-	}
+	lm := msgStoreLookup(t, ms, msg.Sequence)
 	if !reflect.DeepEqual(msg, lm) {
 		t.Fatalf("Expected lookup message to be %v, got %v", msg, lm)
 	}
@@ -4408,10 +4402,7 @@ func TestFSMsgCache(t *testing.T) {
 	closeFile := true
 	end := time.Now().Add(2 * time.Duration(cacheTTL))
 	for time.Now().Before(end) {
-		lm, err = ms.Lookup(msg.Sequence)
-		if err != nil {
-			t.Fatalf("Error looking up message %v: %v", msg.Sequence, err)
-		}
+		lm := msgStoreLookup(t, ms, msg.Sequence)
 		if !reflect.DeepEqual(msg, lm) {
 			t.Fatalf("Expected lookup message to be %v, got %v", msg, lm)
 		}
@@ -4428,7 +4419,7 @@ func TestFSMsgCache(t *testing.T) {
 	time.Sleep(bkgTasksSleepDuration + time.Duration(cacheTTL) + 500*time.Millisecond)
 	// Now a lookup should return nil because message
 	// should have been evicted and file is closed
-	lm, err = ms.Lookup(msg.Sequence)
+	lm, err := ms.Lookup(msg.Sequence)
 	if lm != nil || err == nil {
 		t.Fatalf("Unexpected message: %v", lm)
 	}
