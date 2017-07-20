@@ -532,10 +532,14 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 			sortedPendingMsgs := makeSortedPendingMsgs(sub.acksPending)
 			for _, pm := range sortedPendingMsgs {
 				m, err := cs.Msgs.Lookup(pm.seq)
-				if m == nil || err != nil {
-					ss.stan.log.Errorf("Unable to update subscription for %s:%v (%v)",
-						sub.subject, pm.seq, err)
-					// Don't need to ack it since we are destroying this subscription
+				if err != nil {
+					ss.stan.log.Errorf("Unable to update subscription for %s:%v (%v)", sub.subject, pm.seq, err)
+					continue
+				}
+				// This is possible if message has expired or removed from channel
+				// due to limits. No need to ack it since we are destroying this
+				// subscription.
+				if m == nil {
 					continue
 				}
 				// Get one of the remaning queue subscribers.
@@ -3334,6 +3338,8 @@ func (s *StanServer) getNextMsg(cs *stores.ChannelStore, subject string, nextSeq
 		nextMsg, err := cs.Msgs.Lookup(*nextSeq)
 		if err != nil {
 			s.log.Errorf("Error looking up message %v:%v (%v)", subject, *nextSeq, err)
+			// TODO: This will stop delivery. Will revisit later to see if we
+			// should move to the next message (if avail) or not.
 			return nil
 		}
 		if nextMsg != nil {
@@ -3343,6 +3349,11 @@ func (s *StanServer) getNextMsg(cs *stores.ChannelStore, subject string, nextSeq
 		// FirstMsg could be costly (read from disk, etc)
 		// to realize that the message is of lower sequence.
 		// So check with cheaper FirstSequence() first.
+
+		// TODO: Error is ignored here. Will revisit this whole function
+		// later with handling of gaps in message sequence (either due
+		// to errors or absence of messages - that may have been removed
+		// after fixing a previous store corruption).
 		firstAvail, _ := cs.Msgs.FirstSequence()
 		if firstAvail <= *nextSeq {
 			return nil
@@ -3361,15 +3372,6 @@ func (s *StanServer) getNextMsg(cs *stores.ChannelStore, subject string, nextSeq
 		// the first avail message may have been dropped in the
 		// meantime.
 	}
-}
-
-func (s *StanServer) getSequenceFromStartTime(cs *stores.ChannelStore, startTime int64) (uint64, error) {
-	tm, err := cs.Msgs.GetSequenceFromTimestamp(startTime)
-	if err != nil {
-		s.log.Errorf("Unable to get sequence from start time: %v", err)
-		return 0, err
-	}
-	return tm, nil
 }
 
 // Setup the start position for the subscriber.
@@ -3408,7 +3410,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 	case pb.StartPosition_TimeDeltaStart:
 		startTime := time.Now().UnixNano() - sr.StartTimeDelta
 		// If there is no message, seq will be 0.
-		seq, err := s.getSequenceFromStartTime(cs, startTime)
+		seq, err := cs.Msgs.GetSequenceFromTimestamp(startTime)
 		if err != nil {
 			return err
 		}

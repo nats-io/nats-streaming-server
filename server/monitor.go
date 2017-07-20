@@ -400,7 +400,10 @@ func (s *StanServer) handleChannelsz(w http.ResponseWriter, r *http.Request) {
 			carr = carr[minoff:maxoff]
 			for _, cz := range carr {
 				cs := channels[cz.Name]
-				updateChannelz(cz, cs, subsOption)
+				if err := updateChannelz(cz, cs, subsOption); err != nil {
+					http.Error(w, fmt.Sprintf("Error getting information about channel %q: %v", channelName, err), http.StatusInternalServerError)
+					return
+				}
 			}
 			channelsz.Count = len(carr)
 			channelsz.Channels = carr
@@ -425,13 +428,22 @@ func (s *StanServer) handleOneChannel(w http.ResponseWriter, r *http.Request, na
 		return
 	}
 	channelz := &Channelz{Name: name}
-	updateChannelz(channelz, cs, subsOption)
+	if err := updateChannelz(channelz, cs, subsOption); err != nil {
+		http.Error(w, fmt.Sprintf("Error getting information about channel %q: %v", name, err), http.StatusInternalServerError)
+		return
+	}
 	s.sendResponse(w, r, channelz)
 }
 
-func updateChannelz(cz *Channelz, cs *stores.ChannelStore, subsOption int) {
-	msgs, bytes, _ := cs.Msgs.State()
-	fseq, lseq, _ := cs.Msgs.FirstAndLastSequence()
+func updateChannelz(cz *Channelz, cs *stores.ChannelStore, subsOption int) error {
+	msgs, bytes, err := cs.Msgs.State()
+	if err != nil {
+		return fmt.Errorf("unable to get message state: %v", err)
+	}
+	fseq, lseq, err := cs.Msgs.FirstAndLastSequence()
+	if err != nil {
+		return fmt.Errorf("unable to get first and last sequence: %v", err)
+	}
 	cz.Msgs = msgs
 	cz.Bytes = bytes
 	cz.FirstSeq = fseq
@@ -440,6 +452,7 @@ func updateChannelz(cz *Channelz, cs *stores.ChannelStore, subsOption int) {
 		ss := cs.UserData.(*subStore)
 		cz.Subscriptions = getMonitorChannelSubs(ss)
 	}
+	return nil
 }
 
 func (s *StanServer) sendResponse(w http.ResponseWriter, r *http.Request, content interface{}) {
