@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	natsd "github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
@@ -265,6 +266,7 @@ func TestParsePerChannelLimitsSetToZero(t *testing.T) {
 }
 
 func TestParseMapStruct(t *testing.T) {
+	expectFailureFor(t, "streaming: xxx", mapStructErr)
 	expectFailureFor(t, "store_limits: xxx", mapStructErr)
 	expectFailureFor(t, "store_limits: {\nchannels: xxx\n}", mapStructErr)
 	expectFailureFor(t, "store_limits: {\nchannels: {\n\"foo\": xxx\n}\n}", mapStructErr)
@@ -273,6 +275,7 @@ func TestParseMapStruct(t *testing.T) {
 }
 
 func TestParseWrongTypes(t *testing.T) {
+	expectFailureFor(t, "streaming:{id:123}", wrongTypeErr)
 	expectFailureFor(t, "id: 123", wrongTypeErr)
 	expectFailureFor(t, "discover_prefix: 123", wrongTypeErr)
 	expectFailureFor(t, "store: 123", wrongTypeErr)
@@ -334,5 +337,94 @@ func expectFailureFor(t *testing.T, content, errorMatch string) {
 		t.Fatalf("For content: %q, expected failure, did not get one", content)
 	} else if !strings.Contains(err.Error(), errorMatch) {
 		t.Fatalf("Possible unexpected error: %v", err)
+	}
+}
+
+func TestParseProcessConfigFiles(t *testing.T) {
+	// Calling ProcessConfigFiles with no file should return default stan options
+	// and empty nats options.
+	sopts, nopts, err := ProcessConfigFiles("", "")
+	if err != nil {
+		t.Fatalf("Error processing config files: %v", err)
+	}
+	if !reflect.DeepEqual(sopts, GetDefaultOptions()) {
+		t.Fatalf("Did not get default options: %v", sopts)
+	}
+	if !reflect.DeepEqual(nopts, &natsd.Options{}) {
+		t.Fatalf("Did not get empty NATS options: %v", nopts)
+	}
+
+	sconf := "s.conf"
+	nconf := "n.conf"
+	defer os.Remove(sconf)
+	defer os.Remove(nconf)
+
+	// This test will first use both streaming and nats configuration
+	// files, each having configuration elements for the other module
+	// that should be ignored since they will be processed individually.
+	scontent := []byte(`
+	port: 4223
+	streaming: {
+		cluster_id: my_cluster
+	}`)
+	if err := ioutil.WriteFile(sconf, scontent, 0660); err != nil {
+		t.Fatalf("Error creating conf file: %v", err)
+	}
+	ncontent := []byte(`
+	port: 5223
+	streaming: {
+		cluster_id: my_cluster_2
+	}`)
+	if err := ioutil.WriteFile(nconf, ncontent, 0660); err != nil {
+		t.Fatalf("Error creating conf file: %v", err)
+	}
+	sopts, nopts, err = ProcessConfigFiles(sconf, nconf)
+	if err != nil {
+		t.Fatalf("Error processing config files: %v", err)
+	}
+	// Check that streaming and NATS options have been correctly loaded
+	if sopts.ID != "my_cluster" {
+		t.Fatalf("Unexpected cluster id: %v", sopts.ID)
+	}
+	if nopts.Port != 5223 {
+		t.Fatalf("Unexpected listen port: %v", nopts.Port)
+	}
+
+	// Now pass only one file, and verify that the single file is used
+	// for both streaming and nats.
+	for i := 0; i < 2; i++ {
+		if i == 0 {
+			sopts, nopts, err = ProcessConfigFiles(sconf, "")
+		} else {
+			sopts, nopts, err = ProcessConfigFiles("", sconf)
+		}
+		if err != nil {
+			t.Fatalf("Error processing config files: %v", err)
+		}
+		if sopts.ID != "my_cluster" {
+			t.Fatalf("Unexpected cluster id: %v", sopts.ID)
+		}
+		// This should be the port defined in scontent
+		if nopts.Port != 4223 {
+			t.Fatalf("Unexpected listen port: %v", nopts.Port)
+		}
+	}
+	// Same with other conf file
+	for i := 0; i < 2; i++ {
+		if i == 0 {
+			sopts, nopts, err = ProcessConfigFiles(nconf, "")
+		} else {
+			sopts, nopts, err = ProcessConfigFiles("", nconf)
+		}
+		if err != nil {
+			t.Fatalf("Error processing config files: %v", err)
+		}
+		if sopts.ID != "my_cluster_2" {
+			t.Fatalf("Unexpected cluster id: %v", sopts.ID)
+		}
+		// This should be the port defined in scontent
+		if nopts.Port != 5223 {
+			t.Fatalf("Unexpected listen port: %v", nopts.Port)
+		}
 	}
 }
