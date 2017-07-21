@@ -4579,3 +4579,23 @@ func TestFSGetChannels(t *testing.T) {
 	defer fs.Close()
 	testGetChannels(t, fs)
 }
+
+func TestFSDeleteSubError(t *testing.T) {
+	cleanupDatastore(t, defaultDataStore)
+	defer cleanupDatastore(t, defaultDataStore)
+
+	// No buffer for this test
+	fs := createDefaultFileStore(t, BufferSize(0))
+	defer fs.Close()
+
+	subid := storeSub(t, fs, "foo")
+	cs := fs.LookupChannel("foo")
+	ss := cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.file.handle.Close()
+	ss.Unlock()
+
+	if err := ss.DeleteSub(subid); err == nil {
+		t.Fatal("Expected error on sub delete, got none")
+	}
+}

@@ -247,7 +247,7 @@ type SubStore interface {
 	UpdateSub(*spb.SubState) error
 
 	// DeleteSub invalidates the subscription 'subid'.
-	DeleteSub(subid uint64)
+	DeleteSub(subid uint64) error
 
 	// AddSeqPending adds the given message 'seqno' to the subscription 'subid'.
 	AddSeqPending(subid, seqno uint64) error

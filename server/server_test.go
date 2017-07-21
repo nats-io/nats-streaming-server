@@ -6469,12 +6469,19 @@ type mockedMsgStore struct {
 	fail bool
 }
 
+type mockedSubStore struct {
+	stores.SubStore
+	sync.RWMutex
+	fail bool
+}
+
 func (ms *mockedStore) CreateChannel(name string, userData interface{}) (*stores.ChannelStore, bool, error) {
 	cs, b, err := ms.Store.CreateChannel(name, userData)
 	if err != nil {
 		return nil, false, err
 	}
 	cs.Msgs = &mockedMsgStore{MsgStore: cs.Msgs}
+	cs.Subs = &mockedSubStore{SubStore: cs.Subs}
 	return cs, b, nil
 }
 
@@ -6724,4 +6731,133 @@ forLoop:
 	if !gotErr {
 		t.Fatalf("Did not capture error about updating subscription")
 	}
+}
+
+func (ss *mockedSubStore) AddSeqPending(subid, seq uint64) error {
+	ss.RLock()
+	fail := ss.fail
+	ss.RUnlock()
+	if fail {
+		return fmt.Errorf("On purpose")
+	}
+	return ss.SubStore.AddSeqPending(subid, seq)
+}
+
+func (ss *mockedSubStore) DeleteSub(subid uint64) error {
+	ss.RLock()
+	fail := ss.fail
+	ss.RUnlock()
+	if fail {
+		return fmt.Errorf("On purpose")
+	}
+	return ss.SubStore.DeleteSub(subid)
+}
+
+func TestDeleteSubFailures(t *testing.T) {
+	logger := &checkErrorLogger{checkErrorStr: "deleting subscription"}
+	opts := GetDefaultOptions()
+	opts.CustomLogger = logger
+	s, err := RunServerWithOpts(opts, nil)
+	if err != nil {
+		t.Fatalf("Error running server: %v", err)
+	}
+	defer s.Shutdown()
+
+	s.mu.Lock()
+	ms := &mockedStore{Store: s.store}
+	s.store = ms
+	s.mu.Unlock()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Create a plain sub
+	psub, err := sc.Subscribe("foo", func(_ *stan.Msg) {})
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Create a queue sub
+	qsub, err := sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {})
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Create a durable queue sub with manual ack and does not ack message
+	ch := make(chan bool)
+	dqsub1, err := sc.QueueSubscribe("foo", "dqueue", func(_ *stan.Msg) {
+		ch <- true
+	}, stan.DurableName("dur"), stan.SetManualAckMode())
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Produce a message to this durable queue sub
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	// Create 2 more durable queue subs
+	dqsub2, err := sc.QueueSubscribe("foo", "dqueue", func(_ *stan.Msg) {},
+		stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if _, err := sc.QueueSubscribe("foo", "dqueue", func(_ *stan.Msg) {},
+		stan.DurableName("dur")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Ensure subscription is processed
+	waitForNumSubs(t, s, clientName, 5)
+
+	cs := s.store.LookupChannel("foo")
+	mss := cs.Subs.(*mockedSubStore)
+	mss.Lock()
+	mss.fail = true
+	mss.Unlock()
+
+	// Check that server reported an error
+	checkError := func() {
+		logger.Lock()
+		gotIt := logger.gotError
+		logger.gotError = false
+		logger.Unlock()
+		if !gotIt {
+			stackFatalf(t, "Server did not log error on unsubscribe")
+		}
+	}
+
+	// Now unsubscribe
+	if err := psub.Unsubscribe(); err != nil {
+		t.Fatalf("Unexpected error on unsubscribe: %v", err)
+	}
+	// Wait for unsubscribe to be processed
+	waitForNumSubs(t, s, clientName, 4)
+	checkError()
+
+	// Unsubscribe queue sub
+	if err := qsub.Unsubscribe(); err != nil {
+		t.Fatalf("Unexpected error on unsubscribe: %v", err)
+	}
+	// Wait for unsubscribe to be processed
+	waitForNumSubs(t, s, clientName, 3)
+	checkError()
+
+	// Close 1 durable queue sub
+	if err := dqsub2.Close(); err != nil {
+		t.Fatalf("Error on close: %v", err)
+	}
+	// Wait for close to be processed
+	waitForNumSubs(t, s, clientName, 2)
+	checkError()
+
+	// Now check that when closing qsub1 that has an unack message,
+	// server logs an error when trying to move the message to remaining
+	// queue member
+	logger.Lock()
+	logger.checkErrorStr = "update subscription"
+	logger.Unlock()
+	if err := dqsub1.Close(); err != nil {
+		t.Fatalf("Error on close: %v", err)
+	}
+	// Wait for close to be processed
+	waitForNumSubs(t, s, clientName, 1)
+	checkError()
 }

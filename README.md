@@ -56,6 +56,11 @@ NATS Streaming provides the following high-level feature set.
 
 ## Version `0.6.0`
 
+The SubStore interface was updated.
+
+* `DeleteSub()` has been modified to return an error. This allows the server to report possible errors during deletion
+of a subscription.
+
 The MsgStore interface was updated.
 
 * `Lookup()`, `FirstSequence()`, `LastSequence()`, `FirstAndLastSequence()`, `GetSequenceFromTimestamp()`, `FirstMsg()` and `LastMsg()`

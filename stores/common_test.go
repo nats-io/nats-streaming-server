@@ -122,6 +122,12 @@ func msgStoreLastMsg(t tLogger, ms MsgStore) *pb.MsgProto {
 	return m
 }
 
+func subStoreDeleteSub(t tLogger, ss SubStore, subid uint64) {
+	if err := ss.DeleteSub(subid); err != nil {
+		stackFatalf(t, "Error deleting subscription %v: %v", subid, err)
+	}
+}
+
 func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
 	cs := s.LookupChannel(channel)
 	if cs == nil {
@@ -194,7 +200,7 @@ func storeSubDelete(t *testing.T, s Store, channel string, subID ...uint64) {
 	}
 	ss := cs.Subs
 	for _, s := range subID {
-		ss.DeleteSub(s)
+		subStoreDeleteSub(t, ss, s)
 	}
 }
 
@@ -667,7 +673,7 @@ func testBasicSubStore(t *testing.T, s Store) {
 	if err := ss.UpdateSub(sub); err != nil {
 		t.Fatalf("Unexpected error on update sub: %v", err)
 	}
-	ss.DeleteSub(sub.ID)
+	subStoreDeleteSub(t, ss, sub.ID)
 
 	// Chekck that there is no error if we add updates for deleted sub.
 	if err := ss.AddSeqPending(sub.ID, 2); err != nil {
