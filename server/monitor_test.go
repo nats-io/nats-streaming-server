@@ -1050,9 +1050,13 @@ func TestMonitorChannelz(t *testing.T) {
 	resp.Body.Close()
 
 	// Produce various store failures
-	url = fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, ChannelsPath+"?channel=foo")
-	cs := s.store.LookupChannel("foo")
+	// Avoid race conditions, create a channel for which there is no subscription
+	cs, err := s.lookupOrCreateChannel("nosub")
+	if err != nil {
+		t.Fatalf("Error creating channel: %v", err)
+	}
 	orgCS := cs.Msgs
+	url = fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, ChannelsPath+"?channel=nosub")
 	msgStores := []stores.MsgStore{
 		&msgStoreFailMsgState{MsgStore: orgCS},
 		&msgStoreFailFirstAndLastSequence{MsgStore: orgCS},
