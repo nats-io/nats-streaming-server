@@ -3273,10 +3273,12 @@ func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 }
 
 // DeleteSub invalidates this subscription.
-func (ss *FileSubStore) DeleteSub(subid uint64) {
+func (ss *FileSubStore) DeleteSub(subid uint64) error {
 	ss.Lock()
 	ss.delSub.ID = subid
-	ss.writeRecord(nil, subRecDel, &ss.delSub)
+	err := ss.writeRecord(nil, subRecDel, &ss.delSub)
+	// Even if there is an error, continue with cleanup. If later
+	// a compact is successful, the sub won't be present in the compacted file.
 	if s, exists := ss.subs[subid]; exists {
 		delete(ss.subs, subid)
 		// writeRecord has already accounted for the count of the
@@ -3289,6 +3291,7 @@ func (ss *FileSubStore) DeleteSub(subid uint64) {
 		}
 	}
 	ss.Unlock()
+	return err
 }
 
 // shouldCompact returns a boolean indicating if we should compact

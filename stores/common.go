@@ -455,10 +455,11 @@ func (gss *genericSubStore) createSub(sub *spb.SubState) error {
 }
 
 // DeleteSub invalidates this subscription.
-func (gss *genericSubStore) DeleteSub(subid uint64) {
+func (gss *genericSubStore) DeleteSub(subid uint64) error {
 	gss.Lock()
 	gss.subsCount--
 	gss.Unlock()
+	return nil
 }
 
 // AddSeqPending adds the given message seqno to the given subscription.

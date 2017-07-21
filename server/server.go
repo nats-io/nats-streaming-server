@@ -452,6 +452,8 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 	}
 
 	sub.Lock()
+	subject := sub.subject
+	inbox := sub.Inbox
 	sub.removed = true
 	sub.clearAckTimer()
 	durableKey := ""
@@ -473,12 +475,19 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 	qgroup := sub.QGroup
 	sub.Unlock()
 
+	reportError := func(err error) {
+		ss.stan.log.Errorf("Error deleting subscription on channel %s (id=%v inbox=%v, ackInbox=%v, err=%v), the subscription may be recovered on restart",
+			subject, subid, inbox, ackInbox, err)
+	}
+
 	// Delete from storage non durable subscribers on either connection
 	// close or call to Unsubscribe(), and durable subscribers only on
 	// Unsubscribe(). Leave durable queue subs for now, they need to
 	// be treated differently.
 	if !isDurable || (unsubscribe && durableKey != "") {
-		store.DeleteSub(subid)
+		if err := store.DeleteSub(subid); err != nil {
+			reportError(err)
+		}
 	}
 
 	ss.Lock()
@@ -507,7 +516,9 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 			if !isDurable || unsubscribe {
 				delete(ss.qsubs, qgroup)
 				// Delete from storage too.
-				store.DeleteSub(subid)
+				if err := store.DeleteSub(subid); err != nil {
+					reportError(err)
+				}
 			} else {
 				// Group is durable and last member just left the group,
 				// but didn't call Unsubscribe(). Need to keep a reference
@@ -590,7 +601,9 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 			// member, we need to delete from storage (we did that higher in
 			// that function for non durable case). Issue #215.
 			if isDurable {
-				store.DeleteSub(subid)
+				if err := store.DeleteSub(subid); err != nil {
+					reportError(err)
+				}
 			}
 		}
 		if storageUpdate {
