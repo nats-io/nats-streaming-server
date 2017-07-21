@@ -428,7 +428,7 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	defer resetDefaultPartitionsVars()
 
 	// For this test, use a larger value than other tests
-	partitionsRequestTimeout = 500 * time.Millisecond
+	partitionsRequestTimeout = time.Second
 
 	ncOpts1 := natsdTest.DefaultTestOptions
 	ncOpts1.Cluster.Host = "localhost"

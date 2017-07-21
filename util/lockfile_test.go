@@ -41,6 +41,16 @@ func TestLockFile(t *testing.T) {
 		t.Fatalf("Error creating lock file: %v", err)
 	}
 	defer f.Close()
+	if !parentProcess {
+		// As a child process that got the lock, create a file
+		// that the parent can check the existence of to proceed.
+		wf, err := os.Create("test_child.txt")
+		if err != nil {
+			t.Fatalf("Child process unable to create file: %v", err)
+		}
+		wf.Close()
+		defer os.Remove(wf.Name())
+	}
 
 	// If we are the parent process, try to spawn a new process
 	// that will try to grab the lock for same file
@@ -56,7 +66,13 @@ func TestLockFile(t *testing.T) {
 	} else {
 		// If the child process, wait a bit while parent process
 		// tries to get the lock.
-		time.Sleep(2 * time.Second)
+		for {
+			if _, err := os.Stat("test_parent.txt"); err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			break
+		}
 	}
 	// Release the lock
 	if err := f.Close(); err != nil {
@@ -80,13 +96,26 @@ func TestLockFile(t *testing.T) {
 			}
 		}()
 		// Give a chance for the child process to run
-		time.Sleep(time.Second)
+		for {
+			if _, err := os.Stat("test_child.txt"); err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			break
+		}
 		// The parent process should now be the one that fails
 		f, err := CreateLockFile(fname)
 		if err == nil {
 			f.Close()
 			t.Fatal("Expected CreateLockFile to fail, it did not")
 		}
+		// Write a file to indicate to the child process that we are done
+		wf, err := os.Create("test_parent.txt")
+		if err != nil {
+			t.Fatalf("Parent process unable to create file: %v", err)
+		}
+		wf.Close()
+		defer os.Remove(wf.Name())
 		wg.Wait()
 	}
 }
