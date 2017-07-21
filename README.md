@@ -54,6 +54,14 @@ NATS Streaming provides the following high-level feature set.
 
 # Important Changes
 
+## Version `0.6.0`
+
+The MsgStore interface was updated.
+
+* `Lookup()`, `FirstSequence()`, `LastSequence()`, `FirstAndLastSequence()`, `GetSequenceFromTimestamp()`, `FirstMsg()` and `LastMsg()`
+have all been modified to return an error. This is so that implementations that may fail to lookup, get the first sequence, etc...
+have a way to report the error to the caller.
+
 ## Version `0.5.0`
 
 The Store interface was updated. There are 2 news APIs:

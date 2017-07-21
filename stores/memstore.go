@@ -121,51 +121,51 @@ func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
 }
 
 // Lookup returns the stored message with given sequence number.
-func (ms *MemoryMsgStore) Lookup(seq uint64) *pb.MsgProto {
+func (ms *MemoryMsgStore) Lookup(seq uint64) (*pb.MsgProto, error) {
 	ms.RLock()
 	m := ms.msgs[seq]
 	ms.RUnlock()
-	return m
+	return m, nil
 }
 
 // FirstMsg returns the first message stored.
-func (ms *MemoryMsgStore) FirstMsg() *pb.MsgProto {
+func (ms *MemoryMsgStore) FirstMsg() (*pb.MsgProto, error) {
 	ms.RLock()
 	m := ms.msgs[ms.first]
 	ms.RUnlock()
-	return m
+	return m, nil
 }
 
 // LastMsg returns the last message stored.
-func (ms *MemoryMsgStore) LastMsg() *pb.MsgProto {
+func (ms *MemoryMsgStore) LastMsg() (*pb.MsgProto, error) {
 	ms.RLock()
 	m := ms.msgs[ms.last]
 	ms.RUnlock()
-	return m
+	return m, nil
 }
 
 // GetSequenceFromTimestamp returns the sequence of the first message whose
 // timestamp is greater or equal to given timestamp.
-func (ms *MemoryMsgStore) GetSequenceFromTimestamp(timestamp int64) uint64 {
+func (ms *MemoryMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error) {
 	ms.RLock()
 	defer ms.RUnlock()
 
 	// Quick checks first
 	if len(ms.msgs) == 0 {
-		return 0
+		return 0, nil
 	}
 	if ms.msgs[ms.first].Timestamp >= timestamp {
-		return ms.first
+		return ms.first, nil
 	}
 	if timestamp >= ms.msgs[ms.last].Timestamp {
-		return ms.last + 1
+		return ms.last + 1, nil
 	}
 
 	index := sort.Search(len(ms.msgs), func(i int) bool {
 		return ms.msgs[uint64(i)+ms.first].Timestamp >= timestamp
 	})
 
-	return uint64(index) + ms.first
+	return uint64(index) + ms.first, nil
 }
 
 // expireMsgs ensures that messages don't stay in the log longer than the

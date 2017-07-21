@@ -42,6 +42,7 @@ type tLogger interface {
 var (
 	defaultDataStore string
 	testLogger       logger.Logger
+	errOnPurpose     = errors.New("On purpose")
 )
 
 func init() {
@@ -78,6 +79,22 @@ func stackFatalf(t tLogger, f string, args ...interface{}) {
 	}
 
 	t.Fatalf("%s", strings.Join(lines, "\n"))
+}
+
+func msgStoreFirstAndLastSequence(t tLogger, ms stores.MsgStore) (uint64, uint64) {
+	f, l, err := ms.FirstAndLastSequence()
+	if err != nil {
+		stackFatalf(t, "Error getting first and last sequence: %v", err)
+	}
+	return f, l
+}
+
+func msgStoreFirstMsg(t tLogger, ms stores.MsgStore) *pb.MsgProto {
+	m, err := ms.FirstMsg()
+	if err != nil {
+		stackFatalf(t, "Error getting sequence first message: %v", err)
+	}
+	return m
 }
 
 // Helper function to shutdown last, a server that is being restarted in a test.
@@ -294,27 +311,34 @@ func TestRunServer(t *testing.T) {
 }
 
 type dummyLogger struct {
+	sync.Mutex
 	msg string
 }
 
-func (d *dummyLogger) Noticef(format string, args ...interface{}) {
+func (d *dummyLogger) log(format string, args ...interface{}) {
+	d.Lock()
 	d.msg = fmt.Sprintf(format, args...)
+	d.Unlock()
+}
+
+func (d *dummyLogger) Noticef(format string, args ...interface{}) {
+	d.log(format, args...)
 }
 
 func (d *dummyLogger) Debugf(format string, args ...interface{}) {
-	d.msg = fmt.Sprintf(format, args...)
+	d.log(format, args...)
 }
 
 func (d *dummyLogger) Tracef(format string, args ...interface{}) {
-	d.msg = fmt.Sprintf(format, args...)
+	d.log(format, args...)
 }
 
 func (d *dummyLogger) Errorf(format string, args ...interface{}) {
-	d.msg = fmt.Sprintf(format, args...)
+	d.log(format, args...)
 }
 
 func (d *dummyLogger) Fatalf(format string, args ...interface{}) {
-	d.msg = fmt.Sprintf(format, args...)
+	d.log(format, args...)
 }
 
 func TestRunServerFailureLogsCause(t *testing.T) {
@@ -2464,7 +2488,7 @@ func TestStartPositionSequenceStart(t *testing.T) {
 		}
 	}
 	// Check first/last
-	firstSeq, lastSeq := s.store.LookupChannel("foo").Msgs.FirstAndLastSequence()
+	firstSeq, lastSeq := msgStoreFirstAndLastSequence(t, s.store.LookupChannel("foo").Msgs)
 	if firstSeq != uint64(opts.MaxMsgs+1) {
 		t.Fatalf("Expected first sequence to be %v, got %v", uint64(opts.MaxMsgs+1), firstSeq)
 	}
@@ -3272,7 +3296,7 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	if cs == nil {
 		t.Fatal("Channel foo should have been recovered")
 	}
-	if m := cs.Msgs.FirstMsg(); m == nil || m.Redelivered {
+	if m := msgStoreFirstMsg(t, cs.Msgs); m == nil || m.Redelivered {
 		t.Fatal("Message should have been recovered as not redelivered")
 	}
 
@@ -3305,9 +3329,9 @@ func TestFileStoreRedeliveredPerSub(t *testing.T) {
 	}
 
 	// Start a subscriber that consumes the message but does not ack it.
-	var err error
-	if sub1, err = sc.Subscribe("foo", cb, stan.DeliverAllAvailable(),
-		stan.SetManualAckMode(), stan.AckWait(time.Second)); err != nil {
+	sub1, err := sc.Subscribe("foo", cb, stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(), stan.AckWait(time.Second))
+	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	// Wait for 1st msg to be received
@@ -6432,5 +6456,272 @@ func TestFileStoreMultipleShadowQSubs(t *testing.T) {
 	}
 	if shadow.ID != 2 || lastSent != 2 {
 		t.Fatalf("Recovered shadow queue sub should be ID 2, lastSent 2, got %v, %v", shadow.ID, lastSent)
+	}
+}
+
+type mockedStore struct {
+	stores.Store
+}
+
+type mockedMsgStore struct {
+	stores.MsgStore
+	sync.RWMutex
+	fail bool
+}
+
+func (ms *mockedStore) CreateChannel(name string, userData interface{}) (*stores.ChannelStore, bool, error) {
+	cs, b, err := ms.Store.CreateChannel(name, userData)
+	if err != nil {
+		return nil, false, err
+	}
+	cs.Msgs = &mockedMsgStore{MsgStore: cs.Msgs}
+	return cs, b, nil
+}
+
+func (ms *mockedMsgStore) Lookup(seq uint64) (*pb.MsgProto, error) {
+	ms.RLock()
+	fail := ms.fail
+	ms.RUnlock()
+	if fail {
+		return nil, errOnPurpose
+	}
+	return ms.MsgStore.Lookup(seq)
+}
+
+func (ms *mockedMsgStore) FirstSequence() (uint64, error) {
+	ms.RLock()
+	fail := ms.fail
+	ms.RUnlock()
+	if fail {
+		return 0, errOnPurpose
+	}
+	return ms.MsgStore.FirstSequence()
+}
+
+func (ms *mockedMsgStore) LastSequence() (uint64, error) {
+	ms.RLock()
+	fail := ms.fail
+	ms.RUnlock()
+	if fail {
+		return 0, errOnPurpose
+	}
+	return ms.MsgStore.LastSequence()
+}
+
+func (ms *mockedMsgStore) FirstAndLastSequence() (uint64, uint64, error) {
+	ms.RLock()
+	fail := ms.fail
+	ms.RUnlock()
+	if fail {
+		return 0, 0, errOnPurpose
+	}
+	return ms.MsgStore.FirstAndLastSequence()
+}
+
+func (ms *mockedMsgStore) GetSequenceFromTimestamp(startTime int64) (uint64, error) {
+	ms.RLock()
+	fail := ms.fail
+	ms.RUnlock()
+	if fail {
+		return 0, errOnPurpose
+	}
+	return ms.MsgStore.GetSequenceFromTimestamp(startTime)
+}
+
+func TestStartPositionFailures(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	s.mu.Lock()
+	ms := &mockedStore{Store: s.store}
+	s.store = ms
+	s.mu.Unlock()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unable to publish: %v", err)
+	}
+
+	cs := s.store.LookupChannel("foo")
+	mms := cs.Msgs.(*mockedMsgStore)
+	mms.Lock()
+	mms.fail = true
+	mms.Unlock()
+
+	// New only
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err == nil || !strings.Contains(err.Error(), errOnPurpose.Error()) {
+		t.Fatalf("Not failed as expected: %v", err)
+	}
+	// Last received
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartWithLastReceived()); err == nil || !strings.Contains(err.Error(), errOnPurpose.Error()) {
+		t.Fatalf("Not failed as expected: %v", err)
+	}
+	// Time delta
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartAtTimeDelta(time.Second)); err == nil || !strings.Contains(err.Error(), errOnPurpose.Error()) {
+		t.Fatalf("Not failed as expected: %v", err)
+	}
+	// Sequence start
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartAtSequence(1)); err == nil || !strings.Contains(err.Error(), errOnPurpose.Error()) {
+		t.Fatalf("Not failed as expected: %v", err)
+	}
+	// First
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.StartAt(pb.StartPosition_First)); err == nil || !strings.Contains(err.Error(), errOnPurpose.Error()) {
+		t.Fatalf("Not failed as expected: %v", err)
+	}
+}
+
+type checkErrorLogger struct {
+	dummyLogger
+	checkErrorStr string
+	gotError      bool
+}
+
+func (l *checkErrorLogger) Errorf(format string, args ...interface{}) {
+	l.log(format, args...)
+	l.Lock()
+	if strings.Contains(l.msg, l.checkErrorStr) {
+		l.gotError = true
+	}
+	l.Unlock()
+}
+
+func TestMsgLookupFailures(t *testing.T) {
+	logger := &checkErrorLogger{checkErrorStr: "looking up"}
+	opts := GetDefaultOptions()
+	opts.CustomLogger = logger
+	s, err := RunServerWithOpts(opts, nil)
+	if err != nil {
+		t.Fatalf("Error running server: %v", err)
+	}
+	defer s.Shutdown()
+
+	s.mu.Lock()
+	ms := &mockedStore{Store: s.store}
+	s.store = ms
+	s.mu.Unlock()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	rcvCh := make(chan bool)
+	sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {
+		rcvCh <- true
+	})
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	cs := s.store.LookupChannel("foo")
+	mms := cs.Msgs.(*mockedMsgStore)
+	mms.Lock()
+	mms.fail = true
+	mms.Unlock()
+
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unable to publish: %v", err)
+	}
+
+	select {
+	case <-rcvCh:
+		t.Fatal("Should not have received the message")
+	case <-time.After(500 * time.Millisecond):
+		// we waited "long enoug" and did not receive anything, which is good
+	}
+	logger.Lock()
+	gotErr := logger.gotError
+	logger.Unlock()
+	if !gotErr {
+		t.Fatalf("Did not capture error about lookup")
+	}
+	mms.Lock()
+	mms.fail = false
+	mms.Unlock()
+	sub.Unsubscribe()
+
+	// Create subscription, manual ack mode, don't ack, wait for redelivery
+	sub, err = sc.Subscribe("foo", func(_ *stan.Msg) {
+		rcvCh <- true
+	}, stan.DeliverAllAvailable(), stan.SetManualAckMode(), stan.AckWait(time.Second))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if err := Wait(rcvCh); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Activate store failure
+	mms.Lock()
+	mms.fail = true
+	logger.Lock()
+	logger.checkErrorStr = "Error getting message for redelivery"
+	logger.gotError = false
+	logger.Unlock()
+	mms.Unlock()
+	// Make sure message is not redelivered and we capture the error
+	select {
+	case <-rcvCh:
+		t.Fatal("Should not have received the message")
+	case <-time.After(1500 * time.Millisecond):
+		// we waited more than redelivery time and did not receive anything, which is good
+	}
+	logger.Lock()
+	gotErr = logger.gotError
+	logger.Unlock()
+	if !gotErr {
+		t.Fatalf("Did not capture error about redelivery")
+	}
+	mms.Lock()
+	mms.fail = false
+	mms.Unlock()
+	sub.Unsubscribe()
+
+	// Check that removal of qsub with pending message
+
+	// One queue member receives and acks
+	if _, err := sc.QueueSubscribe("bar", "queue", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	// Another member does not ack.
+	qsub2, err := sc.QueueSubscribe("bar", "queue", func(_ *stan.Msg) {
+		rcvCh <- true
+	}, stan.SetManualAckMode(), stan.AckWait(time.Second))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	cs = s.store.LookupChannel("bar")
+	mms = cs.Msgs.(*mockedMsgStore)
+
+	// Publish messages until qsub2 receives one
+forLoop:
+	for {
+		if err := sc.Publish("bar", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+		select {
+		case <-rcvCh:
+			break forLoop
+		case <-time.After(500 * time.Millisecond):
+			// send a new message
+		}
+	}
+	// Activate store failures
+	mms.Lock()
+	mms.fail = true
+	logger.Lock()
+	logger.checkErrorStr = "Unable to update subscription"
+	logger.gotError = false
+	logger.Unlock()
+	mms.Unlock()
+	// Close qsub2, server should try to move unack'ed message to qsub1
+	if err := qsub2.Close(); err != nil {
+		t.Fatalf("Error closing qsub: %v", err)
+	}
+	logger.Lock()
+	gotErr = logger.gotError
+	logger.Unlock()
+	if !gotErr {
+		t.Fatalf("Did not capture error about updating subscription")
 	}
 }

@@ -33,7 +33,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.5.1"
+	VERSION = "0.6.0"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -300,6 +300,7 @@ type subStore struct {
 	durables map[string]*subState   // durables lookup
 	acks     map[string]*subState   // ack inbox lookup
 	stan     *StanServer            // back link to Stan server
+	subject  string
 }
 
 // Holds all queue subsribers for a subject/group and
@@ -348,7 +349,7 @@ func (s *StanServer) lookupOrCreateChannel(channel string) (*stores.ChannelStore
 	}
 	// It's possible that more than one go routine comes here at the same
 	// time. `ss` will then be simply gc'ed.
-	ss := s.createSubStore()
+	ss := s.createSubStore(channel)
 	cs, _, err := s.store.CreateChannel(channel, ss)
 	if err != nil {
 		return nil, err
@@ -357,13 +358,14 @@ func (s *StanServer) lookupOrCreateChannel(channel string) (*stores.ChannelStore
 }
 
 // createSubStore creates a new instance of `subStore`.
-func (s *StanServer) createSubStore() *subStore {
+func (s *StanServer) createSubStore(subject string) *subStore {
 	subs := &subStore{
 		psubs:    make([]*subState, 0, 4),
 		qsubs:    make(map[string]*queueState),
 		durables: make(map[string]*subState),
 		acks:     make(map[string]*subState),
 		stan:     s,
+		subject:  subject,
 	}
 	return subs
 }
@@ -529,9 +531,15 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 			storageUpdate = sub.LastSent == qs.lastSent
 			sortedPendingMsgs := makeSortedPendingMsgs(sub.acksPending)
 			for _, pm := range sortedPendingMsgs {
-				m := cs.Msgs.Lookup(pm.seq)
+				m, err := cs.Msgs.Lookup(pm.seq)
+				if err != nil {
+					ss.stan.log.Errorf("Unable to update subscription for %s:%v (%v)", sub.subject, pm.seq, err)
+					continue
+				}
+				// This is possible if message has expired or removed from channel
+				// due to limits. No need to ack it since we are destroying this
+				// subscription.
 				if m == nil {
-					// Don't need to ack it since we are destroying this subscription
 					continue
 				}
 				// Get one of the remaning queue subscribers.
@@ -1362,7 +1370,7 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 		// Lookup the ChannelStore from the store
 		channel := s.store.LookupChannel(channelName)
 		// Create the subStore for this channel
-		ss := s.createSubStore()
+		ss := s.createSubStore(channelName)
 		// Set it into the channel store
 		channel.UserData = ss
 		// Get the recovered subscriptions for this channel.
@@ -2363,8 +2371,11 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 // sub/sequence number and returns nil, otherwise return a copy of the
 // message (since it is going to be modified: m.Redelivered = true)
 func (s *StanServer) getMsgForRedelivery(cs *stores.ChannelStore, sub *subState, seq uint64) *pb.MsgProto {
-	m := cs.Msgs.Lookup(seq)
-	if m == nil {
+	m, err := cs.Msgs.Lookup(seq)
+	if m == nil || err != nil {
+		if err != nil {
+			s.log.Errorf("Error getting message for redelivery %v:%v (%v)", sub.subject, seq, err)
+		}
 		// Ack it so that it does not reincarnate on restart
 		s.processAck(cs, sub, seq)
 		return nil
@@ -3098,11 +3109,13 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 		if setStartPos {
 			// set the start sequence of the subscriber.
-			s.setSubStartSequence(cs, sub, sr)
+			err = s.setSubStartSequence(cs, sub, sr)
 		}
 
-		// add the subscription to stan
-		err = s.addSubscription(ss, sub)
+		if err == nil {
+			// add the subscription to stan
+			err = s.addSubscription(ss, sub)
+		}
 	}
 	if err != nil {
 		// Try to undo what has been done.
@@ -3291,9 +3304,10 @@ func (s *StanServer) sendAvailableMessagesToQueue(cs *stores.ChannelStore, qs *q
 		return
 	}
 
+	subject := cs.UserData.(*subStore).subject
 	qs.Lock()
 	for nextSeq := qs.lastSent + 1; ; nextSeq++ {
-		nextMsg := getNextMsg(cs, &nextSeq, &qs.lastSent)
+		nextMsg := s.getNextMsg(cs, subject, &nextSeq, &qs.lastSent)
 		if nextMsg == nil {
 			break
 		}
@@ -3308,7 +3322,7 @@ func (s *StanServer) sendAvailableMessagesToQueue(cs *stores.ChannelStore, qs *q
 func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subState) {
 	sub.Lock()
 	for nextSeq := sub.LastSent + 1; ; nextSeq++ {
-		nextMsg := getNextMsg(cs, &nextSeq, &sub.LastSent)
+		nextMsg := s.getNextMsg(cs, sub.subject, &nextSeq, &sub.LastSent)
 		if nextMsg == nil {
 			break
 		}
@@ -3319,9 +3333,15 @@ func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subStat
 	sub.Unlock()
 }
 
-func getNextMsg(cs *stores.ChannelStore, nextSeq, lastSent *uint64) *pb.MsgProto {
+func (s *StanServer) getNextMsg(cs *stores.ChannelStore, subject string, nextSeq, lastSent *uint64) *pb.MsgProto {
 	for {
-		nextMsg := cs.Msgs.Lookup(*nextSeq)
+		nextMsg, err := cs.Msgs.Lookup(*nextSeq)
+		if err != nil {
+			s.log.Errorf("Error looking up message %v:%v (%v)", subject, *nextSeq, err)
+			// TODO: This will stop delivery. Will revisit later to see if we
+			// should move to the next message (if avail) or not.
+			return nil
+		}
 		if nextMsg != nil {
 			return nextMsg
 		}
@@ -3329,7 +3349,12 @@ func getNextMsg(cs *stores.ChannelStore, nextSeq, lastSent *uint64) *pb.MsgProto
 		// FirstMsg could be costly (read from disk, etc)
 		// to realize that the message is of lower sequence.
 		// So check with cheaper FirstSequence() first.
-		firstAvail := cs.Msgs.FirstSequence()
+
+		// TODO: Error is ignored here. Will revisit this whole function
+		// later with handling of gaps in message sequence (either due
+		// to errors or absence of messages - that may have been removed
+		// after fixing a previous store corruption).
+		firstAvail, _ := cs.Msgs.FirstSequence()
 		if firstAvail <= *nextSeq {
 			return nil
 		}
@@ -3349,13 +3374,10 @@ func getNextMsg(cs *stores.ChannelStore, nextSeq, lastSent *uint64) *pb.MsgProto
 	}
 }
 
-func (s *StanServer) getSequenceFromStartTime(cs *stores.ChannelStore, startTime int64) uint64 {
-	return cs.Msgs.GetSequenceFromTimestamp(startTime)
-}
-
 // Setup the start position for the subscriber.
-func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState, sr *pb.SubscriptionRequest) {
+func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState, sr *pb.SubscriptionRequest) error {
 	sub.Lock()
+	defer sub.Unlock()
 
 	lastSent := uint64(0)
 
@@ -3364,13 +3386,20 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 
 	switch sr.StartPosition {
 	case pb.StartPosition_NewOnly:
-		lastSent = cs.Msgs.LastSequence()
+		var err error
+		lastSent, err = cs.Msgs.LastSequence()
+		if err != nil {
+			return err
+		}
 		if s.debug {
 			s.log.Debugf("[Client:%s] Sending new-only subject=%s, seq=%d",
 				sub.ClientID, sub.subject, lastSent)
 		}
 	case pb.StartPosition_LastReceived:
-		lastSeq := cs.Msgs.LastSequence()
+		lastSeq, err := cs.Msgs.LastSequence()
+		if err != nil {
+			return err
+		}
 		if lastSeq > 0 {
 			lastSent = lastSeq - 1
 		}
@@ -3381,7 +3410,10 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 	case pb.StartPosition_TimeDeltaStart:
 		startTime := time.Now().UnixNano() - sr.StartTimeDelta
 		// If there is no message, seq will be 0.
-		seq := s.getSequenceFromStartTime(cs, startTime)
+		seq, err := cs.Msgs.GetSequenceFromTimestamp(startTime)
+		if err != nil {
+			return err
+		}
 		if seq > 0 {
 			// If the time delta is in the future relative to the last
 			// message in the log, 'seq' will be equal to last sequence + 1,
@@ -3394,7 +3426,10 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 		}
 	case pb.StartPosition_SequenceStart:
 		// If there is no message, firstSeq and lastSeq will be equal to 0.
-		firstSeq, lastSeq := cs.Msgs.FirstAndLastSequence()
+		firstSeq, lastSeq, err := cs.Msgs.FirstAndLastSequence()
+		if err != nil {
+			return err
+		}
 		// StartSequence is an uint64, so can't be lower than 0.
 		if sr.StartSequence < firstSeq {
 			// That translates to sending the first message available.
@@ -3412,7 +3447,10 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 				sub.ClientID, sub.subject, sr.StartSequence, lastSent)
 		}
 	case pb.StartPosition_First:
-		firstSeq := cs.Msgs.FirstSequence()
+		firstSeq, err := cs.Msgs.FirstSequence()
+		if err != nil {
+			return err
+		}
 		if firstSeq > 0 {
 			lastSent = firstSeq - 1
 		}
@@ -3422,7 +3460,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 		}
 	}
 	sub.LastSent = lastSent
-	sub.Unlock()
+	return nil
 }
 
 // startGoRoutine starts the given function as a go routine if and only if

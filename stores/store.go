@@ -272,29 +272,29 @@ type MsgStore interface {
 	Store(data []byte) (uint64, error)
 
 	// Lookup returns the stored message with given sequence number.
-	Lookup(seq uint64) *pb.MsgProto
+	Lookup(seq uint64) (*pb.MsgProto, error)
 
 	// FirstSequence returns sequence for first message stored, 0 if no
 	// message is stored.
-	FirstSequence() uint64
+	FirstSequence() (uint64, error)
 
 	// LastSequence returns sequence for last message stored, 0 if no
 	// message is stored.
-	LastSequence() uint64
+	LastSequence() (uint64, error)
 
 	// FirstAndLastSequence returns sequences for the first and last messages stored,
 	// 0 if no message is stored.
-	FirstAndLastSequence() (uint64, uint64)
+	FirstAndLastSequence() (uint64, uint64, error)
 
 	// GetSequenceFromTimestamp returns the sequence of the first message whose
 	// timestamp is greater or equal to given timestamp.
-	GetSequenceFromTimestamp(timestamp int64) uint64
+	GetSequenceFromTimestamp(timestamp int64) (uint64, error)
 
 	// FirstMsg returns the first message stored.
-	FirstMsg() *pb.MsgProto
+	FirstMsg() (*pb.MsgProto, error)
 
 	// LastMsg returns the last message stored.
-	LastMsg() *pb.MsgProto
+	LastMsg() (*pb.MsgProto, error)
 
 	// Flush is for stores that may buffer operations and need them to be persisted.
 	Flush() error
