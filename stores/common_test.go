@@ -452,7 +452,8 @@ func testMaxMsgs(t *testing.T, s Store) {
 	}
 
 	// Check that older messages are no longer avail.
-	if msgStoreLookup(t, cs.Msgs, 1) != nil || msgStoreLookup(t, cs.Msgs, uint64(firstSeqAfterLimitReached-1)) != nil {
+	if msgStoreLookup(t, cs.Msgs, 1) != nil ||
+		msgStoreLookup(t, cs.Msgs, uint64(firstSeqAfterLimitReached-1)) != nil {
 		t.Fatal("Older messages still available")
 	}
 
@@ -817,8 +818,12 @@ func TestGSNoOps(t *testing.T) {
 	gms := &genericMsgStore{}
 	defer gms.Close()
 	gms.init("foo", testLogger, &limits.MsgStoreLimits)
-	if msgStoreLookup(t, gms, 1) != nil || msgStoreFirstMsg(t, gms) != nil || msgStoreLastMsg(t, gms) != nil ||
-		gms.Flush() != nil || msgStoreGetSequenceFromTimestamp(t, gms, 0) != 0 || gms.Close() != nil {
+	if msgStoreLookup(t, gms, 1) != nil ||
+		msgStoreFirstMsg(t, gms) != nil ||
+		msgStoreLastMsg(t, gms) != nil ||
+		gms.Flush() != nil ||
+		msgStoreGetSequenceFromTimestamp(t, gms, 0) != 0 ||
+		gms.Close() != nil {
 		t.Fatal("Expected no value since these should not be implemented for generic store")
 	}
 	if seq, err := gms.Store([]byte("hello")); seq != 0 || err != nil {
