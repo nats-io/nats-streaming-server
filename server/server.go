@@ -907,7 +907,7 @@ func (s *StanServer) buildServerURLs(sOpts *Options, opts *server.Options) ([]st
 // connection url, and for other future items (e.g. auth)
 func (s *StanServer) createNatsClientConn(name string, sOpts *Options, nOpts *server.Options) (*nats.Conn, error) {
 	var err error
-	ncOpts := nats.DefaultOptions
+	ncOpts := nats.GetDefaultOptions()
 
 	ncOpts.Servers, err = s.buildServerURLs(sOpts, nOpts)
 	if err != nil {
