@@ -533,17 +533,16 @@ func TestMonitorClientsz(t *testing.T) {
 		}
 		clientsz.Clients = make([]*Clientz, 0, len(cids))
 		for _, cid := range cids {
-			cli := s.store.GetClient(cid)
+			cli := s.clients.lookup(cid)
+			cli.RLock()
 			cz := &Clientz{
 				ID:      cid,
-				HBInbox: cli.HbInbox,
+				HBInbox: cli.info.HbInbox,
 			}
 			if expectSubs {
-				srvCli := cli.UserData.(*client)
-				srvCli.RLock()
-				cz.Subscriptions = getCliSubs(srvCli.subs)
-				srvCli.RUnlock()
+				cz.Subscriptions = getCliSubs(cli.subs)
 			}
+			cli.RUnlock()
 			clientsz.Clients = append(clientsz.Clients, cz)
 		}
 		return clientsz
@@ -657,20 +656,19 @@ func TestMonitorClientz(t *testing.T) {
 	}
 
 	generateExpectedCZ := func(cid string, expectSubs bool) *Clientz {
-		cli := s.store.GetClient(cid)
+		cli := s.clients.lookup(cid)
 		if cli == nil {
 			return nil
 		}
+		cli.RLock()
 		cz := &Clientz{
 			ID:      cid,
-			HBInbox: cli.HbInbox,
+			HBInbox: cli.info.HbInbox,
 		}
 		if expectSubs {
-			srvCli := cli.UserData.(*client)
-			srvCli.RLock()
-			cz.Subscriptions = getCliSubs(srvCli.subs)
-			srvCli.RUnlock()
+			cz.Subscriptions = getCliSubs(cli.subs)
 		}
+		cli.RUnlock()
 		return cz
 	}
 

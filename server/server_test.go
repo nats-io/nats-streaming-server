@@ -152,14 +152,14 @@ func waitForNumClients(t tLogger, s *StanServer, expected int) {
 
 // Helper function that returns the number of clients
 func getClientsCountFunc(s *StanServer) (string, int) {
-	return "clients", s.store.GetClientsCount()
+	return "clients", s.clients.count()
 }
 
 // Helper function that fails if number of subscriptions is not as expected
 func checkSubs(t tLogger, s *StanServer, ID string, expected int) []*subState {
 	// Since we need to return the array and we want the array to match
 	// the expected value, use the "public" API here.
-	subs := s.clients.GetSubs(ID)
+	subs := s.clients.getSubs(ID)
 	checkCount(t, expected, func() (string, int) { return "subscriptions", len(subs) })
 	return subs
 }
@@ -170,7 +170,7 @@ func waitForNumSubs(t tLogger, s *StanServer, ID string, expected int) {
 	waitForCount(t, expected, func() (string, int) {
 		// We avoid getting a copy of the subscriptions array here
 		// by directly returning the length of the array.
-		c := s.clients.Lookup(ID)
+		c := s.clients.lookup(ID)
 		c.RLock()
 		defer c.RUnlock()
 		return "subscriptions", len(c.subs)
@@ -178,7 +178,7 @@ func waitForNumSubs(t tLogger, s *StanServer, ID string, expected int) {
 }
 
 func waitForAcks(t tLogger, s *StanServer, ID string, subID uint64, expected int) {
-	subs := s.clients.GetSubs(ID)
+	subs := s.clients.getSubs(ID)
 	var sub *subState
 	for _, s := range subs {
 		s.RLock()
@@ -741,6 +741,29 @@ func TestInvalidSubRequest(t *testing.T) {
 	if !s.store.HasChannel() {
 		t.Fatal("Expected channel foo to have been created")
 	}
+
+	// Create a durable
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	dur, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Close durable
+	if err := dur.Close(); err != nil {
+		t.Fatalf("Error closing durable: %v", err)
+	}
+	// Close client
+	sc.Close()
+	// Ensure this is processed
+	checkClients(t, s, 0)
+	// Try to update the durable now that client does not exist.
+	req.ClientID = clientName
+	req.Subject = "foo"
+	req.DurableName = "dur"
+	if err := sendInvalidSubRequest(s, nc, req, fmt.Errorf("can't find clientID: %v", clientName)); err != nil {
+		t.Fatalf("%v", err)
+	}
 }
 
 func sendInvalidUnsubRequest(s *StanServer, nc *nats.Conn, req *pb.UnsubscribeRequest) error {
@@ -786,7 +809,7 @@ func TestInvalidUnsubRequest(t *testing.T) {
 	}
 
 	// Verify server state. Client should be created
-	client := s.clients.Lookup(clientName)
+	client := s.clients.lookup(clientName)
 	if client == nil {
 		t.Fatal("A client should have been created")
 	}
@@ -1867,7 +1890,7 @@ func TestRunServerWithFileStore(t *testing.T) {
 }
 
 func checkDurable(t *testing.T, s *StanServer, channel, durName, durKey string) {
-	c := s.clients.Lookup(clientName)
+	c := s.clients.lookup(clientName)
 	if c == nil {
 		stackFatalf(t, "Expected client %v to be registered", clientName)
 	}
@@ -2073,7 +2096,7 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 	checkDurable(t, s, "foo", durName, durKey)
 
 	// We verified that there is 1 sub, and this is our durable.
-	subs := s.clients.GetSubs(clientName)
+	subs := s.clients.getSubs(clientName)
 	durable := subs[0]
 	durable.RLock()
 	// Get the AckInbox.
@@ -2193,7 +2216,7 @@ func TestDurableRemovedOnUnsubscribe(t *testing.T) {
 func checkDurableNoPendingAck(t *testing.T, s *StanServer, isSame bool,
 	ackInbox string, ackSub *nats.Subscription, expectedSeq uint64) {
 	// When called, we know that there is 1 sub, and the sub is a durable.
-	subs := s.clients.GetSubs(clientName)
+	subs := s.clients.getSubs(clientName)
 	durable := subs[0]
 	durable.RLock()
 	durAckInbox := durable.AckInbox
@@ -2895,7 +2918,7 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	}
 
 	// For delete the client
-	s.clients.Unregister(clientName)
+	s.clients.unregister(clientName)
 
 	// Shutdown the server
 	s.Shutdown()
@@ -2904,7 +2927,7 @@ func TestIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	s = runServerWithOpts(t, opts, nil)
 
 	// Check that client does not exist
-	if s.clients.Lookup(clientName) != nil {
+	if s.clients.lookup(clientName) != nil {
 		t.Fatal("Client should not have been recovered")
 	}
 	// Channel would be recovered
@@ -3000,7 +3023,7 @@ func TestCheckClientHealthDontKeepClientLock(t *testing.T) {
 	// before checking.
 	time.Sleep(2 * opts.ClientHBInterval)
 
-	c := s.clients.Lookup(clientName)
+	c := s.clients.lookup(clientName)
 	c.RLock()
 	// This is to avoid staticcheck "empty critical section (SA2001)" report
 	_ = c.fhb
@@ -3450,9 +3473,8 @@ func TestFileStoreCheckClientHealthAfterRestart(t *testing.T) {
 	// Check that there are 2 clients
 	checkClients(t, s, 2)
 	// Tweak their hbTimer interval to make the test short
-	clients := s.store.GetClients()
-	for cID, sc := range clients {
-		c := sc.UserData.(*client)
+	clients := s.clients.getClients()
+	for cID, c := range clients {
 		c.Lock()
 		if c.hbt == nil {
 			c.Unlock()
@@ -3609,7 +3631,7 @@ func TestFileStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
 	s = runServerWithOpts(t, opts, nil)
 
 	// Get subs
-	subs := s.clients.GetSubs(clientName)
+	subs := s.clients.getSubs(clientName)
 	if len(subs) != 2 {
 		t.Fatalf("Expected 2 subscriptions to be recovered, got %v", len(subs))
 	}
@@ -3703,7 +3725,7 @@ func TestFileStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 	s = runServerWithOpts(t, opts, nil)
 
 	// Get subs
-	subs := s.clients.GetSubs(clientName)
+	subs := s.clients.getSubs(clientName)
 	if len(subs) != 2 {
 		t.Fatalf("Expected 2 subscriptions to be recovered, got %v", len(subs))
 	}
@@ -3819,7 +3841,7 @@ func TestSubscribeShrink(t *testing.T) {
 	// Check number of subs
 	waitForNumSubs(t, s, clientName, 0)
 	// Make sure that array size reduced
-	client := s.clients.Lookup(clientName)
+	client := s.clients.lookup(clientName)
 	if client == nil {
 		t.Fatal("Client should exist")
 	}
@@ -5900,7 +5922,7 @@ func TestDontSendEmptyMsgProto(t *testing.T) {
 
 	waitForNumSubs(t, s, clientName, 1)
 
-	subs := s.clients.GetSubs(clientName)
+	subs := s.clients.getSubs(clientName)
 	sub := subs[0]
 
 	defer func() {
@@ -6027,7 +6049,7 @@ func TestFileStoreAcksPool(t *testing.T) {
 
 	// Check total subs and each sub's ackSub is pooled or not as expected.
 	checkAckSubs := func(total int32, checkSubFunc func(sub *subState) error) {
-		subs := s.clients.GetSubs(clientName)
+		subs := s.clients.getSubs(clientName)
 		if len(subs) != int(total) {
 			stackFatalf(t, "Expected %d subs, got %v", total, len(subs))
 		}
@@ -6743,6 +6765,16 @@ func (ss *mockedSubStore) AddSeqPending(subid, seq uint64) error {
 	return ss.SubStore.AddSeqPending(subid, seq)
 }
 
+func (ss *mockedSubStore) UpdateSub(sub *spb.SubState) error {
+	ss.RLock()
+	fail := ss.fail
+	ss.RUnlock()
+	if fail {
+		return fmt.Errorf("On purpose")
+	}
+	return ss.SubStore.UpdateSub(sub)
+}
+
 func (ss *mockedSubStore) DeleteSub(subid uint64) error {
 	ss.RLock()
 	fail := ss.fail
@@ -6860,4 +6892,138 @@ func TestDeleteSubFailures(t *testing.T) {
 	// Wait for close to be processed
 	waitForNumSubs(t, s, clientName, 1)
 	checkError()
+}
+
+func TestUpdateSubFailure(t *testing.T) {
+	logger := &checkErrorLogger{checkErrorStr: "add subscription"}
+	opts := GetDefaultOptions()
+	opts.CustomLogger = logger
+	s, err := RunServerWithOpts(opts, nil)
+	if err != nil {
+		t.Fatalf("Error running server: %v", err)
+	}
+	defer s.Shutdown()
+
+	s.mu.Lock()
+	ms := &mockedStore{Store: s.store}
+	s.store = ms
+	s.mu.Unlock()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	dur, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	waitForNumSubs(t, s, clientName, 1)
+	dur.Close()
+	waitForNumSubs(t, s, clientName, 0)
+
+	cs := s.store.LookupChannel("foo")
+	mss := cs.Subs.(*mockedSubStore)
+	mss.Lock()
+	mss.fail = true
+	mss.Unlock()
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur")); err == nil {
+		t.Fatal("Expected subscription to fail")
+	}
+	logger.Lock()
+	gotIt := logger.gotError
+	logger.Unlock()
+	if !gotIt {
+		t.Fatalf("Server did not log error on subscribe")
+	}
+}
+
+func TestQueueSubStoreFailure(t *testing.T) {
+	logger := &checkErrorLogger{checkErrorStr: "update subscription"}
+	opts := GetDefaultOptions()
+	opts.CustomLogger = logger
+	s, err := RunServerWithOpts(opts, nil)
+	if err != nil {
+		t.Fatalf("Error running server: %v", err)
+	}
+	defer s.Shutdown()
+
+	s.mu.Lock()
+	s.store = &mockedStore{Store: s.store}
+	s.mu.Unlock()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	waitForNumSubs(t, s, clientName, 1)
+
+	// Cause failure on AddSeqPending
+	cs := s.store.LookupChannel("foo")
+	mss := cs.Subs.(*mockedSubStore)
+	mss.Lock()
+	mss.fail = true
+	mss.Unlock()
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Check error was logged.
+	logger.Lock()
+	gotIt := logger.gotError
+	logger.Unlock()
+	if !gotIt {
+		t.Fatal("Server did not log error about updating subscription")
+	}
+}
+
+func TestClientStoreError(t *testing.T) {
+	logger := &checkErrorLogger{checkErrorStr: "deleting client"}
+	opts := GetDefaultOptions()
+	opts.CustomLogger = logger
+	s, err := RunServerWithOpts(opts, nil)
+	if err != nil {
+		t.Fatalf("Error running server: %v", err)
+	}
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	s.clients.Lock()
+	s.clients.store = &clientStoreErrorsStore{Store: s.clients.store}
+	s.clients.Unlock()
+
+	// Client should not fail to close
+	if err := sc.Close(); err != nil {
+		t.Fatalf("Error on close: %v", err)
+	}
+	// However, server should have logged something about an error closing client
+	logger.Lock()
+	gotIt := logger.gotError
+	logger.Unlock()
+	if !gotIt {
+		t.Fatal("Server did not report error about closing client")
+	}
+	// Verify that client is gone though
+	if c := s.clients.lookup(clientName); c != nil {
+		t.Fatalf("Unexpected client in server: %v", c)
+	}
+
+	logger.Lock()
+	logger.gotError = false
+	logger.checkErrorStr = "registering client"
+	logger.Unlock()
+
+	if _, err := stan.Connect(clusterName, clientName); err == nil || !strings.Contains(err.Error(), errOnPurpose.Error()) {
+		t.Fatalf("Expected error on connect, got %v", err)
+	}
+	logger.Lock()
+	gotIt = logger.gotError
+	logger.Unlock()
+	if !gotIt {
+		t.Fatal("Server did not report error about registering client")
+	}
+	if c := s.clients.lookup(clientName); c != nil {
+		t.Fatalf("Unexpected client in server: %v", c)
+	}
 }

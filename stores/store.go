@@ -1,4 +1,4 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
 
 package stores
 
@@ -92,11 +92,9 @@ type RecoveredState struct {
 	Subs    RecoveredSubscriptions
 }
 
-// Client represents a client with ID, Heartbeat Inbox and user data sets
-// when adding it to the store.
+// Client represents a client with ID and Heartbeat Inbox.
 type Client struct {
 	spb.ClientInfo
-	UserData interface{}
 }
 
 // RecoveredSubscriptions is a map of recovered subscriptions, keyed by channel name.
@@ -205,27 +203,10 @@ type Store interface {
 	MsgsState(channel string) (numMessages int, byteSize uint64, err error)
 
 	// AddClient stores information about the client identified by `clientID`.
-	// If a Client is already registered, this call returns the currently
-	// registered Client object, and the boolean set to false to indicate
-	// that the client is not new.
-	AddClient(clientID, hbInbox string, userData interface{}) (*Client, bool, error)
+	AddClient(clientID, hbInbox string) (*Client, error)
 
-	// GetClient returns the stored Client, or nil if it does not exist.
-	GetClient(clientID string) *Client
-
-	// GetClients returns a map of all stored Client objects, with client IDs
-	// as the key.
-	// The returned map is a copy of the state maintained by the store so that
-	// it is safe for the caller to walk through the map while clients may be
-	// added/deleted from the store.
-	GetClients() map[string]*Client
-
-	// GetClientsCount returns the number of registered clients.
-	GetClientsCount() int
-
-	// DeleteClient removes the client identified by `clientID` from the store
-	// and returns it to the caller.
-	DeleteClient(clientID string) *Client
+	// DeleteClient removes the client identified by `clientID` from the store.
+	DeleteClient(clientID string) error
 
 	// Close closes this store (including all MsgStore and SubStore).
 	// If an exlusive lock was acquired, the lock shall be released.

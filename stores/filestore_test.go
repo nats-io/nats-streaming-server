@@ -2128,7 +2128,7 @@ func TestFSAddClientError(t *testing.T) {
 	// Close the client file to cause error
 	fs.clientsFile.handle.Close()
 	// Should fail
-	if c, _, err := fs.AddClient("c1", "hbInbox", "test"); err == nil {
+	if c, err := fs.AddClient("c1", "hbInbox"); err == nil {
 		t.Fatal("Expected error, got none")
 	} else if c != nil {
 		t.Fatalf("Should not have gotten a client back, got %v", c)
@@ -2168,16 +2168,14 @@ func TestFSCompactClientFile(t *testing.T) {
 	// Create clients below threshold
 	for i := 0; i < total; i++ {
 		cid := fmt.Sprintf("cid_%d", (i + 1))
-		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
-			t.Fatalf("Unexpected error adding clients: %v", err)
-		}
+		storeAddClient(t, fs, cid, "hbInbox")
 	}
 	// Should be `total` clients, and 0 delete records
 	check(fs, total, 0)
 	// Delete half.
 	for i := 0; i < threshold-1; i++ {
 		cid := fmt.Sprintf("cid_%d", (i + 1))
-		fs.DeleteClient(cid)
+		storeDeleteClient(t, fs, cid)
 	}
 	check(fs, threshold+1, threshold-1)
 
@@ -2198,21 +2196,19 @@ func TestFSCompactClientFile(t *testing.T) {
 
 	// Delete one more, this should trigger compaction
 	cid := fmt.Sprintf("cid_%d", threshold)
-	fs.DeleteClient(cid)
+	storeDeleteClient(t, fs, cid)
 	// One client less, 0 del records after a compaction
 	check(fs, threshold, 0)
 
 	// Make sure we don't compact too often
 	for i := 0; i < total; i++ {
 		cid := fmt.Sprintf("cid_%d", total+i+1)
-		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
-			t.Fatalf("Unexpected error adding clients: %v", err)
-		}
+		storeAddClient(t, fs, cid, "hbInbox")
 	}
 	// Delete almost all of them
 	for i := 0; i < total-1; i++ {
 		cid := fmt.Sprintf("cid_%d", total+i+1)
-		fs.DeleteClient(cid)
+		storeDeleteClient(t, fs, cid)
 	}
 	// The number of clients should be same than before + 1,
 	// and lots of delete
@@ -2221,7 +2217,7 @@ func TestFSCompactClientFile(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 	// Delete one more, compaction should occur
 	cid = fmt.Sprintf("cid_%d", 2*total)
-	fs.DeleteClient(cid)
+	storeDeleteClient(t, fs, cid)
 	// One less client, 0 delete records after compaction
 	check(fs, threshold, 0)
 
@@ -2238,16 +2234,14 @@ func TestFSCompactClientFile(t *testing.T) {
 	fs.Unlock()
 	for i := 0; i < total; i++ {
 		cid := fmt.Sprintf("cid_%d", (i + 1))
-		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
-			t.Fatalf("Unexpected error adding clients: %v", err)
-		}
+		storeAddClient(t, fs, cid, "hbInbox")
 	}
 	// Should be `total` clients, and 0 delete records
 	check(fs, total, 0)
 	// Delete all
 	for i := 0; i < total; i++ {
 		cid := fmt.Sprintf("cid_%d", (i + 1))
-		fs.DeleteClient(cid)
+		storeDeleteClient(t, fs, cid)
 	}
 	// No client, but no reduction in number of delete records since no compaction
 	check(fs, 0, total)
@@ -2265,16 +2259,14 @@ func TestFSCompactClientFile(t *testing.T) {
 	fs.Unlock()
 	for i := 0; i < total; i++ {
 		cid := fmt.Sprintf("cid_%d", (i + 1))
-		if _, _, err := fs.AddClient(cid, "hbInbox", nil); err != nil {
-			t.Fatalf("Unexpected error adding clients: %v", err)
-		}
+		storeAddClient(t, fs, cid, "hbInbox")
 	}
 	// Should be `total` clients, and 0 delete records
 	check(fs, total, 0)
 	// Delete all
 	for i := 0; i < total; i++ {
 		cid := fmt.Sprintf("cid_%d", (i + 1))
-		fs.DeleteClient(cid)
+		storeDeleteClient(t, fs, cid)
 	}
 	// No client, but no reduction in number of delete records since no compaction
 	check(fs, 0, total)

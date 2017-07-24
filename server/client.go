@@ -1,4 +1,4 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
 
 package server
 
@@ -10,17 +10,24 @@ import (
 
 // This is a proxy to the store interface.
 type clientStore struct {
-	store stores.Store
+	sync.RWMutex
+	clients map[string]*client
+	store   stores.Store
 }
 
 // client has information needed by the server. A client is also
 // stored in a stores.Client object (which contains ID and HbInbox).
 type client struct {
 	sync.RWMutex
-	unregistered bool
-	hbt          *time.Timer
-	fhb          int
-	subs         []*subState
+	info *stores.Client
+	hbt  *time.Timer
+	fhb  int
+	subs []*subState
+}
+
+// newClientStore creates a new clientStore instance using `store` as the backing storage.
+func newClientStore(store stores.Store) *clientStore {
+	return &clientStore{clients: make(map[string]*client), store: store}
 }
 
 // getSubsCopy returns a copy of the client's subscribers array.
@@ -33,46 +40,65 @@ func (c *client) getSubsCopy() []*subState {
 
 // Register a client if new, otherwise returns the client already registered
 // and `false` to indicate that the client is not new.
-func (cs *clientStore) Register(ID, hbInbox string) (*stores.Client, bool, error) {
-	// Will be gc'ed if we fail to register, that's ok.
-	c := &client{subs: make([]*subState, 0, 4)}
-	sc, isNew, err := cs.store.AddClient(ID, hbInbox, c)
+func (cs *clientStore) register(ID, hbInbox string) (*client, bool, error) {
+	cs.Lock()
+	defer cs.Unlock()
+	c := cs.clients[ID]
+	if c != nil {
+		return c, false, nil
+	}
+	sc, err := cs.store.AddClient(ID, hbInbox)
 	if err != nil {
 		return nil, false, err
 	}
-	return sc, isNew, nil
+	c = &client{info: sc, subs: make([]*subState, 0, 4)}
+	cs.clients[ID] = c
+	return c, true, nil
 }
 
 // Unregister a client.
-func (cs *clientStore) Unregister(ID string) *stores.Client {
-	sc := cs.store.DeleteClient(ID)
-	if sc != nil {
-		c := sc.UserData.(*client)
-		c.Lock()
-		c.unregistered = true
-		c.Unlock()
+func (cs *clientStore) unregister(ID string) (*client, error) {
+	cs.Lock()
+	defer cs.Unlock()
+	c := cs.clients[ID]
+	if c == nil {
+		return nil, nil
 	}
-	return sc
+	c.Lock()
+	if c.hbt != nil {
+		c.hbt.Stop()
+		c.hbt = nil
+	}
+	c.Unlock()
+	delete(cs.clients, ID)
+	if err := cs.store.DeleteClient(ID); err != nil {
+		return c, err
+	}
+	return c, nil
 }
 
 // IsValid returns true if the client is registered, false otherwise.
-func (cs *clientStore) IsValid(ID string) bool {
-	return cs.store.GetClient(ID) != nil
+func (cs *clientStore) isValid(ID string) bool {
+	cs.RLock()
+	valid := cs.clients[ID] != nil
+	cs.RUnlock()
+	return valid
 }
 
 // Lookup a client
-func (cs *clientStore) Lookup(ID string) *client {
-	sc := cs.store.GetClient(ID)
-	if sc != nil {
-		return sc.UserData.(*client)
-	}
-	return nil
+func (cs *clientStore) lookup(ID string) *client {
+	cs.RLock()
+	c := cs.clients[ID]
+	cs.RUnlock()
+	return c
 }
 
 // GetSubs returns the list of subscriptions for the client identified by ID,
 // or nil if such client is not found.
-func (cs *clientStore) GetSubs(ID string) []*subState {
-	c := cs.Lookup(ID)
+func (cs *clientStore) getSubs(ID string) []*subState {
+	cs.RLock()
+	defer cs.RUnlock()
+	c := cs.clients[ID]
 	if c == nil {
 		return nil
 	}
@@ -85,17 +111,14 @@ func (cs *clientStore) GetSubs(ID string) []*subState {
 // AddSub adds the subscription to the client identified by clientID
 // and returns true only if the client has not been unregistered,
 // otherwise returns false.
-func (cs *clientStore) AddSub(ID string, sub *subState) bool {
-	sc := cs.store.GetClient(ID)
-	if sc == nil {
+func (cs *clientStore) addSub(ID string, sub *subState) bool {
+	cs.RLock()
+	defer cs.RUnlock()
+	c := cs.clients[ID]
+	if c == nil {
 		return false
 	}
-	c := sc.UserData.(*client)
 	c.Lock()
-	if c.unregistered {
-		c.Unlock()
-		return false
-	}
 	c.subs = append(c.subs, sub)
 	c.Unlock()
 	return true
@@ -104,19 +127,64 @@ func (cs *clientStore) AddSub(ID string, sub *subState) bool {
 // RemoveSub removes the subscription from the client identified by clientID
 // and returns true only if the client has not been unregistered and that
 // the subscription was found, otherwise returns false.
-func (cs *clientStore) RemoveSub(ID string, sub *subState) bool {
-	sc := cs.store.GetClient(ID)
-	if sc == nil {
+func (cs *clientStore) removeSub(ID string, sub *subState) bool {
+	cs.RLock()
+	defer cs.RUnlock()
+	c := cs.clients[ID]
+	if c == nil {
 		return false
 	}
-	c := sc.UserData.(*client)
 	c.Lock()
-	if c.unregistered {
-		c.Unlock()
-		return false
-	}
 	removed := false
 	c.subs, removed = sub.deleteFromList(c.subs)
 	c.Unlock()
 	return removed
+}
+
+// recoverClients recreates the content of the client store based on clients
+// information recovered from the Store.
+func (cs *clientStore) recoverClients(clients []*stores.Client) {
+	cs.Lock()
+	for _, sc := range clients {
+		client := &client{info: sc, subs: make([]*subState, 0, 4)}
+		cs.clients[client.info.ID] = client
+	}
+	cs.Unlock()
+}
+
+// setClientHB will lookup the client `ID` and, if present, set the
+// client's timer with the given interval and function.
+func (cs *clientStore) setClientHB(ID string, interval time.Duration, f func()) {
+	cs.RLock()
+	defer cs.RUnlock()
+	c := cs.clients[ID]
+	if c == nil {
+		return
+	}
+	c.Lock()
+	if c.hbt == nil {
+		c.hbt = time.AfterFunc(interval, f)
+	}
+	c.Unlock()
+}
+
+// getClients returns a snapshot of the registered clients.
+// The map itself is a copy (can be iterated safely), but
+// the clients objects returned are the one stored in the clientStore.
+func (cs *clientStore) getClients() map[string]*client {
+	cs.RLock()
+	defer cs.RUnlock()
+	clients := make(map[string]*client, len(cs.clients))
+	for _, c := range cs.clients {
+		clients[c.info.ID] = c
+	}
+	return clients
+}
+
+// count returns the number of registered clients
+func (cs *clientStore) count() int {
+	cs.RLock()
+	total := len(cs.clients)
+	cs.RUnlock()
+	return total
 }

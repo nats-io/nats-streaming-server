@@ -128,6 +128,20 @@ func subStoreDeleteSub(t tLogger, ss SubStore, subid uint64) {
 	}
 }
 
+func storeAddClient(t tLogger, s Store, clientID, hbInbox string) *Client {
+	c, err := s.AddClient(clientID, hbInbox)
+	if err != nil {
+		stackFatalf(t, "Error adding client %q: %v", clientID, err)
+	}
+	return c
+}
+
+func storeDeleteClient(t tLogger, s Store, clientID string) {
+	if err := s.DeleteClient(clientID); err != nil {
+		stackFatalf(t, "Error deleting client %q: %v", clientID, err)
+	}
+}
+
 func storeMsg(t *testing.T, s Store, channel string, data []byte) *pb.MsgProto {
 	cs := s.LookupChannel(channel)
 	if cs == nil {
@@ -736,64 +750,24 @@ func testGetSeqFromStartTime(t *testing.T, s Store) {
 
 func testClientAPIs(t *testing.T, s Store) {
 	// Delete client that does not exist
-	s.DeleteClient("client1")
+	storeDeleteClient(t, s, "client1")
 
 	// Delete a client before adding it
-	s.DeleteClient("client2")
+	storeDeleteClient(t, s, "client2")
 
 	// Adding it after the delete
-	sc, _, err := s.AddClient("client2", "hbInbox", nil)
-	if err != nil {
-		t.Fatalf("Unexpected error adding client: %v", err)
-	}
-	// Adding it another time should return the first and isNew false
-	if sc2, isNew, err := s.AddClient("client2", "hbInbox", nil); err != nil {
-		t.Fatalf("Unexpected error on add client: %v", err)
-	} else if isNew {
-		t.Fatal("isNew should be false")
-	} else if sc2 != sc {
-		t.Fatalf("Old client should be %v, got %v", sc, sc2)
-	}
+	storeAddClient(t, s, "client2", "hbInbox")
+
+	// Adding it another time should not return an error
+	storeAddClient(t, s, "client2", "hbInbox")
 
 	// Add a client
-	userData := "test"
-	sc3, _, err := s.AddClient("client3", "hbInbox", userData)
-	if err != nil {
-		t.Fatalf("Unexpected error adding client: %v", err)
-	}
+	storeAddClient(t, s, "client3", "hbInbox")
 
 	// Add a client then..
-	sc, _, err = s.AddClient("client4", "hbInbox", nil)
-	if err != nil {
-		t.Fatalf("Unexpected error adding client: %v", err)
-	}
+	storeAddClient(t, s, "client4", "hbInbox")
 	// Delete it.
-	if dsc := s.DeleteClient("client4"); dsc != sc {
-		t.Fatalf("Expected delete to return %v, got %v", sc, dsc)
-	}
-
-	// Try to retrieve client3
-	if gc := s.GetClient("client3"); gc != sc3 {
-		t.Fatalf("Expected %v, got %v", sc3, gc)
-	}
-	if count := s.GetClientsCount(); count != 2 {
-		t.Fatalf("Expected 2 clients, got %v", count)
-	}
-	clients := s.GetClients()
-	if len(clients) != 2 {
-		t.Fatalf("Expected 2 client, got %v", len(clients))
-	}
-	for cID, sc := range clients {
-		if cID != "client2" && cID != "client3" {
-			t.Fatalf("Unexpected CID: %v", cID)
-		}
-		if sc.HbInbox != "hbInbox" {
-			t.Fatalf("Invalid hbInbox: %v", sc.HbInbox)
-		}
-		if cID == "client3" && sc.UserData != userData {
-			t.Fatalf("Expected user data to be %v, got %v", userData, sc.UserData)
-		}
-	}
+	storeDeleteClient(t, s, "client4")
 }
 
 func testFlush(t *testing.T, s Store) {

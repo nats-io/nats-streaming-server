@@ -993,7 +993,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	s.store = store
 
 	// Create clientStore
-	s.clients = &clientStore{store: s.store}
+	s.clients = newClientStore(s.store)
 
 	// If no NATS server url is provided, it means that we embed the NATS Server
 	if sOpts.NATSServerURL == "" {
@@ -1363,12 +1363,7 @@ func (s *StanServer) ensureRunningStandAlone() error {
 
 // Binds server's view of a client with stored Client objects.
 func (s *StanServer) processRecoveredClients(clients []*stores.Client) {
-	for _, sc := range clients {
-		// Create a client object and set it as UserData on the stored Client.
-		// No lock needed here because no other routine is going to use this
-		// until the server is finished recovering.
-		sc.UserData = &client{subs: make([]*subState, 0, 4)}
-	}
+	s.clients.recoverClients(clients)
 }
 
 // Reconstruct the subscription state on restart.
@@ -1416,7 +1411,7 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 				sub.IsDurable = true
 			}
 			// Add the subscription to the corresponding client
-			added := s.clients.AddSub(sub.ClientID, sub)
+			added := s.clients.addSub(sub.ClientID, sub)
 			if added || sub.IsDurable {
 				// Repair for issue https://github.com/nats-io/nats-streaming-server/issues/215
 				// Do not recover a queue durable subscriber that still
@@ -1515,19 +1510,11 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 	}
 	// Go through the list of clients and ensure their Hb timer is set.
 	for _, sc := range recoveredClients {
-		c := sc.UserData.(*client)
-		c.Lock()
-		// Client could have been unregisted by now since the server has its
-		// internal subscriptions started (and may receive client requests).
-		if !c.unregistered && c.hbt == nil {
-			// Because of the loop, we need to make copy for the closure
-			// to time.AfterFunc
-			cID := sc.ID
-			c.hbt = time.AfterFunc(s.opts.ClientHBInterval, func() {
-				s.checkClientHealth(cID)
-			})
-		}
-		c.Unlock()
+		// Because of the loop, we need to make copy for the closure
+		cID := sc.ID
+		s.clients.setClientHB(cID, s.opts.ClientHBTimeout, func() {
+			s.checkClientHealth(cID)
+		})
 	}
 	return nil
 }
@@ -1666,7 +1653,7 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 	}
 
 	// Try to register
-	client, isNew, err := s.clients.Register(req.ClientID, req.HeartbeatInbox)
+	client, isNew, err := s.clients.register(req.ClientID, req.HeartbeatInbox)
 	if err != nil {
 		s.log.Errorf("[Client:%s] Error registering client: %v", req.ClientID, err)
 		s.sendConnectErr(m.Reply, err.Error())
@@ -1731,7 +1718,7 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 	s.finishConnectRequest(client, req, m.Reply)
 }
 
-func (s *StanServer) finishConnectRequest(sc *stores.Client, req *pb.ConnectRequest, replyInbox string) {
+func (s *StanServer) finishConnectRequest(client *client, req *pb.ConnectRequest, replyInbox string) {
 	cr := &pb.ConnectResponse{
 		PubPrefix:        s.info.Publish,
 		SubRequests:      s.info.Subscribe,
@@ -1744,21 +1731,19 @@ func (s *StanServer) finishConnectRequest(sc *stores.Client, req *pb.ConnectRequ
 
 	clientID := req.ClientID
 	hbInbox := req.HeartbeatInbox
-	client := sc.UserData.(*client)
-
 	// Heartbeat timer.
-	client.Lock()
-	client.hbt = time.AfterFunc(s.opts.ClientHBInterval, func() { s.checkClientHealth(clientID) })
-	client.Unlock()
+	s.clients.setClientHB(clientID, s.opts.ClientHBInterval, func() { s.checkClientHealth(clientID) })
 
 	s.log.Debugf("[Client:%s] Connected (Inbox=%v)", clientID, hbInbox)
 }
 
-func (s *StanServer) processConnectRequestWithDupID(sc *stores.Client, req *pb.ConnectRequest, replyInbox string) {
+func (s *StanServer) processConnectRequestWithDupID(c *client, req *pb.ConnectRequest, replyInbox string) {
 	sendErr := true
 
-	hbInbox := sc.HbInbox
-	clientID := sc.ID
+	c.RLock()
+	hbInbox := c.info.HbInbox
+	clientID := c.info.ID
+	c.RUnlock()
 
 	defer func() {
 		s.dupCIDGuard.Lock()
@@ -1785,7 +1770,7 @@ func (s *StanServer) processConnectRequestWithDupID(sc *stores.Client, req *pb.C
 
 		// Need to re-register now based on the new request info.
 		var isNew bool
-		sc, isNew, err = s.clients.Register(req.ClientID, req.HeartbeatInbox)
+		c, isNew, err = s.clients.register(req.ClientID, req.HeartbeatInbox)
 		if err == nil && isNew {
 			// We could register the new client.
 			s.log.Debugf("[Client:%s] Replaced old client (Inbox=%v)", req.ClientID, hbInbox)
@@ -1800,7 +1785,7 @@ func (s *StanServer) processConnectRequestWithDupID(sc *stores.Client, req *pb.C
 		return
 	}
 	// We have replaced the old with the new.
-	s.finishConnectRequest(sc, req, replyInbox)
+	s.finishConnectRequest(c, req, replyInbox)
 }
 
 func (s *StanServer) sendConnectErr(replyInbox, err string) {
@@ -1811,19 +1796,15 @@ func (s *StanServer) sendConnectErr(replyInbox, err string) {
 
 // Send a heartbeat call to the client.
 func (s *StanServer) checkClientHealth(clientID string) {
-	sc := s.store.GetClient(clientID)
-	if sc == nil {
+	client := s.clients.lookup(clientID)
+	if client == nil {
 		return
 	}
-	client := sc.UserData.(*client)
-	hbInbox := sc.HbInbox
 
 	client.RLock()
-	unregistered := client.unregistered
+	hbInbox := client.info.HbInbox
 	client.RUnlock()
-	if unregistered {
-		return
-	}
+
 	var subs []*subState
 	hasFailedHB := false
 	// Sends the HB request. This call blocks for ClientHBTimeout,
@@ -1831,33 +1812,30 @@ func (s *StanServer) checkClientHealth(clientID string) {
 	_, err := s.nc.Request(hbInbox, nil, s.opts.ClientHBTimeout)
 	// Grab the lock now.
 	client.Lock()
-	// If client has been unregisted in the meantime, we are done.
-	if !client.unregistered {
-		// If we did not get the reply, increase the number of
-		// failed heartbeats.
-		if err != nil {
-			client.fhb++
-			// If we have reached the max number of failures
-			if client.fhb > s.opts.ClientHBFailCount {
-				s.log.Debugf("[Client:%s] Timed out on heartbeats", clientID)
-				// close the client (connection). This locks the
-				// client object internally so unlock here.
-				client.Unlock()
-				// useLocking is not for client.Lock but for the
-				// use closeProtosMu mutex.
-				s.closeClient(useLocking, clientID)
-				return
-			}
-		} else {
-			// We got the reply, reset the number of failed heartbeats.
-			client.fhb = 0
+	// If we did not get the reply, increase the number of
+	// failed heartbeats.
+	if err != nil {
+		client.fhb++
+		// If we have reached the max number of failures
+		if client.fhb > s.opts.ClientHBFailCount {
+			s.log.Debugf("[Client:%s] Timed out on heartbeats", clientID)
+			// close the client (connection). This locks the
+			// client object internally so unlock here.
+			client.Unlock()
+			// useLocking is not for client.Lock but for the
+			// use closeProtosMu mutex.
+			s.closeClient(useLocking, clientID)
+			return
 		}
-		// Get a copy of subscribers and client.fhb while under lock
-		subs = client.getSubsCopy()
-		hasFailedHB = client.fhb > 0
-		// Reset the timer to fire again.
-		client.hbt.Reset(s.opts.ClientHBInterval)
+	} else {
+		// We got the reply, reset the number of failed heartbeats.
+		client.fhb = 0
 	}
+	// Get a copy of subscribers and client.fhb while under lock
+	subs = client.getSubsCopy()
+	hasFailedHB = client.fhb > 0
+	// Reset the timer to fire again.
+	client.hbt.Reset(s.opts.ClientHBInterval)
 	client.Unlock()
 	if len(subs) > 0 {
 		// Push the info about presence of failed heartbeats down to
@@ -1878,25 +1856,27 @@ func (s *StanServer) closeClient(lock bool, clientID string) bool {
 		defer s.closeProtosMu.Unlock()
 	}
 	// Remove from our clientStore.
-	sc := s.clients.Unregister(clientID)
-	if sc == nil {
+	client, err := s.clients.unregister(clientID)
+	// The above call may return an error (due to storage) but still return
+	// the client that is being unregistered. So log error an proceed.
+	if err != nil {
+		s.log.Errorf("Error deleting client %q: %v", clientID, err)
+	}
+	// This would mean that the client was already unregistered or was never
+	// registered.
+	if client == nil {
 		return false
 	}
-	hbInbox := sc.HbInbox
-	// At this point, client.unregistered has been set to true,
-	// in Unregister() preventing any addition/removal of subs, etc..
-	client := sc.UserData.(*client)
-
-	client.Lock()
-	if client.hbt != nil {
-		client.hbt.Stop()
-	}
-	client.Unlock()
 
 	// Remove all non-durable subscribers.
 	s.removeAllNonDurableSubscribers(client)
 
-	s.log.Debugf("[Client:%s] Closed (Inbox=%v)", clientID, hbInbox)
+	if s.debug {
+		client.RLock()
+		hbInbox := client.info.HbInbox
+		client.RUnlock()
+		s.log.Debugf("[Client:%s] Closed (Inbox=%v)", clientID, hbInbox)
+	}
 	return true
 }
 
@@ -1939,7 +1919,7 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
 		refs++
 	}
-	subs := s.clients.GetSubs(req.ClientID)
+	subs := s.clients.getSubs(req.ClientID)
 	if len(subs) > 0 {
 		// There are subscribers, we will schedule the connection
 		// close request to subscriber's ackInbox subscribers.
@@ -2019,7 +1999,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	}
 
 	// Make sure we have a clientID, guid, etc.
-	if pm.Guid == "" || !s.clients.IsValid(pm.ClientID) || !util.IsSubjectValid(pm.Subject, false) {
+	if pm.Guid == "" || !s.clients.isValid(pm.ClientID) || !util.IsSubjectValid(pm.Subject, false) {
 		s.log.Errorf("Received invalid client publish message %v", pm)
 		s.sendPublishErr(m.Reply, pm.Guid, ErrInvalidPubReq)
 		return
@@ -2218,7 +2198,7 @@ func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subS
 	}
 
 	// If we don't find the client, we are done.
-	client := s.clients.Lookup(clientID)
+	client := s.clients.lookup(clientID)
 	if client == nil {
 		return
 	}
@@ -2793,7 +2773,7 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 	}
 
 	// Remove from Client
-	if !s.clients.RemoveSub(req.ClientID, sub) {
+	if !s.clients.removeSub(req.ClientID, sub) {
 		s.log.Errorf("[Client:%s] %s request for missing client", req.ClientID, action)
 		s.sendSubscriptionResponseErr(m.Reply, ErrUnknownClient)
 		return
@@ -2916,7 +2896,7 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 // addSubscription adds `sub` to the client and store.
 func (s *StanServer) addSubscription(ss *subStore, sub *subState) error {
 	// Store in client
-	if !s.clients.AddSub(sub.ClientID, sub) {
+	if !s.clients.addSub(sub.ClientID, sub) {
 		return fmt.Errorf("can't find clientID: %v", sub.ClientID)
 	}
 	// Store this subscription in subStore
@@ -2930,7 +2910,7 @@ func (s *StanServer) addSubscription(ss *subStore, sub *subState) error {
 // No lock is needed for `sub` since it has just been created.
 func (s *StanServer) updateDurable(ss *subStore, sub *subState) error {
 	// Store in the client
-	if !s.clients.AddSub(sub.ClientID, sub) {
+	if !s.clients.addSub(sub.ClientID, sub) {
 		return fmt.Errorf("can't find clientID: %v", sub.ClientID)
 	}
 	// Update this subscription in the store

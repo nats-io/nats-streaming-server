@@ -179,7 +179,7 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 		Now:           now,
 		Start:         s.startTime,
 		Uptime:        myUptime(now.Sub(s.startTime)),
-		Clients:       s.store.GetClientsCount(),
+		Clients:       s.clients.count(),
 		Channels:      numChannels,
 		Subscriptions: numSubs,
 		TotalMsgs:     count,
@@ -235,11 +235,7 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 	singleClient := r.URL.Query().Get("client")
 	subsOption, _ := strconv.Atoi(r.URL.Query().Get("subs"))
 	if singleClient != "" {
-		var clientz *Clientz
-		client := s.store.GetClient(singleClient)
-		if client != nil {
-			clientz = getMonitorClient(client, subsOption)
-		}
+		clientz := getMonitorClient(s, singleClient, subsOption)
 		if clientz == nil {
 			http.Error(w, fmt.Sprintf("Client %s not found", singleClient), http.StatusNotFound)
 			return
@@ -247,11 +243,11 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 		s.sendResponse(w, r, clientz)
 	} else {
 		offset, limit := getOffsetAndLimit(r)
-		clients := s.store.GetClients()
+		clients := s.clients.getClients()
 		totalClients := len(clients)
 		carr := make([]*Clientz, 0, totalClients)
-		for _, c := range clients {
-			cz := &Clientz{ID: c.ID}
+		for cID := range clients {
+			cz := &Clientz{ID: cID}
 			carr = append(carr, cz)
 		}
 		sort.Sort(byClientID(carr))
@@ -259,14 +255,23 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 		minoff, maxoff := getMinMaxOffset(offset, limit, totalClients)
 		carr = carr[minoff:maxoff]
 
+		// Since clients may be unregistered between the time we get the client IDs
+		// and the time we build carr array, lets count the number of elements
+		// actually intserted.
+		carrSize := 0
 		for _, c := range carr {
-			cli := clients[c.ID]
-			c.HBInbox = cli.HbInbox
-			if subsOption == 1 {
-				srvCli := cli.UserData.(*client)
-				c.Subscriptions = getMonitorClientSubs(srvCli, true)
+			client := s.clients.lookup(c.ID)
+			if client != nil {
+				client.RLock()
+				c.HBInbox = client.info.HbInbox
+				if subsOption == 1 {
+					c.Subscriptions = getMonitorClientSubs(client)
+				}
+				client.RUnlock()
+				carrSize++
 			}
 		}
+		carr = carr[0:carrSize]
 		clientsz := &Clientsz{
 			ClusterID: s.info.ClusterID,
 			ServerID:  s.serverID,
@@ -281,31 +286,24 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func getMonitorClient(c *stores.Client, subsOption int) *Clientz {
-	cli := c.UserData.(*client)
-	cli.RLock()
-	defer cli.RUnlock()
-	if cli.unregistered {
+func getMonitorClient(s *StanServer, clientID string, subsOption int) *Clientz {
+	cli := s.clients.lookup(clientID)
+	if cli == nil {
 		return nil
 	}
+	cli.RLock()
+	defer cli.RUnlock()
 	cz := &Clientz{
-		HBInbox: c.HbInbox,
-		ID:      c.ID,
+		HBInbox: cli.info.HbInbox,
+		ID:      cli.info.ID,
 	}
 	if subsOption == 1 {
-		cz.Subscriptions = getMonitorClientSubs(cli, false)
+		cz.Subscriptions = getMonitorClientSubs(cli)
 	}
 	return cz
 }
 
-func getMonitorClientSubs(client *client, needsLock bool) map[string][]*Subscriptionz {
-	if needsLock {
-		client.RLock()
-		defer client.RUnlock()
-		if client.unregistered {
-			return nil
-		}
-	}
+func getMonitorClientSubs(client *client) map[string][]*Subscriptionz {
 	subs := client.subs
 	var subsz map[string][]*Subscriptionz
 	for _, sub := range subs {

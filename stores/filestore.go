@@ -418,6 +418,7 @@ type FileStore struct {
 	clientsFile   *file
 	opts          FileStoreOptions
 	compactItvl   time.Duration
+	clients       map[string]*Client
 	addClientRec  spb.ClientInfo
 	delClientRec  spb.ClientDelete
 	cliFileSize   int64
@@ -1082,7 +1083,7 @@ func NewFileStore(log logger.Logger, rootDir string, limits *StoreLimits, option
 		return nil, fmt.Errorf("for %v stores, root directory must be specified", TypeFile)
 	}
 
-	fs := &FileStore{opts: DefaultFileStoreOptions}
+	fs := &FileStore{opts: DefaultFileStoreOptions, clients: make(map[string]*Client)}
 	if err := fs.init(TypeFile, log, limits); err != nil {
 		return nil, err
 	}
@@ -1489,59 +1490,61 @@ func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*Chann
 	return channelStore, true, nil
 }
 
-// AddClient stores information about the client identified by `clientID`.
-func (fs *FileStore) AddClient(clientID, hbInbox string, userData interface{}) (*Client, bool, error) {
-	sc, isNew, err := fs.genericStore.AddClient(clientID, hbInbox, userData)
-	if err != nil {
-		return nil, false, err
-	}
-	if !isNew {
-		return sc, false, nil
-	}
+// AddClient implements the Store interface
+func (fs *FileStore) AddClient(clientID, hbInbox string) (*Client, error) {
 	fs.Lock()
 	if _, err := fs.fm.lockFile(fs.clientsFile); err != nil {
 		fs.Unlock()
-		return nil, false, err
+		return nil, err
 	}
 	fs.addClientRec = spb.ClientInfo{ID: clientID, HbInbox: hbInbox}
 	_, size, err := writeRecord(fs.clientsFile.handle, nil, addClient, &fs.addClientRec, fs.addClientRec.Size(), fs.crcTable)
 	if err != nil {
-		delete(fs.clients, clientID)
 		fs.fm.unlockFile(fs.clientsFile)
 		fs.Unlock()
-		return nil, false, err
+		return nil, err
 	}
 	fs.cliFileSize += int64(size)
 	fs.fm.unlockFile(fs.clientsFile)
+	client := Client{fs.addClientRec}
+	fs.clients[clientID] = &client
 	fs.Unlock()
-	return sc, true, nil
+	return &client, nil
 }
 
-// DeleteClient invalidates the client identified by `clientID`.
-func (fs *FileStore) DeleteClient(clientID string) *Client {
-	sc := fs.genericStore.DeleteClient(clientID)
-	if sc != nil {
-		fs.Lock()
-		if _, err := fs.fm.lockFile(fs.clientsFile); err != nil {
-			fs.Unlock()
-			return sc
-		}
-		fs.delClientRec = spb.ClientDelete{ID: clientID}
-		_, size, _ := writeRecord(fs.clientsFile.handle, nil, delClient, &fs.delClientRec, fs.delClientRec.Size(), fs.crcTable)
-		fs.cliDeleteRecs++
-		fs.cliFileSize += int64(size)
-		// Check if this triggers a need for compaction
-		if fs.shouldCompactClientFile() {
-			// close the file now
-			fs.fm.closeLockedFile(fs.clientsFile)
-			// compact (this uses a temporary file)
-			fs.compactClientFile(fs.clientsFile.name)
-		} else {
-			fs.fm.unlockFile(fs.clientsFile)
-		}
+// DeleteClient implements the Store interface
+func (fs *FileStore) DeleteClient(clientID string) error {
+	fs.Lock()
+	if _, err := fs.fm.lockFile(fs.clientsFile); err != nil {
 		fs.Unlock()
+		return err
 	}
-	return sc
+	fs.delClientRec = spb.ClientDelete{ID: clientID}
+	_, size, err := writeRecord(fs.clientsFile.handle, nil, delClient, &fs.delClientRec, fs.delClientRec.Size(), fs.crcTable)
+	// Even if there is an error, proceed. If we compact the file,
+	// this may resolve the issue.
+	delete(fs.clients, clientID)
+	fs.cliDeleteRecs++
+	fs.cliFileSize += int64(size)
+	// Check if this triggers a need for compaction
+	if fs.shouldCompactClientFile() {
+		// close the file now
+		// If we can't close the file, it does not make sense
+		// to proceed with compaction.
+		if lerr := fs.fm.closeLockedFile(fs.clientsFile); lerr != nil {
+			fs.Unlock()
+			return lerr
+		}
+		// compact (this uses a temporary file)
+		// Override writeRecord error with the result of compaction.
+		// If compaction works, the original error is no longer an issue
+		// since the file has been replaced.
+		err = fs.compactClientFile(fs.clientsFile.name)
+	} else {
+		fs.fm.unlockFile(fs.clientsFile)
+	}
+	fs.Unlock()
+	return err
 }
 
 // shouldCompactClientFile returns true if the client file should be compacted

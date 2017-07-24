@@ -56,6 +56,17 @@ NATS Streaming provides the following high-level feature set.
 
 ## Version `0.6.0`
 
+The Store interface has been heavily modified. Some of the responsibilities have been moved into the server
+resulting on deletion of some Store APIs and removal of `UserData` fields in `Client` and `ChannelStore`.
+
+The Store interface was updated.
+
+* `Client` no longer stores a `UserData` field.
+* `AddClient()` is now simply returning a `*Client` and `error`. It no longer accepts a `userData interface{}` parameter.
+* `DeleteClient()` now returns an error instead of returning the deleted `*Client`. This will allow the server to
+report possible errors.
+* `GetClient()`, `GetClients`, `GetClientsCount()` have been removed from the Store API.
+
 The SubStore interface was updated.
 
 * `DeleteSub()` has been modified to return an error. This allows the server to report possible errors during deletion
