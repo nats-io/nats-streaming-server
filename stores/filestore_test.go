@@ -1512,10 +1512,35 @@ func TestFSGetSeqFromTimestamp(t *testing.T) {
 	cleanupDatastore(t, defaultDataStore)
 	defer cleanupDatastore(t, defaultDataStore)
 
+	// For this test, reduce the background task go routine sleep interval
+	bkgTasksSleepDuration = 10 * time.Millisecond
+	defer func() {
+		bkgTasksSleepDuration = defaultBkgTasksSleepDuration
+	}()
+
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
 	testGetSeqFromStartTime(t, fs)
+
+	// Restart the server, make sure we can get the expected sequence
+	times := []int64{
+		time.Now().UnixNano() - int64(time.Hour),
+		time.Now().UnixNano() + int64(time.Hour),
+	}
+	expectedSeqs := []uint64{1, 101}
+
+	for i := 0; i < len(times); i++ {
+		fs.Close()
+		fs, _ = openDefaultFileStore(t)
+		defer fs.Close()
+
+		cs := fs.LookupChannel("foo")
+		seq := msgStoreGetSequenceFromTimestamp(t, cs.Msgs, times[i])
+		if seq != expectedSeqs[i] {
+			t.Fatalf("Expected seq to be %v, got %v", expectedSeqs[i], seq)
+		}
+	}
 }
 
 func TestFSBadClientFile(t *testing.T) {
