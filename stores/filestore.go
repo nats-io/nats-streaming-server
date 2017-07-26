@@ -2807,9 +2807,13 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error
 	ms.RLock()
 	defer ms.RUnlock()
 
-	// Quick check first
-	if ms.first == ms.last {
+	// No message ever stored
+	if ms.first == 0 {
 		return 0, nil
+	}
+	// All messages have expired
+	if ms.first > ms.last {
+		return ms.last + 1, nil
 	}
 	// If we have some state, try to quickly get the sequence
 	if ms.firstMsg != nil && ms.firstMsg.Timestamp >= timestamp {
@@ -2819,6 +2823,7 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error
 		return ms.last + 1, nil
 	}
 
+	smallest := int64(-1)
 	// This will require disk access.
 	for _, slice := range ms.files {
 		if err := ms.lockIndexFile(slice); err != nil {
@@ -2841,8 +2846,13 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error
 					}
 				}
 			}
+		} else if smallest == -1 || mindex.timestamp < smallest {
+			smallest = mindex.timestamp
 		}
 		ms.unlockIndexFile(slice)
+	}
+	if timestamp < smallest {
+		return ms.first, nil
 	}
 	return ms.last + 1, nil
 }

@@ -150,9 +150,13 @@ func (ms *MemoryMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, err
 	ms.RLock()
 	defer ms.RUnlock()
 
-	// Quick checks first
-	if len(ms.msgs) == 0 {
+	// No message ever stored
+	if ms.first == 0 {
 		return 0, nil
+	}
+	// All messages have expired
+	if ms.first > ms.last {
+		return ms.last + 1, nil
 	}
 	if ms.msgs[ms.first].Timestamp >= timestamp {
 		return ms.first, nil

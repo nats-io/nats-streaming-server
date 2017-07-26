@@ -686,6 +686,9 @@ func testBasicSubStore(t *testing.T, s Store) {
 }
 
 func testGetSeqFromStartTime(t *testing.T, s Store) {
+	limits := testDefaultStoreLimits
+	limits.MaxAge = 500 * time.Millisecond
+	s.SetLimits(&limits)
 	// Force creation of channel without storing anything yet
 	s.CreateChannel("foo", nil)
 	// Lookup channel store
@@ -720,6 +723,14 @@ func testGetSeqFromStartTime(t *testing.T, s Store) {
 	seq = msgStoreGetSequenceFromTimestamp(t, cs.Msgs, msgs[count-1].Timestamp+int64(time.Second))
 	if seq != msgs[count-1].Sequence+1 {
 		t.Fatalf("Expected seq to be %v, got %v", msgs[count-1].Sequence+1, seq)
+	}
+	// Wait for all messages to expire
+	time.Sleep(600 * time.Millisecond)
+	// Now these calls should all return the lastSeq + 1
+	seq1 := msgStoreGetSequenceFromTimestamp(t, cs.Msgs, time.Now().UnixNano()-int64(time.Hour))
+	seq2 := msgStoreGetSequenceFromTimestamp(t, cs.Msgs, time.Now().UnixNano()+int64(time.Hour))
+	if seq1 != seq2 || seq1 != msgs[count-1].Sequence+1 {
+		t.Fatalf("After expiration, returned sequence should be: %v, got %v %v", msgs[count-1].Sequence+1, seq1, seq2)
 	}
 }
 
