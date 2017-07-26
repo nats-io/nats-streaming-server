@@ -115,7 +115,7 @@ func TestMSMaxChannels(t *testing.T) {
 		t.Fatalf("Unexpected error setting limits: %v", err)
 	}
 
-	testMaxChannels(t, ms, limitCount)
+	testMaxChannels(t, ms, "limit", limitCount)
 
 	// Set the limit to 0
 	limits.MaxChannels = 0
@@ -124,7 +124,7 @@ func TestMSMaxChannels(t *testing.T) {
 	}
 	// Now try to test the limit against
 	// any value, it should not fail
-	testMaxChannels(t, ms, 0)
+	testMaxChannels(t, ms, "nolimit", 0)
 }
 
 func TestMSMaxSubs(t *testing.T) {
@@ -156,13 +156,12 @@ func TestMSMaxAge(t *testing.T) {
 	ms := createDefaultMemStore(t)
 	defer ms.Close()
 
-	testMaxAge(t, ms)
+	cs := testMaxAge(t, ms)
 
 	// Store a message
-	storeMsg(t, ms, "foo", []byte("msg"))
+	storeMsg(t, cs, "foo", []byte("msg"))
 	// Verify timer is set
 	ms.RLock()
-	cs := ms.LookupChannel("foo")
 	timerSet := cs.Msgs.(*MemoryMsgStore).ageTimer != nil
 	ms.RUnlock()
 	if !timerSet {
@@ -266,10 +265,4 @@ func TestMSLimitWithWildcardsInConfig(t *testing.T) {
 	ms := createDefaultMemStore(t)
 	defer ms.Close()
 	testLimitWithWildcardsInConfig(t, ms)
-}
-
-func TestMSGetChannels(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-	testGetChannels(t, ms)
 }

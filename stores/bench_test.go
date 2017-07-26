@@ -19,7 +19,7 @@ func benchCleanupDatastore(b *testing.B, dir string) {
 	}
 }
 
-func benchCreateDefaultFileStore(t *testing.B) *FileStore {
+func benchCreateDefaultFileStore(t *testing.B) (*FileStore, *RecoveredState) {
 	fs, err := NewFileStore(testLogger, defaultDataStore, &testDefaultStoreLimits)
 	if err != nil {
 		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
@@ -35,7 +35,7 @@ func benchCreateDefaultFileStore(t *testing.B) *FileStore {
 			stackFatalf(t, "Unexpected error durint Init: %v", err)
 		}
 	}
-	return fs
+	return fs, state
 }
 
 func benchStoreMsg(b *testing.B, ms MsgStore, data []byte) *pb.MsgProto {
@@ -56,10 +56,10 @@ func BenchmarkRecoverMsgs(b *testing.B) {
 	benchCleanupDatastore(b, defaultDataStore)
 	defer benchCleanupDatastore(b, defaultDataStore)
 
-	s := benchCreateDefaultFileStore(b)
+	s, _ := benchCreateDefaultFileStore(b)
 	defer s.Close()
 
-	cs, _, err := s.CreateChannel("foo", nil)
+	cs, err := s.CreateChannel("foo")
 	if err != nil {
 		b.Fatalf("Error creating channel foo: %v", err)
 	}
@@ -75,18 +75,12 @@ func BenchmarkRecoverMsgs(b *testing.B) {
 	// Measure recovery
 	b.N = count
 	b.StartTimer()
-	s = benchCreateDefaultFileStore(b)
+	s, state := benchCreateDefaultFileStore(b)
 	b.StopTimer()
 
 	defer s.Close()
-	cs = s.LookupChannel("foo")
-	if cs == nil {
-		b.Fatal("Channel foo should exist")
-	}
-	n, _, err := cs.Msgs.State()
-	if err != nil {
-		b.Fatalf("Unexpected error getting state: %v", err)
-	}
+	cs = getRecoveredChannel(b, state, "foo")
+	n, _ := msgStoreState(b, cs.Msgs)
 	if n != count {
 		b.Fatalf("Expected %v messages, got %v", count, n)
 	}
@@ -98,10 +92,10 @@ func BenchmarkRecoverSubs(b *testing.B) {
 	benchCleanupDatastore(b, defaultDataStore)
 	defer benchCleanupDatastore(b, defaultDataStore)
 
-	s := benchCreateDefaultFileStore(b)
+	s, _ := benchCreateDefaultFileStore(b)
 	defer s.Close()
 
-	cs, _, err := s.CreateChannel("foo", nil)
+	cs, err := s.CreateChannel("foo")
 	if err != nil {
 		b.Fatalf("Error creating channel foo: %v", err)
 	}
@@ -146,13 +140,8 @@ func BenchmarkRecoverSubs(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Unable to restore the state: %v", err)
 	}
-	if state == nil {
-		b.Fatal("State should have been recovered")
-	}
-	recoveredSubs := state.Subs["foo"]
-	if len(recoveredSubs) != numSubs {
-		b.Fatalf("Should have recovered %v subs, got %v", numSubs, len(recoveredSubs))
-	}
+	getRecoveredChannel(b, state, "foo")
+	recoveredSubs := getRecoveredSubs(b, state, "foo", numSubs)
 	for _, sub := range recoveredSubs {
 		if len(sub.Pending) != 0 {
 			b.Fatalf("Non pending message should have been recovered, got %v", len(sub.Pending))

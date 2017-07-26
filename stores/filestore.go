@@ -1110,28 +1110,27 @@ func NewFileStore(log logger.Logger, rootDir string, limits *StoreLimits, option
 	return fs, nil
 }
 
-type recoveredChannelInfo struct {
-	name string
-	subs []*RecoveredSubState
-	cs   *ChannelStore
-}
-
 type channelRecoveryCtx struct {
 	wg        *sync.WaitGroup
 	poolCh    chan struct{}
 	errCh     chan error
-	recoverCh chan *recoveredChannelInfo
+	recoverCh chan *recoveredChannel
+}
+
+type recoveredChannel struct {
+	name string
+	rc   *RecoveredChannel
 }
 
 // Recover implements the Store interface
 func (fs *FileStore) Recover() (*RecoveredState, error) {
 	var (
-		err              error
-		recoveredState   *RecoveredState
-		serverInfo       *spb.ServerInfo
-		recoveredClients []*Client
-		recoveredSubs    = make(RecoveredSubscriptions)
-		channels         []os.FileInfo
+		err               error
+		recoveredState    *RecoveredState
+		serverInfo        *spb.ServerInfo
+		recoveredClients  []*Client
+		recoveredChannels = make(map[string]*RecoveredChannel)
+		channels          []os.FileInfo
 	)
 
 	// Ensure store is closed in case of return with error
@@ -1218,8 +1217,8 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 		for !done {
 			select {
 			case rc := <-recoverCh:
-				recoveredSubs[rc.name] = rc.subs
-				fs.channels[rc.name] = rc.cs
+				recoveredChannels[rc.name] = rc.rc
+				fs.channels[rc.name] = rc.rc.Channel
 			default:
 				done = true
 			}
@@ -1227,15 +1226,15 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 	}
 	// Create the recovered state to return
 	recoveredState = &RecoveredState{
-		Info:    serverInfo,
-		Clients: recoveredClients,
-		Subs:    recoveredSubs,
+		Info:     serverInfo,
+		Clients:  recoveredClients,
+		Channels: recoveredChannels,
 	}
 	fs.log.Noticef("Recovered %v channels", len(fs.channels))
 	return recoveredState, nil
 }
 
-func initParalleRecovery(maxGoRoutines, foundChannels int) (*sync.WaitGroup, chan struct{}, chan error, chan *recoveredChannelInfo) {
+func initParalleRecovery(maxGoRoutines, foundChannels int) (*sync.WaitGroup, chan struct{}, chan error, chan *recoveredChannel) {
 	wg := sync.WaitGroup{}
 	poolCh := make(chan struct{}, maxGoRoutines)
 	for i := 0; i < maxGoRoutines; i++ {
@@ -1245,7 +1244,7 @@ func initParalleRecovery(maxGoRoutines, foundChannels int) (*sync.WaitGroup, cha
 	// foundChannels is the number of directories (channels) found
 	// in the root directory. It is the max number of elements we will
 	// put in this channel during the recovery process.
-	recoverCh := make(chan *recoveredChannelInfo, foundChannels)
+	recoverCh := make(chan *recoveredChannel, foundChannels)
 	return &wg, poolCh, errCh, recoverCh
 }
 
@@ -1275,8 +1274,16 @@ func (fs *FileStore) recoverOneChannel(dir, name string, limits *ChannelLimits, 
 		return
 	}
 
-	// For this channel, construct an array of RecoveredSubState
-	rssArray := make([]*RecoveredSubState, 0, len(subStore.subs))
+	recoveredChannel := &recoveredChannel{
+		name: name,
+		rc: &RecoveredChannel{
+			Channel: &Channel{
+				Subs: subStore,
+				Msgs: msgStore,
+			},
+			Subscriptions: make([]*RecoveredSubscription, 0, len(subStore.subs)),
+		},
+	}
 
 	// Fill that array with what we got from newFileSubStore.
 	for _, sub := range subStore.subs {
@@ -1285,7 +1292,7 @@ func (fs *FileStore) recoverOneChannel(dir, name string, limits *ChannelLimits, 
 		// to the store. So make a copy and return the pointer to
 		// that copy.
 		csub := *sub.sub
-		rss := &RecoveredSubState{
+		rs := &RecoveredSubscription{
 			Sub:     &csub,
 			Pending: make(PendingAcks),
 		}
@@ -1294,21 +1301,14 @@ func (fs *FileStore) recoverOneChannel(dir, name string, limits *ChannelLimits, 
 			// Lookup messages, and if we find those, update the
 			// Pending map.
 			for seq := range sub.seqnos {
-				rss.Pending[seq] = struct{}{}
+				rs.Pending[seq] = struct{}{}
 			}
 		}
 		// Add to the array of recovered subscriptions
-		rssArray = append(rssArray, rss)
+		recoveredChannel.rc.Subscriptions = append(recoveredChannel.rc.Subscriptions, rs)
 	}
 	// Push our recovered info into the recovered channel.
-	ctx.recoverCh <- &recoveredChannelInfo{
-		name: name,
-		subs: rssArray,
-		cs: &ChannelStore{
-			Subs: subStore,
-			Msgs: msgStore,
-		},
-	}
+	ctx.recoverCh <- recoveredChannel
 }
 
 // GetExclusiveLock implements the Store interface
@@ -1441,26 +1441,21 @@ func (fs *FileStore) recoverServerInfo(file *os.File) (*spb.ServerInfo, error) {
 	return info, nil
 }
 
-// CreateChannel creates a ChannelStore for the given channel, and returns
-// `true` to indicate that the channel is new, false if it already exists.
-func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, bool, error) {
+// CreateChannel implements the Store interface
+func (fs *FileStore) CreateChannel(channel string) (*Channel, error) {
 	fs.Lock()
 	defer fs.Unlock()
-	channelStore := fs.channels[channel]
-	if channelStore != nil {
-		return channelStore, false, nil
-	}
 
-	// Check for limits
-	if err := fs.canAddChannel(); err != nil {
-		return nil, false, err
+	// Verify that it does not already exist or that we did not hit the limits
+	if err := fs.canAddChannel(channel); err != nil {
+		return nil, err
 	}
 
 	// We create the channel here...
 
 	channelDirName := filepath.Join(fs.fm.rootDir, channel)
 	if err := os.MkdirAll(channelDirName, os.ModeDir+os.ModePerm); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	var err error
@@ -1471,23 +1466,22 @@ func (fs *FileStore) CreateChannel(channel string, userData interface{}) (*Chann
 
 	msgStore, err = fs.newFileMsgStore(channelDirName, channel, &channelLimits.MsgStoreLimits, false)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	subStore, err = fs.newFileSubStore(channel, &channelLimits.SubStoreLimits, false)
 	if err != nil {
 		msgStore.Close()
-		return nil, false, err
+		return nil, err
 	}
 
-	channelStore = &ChannelStore{
-		Subs:     subStore,
-		Msgs:     msgStore,
-		UserData: userData,
+	c := &Channel{
+		Subs: subStore,
+		Msgs: msgStore,
 	}
 
-	fs.channels[channel] = channelStore
+	fs.channels[channel] = c
 
-	return channelStore, true, nil
+	return c, nil
 }
 
 // AddClient implements the Store interface

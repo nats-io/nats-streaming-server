@@ -159,7 +159,7 @@ const (
 // subStartInfo contains information used when a subscription request
 // is successful and the start (sending avail messages) is scheduled.
 type subStartInfo struct {
-	cs        *stores.ChannelStore
+	c         *channel
 	sub       *subState
 	qs        *queueState
 	isDurable bool
@@ -192,6 +192,101 @@ func (state State) String() string {
 	default:
 		return "UNKNOW STATE"
 	}
+}
+
+type channelStore struct {
+	sync.RWMutex
+	channels map[string]*channel
+	store    stores.Store
+}
+
+func newChannelStore(s stores.Store) *channelStore {
+	cs := &channelStore{
+		channels: make(map[string]*channel),
+		store:    s,
+	}
+	return cs
+}
+
+func (cs *channelStore) get(name string) *channel {
+	cs.RLock()
+	c := cs.channels[name]
+	cs.RUnlock()
+	return c
+}
+
+func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, error) {
+	cs.Lock()
+	defer cs.Unlock()
+	// It is possible that there were 2 concurrent calls to lookupOrCreateChannel
+	// which first uses `channelStore.get()` and if not found, calls this function.
+	// So we need to check now that we have the write lock that the channel has
+	// not already been created.
+	c := cs.channels[name]
+	if c != nil {
+		return c, nil
+	}
+	sc, err := cs.store.CreateChannel(name)
+	if err != nil {
+		return nil, err
+	}
+	return cs.create(s, name, sc), nil
+}
+
+// low-level creation and storage in memory of a *channel
+// Lock is held on entry or not needed.
+func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) *channel {
+	c := &channel{name: name, store: sc, ss: s.createSubStore()}
+	cs.channels[name] = c
+	return c
+}
+
+func (cs *channelStore) getAll() map[string]*channel {
+	cs.RLock()
+	m := make(map[string]*channel, len(cs.channels))
+	for k, v := range cs.channels {
+		m[k] = v
+	}
+	cs.RUnlock()
+	return m
+}
+
+func (cs *channelStore) msgsState(channelName string) (int, uint64, error) {
+	cs.RLock()
+	defer cs.RUnlock()
+	if channelName != "" {
+		c := cs.channels[channelName]
+		if c == nil {
+			return 0, 0, fmt.Errorf("channel %q not found", channelName)
+		}
+		return c.store.Msgs.State()
+	}
+	var (
+		count int
+		bytes uint64
+	)
+	for _, c := range cs.channels {
+		m, b, err := c.store.Msgs.State()
+		if err != nil {
+			return 0, 0, err
+		}
+		count += m
+		bytes += b
+	}
+	return count, bytes, nil
+}
+
+func (cs *channelStore) count() int {
+	cs.RLock()
+	count := len(cs.channels)
+	cs.RUnlock()
+	return count
+}
+
+type channel struct {
+	name  string
+	store *stores.Channel
+	ss    *subStore
 }
 
 // StanServer structure represents the STAN server
@@ -227,6 +322,9 @@ type StanServer struct {
 
 	// Clients
 	clients *clientStore
+
+	// channels
+	channels *channelStore
 
 	// Store
 	store stores.Store
@@ -300,7 +398,6 @@ type subStore struct {
 	durables map[string]*subState   // durables lookup
 	acks     map[string]*subState   // ack inbox lookup
 	stan     *StanServer            // back link to Stan server
-	subject  string
 }
 
 // Holds all queue subsribers for a subject/group and
@@ -343,29 +440,22 @@ type subState struct {
 }
 
 // Looks up, or create a new channel if it does not exist
-func (s *StanServer) lookupOrCreateChannel(channel string) (*stores.ChannelStore, error) {
-	if cs := s.store.LookupChannel(channel); cs != nil {
-		return cs, nil
+func (s *StanServer) lookupOrCreateChannel(name string) (*channel, error) {
+	c := s.channels.get(name)
+	if c != nil {
+		return c, nil
 	}
-	// It's possible that more than one go routine comes here at the same
-	// time. `ss` will then be simply gc'ed.
-	ss := s.createSubStore(channel)
-	cs, _, err := s.store.CreateChannel(channel, ss)
-	if err != nil {
-		return nil, err
-	}
-	return cs, nil
+	return s.channels.createChannel(s, name)
 }
 
 // createSubStore creates a new instance of `subStore`.
-func (s *StanServer) createSubStore(subject string) *subStore {
+func (s *StanServer) createSubStore() *subStore {
 	subs := &subStore{
 		psubs:    make([]*subState, 0, 4),
 		qsubs:    make(map[string]*queueState),
 		durables: make(map[string]*subState),
 		acks:     make(map[string]*subState),
 		stan:     s,
-		subject:  subject,
 	}
 	return subs
 }
@@ -446,7 +536,7 @@ func (ss *subStore) updateState(sub *subState) {
 
 // Remove a subscriber from the subscription store, leaving durable
 // subscriptions unless `unsubscribe` is true.
-func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe bool) {
+func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	if sub == nil {
 		return
 	}
@@ -542,7 +632,7 @@ func (ss *subStore) Remove(cs *stores.ChannelStore, sub *subState, unsubscribe b
 			storageUpdate = sub.LastSent == qs.lastSent
 			sortedPendingMsgs := makeSortedPendingMsgs(sub.acksPending)
 			for _, pm := range sortedPendingMsgs {
-				m, err := cs.Msgs.Lookup(pm.seq)
+				m, err := c.store.Msgs.Lookup(pm.seq)
 				if err != nil {
 					ss.stan.log.Errorf("Unable to update subscription for %s:%v (%v)", sub.subject, pm.seq, err)
 					continue
@@ -992,8 +1082,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// that it was successful.
 	s.store = store
 
-	// Create clientStore
 	s.clients = newClientStore(s.store)
+	s.channels = newChannelStore(s.store)
 
 	// If no NATS server url is provided, it means that we embed the NATS Server
 	if sOpts.NATSServerURL == "" {
@@ -1138,7 +1228,7 @@ func (s *StanServer) start(runningState State) error {
 		s.processRecoveredClients(recoveredState.Clients)
 
 		// Process recovered channels (if any).
-		recoveredSubs = s.processRecoveredChannels(recoveredState.Subs)
+		recoveredSubs = s.processRecoveredChannels(recoveredState.Channels)
 	} else {
 		s.info.ClusterID = s.opts.ID
 		// Generate Subjects
@@ -1370,24 +1460,19 @@ func (s *StanServer) processRecoveredClients(clients []*stores.Client) {
 // We don't use locking in there because there is no communication
 // with the NATS server and/or clients, so no chance that the state
 // changes while we are doing this.
-func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubscriptions) []*subState {
+func (s *StanServer) processRecoveredChannels(channels map[string]*stores.RecoveredChannel) []*subState {
 	// We will return the recovered subscriptions
 	allSubs := make([]*subState, 0, 16)
 
-	for channelName, recoveredSubs := range subscriptions {
-		// Lookup the ChannelStore from the store
-		channel := s.store.LookupChannel(channelName)
-		// Create the subStore for this channel
-		ss := s.createSubStore(channelName)
-		// Set it into the channel store
-		channel.UserData = ss
+	for channelName, recoveredChannel := range channels {
+		channel := s.channels.create(s, channelName, recoveredChannel.Channel)
 		// Get the recovered subscriptions for this channel.
-		for _, recSub := range recoveredSubs {
+		for _, recSub := range recoveredChannel.Subscriptions {
 			// Create a subState
 			sub := &subState{
-				subject: channelName,
+				subject: channel.name,
 				ackWait: time.Duration(recSub.Sub.AckWaitInSecs) * time.Second,
-				store:   channel.Subs,
+				store:   channel.store.Subs,
 			}
 			sub.acksPending = make(map[uint64]int64, len(recSub.Pending))
 			for seq := range recSub.Pending {
@@ -1421,7 +1506,7 @@ func (s *StanServer) processRecoveredChannels(subscriptions stores.RecoveredSubs
 					continue
 				}
 				// Add this subscription to subStore.
-				ss.updateState(sub)
+				channel.ss.updateState(sub)
 				// If this is a durable and the client was not recovered
 				// (was offline), we need to clear the ClientID otherwise
 				// it won't be able to reconnect
@@ -1547,15 +1632,15 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 		subject := sub.subject
 		qs := sub.qstate
 		sub.Unlock()
-		cs := s.store.LookupChannel(subject)
-		if cs == nil {
+		c := s.channels.get(subject)
+		if c == nil {
 			continue
 		}
 		// Kick delivery of (possible) new messages
 		if qs != nil {
-			s.sendAvailableMessagesToQueue(cs, qs)
+			s.sendAvailableMessagesToQueue(c, qs)
 		} else {
-			s.sendAvailableMessages(cs, sub)
+			s.sendAvailableMessages(c, sub)
 		}
 	}
 }
@@ -2116,19 +2201,19 @@ func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force b
 }
 
 // processMsg will process a message, and possibly send to clients, etc.
-func (s *StanServer) processMsg(cs *stores.ChannelStore) {
-	ss := cs.UserData.(*subStore)
+func (s *StanServer) processMsg(c *channel) {
+	ss := c.ss
 
 	// Since we iterate through them all.
 	ss.RLock()
 	// Walk the plain subscribers and deliver to each one
 	for _, sub := range ss.psubs {
-		s.sendAvailableMessages(cs, sub)
+		s.sendAvailableMessages(c, sub)
 	}
 
 	// Check the queue subscribers
 	for _, qs := range ss.qsubs {
-		s.sendAvailableMessagesToQueue(cs, qs)
+		s.sendAvailableMessagesToQueue(c, qs)
 	}
 	ss.RUnlock()
 }
@@ -2179,7 +2264,7 @@ func makeSortedPendingMsgs(pendingMsgs map[uint64]int64) []*pendingMsg {
 }
 
 // Redeliver all outstanding messages to a durable subscriber, used on resubscribe.
-func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subState) {
+func (s *StanServer) performDurableRedelivery(c *channel, sub *subState) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.RLock()
 	sortedSeqs := makeSortedSequences(sub.acksPending)
@@ -2204,7 +2289,7 @@ func (s *StanServer) performDurableRedelivery(cs *stores.ChannelStore, sub *subS
 	}
 	// Go through all messages
 	for _, seq := range sortedSeqs {
-		m := s.getMsgForRedelivery(cs, sub, seq)
+		m := s.getMsgForRedelivery(c, sub, seq)
 		if m == nil {
 			continue
 		}
@@ -2262,10 +2347,10 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	}
 	sub.Unlock()
 
-	cs := s.store.LookupChannel(subject)
+	c := s.channels.get(subject)
 	// Should not happen at this time since channels are not
 	// removed...
-	if cs == nil {
+	if c == nil {
 		s.log.Errorf("[Client:%s] Aborting redelivery for non existing channel: %s",
 			clientID, subject)
 		sub.Lock()
@@ -2291,7 +2376,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 
 	// We will move through acksPending(sorted) and see what needs redelivery.
 	for _, pm := range sortedPendingMsgs {
-		m := s.getMsgForRedelivery(cs, sub, pm.seq)
+		m := s.getMsgForRedelivery(c, sub, pm.seq)
 		if m == nil {
 			continue
 		}
@@ -2346,7 +2431,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			// We do this only after confirmation that it was successfully added
 			// as pending on the other queue subscriber.
 			if pick != sub && sent {
-				s.processAck(cs, sub, m.Sequence)
+				s.processAck(c, sub, m.Sequence)
 			}
 		} else {
 			sub.Lock()
@@ -2363,14 +2448,14 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 // because it has been removed due to limit - processes an ACK for this
 // sub/sequence number and returns nil, otherwise return a copy of the
 // message (since it is going to be modified: m.Redelivered = true)
-func (s *StanServer) getMsgForRedelivery(cs *stores.ChannelStore, sub *subState, seq uint64) *pb.MsgProto {
-	m, err := cs.Msgs.Lookup(seq)
+func (s *StanServer) getMsgForRedelivery(c *channel, sub *subState, seq uint64) *pb.MsgProto {
+	m, err := c.store.Msgs.Lookup(seq)
 	if m == nil || err != nil {
 		if err != nil {
 			s.log.Errorf("Error getting message for redelivery %v:%v (%v)", sub.subject, seq, err)
 		}
 		// Ack it so that it does not reincarnate on restart
-		s.processAck(cs, sub, seq)
+		s.processAck(c, sub, seq)
 		return nil
 	}
 	// The store implementation does not return a copy, we need one
@@ -2504,7 +2589,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 	// This will be done by a master election within the cluster, for now we
 	// assume we are the master and assign the sequence ID here.
 	////////////////////////////////////////////////////////////////////////////
-	storesToFlush := make(map[*stores.ChannelStore]struct{}, 64)
+	storesToFlush := make(map[*channel]struct{}, 64)
 
 	var _pendingMsgs [ioChannelSize]*ioPendingMsg
 	var pendingMsgs = _pendingMsgs[:0]
@@ -2569,19 +2654,19 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 			}
 
 			// flush all the stores with messages written to them...
-			for cs := range storesToFlush {
-				if err := cs.Msgs.Flush(); err != nil {
+			for c := range storesToFlush {
+				if err := c.store.Msgs.Flush(); err != nil {
 					// TODO: Attempt recovery, notify publishers of error.
 					panic(fmt.Errorf("Unable to flush msg store: %v", err))
 				}
 				// Call this here, so messages are sent to subscribers,
 				// which means that msg seq is added to subscription file
-				s.processMsg(cs)
-				if err := cs.Subs.Flush(); err != nil {
+				s.processMsg(c)
+				if err := c.store.Subs.Flush(); err != nil {
 					panic(fmt.Errorf("Unable to flush sub store: %v", err))
 				}
 				// Remove entry from map (this is safe in Go)
-				delete(storesToFlush, cs)
+				delete(storesToFlush, c)
 			}
 
 			// Ack our messages back to the publisher
@@ -2601,15 +2686,15 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 }
 
 // assignAndStore will assign a sequence ID and then store the message.
-func (s *StanServer) assignAndStore(pm *pb.PubMsg) (*stores.ChannelStore, error) {
-	cs, err := s.lookupOrCreateChannel(pm.Subject)
+func (s *StanServer) assignAndStore(pm *pb.PubMsg) (*channel, error) {
+	c, err := s.lookupOrCreateChannel(pm.Subject)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := cs.Msgs.Store(pm.Data); err != nil {
+	if _, err := c.store.Msgs.Store(pm.Data); err != nil {
 		return nil, err
 	}
-	return cs, nil
+	return c, nil
 }
 
 // ackPublisher sends the ack for a message.
@@ -2666,15 +2751,13 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 		sub.RLock()
 		subject := sub.subject
 		sub.RUnlock()
-		// Get the ChannelStore
-		cs := s.store.LookupChannel(subject)
-		if cs == nil {
+		// Get the channel
+		c := s.channels.get(subject)
+		if c == nil {
 			continue
 		}
-		// Get the subStore from the ChannelStore
-		ss := cs.UserData.(*subStore)
 		// Don't remove durables
-		ss.Remove(cs, sub, false)
+		c.ss.Remove(c, sub, false)
 	}
 }
 
@@ -2720,8 +2803,8 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 		action = "sub close"
 		isSubClose = true
 	}
-	cs := s.store.LookupChannel(req.Subject)
-	if cs == nil {
+	c := s.channels.get(req.Subject)
+	if c == nil {
 		s.log.Errorf("[Client:%s] %s request missing subject %s",
 			req.ClientID, action, req.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
@@ -2729,7 +2812,7 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 	}
 
 	// Get the subStore
-	ss := cs.UserData.(*subStore)
+	ss := c.ss
 
 	sub := ss.LookupByAckInbox(req.Inbox)
 	if sub == nil {
@@ -2781,7 +2864,7 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 
 	// Remove the subscription
 	unsubscribe := !isSubClose
-	ss.Remove(cs, sub, unsubscribe)
+	ss.Remove(c, sub, unsubscribe)
 	s.monMu.Lock()
 	s.numSubs--
 	s.monMu.Unlock()
@@ -2990,14 +3073,14 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 
 	// Grab channel state, create a new one if needed.
-	cs, err := s.lookupOrCreateChannel(sr.Subject)
+	c, err := s.lookupOrCreateChannel(sr.Subject)
 	if err != nil {
 		s.log.Errorf("Unable to create store for subject %s", sr.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
 	}
 	// Get the subStore
-	ss := cs.UserData.(*subStore)
+	ss := c.ss
 
 	var sub *subState
 
@@ -3097,12 +3180,12 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			subject:     sr.Subject,
 			ackWait:     time.Duration(sr.AckWaitInSecs) * time.Second,
 			acksPending: make(map[uint64]int64),
-			store:       cs.Subs,
+			store:       c.store.Subs,
 		}
 
 		if setStartPos {
 			// set the start sequence of the subscriber.
-			err = s.setSubStartSequence(cs, sub, sr)
+			err = s.setSubStartSequence(c, sub, sr)
 		}
 
 		if err == nil {
@@ -3113,7 +3196,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	if err != nil {
 		// Try to undo what has been done.
 		s.closeProtosMu.Lock()
-		ss.Remove(cs, sub, false)
+		ss.Remove(c, sub, false)
 		s.closeProtosMu.Unlock()
 		s.log.Errorf("Unable to add subscription for %s: %v", sr.Subject, err)
 		s.sendSubscriptionResponseErr(m.Reply, err)
@@ -3160,7 +3243,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	sub.initialized = true
 	sub.Unlock()
 
-	s.subStartCh <- &subStartInfo{cs: cs, sub: sub, qs: qs, isDurable: isDurable}
+	s.subStartCh <- &subStartInfo{c: c, sub: sub, qs: qs, isDurable: isDurable}
 }
 
 // createAckInboxAndSubject returns an AckInbox.
@@ -3205,19 +3288,19 @@ func (s *StanServer) processSubscriptionsStart() {
 	for {
 		select {
 		case subStart := <-s.subStartCh:
-			cs := subStart.cs
+			c := subStart.c
 			sub := subStart.sub
 			qs := subStart.qs
 			isDurable := subStart.isDurable
 			if isDurable {
 				// Redeliver any outstanding.
-				s.performDurableRedelivery(cs, sub)
+				s.performDurableRedelivery(c, sub)
 			}
 			// publish messages to this subscriber
 			if qs != nil {
-				s.sendAvailableMessagesToQueue(cs, qs)
+				s.sendAvailableMessagesToQueue(c, qs)
 			} else {
-				s.sendAvailableMessages(cs, sub)
+				s.sendAvailableMessages(c, sub)
 			}
 		case <-s.subStartQuit:
 			return
@@ -3234,16 +3317,16 @@ func (s *StanServer) processAckMsg(m *nats.Msg) {
 			return
 		}
 	}
-	cs := s.store.LookupChannel(ack.Subject)
-	if cs == nil {
-		s.log.Errorf("[Client:?] Ack received, invalid channel (%s)", ack.Subject)
+	c := s.channels.get(ack.Subject)
+	if c == nil {
+		s.log.Errorf("Unable to process ack seq=%v, channel %q not found", ack.Sequence, ack.Subject)
 		return
 	}
-	s.processAck(cs, cs.UserData.(*subStore).LookupByAckInbox(m.Subject), ack.Sequence)
+	s.processAck(c, c.ss.LookupByAckInbox(m.Subject), ack.Sequence)
 }
 
 // processAck processes an ack and if needed sends more messages.
-func (s *StanServer) processAck(cs *stores.ChannelStore, sub *subState, sequence uint64) {
+func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 	if sub == nil {
 		return
 	}
@@ -3285,22 +3368,21 @@ func (s *StanServer) processAck(cs *stores.ChannelStore, sub *subState, sequence
 	}
 
 	if qs != nil {
-		s.sendAvailableMessagesToQueue(cs, qs)
+		s.sendAvailableMessagesToQueue(c, qs)
 	} else {
-		s.sendAvailableMessages(cs, sub)
+		s.sendAvailableMessages(c, sub)
 	}
 }
 
 // Send any messages that are ready to be sent that have been queued to the group.
-func (s *StanServer) sendAvailableMessagesToQueue(cs *stores.ChannelStore, qs *queueState) {
-	if cs == nil || qs == nil {
+func (s *StanServer) sendAvailableMessagesToQueue(c *channel, qs *queueState) {
+	if c == nil || qs == nil {
 		return
 	}
 
-	subject := cs.UserData.(*subStore).subject
 	qs.Lock()
 	for nextSeq := qs.lastSent + 1; ; nextSeq++ {
-		nextMsg := s.getNextMsg(cs, subject, &nextSeq, &qs.lastSent)
+		nextMsg := s.getNextMsg(c, &nextSeq, &qs.lastSent)
 		if nextMsg == nil {
 			break
 		}
@@ -3312,10 +3394,10 @@ func (s *StanServer) sendAvailableMessagesToQueue(cs *stores.ChannelStore, qs *q
 }
 
 // Send any messages that are ready to be sent that have been queued.
-func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subState) {
+func (s *StanServer) sendAvailableMessages(c *channel, sub *subState) {
 	sub.Lock()
 	for nextSeq := sub.LastSent + 1; ; nextSeq++ {
-		nextMsg := s.getNextMsg(cs, sub.subject, &nextSeq, &sub.LastSent)
+		nextMsg := s.getNextMsg(c, &nextSeq, &sub.LastSent)
 		if nextMsg == nil {
 			break
 		}
@@ -3326,11 +3408,11 @@ func (s *StanServer) sendAvailableMessages(cs *stores.ChannelStore, sub *subStat
 	sub.Unlock()
 }
 
-func (s *StanServer) getNextMsg(cs *stores.ChannelStore, subject string, nextSeq, lastSent *uint64) *pb.MsgProto {
+func (s *StanServer) getNextMsg(c *channel, nextSeq, lastSent *uint64) *pb.MsgProto {
 	for {
-		nextMsg, err := cs.Msgs.Lookup(*nextSeq)
+		nextMsg, err := c.store.Msgs.Lookup(*nextSeq)
 		if err != nil {
-			s.log.Errorf("Error looking up message %v:%v (%v)", subject, *nextSeq, err)
+			s.log.Errorf("Error looking up message %v:%v (%v)", c.name, *nextSeq, err)
 			// TODO: This will stop delivery. Will revisit later to see if we
 			// should move to the next message (if avail) or not.
 			return nil
@@ -3347,7 +3429,7 @@ func (s *StanServer) getNextMsg(cs *stores.ChannelStore, subject string, nextSeq
 		// later with handling of gaps in message sequence (either due
 		// to errors or absence of messages - that may have been removed
 		// after fixing a previous store corruption).
-		firstAvail, _ := cs.Msgs.FirstSequence()
+		firstAvail, _ := c.store.Msgs.FirstSequence()
 		if firstAvail <= *nextSeq {
 			return nil
 		}
@@ -3368,7 +3450,7 @@ func (s *StanServer) getNextMsg(cs *stores.ChannelStore, subject string, nextSeq
 }
 
 // Setup the start position for the subscriber.
-func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState, sr *pb.SubscriptionRequest) error {
+func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.SubscriptionRequest) error {
 	sub.Lock()
 	defer sub.Unlock()
 
@@ -3380,7 +3462,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 	switch sr.StartPosition {
 	case pb.StartPosition_NewOnly:
 		var err error
-		lastSent, err = cs.Msgs.LastSequence()
+		lastSent, err = c.store.Msgs.LastSequence()
 		if err != nil {
 			return err
 		}
@@ -3389,7 +3471,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 				sub.ClientID, sub.subject, lastSent)
 		}
 	case pb.StartPosition_LastReceived:
-		lastSeq, err := cs.Msgs.LastSequence()
+		lastSeq, err := c.store.Msgs.LastSequence()
 		if err != nil {
 			return err
 		}
@@ -3403,7 +3485,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 	case pb.StartPosition_TimeDeltaStart:
 		startTime := time.Now().UnixNano() - sr.StartTimeDelta
 		// If there is no message, seq will be 0.
-		seq, err := cs.Msgs.GetSequenceFromTimestamp(startTime)
+		seq, err := c.store.Msgs.GetSequenceFromTimestamp(startTime)
 		if err != nil {
 			return err
 		}
@@ -3419,7 +3501,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 		}
 	case pb.StartPosition_SequenceStart:
 		// If there is no message, firstSeq and lastSeq will be equal to 0.
-		firstSeq, lastSeq, err := cs.Msgs.FirstAndLastSequence()
+		firstSeq, lastSeq, err := c.store.Msgs.FirstAndLastSequence()
 		if err != nil {
 			return err
 		}
@@ -3440,7 +3522,7 @@ func (s *StanServer) setSubStartSequence(cs *stores.ChannelStore, sub *subState,
 				sub.ClientID, sub.subject, sr.StartSequence, lastSent)
 		}
 	case pb.StartPosition_First:
-		firstSeq, err := cs.Msgs.FirstSequence()
+		firstSeq, err := c.store.Msgs.FirstSequence()
 		if err != nil {
 			return err
 		}

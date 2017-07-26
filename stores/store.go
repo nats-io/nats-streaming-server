@@ -17,16 +17,12 @@ const (
 	TypeFile = "FILE"
 )
 
-const (
-	// AllChannels allows to get state for all channels.
-	AllChannels = "*"
-)
-
 // Errors.
 var (
 	ErrTooManyChannels = errors.New("too many channels")
 	ErrTooManySubs     = errors.New("too many subscriptions per channel")
 	ErrNotSupported    = errors.New("not supported")
+	ErrAlreadyExists   = errors.New("already exists")
 )
 
 // StoreLimits define limits for a store.
@@ -87,9 +83,25 @@ var DefaultStoreLimits = StoreLimits{
 
 // RecoveredState allows the server to reconstruct its state after a restart.
 type RecoveredState struct {
-	Info    *spb.ServerInfo
-	Clients []*Client
-	Subs    RecoveredSubscriptions
+	Info     *spb.ServerInfo
+	Clients  []*Client
+	Channels map[string]*RecoveredChannel
+}
+
+// RecoveredChannel represents a channel that has been recovered, with all its subscriptions
+type RecoveredChannel struct {
+	Channel       *Channel
+	Subscriptions []*RecoveredSubscription
+}
+
+// PendingAcks is a set of message sequences waiting to be acknowledged.
+type PendingAcks map[uint64]struct{}
+
+// RecoveredSubscription represents a recovered Subscription with a map
+// of pending messages.
+type RecoveredSubscription struct {
+	Sub     *spb.SubState
+	Pending PendingAcks
 }
 
 // Client represents a client with ID and Heartbeat Inbox.
@@ -97,23 +109,8 @@ type Client struct {
 	spb.ClientInfo
 }
 
-// RecoveredSubscriptions is a map of recovered subscriptions, keyed by channel name.
-type RecoveredSubscriptions map[string][]*RecoveredSubState
-
-// PendingAcks is a set of message sequences waiting to be acknowledged.
-type PendingAcks map[uint64]struct{}
-
-// RecoveredSubState represents a recovered Subscription with a map
-// of pending messages.
-type RecoveredSubState struct {
-	Sub     *spb.SubState
-	Pending PendingAcks
-}
-
-// ChannelStore contains a reference to both Subscription and Message stores.
-type ChannelStore struct {
-	// UserData is set when the channel is created.
-	UserData interface{}
+// Channel contains a reference to both Subscription and Message stores.
+type Channel struct {
 	// Subs is the Subscriptions Store.
 	Subs SubStore
 	// Msgs is the Messages Store.
@@ -178,29 +175,12 @@ type Store interface {
 	// This call may return an error due to limits validation errors.
 	SetLimits(limits *StoreLimits) error
 
-	// CreateChannel creates a ChannelStore for the given channel, and returns
-	// `true` to indicate that the channel is new, false if it already exists.
+	// CreateChannel creates a Channel.
+	// Implementations should return ErrAlreadyExists if the channel was
+	// already created.
 	// Limits defined for this channel in StoreLimits.PeChannel map, if present,
 	// will apply. Otherwise, the global limits in StoreLimits will apply.
-	CreateChannel(channel string, userData interface{}) (*ChannelStore, bool, error)
-
-	// LookupChannel returns a ChannelStore for the given channel, nil if channel
-	// does not exist.
-	LookupChannel(channel string) *ChannelStore
-
-	// HasChannel returns true if this store has any channel.
-	HasChannel() bool
-
-	// GetChannels returns a map of *ChannelStore, with channels' name as the key.
-	// The returned map is a copy of the state maintained by the store.
-	GetChannels() map[string]*ChannelStore
-
-	// GetChannelsCount returns the number of channels currently stored.
-	GetChannelsCount() int
-
-	// MsgsState returns message store statistics for a given channel, or all
-	// if 'channel' is AllChannels.
-	MsgsState(channel string) (numMessages int, byteSize uint64, err error)
+	CreateChannel(channel string) (*Channel, error)
 
 	// AddClient stores information about the client identified by `clientID`.
 	AddClient(clientID, hbInbox string) (*Client, error)

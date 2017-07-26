@@ -3,7 +3,6 @@
 package stores
 
 import (
-	"fmt"
 	"sync"
 	"time"
 
@@ -31,7 +30,7 @@ type genericStore struct {
 	limits   *StoreLimits
 	sublist  *util.Sublist
 	name     string
-	channels map[string]*ChannelStore
+	channels map[string]*Channel
 }
 
 // genericSubStore is the generic store implementation that manages subscriptions
@@ -73,7 +72,7 @@ func (gs *genericStore) init(name string, log logger.Logger, limits *StoreLimits
 	}
 	gs.log = log
 	// Do not use limits values to create the map.
-	gs.channels = make(map[string]*ChannelStore)
+	gs.channels = make(map[string]*Channel)
 	return nil
 }
 
@@ -145,80 +144,18 @@ func (gs *genericStore) SetLimits(limits *StoreLimits) error {
 	return err
 }
 
-// CreateChannel creates a ChannelStore for the given channel, and returns
-// `true` to indicate that the channel is new, false if it already exists.
-func (gs *genericStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, bool, error) {
-	// no-op
-	return nil, false, fmt.Errorf("generic store: feature not implemented")
-}
-
-// LookupChannel returns a ChannelStore for the given channel.
-func (gs *genericStore) LookupChannel(channel string) *ChannelStore {
-	gs.RLock()
-	cs := gs.channels[channel]
-	gs.RUnlock()
-	return cs
-}
-
-// HasChannel returns true if this store has any channel
-func (gs *genericStore) HasChannel() bool {
-	gs.RLock()
-	l := len(gs.channels)
-	gs.RUnlock()
-	return l > 0
-}
-
-// GetChannelNames implements the Store interface.
-func (gs *genericStore) GetChannels() map[string]*ChannelStore {
-	gs.RLock()
-	defer gs.RUnlock()
-	res := make(map[string]*ChannelStore, len(gs.channels))
-	for k, v := range gs.channels {
-		copyVal := *v
-		res[k] = &copyVal
-	}
-	return res
-}
-
-// GetChannelsCount implements the Store interface.
-func (gs *genericStore) GetChannelsCount() int {
-	gs.RLock()
-	defer gs.RUnlock()
-	return len(gs.channels)
-}
-
-// State returns message store statistics for a given channel ('*' for all)
-func (gs *genericStore) MsgsState(channel string) (numMessages int, byteSize uint64, err error) {
-	numMessages = 0
-	byteSize = 0
-	err = nil
-
-	if channel == AllChannels {
-		gs.RLock()
-		cs := gs.channels
-		gs.RUnlock()
-
-		for _, c := range cs {
-			n, b, lerr := c.Msgs.State()
-			if lerr != nil {
-				err = lerr
-				return
-			}
-			numMessages += n
-			byteSize += b
-		}
-	} else {
-		cs := gs.LookupChannel(channel)
-		if cs != nil {
-			numMessages, byteSize, err = cs.Msgs.State()
-		}
-	}
-	return
+// CreateChannel implements the Store interface
+func (gs *genericStore) CreateChannel(channel string) (*Channel, error) {
+	return nil, nil
 }
 
 // canAddChannel returns true if the current number of channels is below the limit.
+// If a channel named `channelName` alreadt exists, an error is returned.
 // Store lock is assumed to be locked.
-func (gs *genericStore) canAddChannel() error {
+func (gs *genericStore) canAddChannel(name string) error {
+	if gs.channels[name] != nil {
+		return ErrAlreadyExists
+	}
 	if gs.limits.MaxChannels > 0 && len(gs.channels) >= gs.limits.MaxChannels {
 		return ErrTooManyChannels
 	}
@@ -334,31 +271,26 @@ func (gms *genericMsgStore) FirstAndLastSequence() (uint64, uint64, error) {
 
 // Lookup returns the stored message with given sequence number.
 func (gms *genericMsgStore) Lookup(seq uint64) (*pb.MsgProto, error) {
-	// no-op
 	return nil, nil
 }
 
 // FirstMsg returns the first message stored.
 func (gms *genericMsgStore) FirstMsg() (*pb.MsgProto, error) {
-	// no-op
 	return nil, nil
 }
 
 // LastMsg returns the last message stored.
 func (gms *genericMsgStore) LastMsg() (*pb.MsgProto, error) {
-	// no-op
 	return nil, nil
 }
 
 func (gms *genericMsgStore) Flush() error {
-	// no-op
 	return nil
 }
 
 // GetSequenceFromTimestamp returns the sequence of the first message whose
 // timestamp is greater or equal to given timestamp.
 func (gms *genericMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error) {
-	// no-op
 	return 0, nil
 }
 
@@ -420,25 +352,21 @@ func (gss *genericSubStore) DeleteSub(subid uint64) error {
 
 // AddSeqPending adds the given message seqno to the given subscription.
 func (gss *genericSubStore) AddSeqPending(subid, seqno uint64) error {
-	// no-op
 	return nil
 }
 
 // AckSeqPending records that the given message seqno has been acknowledged
 // by the given subscription.
 func (gss *genericSubStore) AckSeqPending(subid, seqno uint64) error {
-	// no-op
 	return nil
 }
 
 // Flush is for stores that may buffer operations and need them to be persisted.
 func (gss *genericSubStore) Flush() error {
-	// no-op
 	return nil
 }
 
 // Close closes this store
 func (gss *genericSubStore) Close() error {
-	// no-op
 	return nil
 }

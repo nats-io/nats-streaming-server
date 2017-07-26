@@ -161,8 +161,12 @@ func (s *StanServer) handleRootz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
-	numChannels := s.store.GetChannelsCount()
-	count, bytes, _ := s.store.MsgsState(stores.AllChannels)
+	numChannels := s.channels.count()
+	count, bytes, err := s.channels.msgsState("")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error getting information about channels state: %v", err), http.StatusInternalServerError)
+		return
+	}
 	s.mu.RLock()
 	state := s.state
 	s.mu.RUnlock()
@@ -212,7 +216,11 @@ func myUptime(d time.Duration) string {
 }
 
 func (s *StanServer) handleStorez(w http.ResponseWriter, r *http.Request) {
-	count, bytes, _ := s.store.MsgsState(stores.AllChannels)
+	count, bytes, err := s.channels.msgsState("")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error getting information about channels state: %v", err), http.StatusInternalServerError)
+		return
+	}
 	storez := &Storez{
 		ClusterID:  s.info.ClusterID,
 		ServerID:   s.serverID,
@@ -377,7 +385,7 @@ func (s *StanServer) handleChannelsz(w http.ResponseWriter, r *http.Request) {
 		s.handleOneChannel(w, r, channelName, subsOption)
 	} else {
 		offset, limit := getOffsetAndLimit(r)
-		channels := s.store.GetChannels()
+		channels := s.channels.getAll()
 		totalChannels := len(channels)
 		minoff, maxoff := getMinMaxOffset(offset, limit, totalChannels)
 		channelsz := &Channelsz{
@@ -420,7 +428,7 @@ func (s *StanServer) handleChannelsz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *StanServer) handleOneChannel(w http.ResponseWriter, r *http.Request, name string, subsOption int) {
-	cs := s.store.LookupChannel(name)
+	cs := s.channels.get(name)
 	if cs == nil {
 		http.Error(w, fmt.Sprintf("Channel %s not found", name), http.StatusNotFound)
 		return
@@ -433,12 +441,12 @@ func (s *StanServer) handleOneChannel(w http.ResponseWriter, r *http.Request, na
 	s.sendResponse(w, r, channelz)
 }
 
-func updateChannelz(cz *Channelz, cs *stores.ChannelStore, subsOption int) error {
-	msgs, bytes, err := cs.Msgs.State()
+func updateChannelz(cz *Channelz, c *channel, subsOption int) error {
+	msgs, bytes, err := c.store.Msgs.State()
 	if err != nil {
 		return fmt.Errorf("unable to get message state: %v", err)
 	}
-	fseq, lseq, err := cs.Msgs.FirstAndLastSequence()
+	fseq, lseq, err := c.store.Msgs.FirstAndLastSequence()
 	if err != nil {
 		return fmt.Errorf("unable to get first and last sequence: %v", err)
 	}
@@ -447,8 +455,7 @@ func updateChannelz(cz *Channelz, cs *stores.ChannelStore, subsOption int) error
 	cz.FirstSeq = fseq
 	cz.LastSeq = lseq
 	if subsOption == 1 {
-		ss := cs.UserData.(*subStore)
-		cz.Subscriptions = getMonitorChannelSubs(ss)
+		cz.Subscriptions = getMonitorChannelSubs(c.ss)
 	}
 	return nil
 }

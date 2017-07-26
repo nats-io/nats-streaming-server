@@ -71,10 +71,8 @@ func (cs *clientStore) unregister(ID string) (*client, error) {
 	}
 	c.Unlock()
 	delete(cs.clients, ID)
-	if err := cs.store.DeleteClient(ID); err != nil {
-		return c, err
-	}
-	return c, nil
+	err := cs.store.DeleteClient(ID)
+	return c, err
 }
 
 // IsValid returns true if the client is registered, false otherwise.
