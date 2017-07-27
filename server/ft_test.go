@@ -62,7 +62,7 @@ func setFTTestsHBInterval() {
 }
 
 func getTestFTDefaultOptions() *Options {
-	opts := getTestDefaultOptsForFileStore()
+	opts := getTestDefaultOptsForPersistentStore()
 	opts.FTGroupName = "ft"
 	return opts
 }

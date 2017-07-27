@@ -17,7 +17,6 @@ import (
 
 	natsd "github.com/nats-io/gnatsd/server"
 	natsdTest "github.com/nats-io/gnatsd/test"
-	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/nats-streaming-server/stores"
 )
@@ -363,45 +362,25 @@ func TestMonitorUptime(t *testing.T) {
 	}
 }
 
-func TestMonitorServerzAfterRestart(t *testing.T) {
-	resetPreviousHTTPConnections()
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
-	opts := getTestDefaultOptsForFileStore()
+func testMonitorStorez(t *testing.T, s *StanServer, expectedType string) {
+	msg := []byte("hello")
+	total := 1000
 
-	s := runMonitorServer(t, opts)
 	defer s.Shutdown()
 
-	nc, err := nats.Connect(nats.DefaultURL, nats.ReconnectWait(100*time.Millisecond))
-	if err != nil {
-		t.Fatalf("Error on connect: %v", err)
-	}
-	defer nc.Close()
-	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
-	if err != nil {
-		t.Fatalf("Error on connect: %v", err)
-	}
+	resetPreviousHTTPConnections()
+
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {})
-	if err != nil {
-		t.Fatalf("Unexpected error on subscribe: %v", err)
-	}
-	defer sub.Unsubscribe()
-	totalMsgs := 10
-	msg := []byte("hello")
-	for i := 0; i < totalMsgs; i++ {
-		if err := sc.Publish("foo", msg); err != nil {
-			t.Fatalf("Unexpected error on publish: %v", err)
-		}
-	}
-	cs := channelsGet(t, s.channels, "foo").store
-	_, totalBytes := msgStoreState(t, cs.Msgs)
+
+	expectedTotalMsgs := 0
+	expectedTotalBytes := uint64(0)
 
 	for i := 0; i < 2; i++ {
-		resp, body := getBody(t, ServerPath, expectedJSON)
+		resp, body := getBody(t, StorePath, expectedJSON)
 		defer resp.Body.Close()
 
-		sz := Serverz{}
+		sz := Storez{}
 		if err := json.Unmarshal(body, &sz); err != nil {
 			t.Fatalf("Got an error unmarshalling the body: %v", err)
 		}
@@ -414,117 +393,40 @@ func TestMonitorServerzAfterRestart(t *testing.T) {
 		if sz.Now.IsZero() {
 			t.Fatalf("Expected Now to be set, was not")
 		}
-		if sz.Start.IsZero() {
-			t.Fatalf("Expected Start to be set, was not")
+		if sz.Type != expectedType {
+			t.Fatalf("Expected Type to be %v, got %v", expectedType, sz.Type)
 		}
-		if sz.Uptime == "" {
-			t.Fatalf("Expected Uptime to be set, was not")
+		if !reflect.DeepEqual(sz.Limits, s.opts.StoreLimits) {
+			t.Fatalf("Expected Limits to be %v, got %v", s.opts.StoreLimits, sz.Limits)
 		}
-		if sz.Version != VERSION {
-			t.Fatalf("Expected version to be %v, got %v", VERSION, sz.Version)
+		if sz.TotalMsgs != expectedTotalMsgs {
+			t.Fatalf("Expected TotalMsgs to be %v, got %v", expectedTotalMsgs, sz.TotalMsgs)
 		}
-		if sz.GoVersion != runtime.Version() {
-			t.Fatalf("Expected GoVersion to be %v, got %v", runtime.Version(), sz.Version)
-		}
-		if sz.Clients != 1 {
-			t.Fatalf("Expected 1 client, got %v", sz.Clients)
-		}
-		if sz.Channels != 1 {
-			t.Fatalf("Expected 1 channel, got %v", sz.Channels)
-		}
-		if sz.Subscriptions != 1 {
-			t.Fatalf("Expected 1 subscription, got %v", sz.Subscriptions)
-		}
-		if sz.TotalMsgs != totalMsgs {
-			t.Fatalf("Expected %d messages, got %v", totalMsgs, sz.TotalMsgs)
-		}
-		if sz.TotalBytes != totalBytes {
-			t.Fatalf("Expected %v bytes, got %v", totalBytes, sz.TotalBytes)
+		if sz.TotalBytes != expectedTotalBytes {
+			t.Fatalf("Expected TotalMsgs to be %v, got %v", expectedTotalBytes, sz.TotalBytes)
 		}
 		resp.Body.Close()
 
-		// Restart server
-		s.Shutdown()
-		resetPreviousHTTPConnections()
-		s = runMonitorServer(t, opts)
-		defer s.Shutdown()
+		if i == 0 {
+			for j := 0; j < total; j++ {
+				if err := sc.Publish("foo", msg); err != nil {
+					t.Fatalf("Unexpected error on publish: %v", err)
+				}
+			}
+			cs := channelsGet(t, s.channels, "foo").store
+			expectedTotalMsgs, expectedTotalBytes = msgStoreState(t, cs.Msgs)
+		}
 	}
-	sc.Close()
-	nc.Close()
-	s.Shutdown()
+
+	// Produce store failure
+	c := channelsGet(t, s.channels, "foo")
+	c.store.Msgs = &msgStoreFailMsgState{MsgStore: c.store.Msgs}
+	monitorExpectInternalError(t, StorePath)
 }
 
 func TestMonitorStorez(t *testing.T) {
-	msg := []byte("hello")
-	total := 1000
-
-	testStore := func(s *StanServer, expectedType string) {
-		defer s.Shutdown()
-
-		resetPreviousHTTPConnections()
-
-		sc := NewDefaultConnection(t)
-		defer sc.Close()
-
-		expectedTotalMsgs := 0
-		expectedTotalBytes := uint64(0)
-
-		for i := 0; i < 2; i++ {
-			resp, body := getBody(t, StorePath, expectedJSON)
-			defer resp.Body.Close()
-
-			sz := Storez{}
-			if err := json.Unmarshal(body, &sz); err != nil {
-				t.Fatalf("Got an error unmarshalling the body: %v", err)
-			}
-			if sz.ClusterID != s.ClusterID() {
-				t.Fatalf("Expected ClusterID to be %v, got %v", s.ClusterID(), sz.ClusterID)
-			}
-			if sz.ServerID != s.serverID {
-				t.Fatalf("Expected ServerID to be %v, got %v", s.serverID, sz.ServerID)
-			}
-			if sz.Now.IsZero() {
-				t.Fatalf("Expected Now to be set, was not")
-			}
-			if sz.Type != expectedType {
-				t.Fatalf("Expected Type to be %v, got %v", expectedType, sz.Type)
-			}
-			if !reflect.DeepEqual(sz.Limits, s.opts.StoreLimits) {
-				t.Fatalf("Expected Limits to be %v, got %v", s.opts.StoreLimits, sz.Limits)
-			}
-			if sz.TotalMsgs != expectedTotalMsgs {
-				t.Fatalf("Expected TotalMsgs to be %v, got %v", expectedTotalMsgs, sz.TotalMsgs)
-			}
-			if sz.TotalBytes != expectedTotalBytes {
-				t.Fatalf("Expected TotalMsgs to be %v, got %v", expectedTotalBytes, sz.TotalBytes)
-			}
-			resp.Body.Close()
-
-			if i == 0 {
-				for j := 0; j < total; j++ {
-					if err := sc.Publish("foo", msg); err != nil {
-						t.Fatalf("Unexpected error on publish: %v", err)
-					}
-				}
-				cs := channelsGet(t, s.channels, "foo").store
-				expectedTotalMsgs, expectedTotalBytes = msgStoreState(t, cs.Msgs)
-			}
-		}
-
-		// Produce store failure
-		c := channelsGet(t, s.channels, "foo")
-		c.store.Msgs = &msgStoreFailMsgState{MsgStore: c.store.Msgs}
-		monitorExpectInternalError(t, StorePath)
-	}
-
 	s := runMonitorServer(t, GetDefaultOptions())
-	testStore(s, stores.TypeMemory)
-
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
-	opts := getTestDefaultOptsForFileStore()
-	s = runMonitorServer(t, opts)
-	testStore(s, stores.TypeFile)
+	testMonitorStorez(t, s, stores.TypeMemory)
 }
 
 func TestMonitorClientsz(t *testing.T) {
