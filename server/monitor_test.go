@@ -73,6 +73,18 @@ func getBody(t *testing.T, endpoint, expectedContentType string) (*http.Response
 	return resp, body
 }
 
+func monitorExpectInternalError(t *testing.T, endpoint string) {
+	url := fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, endpoint)
+	resp, err := http.Get(url)
+	if err != nil {
+		stackFatalf(t, "Expected no error: Got %v\n", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		stackFatalf(t, "Expected a %d response, got %d\n", http.StatusInternalServerError, resp.StatusCode)
+	}
+}
+
 func TestMonitorUseEmbeddedNATSServer(t *testing.T) {
 	resetPreviousHTTPConnections()
 	s := runMonitorServer(t, GetDefaultOptions())
@@ -163,8 +175,8 @@ func TestMonitorServerz(t *testing.T) {
 			t.Fatalf("Unexpected error on publish: %v", err)
 		}
 	}
-	cs := s.store.LookupChannel("foo")
-	_, totalBytes, _ := cs.Msgs.State()
+	cs := channelsGet(t, s.channels, "foo").store
+	_, totalBytes := msgStoreState(t, cs.Msgs)
 
 	resp, body := getBody(t, ServerPath, expectedJSON)
 	defer resp.Body.Close()
@@ -324,6 +336,14 @@ func TestMonitorServerz(t *testing.T) {
 	if sz.TotalBytes > 0 {
 		t.Fatalf("Expected 0 bytes, got %v", sz.TotalBytes)
 	}
+
+	// Produce store failure
+	c, err := s.lookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Error creating channel: %v", err)
+	}
+	c.store.Msgs = &msgStoreFailMsgState{MsgStore: c.store.Msgs}
+	monitorExpectInternalError(t, ServerPath)
 }
 
 func TestMonitorUptime(t *testing.T) {
@@ -374,8 +394,8 @@ func TestMonitorServerzAfterRestart(t *testing.T) {
 			t.Fatalf("Unexpected error on publish: %v", err)
 		}
 	}
-	cs := s.store.LookupChannel("foo")
-	_, totalBytes, _ := cs.Msgs.State()
+	cs := channelsGet(t, s.channels, "foo").store
+	_, totalBytes := msgStoreState(t, cs.Msgs)
 
 	for i := 0; i < 2; i++ {
 		resp, body := getBody(t, ServerPath, expectedJSON)
@@ -486,10 +506,15 @@ func TestMonitorStorez(t *testing.T) {
 						t.Fatalf("Unexpected error on publish: %v", err)
 					}
 				}
-				cs := s.store.LookupChannel("foo")
-				expectedTotalMsgs, expectedTotalBytes, _ = cs.Msgs.State()
+				cs := channelsGet(t, s.channels, "foo").store
+				expectedTotalMsgs, expectedTotalBytes = msgStoreState(t, cs.Msgs)
 			}
 		}
+
+		// Produce store failure
+		c := channelsGet(t, s.channels, "foo")
+		c.store.Msgs = &msgStoreFailMsgState{MsgStore: c.store.Msgs}
+		monitorExpectInternalError(t, StorePath)
 	}
 
 	s := runMonitorServer(t, GetDefaultOptions())
@@ -533,17 +558,16 @@ func TestMonitorClientsz(t *testing.T) {
 		}
 		clientsz.Clients = make([]*Clientz, 0, len(cids))
 		for _, cid := range cids {
-			cli := s.store.GetClient(cid)
+			cli := s.clients.lookup(cid)
+			cli.RLock()
 			cz := &Clientz{
 				ID:      cid,
-				HBInbox: cli.HbInbox,
+				HBInbox: cli.info.HbInbox,
 			}
 			if expectSubs {
-				srvCli := cli.UserData.(*client)
-				srvCli.RLock()
-				cz.Subscriptions = getCliSubs(srvCli.subs)
-				srvCli.RUnlock()
+				cz.Subscriptions = getCliSubs(cli.subs)
 			}
+			cli.RUnlock()
 			clientsz.Clients = append(clientsz.Clients, cz)
 		}
 		return clientsz
@@ -657,20 +681,19 @@ func TestMonitorClientz(t *testing.T) {
 	}
 
 	generateExpectedCZ := func(cid string, expectSubs bool) *Clientz {
-		cli := s.store.GetClient(cid)
+		cli := s.clients.lookup(cid)
 		if cli == nil {
 			return nil
 		}
+		cli.RLock()
 		cz := &Clientz{
 			ID:      cid,
-			HBInbox: cli.HbInbox,
+			HBInbox: cli.info.HbInbox,
 		}
 		if expectSubs {
-			srvCli := cli.UserData.(*client)
-			srvCli.RLock()
-			cz.Subscriptions = getCliSubs(srvCli.subs)
-			srvCli.RUnlock()
+			cz.Subscriptions = getCliSubs(cli.subs)
 		}
+		cli.RUnlock()
 		return cz
 	}
 
@@ -816,7 +839,7 @@ func TestMonitorChannelsz(t *testing.T) {
 		}
 	}
 
-	cs := s.store.LookupChannel("foo")
+	cs := channelsGet(t, s.channels, "foo").store
 	// Produce store failure that prevents getting the list of channels
 	cs.Msgs = &msgStoreFailMsgState{MsgStore: cs.Msgs}
 
@@ -849,7 +872,7 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 			t.Fatalf("Error creating channel: %v", err)
 		}
 		for i := 0; i < rand.Intn(10)+1; i++ {
-			cs.Msgs.Store([]byte("hello"))
+			cs.store.Msgs.Store([]byte("hello"))
 		}
 		numSubs := rand.Intn(4) + 1
 		totalSubs += numSubs
@@ -882,12 +905,12 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 		if channels != nil {
 			channelsz.Channels = make([]*Channelz, 0, len(channels))
 			for _, c := range channels {
-				cs := s.store.LookupChannel(c)
+				cs := s.channels.get(c)
 				if cs == nil {
 					continue
 				}
-				msgs, bytes, _ := cs.Msgs.State()
-				firstSeq, lastSeq := msgStoreFirstAndLastSequence(t, cs.Msgs)
+				msgs, bytes := msgStoreState(t, cs.store.Msgs)
+				firstSeq, lastSeq := msgStoreFirstAndLastSequence(t, cs.store.Msgs)
 				channelz := &Channelz{
 					Name:     c,
 					FirstSeq: firstSeq,
@@ -895,7 +918,7 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 					Msgs:     msgs,
 					Bytes:    bytes,
 				}
-				ss := cs.UserData.(*subStore)
+				ss := cs.ss
 				ss.RLock()
 				subscriptions := getChannelSubs(ss.psubs)
 				for _, dur := range ss.durables {
@@ -986,7 +1009,7 @@ func TestMonitorChannelz(t *testing.T) {
 			t.Fatalf("Error creating channel: %v", err)
 		}
 		for i := 0; i < rand.Intn(10)+1; i++ {
-			cs.Msgs.Store([]byte("hello"))
+			cs.store.Msgs.Store([]byte("hello"))
 		}
 		if _, err := sc.Subscribe(c, func(_ *stan.Msg) {}); err != nil {
 			t.Fatalf("Error on subscribe: %v", err)
@@ -994,12 +1017,12 @@ func TestMonitorChannelz(t *testing.T) {
 	}
 
 	generateExpectedCZ := func(name string, expectedSubs bool) *Channelz {
-		cs := s.store.LookupChannel(name)
+		cs := s.channels.get(name)
 		if cs == nil {
 			return nil
 		}
-		msgs, bytes, _ := cs.Msgs.State()
-		firstSeq, lastSeq := msgStoreFirstAndLastSequence(t, cs.Msgs)
+		msgs, bytes := msgStoreState(t, cs.store.Msgs)
+		firstSeq, lastSeq := msgStoreFirstAndLastSequence(t, cs.store.Msgs)
 		channelz := &Channelz{
 			Name:     name,
 			FirstSeq: firstSeq,
@@ -1008,7 +1031,7 @@ func TestMonitorChannelz(t *testing.T) {
 			Bytes:    bytes,
 		}
 		if expectedSubs {
-			ss := cs.UserData.(*subStore)
+			ss := cs.ss
 			channelz.Subscriptions = getChannelSubs(ss.psubs)
 		}
 		return channelz
@@ -1055,14 +1078,14 @@ func TestMonitorChannelz(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error creating channel: %v", err)
 	}
-	orgCS := cs.Msgs
+	orgCS := cs.store.Msgs
 	url = fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, ChannelsPath+"?channel=nosub")
 	msgStores := []stores.MsgStore{
 		&msgStoreFailMsgState{MsgStore: orgCS},
 		&msgStoreFailFirstAndLastSequence{MsgStore: orgCS},
 	}
 	for _, ms := range msgStores {
-		cs.Msgs = ms
+		cs.store.Msgs = ms
 		resp, err = http.Get(url)
 		if err != nil {
 			t.Fatalf("Expected no error: Got %v\n", err)

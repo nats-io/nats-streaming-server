@@ -161,8 +161,12 @@ func (s *StanServer) handleRootz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
-	numChannels := s.store.GetChannelsCount()
-	count, bytes, _ := s.store.MsgsState(stores.AllChannels)
+	numChannels := s.channels.count()
+	count, bytes, err := s.channels.msgsState("")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error getting information about channels state: %v", err), http.StatusInternalServerError)
+		return
+	}
 	s.mu.RLock()
 	state := s.state
 	s.mu.RUnlock()
@@ -179,7 +183,7 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 		Now:           now,
 		Start:         s.startTime,
 		Uptime:        myUptime(now.Sub(s.startTime)),
-		Clients:       s.store.GetClientsCount(),
+		Clients:       s.clients.count(),
 		Channels:      numChannels,
 		Subscriptions: numSubs,
 		TotalMsgs:     count,
@@ -212,7 +216,11 @@ func myUptime(d time.Duration) string {
 }
 
 func (s *StanServer) handleStorez(w http.ResponseWriter, r *http.Request) {
-	count, bytes, _ := s.store.MsgsState(stores.AllChannels)
+	count, bytes, err := s.channels.msgsState("")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error getting information about channels state: %v", err), http.StatusInternalServerError)
+		return
+	}
 	storez := &Storez{
 		ClusterID:  s.info.ClusterID,
 		ServerID:   s.serverID,
@@ -235,11 +243,7 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 	singleClient := r.URL.Query().Get("client")
 	subsOption, _ := strconv.Atoi(r.URL.Query().Get("subs"))
 	if singleClient != "" {
-		var clientz *Clientz
-		client := s.store.GetClient(singleClient)
-		if client != nil {
-			clientz = getMonitorClient(client, subsOption)
-		}
+		clientz := getMonitorClient(s, singleClient, subsOption)
 		if clientz == nil {
 			http.Error(w, fmt.Sprintf("Client %s not found", singleClient), http.StatusNotFound)
 			return
@@ -247,11 +251,11 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 		s.sendResponse(w, r, clientz)
 	} else {
 		offset, limit := getOffsetAndLimit(r)
-		clients := s.store.GetClients()
+		clients := s.clients.getClients()
 		totalClients := len(clients)
 		carr := make([]*Clientz, 0, totalClients)
-		for _, c := range clients {
-			cz := &Clientz{ID: c.ID}
+		for cID := range clients {
+			cz := &Clientz{ID: cID}
 			carr = append(carr, cz)
 		}
 		sort.Sort(byClientID(carr))
@@ -259,14 +263,23 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 		minoff, maxoff := getMinMaxOffset(offset, limit, totalClients)
 		carr = carr[minoff:maxoff]
 
+		// Since clients may be unregistered between the time we get the client IDs
+		// and the time we build carr array, lets count the number of elements
+		// actually intserted.
+		carrSize := 0
 		for _, c := range carr {
-			cli := clients[c.ID]
-			c.HBInbox = cli.HbInbox
-			if subsOption == 1 {
-				srvCli := cli.UserData.(*client)
-				c.Subscriptions = getMonitorClientSubs(srvCli, true)
+			client := s.clients.lookup(c.ID)
+			if client != nil {
+				client.RLock()
+				c.HBInbox = client.info.HbInbox
+				if subsOption == 1 {
+					c.Subscriptions = getMonitorClientSubs(client)
+				}
+				client.RUnlock()
+				carrSize++
 			}
 		}
+		carr = carr[0:carrSize]
 		clientsz := &Clientsz{
 			ClusterID: s.info.ClusterID,
 			ServerID:  s.serverID,
@@ -281,31 +294,24 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func getMonitorClient(c *stores.Client, subsOption int) *Clientz {
-	cli := c.UserData.(*client)
-	cli.RLock()
-	defer cli.RUnlock()
-	if cli.unregistered {
+func getMonitorClient(s *StanServer, clientID string, subsOption int) *Clientz {
+	cli := s.clients.lookup(clientID)
+	if cli == nil {
 		return nil
 	}
+	cli.RLock()
+	defer cli.RUnlock()
 	cz := &Clientz{
-		HBInbox: c.HbInbox,
-		ID:      c.ID,
+		HBInbox: cli.info.HbInbox,
+		ID:      cli.info.ID,
 	}
 	if subsOption == 1 {
-		cz.Subscriptions = getMonitorClientSubs(cli, false)
+		cz.Subscriptions = getMonitorClientSubs(cli)
 	}
 	return cz
 }
 
-func getMonitorClientSubs(client *client, needsLock bool) map[string][]*Subscriptionz {
-	if needsLock {
-		client.RLock()
-		defer client.RUnlock()
-		if client.unregistered {
-			return nil
-		}
-	}
+func getMonitorClientSubs(client *client) map[string][]*Subscriptionz {
 	subs := client.subs
 	var subsz map[string][]*Subscriptionz
 	for _, sub := range subs {
@@ -379,7 +385,7 @@ func (s *StanServer) handleChannelsz(w http.ResponseWriter, r *http.Request) {
 		s.handleOneChannel(w, r, channelName, subsOption)
 	} else {
 		offset, limit := getOffsetAndLimit(r)
-		channels := s.store.GetChannels()
+		channels := s.channels.getAll()
 		totalChannels := len(channels)
 		minoff, maxoff := getMinMaxOffset(offset, limit, totalChannels)
 		channelsz := &Channelsz{
@@ -422,7 +428,7 @@ func (s *StanServer) handleChannelsz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *StanServer) handleOneChannel(w http.ResponseWriter, r *http.Request, name string, subsOption int) {
-	cs := s.store.LookupChannel(name)
+	cs := s.channels.get(name)
 	if cs == nil {
 		http.Error(w, fmt.Sprintf("Channel %s not found", name), http.StatusNotFound)
 		return
@@ -435,12 +441,12 @@ func (s *StanServer) handleOneChannel(w http.ResponseWriter, r *http.Request, na
 	s.sendResponse(w, r, channelz)
 }
 
-func updateChannelz(cz *Channelz, cs *stores.ChannelStore, subsOption int) error {
-	msgs, bytes, err := cs.Msgs.State()
+func updateChannelz(cz *Channelz, c *channel, subsOption int) error {
+	msgs, bytes, err := c.store.Msgs.State()
 	if err != nil {
 		return fmt.Errorf("unable to get message state: %v", err)
 	}
-	fseq, lseq, err := cs.Msgs.FirstAndLastSequence()
+	fseq, lseq, err := c.store.Msgs.FirstAndLastSequence()
 	if err != nil {
 		return fmt.Errorf("unable to get first and last sequence: %v", err)
 	}
@@ -449,8 +455,7 @@ func updateChannelz(cz *Channelz, cs *stores.ChannelStore, subsOption int) error
 	cz.FirstSeq = fseq
 	cz.LastSeq = lseq
 	if subsOption == 1 {
-		ss := cs.UserData.(*subStore)
-		cz.Subscriptions = getMonitorChannelSubs(ss)
+		cz.Subscriptions = getMonitorChannelSubs(c.ss)
 	}
 	return nil
 }

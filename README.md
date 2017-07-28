@@ -56,12 +56,34 @@ NATS Streaming provides the following high-level feature set.
 
 ## Version `0.6.0`
 
-The SubStore interface was updated.
+The Store interface has been heavily modified. Some of the responsibilities have been moved into the server
+resulting on deletion of some Store APIs and removal of `UserData` fields in `Client` and `ChannelStore` (renamed `Channel`) objects.
+
+NOTE: Although the interface has changed, the file format of the FileStore implementation has not, which means
+that there is backward/forward compatibility between this and previous releases.
+
+The Store interface was updated:
+
+* Added error `ErrAlreadyExists` that `CreateChannel()` should return if channel already exists.
+* `RecoveredState` has now `Channels` (instead of `Subs`) and is a map of `*RecoveredChannel` keyed by channel name.
+* `RecoveredChannel` has a pointer to a `Channel` (formely `ChannelStore`) and an array of pointers to `RecoveredSubscription` objects.
+* `RecoveredSubscription` replaces `RecoveredSubState`.
+* `Client` no longer stores a `UserData` field.
+* `Channel` (formely `ChannelStore`) no longer stores a `UserData` field.
+* `CreateChannel()` no longer accepts a `userData interface{}` parameter. It returns a `*Channel` and an `error`. If the channel
+already exists, the error `ErrAlreadyExists` is returned.
+* `LookupChannel()`, `HasChannel()`, `GetChannels()`, `GetChannelsCount()`, `GetClient()`, `GetClients`, `GetClientsCount()` and `MsgsState()` APIs
+have all been removed. The server keeps track of clients and channels and therefore does not need those APIs.
+* `AddClient()` is now simply returning a `*Client` and `error`. It no longer accepts a `userData interface{}` parameter.
+* `DeleteClient()` now returns an error instead of returning the deleted `*Client`. This will allow the server to
+report possible errors.
+
+The SubStore interface was updated:
 
 * `DeleteSub()` has been modified to return an error. This allows the server to report possible errors during deletion
 of a subscription.
 
-The MsgStore interface was updated.
+The MsgStore interface was updated:
 
 * `Lookup()`, `FirstSequence()`, `LastSequence()`, `FirstAndLastSequence()`, `GetSequenceFromTimestamp()`, `FirstMsg()` and `LastMsg()`
 have all been modified to return an error. This is so that implementations that may fail to lookup, get the first sequence, etc...

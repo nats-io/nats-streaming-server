@@ -45,18 +45,14 @@ func NewMemoryStore(log logger.Logger, limits *StoreLimits) (*MemoryStore, error
 	return ms, nil
 }
 
-// CreateChannel creates a ChannelStore for the given channel, and returns
-// `true` to indicate that the channel is new, false if it already exists.
-func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*ChannelStore, bool, error) {
+// CreateChannel implements the Store interface
+func (ms *MemoryStore) CreateChannel(channel string) (*Channel, error) {
 	ms.Lock()
 	defer ms.Unlock()
-	channelStore := ms.channels[channel]
-	if channelStore != nil {
-		return channelStore, false, nil
-	}
 
-	if err := ms.canAddChannel(); err != nil {
-		return nil, false, err
+	// Verify that it does not already exist or that we did not hit the limits
+	if err := ms.canAddChannel(channel); err != nil {
+		return nil, err
 	}
 
 	channelLimits := ms.genericStore.getChannelLimits(channel)
@@ -67,15 +63,13 @@ func (ms *MemoryStore) CreateChannel(channel string, userData interface{}) (*Cha
 	subStore := &MemorySubStore{}
 	subStore.init(channel, ms.log, &channelLimits.SubStoreLimits)
 
-	channelStore = &ChannelStore{
-		Subs:     subStore,
-		Msgs:     msgStore,
-		UserData: userData,
+	c := &Channel{
+		Subs: subStore,
+		Msgs: msgStore,
 	}
+	ms.channels[channel] = c
 
-	ms.channels[channel] = channelStore
-
-	return channelStore, true, nil
+	return c, nil
 }
 
 ////////////////////////////////////////////////////////////////////////////

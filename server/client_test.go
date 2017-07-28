@@ -1,4 +1,4 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
 
 package server
 
@@ -11,11 +11,12 @@ import (
 
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nuid"
+	"time"
 )
 
 func createClientStore() *clientStore {
 	store, _ := stores.NewMemoryStore(testLogger, nil)
-	cs := &clientStore{store: store}
+	cs := newClientStore(store)
 	return cs
 }
 
@@ -32,12 +33,12 @@ func TestClientRegister(t *testing.T) {
 	clientID, hbInbox := createClientInfo()
 
 	// Register a new one
-	sc, isNew, _ := cs.Register(clientID, hbInbox)
+	sc, isNew, _ := cs.register(clientID, hbInbox)
 	if sc == nil || !isNew {
 		t.Fatal("Expected client to be new")
 	}
 	// Verify it's in the list of clients
-	c := cs.Lookup(clientID)
+	c := cs.lookup(clientID)
 	if c == nil {
 		t.Fatal("Expected client to be registered")
 	}
@@ -45,11 +46,11 @@ func TestClientRegister(t *testing.T) {
 	func() {
 		c.RLock()
 		defer c.RUnlock()
-		if sc.ID != clientID {
-			t.Fatalf("Expected client id to be %v, got %v", clientID, sc.ID)
+		if c.info.ID != clientID {
+			t.Fatalf("Expected client id to be %v, got %v", clientID, c.info.ID)
 		}
-		if sc.HbInbox != hbInbox {
-			t.Fatalf("Expected client hbInbox to be %v, got %v", hbInbox, sc.HbInbox)
+		if c.info.HbInbox != hbInbox {
+			t.Fatalf("Expected client hbInbox to be %v, got %v", hbInbox, c.info.HbInbox)
 		}
 		if c.hbt != nil {
 			t.Fatal("Did not expect timer to be set")
@@ -63,7 +64,7 @@ func TestClientRegister(t *testing.T) {
 	}()
 
 	// Register with same info
-	secondCli, isNew, _ := cs.Register(clientID, hbInbox)
+	secondCli, isNew, _ := cs.register(clientID, hbInbox)
 	if secondCli != sc || isNew {
 		t.Fatal("Expected to get the same client")
 	}
@@ -86,12 +87,12 @@ func TestClientParallelRegister(t *testing.T) {
 
 			for j := 0; j < totalClients; j++ {
 				clientID := fmt.Sprintf("clientID-%v", j)
-				c, isNew, _ := cs.Register(clientID, hbInbox)
+				c, isNew, _ := cs.register(clientID, hbInbox)
 				if c == nil {
 					errors <- fmt.Errorf("client should not be nil")
 					return
 				}
-				if !isNew && cs.Lookup(clientID) == nil {
+				if !isNew && cs.lookup(clientID) == nil {
 					errors <- fmt.Errorf("Register returned isNew false, but clientID %v can't be found", clientID)
 				}
 				runtime.Gosched()
@@ -110,7 +111,7 @@ func TestClientParallelRegister(t *testing.T) {
 	}
 
 	// We should not get more than totalClients
-	count := cs.store.GetClientsCount()
+	count := cs.count()
 	if count != totalClients {
 		t.Fatalf("Expected %v clients, got %v", totalClients, count)
 	}
@@ -122,21 +123,21 @@ func TestClientUnregister(t *testing.T) {
 	clientID, hbInbox := createClientInfo()
 
 	// Unregistering one that does not exist should not cause a crash
-	cs.Unregister(clientID)
+	cs.unregister(clientID)
 
 	// Now register a client
-	cs.Register(clientID, hbInbox)
+	cs.register(clientID, hbInbox)
 
 	// Verify it's in the list of clients
-	if !cs.IsValid(clientID) {
+	if !cs.isValid(clientID) {
 		t.Fatal("Expected client to be registered")
 	}
 
 	// Unregistering now
-	cs.Unregister(clientID)
+	cs.unregister(clientID)
 
 	// Verify it's gone.
-	if cs.IsValid(clientID) {
+	if cs.isValid(clientID) {
 		t.Fatal("Expected client to be unregistered")
 	}
 }
@@ -147,31 +148,31 @@ func TestClientLookup(t *testing.T) {
 	clientID, hbInbox := createClientInfo()
 
 	// Looks-up one that does not exist
-	if c := cs.Lookup("not-registered"); c != nil {
+	if c := cs.lookup("not-registered"); c != nil {
 		t.Fatalf("Got unexpected client: %v", c)
 	}
 
 	// Registers one
-	cs.Register(clientID, hbInbox)
+	cs.register(clientID, hbInbox)
 
 	// Lookup again
-	if c := cs.Lookup(clientID); c == nil {
+	if c := cs.lookup(clientID); c == nil {
 		t.Fatal("Should have looked-up the client")
 	}
 
 	// Unregistering
-	cs.Unregister(clientID)
+	cs.unregister(clientID)
 
 	// Lookup, should not be there
-	if c := cs.Lookup(clientID); c != nil {
+	if c := cs.lookup(clientID); c != nil {
 		t.Fatalf("Got unexpected client: %v", c)
 	}
 }
 
-func TestClientGetClients(t *testing.T) {
+func TestClientGetClientIDs(t *testing.T) {
 	cs := createClientStore()
 
-	if count := cs.store.GetClientsCount(); count != 0 {
+	if count := cs.count(); count != 0 {
 		t.Fatalf("Expected no client, got %v", count)
 	}
 
@@ -180,21 +181,21 @@ func TestClientGetClients(t *testing.T) {
 	clientID := "me"
 	hbInbox := nuid.Next()
 
-	cs.Register(clientID, hbInbox)
+	cs.register(clientID, hbInbox)
 
 	clientID = "me2"
 	hbInbox = nuid.Next()
 
-	cs.Register(clientID, hbInbox)
+	cs.register(clientID, hbInbox)
 
-	clients := cs.store.GetClients()
+	clients := cs.getClients()
 	if clients == nil || len(clients) != 2 {
 		t.Fatalf("Expected to get 2 clients, got %v", len(clients))
 	}
 
-	for cID := range clients {
-		if cID != "me" && cID != "me2" {
-			t.Fatalf("Unexpected client ID: %v", cID)
+	for _, c := range clients {
+		if c.info.ID != "me" && c.info.ID != "me2" {
+			t.Fatalf("Unexpected client ID: %v", c.info.ID)
 		}
 	}
 }
@@ -207,20 +208,20 @@ func TestClientAddSub(t *testing.T) {
 	sub := &subState{}
 
 	// Try to add a sub with client ID not registered
-	if cs.AddSub(clientID, sub) {
+	if cs.addSub(clientID, sub) {
 		t.Fatal("Expected AddSub to return false")
 	}
 
 	// Now register the client
-	sc, _, _ := cs.Register(clientID, hbInbox)
+	sc, _, _ := cs.register(clientID, hbInbox)
 
 	// Now this should work
-	if !cs.AddSub(clientID, sub) {
+	if !cs.addSub(clientID, sub) {
 		t.Fatal("Expected AddSub to return true")
 	}
 
 	// Check the sub is properly added to the client's subs list.
-	c := sc.UserData.(*client)
+	c := cs.lookup(clientID)
 	func() {
 		c.RLock()
 		defer c.RUnlock()
@@ -234,11 +235,11 @@ func TestClientAddSub(t *testing.T) {
 	}()
 
 	// Unregister
-	cs.Unregister(clientID)
+	cs.unregister(clientID)
 
 	// Again, this should fail since the clientID is not registered
 	// anymore.
-	if cs.AddSub(clientID, sub) {
+	if cs.addSub(clientID, sub) {
 		t.Fatalf("Expected AddSub to return nil, got %v", c)
 	}
 
@@ -252,7 +253,7 @@ func TestClientAddSub(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for {
-			if cs.AddSub(clientID, sub) {
+			if cs.addSub(clientID, sub) {
 				atomic.AddInt32(&added, 1)
 			}
 			select {
@@ -266,13 +267,12 @@ func TestClientAddSub(t *testing.T) {
 	insubs := 0
 	for i := 0; i < total; i++ {
 		// Register the client
-		cs.Register(clientID, hbInbox)
+		cs.register(clientID, hbInbox)
 		runtime.Gosched()
-		sc = cs.Unregister(clientID)
+		c, _ := cs.unregister(clientID)
 		if sc == nil {
 			t.Fatal("Client should have been found")
 		}
-		c = sc.UserData.(*client)
 		c.RLock()
 		subs := c.subs
 		c.RUnlock()
@@ -293,29 +293,29 @@ func TestClientRemoveSub(t *testing.T) {
 	sub := &subState{}
 
 	// Try to remove a sub with client ID not registered
-	if cs.RemoveSub(clientID, sub) {
+	if cs.removeSub(clientID, sub) {
 		t.Fatal("Expected RemoveSub to return false")
 	}
 
 	// Now register the client
-	cs.Register(clientID, hbInbox)
+	cs.register(clientID, hbInbox)
 
 	// Add a subscription
-	if !cs.AddSub(clientID, sub) {
+	if !cs.addSub(clientID, sub) {
 		t.Fatal("Expected AddSub to return true")
 	}
 
 	// And remove it..
-	if !cs.RemoveSub(clientID, sub) {
+	if !cs.removeSub(clientID, sub) {
 		t.Fatal("Expected RemoveSub to return true")
 	}
 
 	// Unregister
-	cs.Unregister(clientID)
+	cs.unregister(clientID)
 
 	// Again, this should fail since the clientID is not registered
 	// anymore.
-	if cs.RemoveSub(clientID, sub) {
+	if cs.removeSub(clientID, sub) {
 		t.Fatal("Expected Remove to return false")
 	}
 
@@ -329,7 +329,7 @@ func TestClientRemoveSub(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for {
-			if cs.RemoveSub(clientID, sub) {
+			if cs.removeSub(clientID, sub) {
 				atomic.AddInt32(&removed, 1)
 			}
 			select {
@@ -343,14 +343,13 @@ func TestClientRemoveSub(t *testing.T) {
 	insubs := 0
 	for i := 0; i < total; i++ {
 		// Register the client
-		cs.Register(clientID, hbInbox)
-		cs.AddSub(clientID, sub)
+		cs.register(clientID, hbInbox)
+		cs.addSub(clientID, sub)
 		runtime.Gosched()
-		sc := cs.Unregister(clientID)
-		if sc == nil {
+		c, _ := cs.unregister(clientID)
+		if c == nil {
 			t.Fatal("Client should have been found")
 		}
-		c := sc.UserData.(*client)
 		c.RLock()
 		subs := c.subs
 		c.RUnlock()
@@ -368,32 +367,32 @@ func TestClientGetSubs(t *testing.T) {
 
 	clientID, hbInbox := createClientInfo()
 
-	if subs := cs.GetSubs(clientID); len(subs) != 0 {
+	if subs := cs.getSubs(clientID); len(subs) != 0 {
 		t.Fatalf("Expected 0 subs, got: %v", len(subs))
 	}
 
 	// Now register the client
-	cs.Register(clientID, hbInbox)
+	cs.register(clientID, hbInbox)
 
 	// Add a subscription
-	if !cs.AddSub(clientID, &subState{subject: "foo"}) {
+	if !cs.addSub(clientID, &subState{subject: "foo"}) {
 		t.Fatal("Expected AddSub to return true")
 	}
 
 	// or two
 	// Add a subscription
-	if !cs.AddSub(clientID, &subState{subject: "bar"}) {
+	if !cs.addSub(clientID, &subState{subject: "bar"}) {
 		t.Fatal("Expected AddSub to return true")
 	}
 
-	subs := cs.GetSubs(clientID)
+	subs := cs.getSubs(clientID)
 	if len(subs) != 2 {
 		t.Fatalf("Expected 2 subs, got: %v", len(subs))
 	}
 
 	// Make sure subs is a copy by switching the 2 subscriptions in the
 	// client's subs array
-	c := cs.Lookup(clientID)
+	c := cs.lookup(clientID)
 	c.Lock()
 	sub2 := c.subs[1]
 	c.subs[1] = c.subs[0]
@@ -412,5 +411,66 @@ func TestClientGetSubs(t *testing.T) {
 				t.Fatalf("Second subject should be \"bar\", got %q", s.subject)
 			}
 		}
+	}
+}
+
+func TestClientSetClientHBForNonExistentClient(t *testing.T) {
+	cs := createClientStore()
+
+	ch := make(chan struct{})
+	cs.setClientHB("me", time.Millisecond, func() { ch <- struct{}{} })
+	// function should not be invoked
+	select {
+	case <-ch:
+		t.Fatal("Timer should not have fired!")
+	case <-time.After(25 * time.Millisecond):
+		// ok
+	}
+}
+
+type clientStoreErrorsStore struct{ stores.Store }
+
+func (s *clientStoreErrorsStore) AddClient(id, hbinbox string) (*stores.Client, error) {
+	return nil, errOnPurpose
+}
+func (s *clientStoreErrorsStore) DeleteClient(id string) error {
+	return errOnPurpose
+}
+
+func TestClientStoreErrors(t *testing.T) {
+	cs := createClientStore()
+
+	// Register a client
+	rc, _, err := cs.register("me", "hbInbox")
+	if err != nil {
+		t.Fatalf("Error during registration: %v", err)
+	}
+	// Make sure it is registered.
+	if c := cs.lookup("me"); c == nil || c != rc {
+		t.Fatal("Client should have been registered")
+	}
+
+	// Now replace store with a store failing the Add/Remove client apis.
+	cs.Lock()
+	cs.store = &clientStoreErrorsStore{Store: cs.store}
+	cs.Unlock()
+
+	// Register: store will fail the AddClient call
+	if _, _, err := cs.register("me2", "hbInbox"); err == nil {
+		t.Fatal("Expected register to fail")
+	}
+	// Make sure client is not registered
+	if c := cs.lookup("me2"); c != nil {
+		t.Fatalf("Unexpected registered client: %v", c)
+	}
+
+	// Try to unregister the one that was successfully registered
+	c, err := cs.unregister("me")
+	if err == nil {
+		t.Fatal("Should have failed")
+	}
+	// However, client should have been removed
+	if c == nil || c != rc {
+		t.Fatalf("Unexpected registered client: %v", c)
 	}
 }

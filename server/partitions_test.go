@@ -339,12 +339,11 @@ func TestPartitionsWithClusterOfServers(t *testing.T) {
 
 	// Now verify that each server handled only the channel it should.
 	checkChannel := func(s *StanServer, chanOk, chanNotOk string) {
-		if s.store.LookupChannel(chanNotOk) != nil {
+		if s.channels.get(chanNotOk) != nil {
 			stackFatalf(t, "Server should not have channel %v", chanNotOk)
 		}
-		if n, _, err := s.store.MsgsState(chanOk); n != 1 || err != nil {
-			stackFatalf(t, "Channel %q should have 1 message and no error, got %v - %v",
-				chanOk, n, err)
+		if n, _ := msgStoreState(t, s.channels.get(chanOk).store.Msgs); n != 1 {
+			stackFatalf(t, "Channel %q should have 1 message and no error, got %v - %v", chanOk, n)
 		}
 	}
 	checkChannel(s1, fooSubj, barSubj)
