@@ -3,9 +3,7 @@
 package server
 
 import (
-	"flag"
 	"os"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,11 +12,11 @@ import (
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
-var storeType string
-
 func benchCleanupDatastore(b *testing.B, dir string) {
-	if err := os.RemoveAll(dir); err != nil {
-		stackFatalf(b, "Error cleaning up datastore: %v", err)
+	if benchStoreType == stores.TypeFile {
+		if err := os.RemoveAll(dir); err != nil {
+			stackFatalf(b, "Error cleaning up datastore: %v", err)
+		}
 	}
 }
 
@@ -26,8 +24,8 @@ func benchRunServer(b *testing.B) *StanServer {
 	opts := GetDefaultOptions()
 	opts.Debug = false
 	opts.Trace = false
-	opts.StoreType = storeType
-	if storeType == stores.TypeFile {
+	opts.StoreType = benchStoreType
+	if benchStoreType == stores.TypeFile {
 		opts.FilestoreDir = defaultDataStore
 	}
 	s, err := RunServerWithOpts(opts, nil)
@@ -278,15 +276,4 @@ func BenchmarkPublishSubscribe(b *testing.B) {
 	} else if nr != int32(b.N) {
 		b.Fatalf("Only Received: %d of %d", received, b.N)
 	}
-}
-
-func TestMain(m *testing.M) {
-	storeType = stores.TypeMemory
-	var st string
-	flag.StringVar(&st, "store", "", "store type to test: \"file\" for File stores")
-	flag.Parse()
-	if strings.ToLower(st) == "file" {
-		storeType = stores.TypeFile
-	}
-	os.Exit(m.Run())
 }
