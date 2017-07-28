@@ -77,10 +77,7 @@ func (cs *clientStore) unregister(ID string) (*client, error) {
 
 // IsValid returns true if the client is registered, false otherwise.
 func (cs *clientStore) isValid(ID string) bool {
-	cs.RLock()
-	valid := cs.clients[ID] != nil
-	cs.RUnlock()
-	return valid
+	return cs.lookup(ID) != nil
 }
 
 // Lookup a client
