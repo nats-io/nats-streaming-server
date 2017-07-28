@@ -59,6 +59,9 @@ NATS Streaming provides the following high-level feature set.
 The Store interface has been heavily modified. Some of the responsibilities have been moved into the server
 resulting on deletion of some Store APIs and removal of `UserData` fields in `Client` and `ChannelStore` (renamed `Channel`) objects.
 
+NOTE: Although the interface has changed, the file format of the FileStore implementation has not, which means
+that there is backward/forward compatibility between this and previous releases.
+
 The Store interface was updated:
 
 * Added error `ErrAlreadyExists` that `CreateChannel()` should return if channel already exists.
