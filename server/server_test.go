@@ -6925,7 +6925,7 @@ func TestDeleteSubFailures(t *testing.T) {
 	// server logs an error when trying to move the message to remaining
 	// queue member
 	logger.Lock()
-	logger.checkErrorStr = "update subscription"
+	logger.checkErrorStr = "transfer message"
 	logger.Unlock()
 	if err := dqsub1.Close(); err != nil {
 		t.Fatalf("Error on close: %v", err)
@@ -6976,8 +6976,8 @@ func TestUpdateSubFailure(t *testing.T) {
 	}
 }
 
-func TestQueueSubStoreFailure(t *testing.T) {
-	logger := &checkErrorLogger{checkErrorStr: "update subscription"}
+func TestSendMsgToSubStoreFailure(t *testing.T) {
+	logger := &checkErrorLogger{checkErrorStr: "add pending message"}
 	opts := GetDefaultOptions()
 	opts.CustomLogger = logger
 	s, err := RunServerWithOpts(opts, nil)
