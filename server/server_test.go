@@ -218,7 +218,7 @@ func waitForAcks(t tLogger, s *StanServer, ID string, subID uint64, expected int
 
 func createConnectionWithNatsOpts(t tLogger, clientName string,
 	natsOpts ...nats.Option) (stan.Conn, *nats.Conn) {
-	opts := nats.DefaultOptions
+	opts := nats.GetDefaultOptions()
 	opts.Servers = []string{nats.DefaultURL}
 	for _, opt := range natsOpts {
 		if err := opt(&opts); err != nil {
