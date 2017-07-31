@@ -730,8 +730,8 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	}
 
 	if log != nil {
-		strace := subTrace{clientID: clientID, isRemove: true, isUnsubscribe: unsubscribe, isGroupEmpty: queueGroupIsEmpty}
-		traceSubStartCloseOrUnsubscribe(log, sub, &strace)
+		traceCtx := subStateTraceCtx{clientID: clientID, isRemove: true, isUnsubscribe: unsubscribe, isGroupEmpty: queueGroupIsEmpty}
+		traceSubState(log, sub, &traceCtx)
 	}
 }
 
@@ -3214,8 +3214,8 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		return
 	}
 	if s.debug {
-		strace := subTrace{clientID: sr.ClientID, isNew: subIsNew, startTrace: subStartTrace}
-		traceSubStartCloseOrUnsubscribe(s.log, sub, &strace)
+		traceCtx := subStateTraceCtx{clientID: sr.ClientID, isNew: subIsNew, startTrace: subStartTrace}
+		traceSubState(s.log, sub, &traceCtx)
 	}
 
 	s.monMu.Lock()
@@ -3257,7 +3257,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	s.subStartCh <- &subStartInfo{c: c, sub: sub, qs: qs, isDurable: isDurable}
 }
 
-type subTrace struct {
+type subStateTraceCtx struct {
 	clientID      string
 	isRemove      bool
 	isNew         bool
@@ -3266,7 +3266,7 @@ type subTrace struct {
 	startTrace    string
 }
 
-func traceSubStartCloseOrUnsubscribe(log logger.Logger, sub *subState, trace *subTrace) {
+func traceSubState(log logger.Logger, sub *subState, ctx *subStateTraceCtx) {
 	sub.RLock()
 	defer sub.RUnlock()
 	var (
@@ -3283,18 +3283,18 @@ func traceSubStartCloseOrUnsubscribe(log logger.Logger, sub *subState, trace *su
 	if sub.QGroup != "" {
 		queue = "queue "
 	}
-	if trace.isRemove {
-		if (trace.isUnsubscribe || !sub.IsDurable) && (sub.QGroup == "" || trace.isGroupEmpty) {
+	if ctx.isRemove {
+		if (ctx.isUnsubscribe || !sub.IsDurable) && (sub.QGroup == "" || ctx.isGroupEmpty) {
 			prefix = "Removed"
-		} else if sub.QGroup != "" && !trace.isGroupEmpty {
+		} else if sub.QGroup != "" && !ctx.isGroupEmpty {
 			prefix = "Removed member from"
 		} else {
 			prefix = "Suspended"
 		}
 	} else {
-		if trace.startTrace != "" {
+		if ctx.startTrace != "" {
 			prefix = "Started new"
-		} else if sub.QGroup != "" && trace.isNew {
+		} else if sub.QGroup != "" && ctx.isNew {
 			prefix = "Added member to"
 		} else if sub.IsDurable {
 			prefix = "Resumed"
@@ -3306,11 +3306,11 @@ func traceSubStartCloseOrUnsubscribe(log logger.Logger, sub *subState, trace *su
 	} else if sub.IsDurable {
 		specific = fmt.Sprintf(" durable=%s,", sub.DurableName)
 	}
-	if !trace.isRemove && trace.startTrace != "" {
-		sending = ", sending " + trace.startTrace
+	if !ctx.isRemove && ctx.startTrace != "" {
+		sending = ", sending " + ctx.startTrace
 	}
 	log.Debugf("[Client:%s] %ssubscription, subject=%s, inbox=%s,%s subid=%d%s",
-		trace.clientID, action, sub.subject, sub.Inbox, specific, sub.ID, sending)
+		ctx.clientID, action, sub.subject, sub.Inbox, specific, sub.ID, sending)
 }
 
 // createAckInboxAndSubject returns an AckInbox.
