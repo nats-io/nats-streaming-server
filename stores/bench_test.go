@@ -13,8 +13,8 @@ import (
 	"github.com/nats-io/nats-streaming-server/spb"
 )
 
-func benchCleanupDatastore(b *testing.B, dir string) {
-	if err := os.RemoveAll(dir); err != nil {
+func benchCleanupDatastore(b *testing.B) {
+	if err := os.RemoveAll(defaultDataStore); err != nil {
 		stackFatalf(b, "Error cleaning up datastore: %v", err)
 	}
 }
@@ -53,8 +53,8 @@ func benchStoreMsg(b *testing.B, ms MsgStore, data []byte) *pb.MsgProto {
 func BenchmarkRecoverMsgs(b *testing.B) {
 	b.StopTimer()
 
-	benchCleanupDatastore(b, defaultDataStore)
-	defer benchCleanupDatastore(b, defaultDataStore)
+	benchCleanupDatastore(b)
+	defer benchCleanupDatastore(b)
 
 	s, _ := benchCreateDefaultFileStore(b)
 	defer s.Close()
@@ -89,8 +89,8 @@ func BenchmarkRecoverMsgs(b *testing.B) {
 func BenchmarkRecoverSubs(b *testing.B) {
 	b.StopTimer()
 
-	benchCleanupDatastore(b, defaultDataStore)
-	defer benchCleanupDatastore(b, defaultDataStore)
+	benchCleanupDatastore(b)
+	defer benchCleanupDatastore(b)
 
 	s, _ := benchCreateDefaultFileStore(b)
 	defer s.Close()

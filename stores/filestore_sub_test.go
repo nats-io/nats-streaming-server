@@ -1,0 +1,1015 @@
+// Copyright 2016-2017 Apcera Inc. All rights reserved.
+
+package stores
+
+import (
+	"hash/crc32"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/nats-io/nats-streaming-server/spb"
+	"github.com/nats-io/nats-streaming-server/util"
+)
+
+func TestFSMaxSubs(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	limitCount := 2
+
+	limits := testDefaultStoreLimits
+	limits.MaxSubscriptions = limitCount
+
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+
+	testMaxSubs(t, fs, "foo", limitCount)
+
+	// Set the limit to 0
+	limits.MaxSubscriptions = 0
+	if err := fs.SetLimits(&limits); err != nil {
+		t.Fatalf("Unexpected error setting limits: %v", err)
+	}
+	// Now try to test the limit against
+	// any value, it should not fail
+	testMaxSubs(t, fs, "bar", 0)
+}
+
+func TestFSBasicSubStore(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	testBasicSubStore(t, fs)
+}
+
+func TestFSRecoverSubUpdatesForDeleteSubOK(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	cs := storeCreateChannel(t, fs, "foo")
+	// Store one sub for which we are going to store updates
+	// and then delete
+	sub1 := storeSub(t, cs, "foo")
+	// This one will stay and should be recovered
+	sub2 := storeSub(t, cs, "foo")
+
+	// Add several pending seq for sub1
+	storeSubPending(t, cs, "foo", sub1, 1, 2, 3)
+
+	// Delete sub
+	storeSubDelete(t, cs, "foo", sub1)
+
+	// Add more updates
+	storeSubPending(t, cs, "foo", sub1, 4, 5)
+	storeSubAck(t, cs, "foo", sub1, 1)
+
+	// Delete unexisting subs
+	storeSubDelete(t, cs, "foo", sub2+1, sub2+2, sub2+3)
+
+	// Close the store
+	fs.Close()
+
+	// Recovers now, should not have any error
+	limits := testDefaultStoreLimits
+	limits.MaxSubscriptions = 1
+	fs, state, err := newFileStore(t, defaultDataStore, &limits)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer fs.Close()
+
+	cs = getRecoveredChannel(t, state, "foo")
+	getRecoveredSubs(t, state, "foo", 1)
+	// Make sure the subs count was not messed-up by the fact
+	// that the store recovered delete requests for un-recovered
+	// subscriptions.
+	// Since we have set the limit of subs to 1, and we have
+	// recovered one, we should fail creating a new one.
+	sub := &spb.SubState{
+		ClientID:      "me",
+		Inbox:         nuidGen.Next(),
+		AckInbox:      nuidGen.Next(),
+		AckWaitInSecs: 10,
+	}
+	if err := cs.Subs.CreateSub(sub); err == nil || err != ErrTooManySubs {
+		t.Fatalf("Should have failed creating a sub, got %v", err)
+	}
+}
+
+func TestFSNoSubIdCollisionAfterRecovery(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	cs := storeCreateChannel(t, fs, "foo")
+	// Store a subscription.
+	sub1 := storeSub(t, cs, "foo")
+
+	// Close the store
+	fs.Close()
+
+	// Recovers now
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	cs = getRecoveredChannel(t, state, "foo")
+	getRecoveredSubs(t, state, "foo", 1)
+	// Store new subscription
+	sub2 := storeSub(t, cs, "foo")
+
+	if sub2 <= sub1 {
+		t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", sub1+1, sub2)
+	}
+
+	// Store a delete subscription with higher ID and make sure
+	// we use something higher on restart
+	delSub := uint64(sub1 + 10)
+	storeSubDelete(t, cs, "foo", delSub)
+
+	// Close the store
+	fs.Close()
+
+	// Recovers now
+	fs, state = openDefaultFileStore(t)
+	defer fs.Close()
+	cs = getRecoveredChannel(t, state, "foo")
+	// sub1 & sub2 should be recovered
+	getRecoveredSubs(t, state, "foo", 2)
+
+	// Store new subscription
+	sub3 := storeSub(t, cs, "foo")
+
+	if sub3 <= sub1 || sub3 <= delSub {
+		t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", delSub+1, sub3)
+	}
+}
+
+func TestFSSubLastSentCorrectOnRecovery(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	cs := storeCreateChannel(t, fs, "foo")
+	// Store a subscription.
+	subID := storeSub(t, cs, "foo")
+
+	// A message
+	msg := []byte("hello")
+
+	// Store msg seq 1 and 2
+	m1 := storeMsg(t, cs, "foo", msg)
+	m2 := storeMsg(t, cs, "foo", msg)
+
+	// Store m1 and m2 for this subscription, then m1 again.
+	storeSubPending(t, cs, "foo", subID, m1.Sequence, m2.Sequence, m1.Sequence)
+
+	// Restart server
+	fs.Close()
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	subs := getRecoveredSubs(t, state, "foo", 1)
+	sub := subs[0]
+	// Check that sub's last seq is m2.Sequence
+	if sub.Sub.LastSent != m2.Sequence {
+		t.Fatalf("Expected LastSent to be %v, got %v", m2.Sequence, sub.Sub.LastSent)
+	}
+}
+
+func TestFSUpdatedSub(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	cs := storeCreateChannel(t, fs, "foo")
+	// Creeate a subscription.
+	subID := storeSub(t, cs, "foo")
+
+	// A message
+	msg := []byte("hello")
+
+	// Store msg seq 1 and 2
+	m1 := storeMsg(t, cs, "foo", msg)
+	m2 := storeMsg(t, cs, "foo", msg)
+	m3 := storeMsg(t, cs, "foo", msg)
+
+	// Store m1 and m2 for this subscription
+	storeSubPending(t, cs, "foo", subID, m1.Sequence, m2.Sequence)
+
+	// Update the subscription
+	ss := cs.Subs
+	updatedSub := &spb.SubState{
+		ID:            subID,
+		ClientID:      "me",
+		Inbox:         nuidGen.Next(),
+		AckInbox:      "newAckInbox",
+		AckWaitInSecs: 10,
+	}
+	if err := ss.UpdateSub(updatedSub); err != nil {
+		t.Fatalf("Error updating subscription: %v", err)
+	}
+	// Store m3 for this subscription
+	storeSubPending(t, cs, "foo", subID, m3.Sequence)
+
+	// Store a subscription with update only, should be recovered
+	subWithoutNew := &spb.SubState{
+		ID:            subID + 1,
+		ClientID:      "me",
+		Inbox:         nuidGen.Next(),
+		AckInbox:      nuidGen.Next(),
+		AckWaitInSecs: 10,
+	}
+	if err := ss.UpdateSub(subWithoutNew); err != nil {
+		t.Fatalf("Error updating subscription: %v", err)
+	}
+
+	// Restart server
+	fs.Close()
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	subs := getRecoveredSubs(t, state, "foo", 2)
+	// Subscriptions are recovered from a map, and then returned as an array.
+	// There is no guarantee that we get them in the order they were persisted.
+	for _, s := range subs {
+		if s.Sub.ID == subID {
+			// Check that sub's last seq is m3.Sequence
+			if s.Sub.LastSent != m3.Sequence {
+				t.Fatalf("Expected LastSent to be %v, got %v", m3.Sequence, s.Sub.LastSent)
+			}
+			// Update lastSent since we know it is correct.
+			updatedSub.LastSent = m3.Sequence
+			// Now compare that what we recovered is same that we used to update.
+			if !reflect.DeepEqual(*s.Sub, *updatedSub) {
+				t.Fatalf("Expected subscription to be %v, got %v", updatedSub, s.Sub)
+			}
+		} else if s.Sub.ID == subID+1 {
+			// Compare that what we recovered is same that we used to update.
+			if !reflect.DeepEqual(*s.Sub, *subWithoutNew) {
+				t.Fatalf("Expected subscription to be %v, got %v", subWithoutNew, s.Sub)
+			}
+		} else {
+			t.Fatalf("Unexpected subscription ID: %v", s.Sub.ID)
+		}
+	}
+}
+
+func TestFSBadSubFile(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	// Create a valid store file first
+	fs := createDefaultFileStore(t)
+
+	cs := storeCreateChannel(t, fs, "foo")
+	// Store a subscription
+	storeSub(t, cs, "foo")
+
+	// Close it
+	fs.Close()
+
+	// First delete the file...
+	fileName := filepath.Join(defaultDataStore, "foo", subsFileName)
+	if err := os.Remove(fileName); err != nil {
+		t.Fatalf("Unable to delete the subscriptions file %q: %v", fileName, err)
+	}
+	// This will create the file without the file version
+	if file, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666); err != nil {
+		t.Fatalf("Error creating client file: %v", err)
+	} else {
+		file.Close()
+	}
+	// So we should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	resetToValidFile := func() *os.File {
+		// First remove the file
+		if err := os.Remove(fileName); err != nil {
+			t.Fatalf("Unexpected error removing file: %v", err)
+		}
+		// Create the file with proper file version
+		file, err := openFile(fileName)
+		if err != nil {
+			t.Fatalf("Error creating file: %v", err)
+		}
+		return file
+	}
+
+	// Restore a valid file
+	file := resetToValidFile()
+	// Write size that causes read of content to EOF
+	if err := util.WriteInt(file, 100); err != nil {
+		t.Fatalf("Error writing header: %v", err)
+	}
+	// Close the file
+	if err := file.Close(); err != nil {
+		t.Fatalf("Unexpected error closing file: %v", err)
+	}
+	// We should fail to create the filestore
+	expectedErrorOpeningDefaultFileStore(t)
+
+	// Test with various types
+	types := []recordType{subRecNew, subRecUpdate, subRecDel, subRecMsg, subRecAck, 99}
+	content := []byte("abc")
+	crc := crc32.ChecksumIEEE(content)
+	for _, oneType := range types {
+		// Restore a valid file
+		file = resetToValidFile()
+		// Write a type that does not exist
+		if err := util.WriteInt(file, int(oneType)<<24|len(content)); err != nil {
+			t.Fatalf("Error writing header: %v", err)
+		}
+		// Write CRC
+		if err := util.WriteInt(file, int(crc)); err != nil {
+			t.Fatalf("Error writing crc: %v", err)
+		}
+		// Write dummy content
+		if _, err := file.Write(content); err != nil {
+			t.Fatalf("Error writing info: %v", err)
+		}
+		// Close the file
+		if err := file.Close(); err != nil {
+			t.Fatalf("Unexpected error closing file: %v", err)
+		}
+		// We should fail to create the filestore
+		expectedErrorOpeningDefaultFileStore(t)
+	}
+}
+
+func checkSubStoreRecCounts(t *testing.T, s *FileSubStore, expectedSubs, expectedRecs, expectedDelRecs int) {
+	s.RLock()
+	numSubs := len(s.subs)
+	numRecs := s.numRecs
+	numDel := s.delRecs
+	s.RUnlock()
+	if numSubs != expectedSubs {
+		stackFatalf(t, "Expected %v subs, got %v", expectedSubs, numSubs)
+	}
+	if numRecs != expectedRecs {
+		stackFatalf(t, "Expected %v recs, got %v", expectedRecs, numRecs)
+	}
+	if numDel != expectedDelRecs {
+		stackFatalf(t, "Expected %v free recs, got %v", expectedDelRecs, numDel)
+	}
+}
+
+func TestFSCompactSubsFileOnDelete(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	total := 6
+	threshold := 3
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	// since we set things manually, we need to compute this here
+	fs.compactItvl = time.Second
+	fs.opts.CompactMinFileSize = -1
+	fs.Unlock()
+
+	cs := storeCreateChannel(t, fs, "foo")
+	ss := cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.compactItvl = time.Second
+	ss.Unlock()
+
+	// Create an empty sub, we don't care about the content
+	sub := &spb.SubState{}
+	subIDs := make([]uint64, 0, total)
+	for i := 0; i < total; i++ {
+		if err := ss.CreateSub(sub); err != nil {
+			t.Fatalf("Unexpected error creating subscription: %v", err)
+		}
+		subIDs = append(subIDs, sub.ID)
+	}
+	checkSubStoreRecCounts(t, ss, total, total, 0)
+	// Delete not enough records to cause compaction
+	for i := 0; i < threshold-1; i++ {
+		subID := subIDs[i]
+		ss.DeleteSub(subID)
+	}
+	checkSubStoreRecCounts(t, ss, total-threshold+1, total, threshold-1)
+
+	// Recover
+	fs.Close()
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	// since we set things manually, we need to compute this here
+	fs.compactItvl = time.Second
+	fs.opts.CompactMinFileSize = -1
+	fs.Unlock()
+
+	cs = getRecoveredChannel(t, state, "foo")
+	ss = cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.compactItvl = time.Second
+	ss.Unlock()
+
+	// Make sure our numbers are correct on recovery
+	checkSubStoreRecCounts(t, ss, total-threshold+1, total, threshold-1)
+
+	// Delete more to cause compaction
+	ss.DeleteSub(subIDs[threshold-1])
+
+	// Since we compact, we now have the same number of recs and subs,
+	// and no delete records.
+	checkSubStoreRecCounts(t, ss, total-threshold, total-threshold, 0)
+
+	// Make sure we don't compact too often
+	count := total - threshold - 1
+	for i := 0; i < count; i++ {
+		subID := subIDs[threshold+i]
+		ss.DeleteSub(subID)
+	}
+	checkSubStoreRecCounts(t, ss, 1, total-threshold, count)
+
+	// Wait for longer than compact interval
+	time.Sleep(1500 * time.Millisecond)
+	// Cause a compact by adding and then removing a subscription
+	ss.DeleteSub(subIDs[total-1])
+	// Check stats
+	checkSubStoreRecCounts(t, ss, 0, 0, 0)
+
+	// Check that compacted file is as expected
+	fs.Close()
+	fs, state = openDefaultFileStore(t)
+	defer fs.Close()
+	cs = getRecoveredChannel(t, state, "foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	checkSubStoreRecCounts(t, ss, 0, 0, 0)
+
+	fs.Close()
+	// Wipe-out everything
+	cleanupDatastore(t)
+
+	fs = createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = false
+	fs.Unlock()
+
+	cs = storeCreateChannel(t, fs, "foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	// Make sure we can't compact
+	subIDs = subIDs[:0]
+	for i := 0; i < total; i++ {
+		if err := ss.CreateSub(sub); err != nil {
+			t.Fatalf("Unexpected error creating subscription: %v", err)
+		}
+		subIDs = append(subIDs, sub.ID)
+	}
+	checkSubStoreRecCounts(t, ss, total, total, 0)
+	for _, subID := range subIDs {
+		ss.DeleteSub(subID)
+	}
+	checkSubStoreRecCounts(t, ss, 0, total, total)
+
+	fs.Close()
+	// Wipe-out everything
+	cleanupDatastore(t)
+
+	fs = createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	fs.opts.CompactMinFileSize = 10 * 1024 * 1024
+	fs.Unlock()
+
+	cs = storeCreateChannel(t, fs, "foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	// Make sure we can't compact
+	subIDs = subIDs[:0]
+	for i := 0; i < total; i++ {
+		if err := ss.CreateSub(sub); err != nil {
+			t.Fatalf("Unexpected error creating subscription: %v", err)
+		}
+		subIDs = append(subIDs, sub.ID)
+	}
+	checkSubStoreRecCounts(t, ss, total, total, 0)
+	for _, subID := range subIDs {
+		ss.DeleteSub(subID)
+	}
+	checkSubStoreRecCounts(t, ss, 0, total, total)
+}
+
+func TestFSCompactSubsFileOnAck(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	fs := createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	// since we set things manually, we need to compute this here
+	fs.compactItvl = time.Second
+	fs.opts.CompactMinFileSize = -1
+	fs.Unlock()
+
+	cs := storeCreateChannel(t, fs, "foo")
+	ss := cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.compactItvl = time.Second
+	ss.Unlock()
+
+	totalSeqs := 10
+	threshold := 1 + 5 // 1 for the sub, 5 for acks
+
+	// Create an empty sub, we don't care about the content
+	sub := &spb.SubState{}
+	if err := ss.CreateSub(sub); err != nil {
+		t.Fatalf("Unexpected error creating subscription: %v", err)
+	}
+
+	// Add sequences
+	for i := 0; i < totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, 0)
+	// Delete not enough records to cause compaction
+	for i := 0; i < threshold-1; i++ {
+		if err := ss.AckSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding ack: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, threshold-1)
+
+	// Recover
+	fs.Close()
+	fs, state := openDefaultFileStore(t)
+	defer fs.Close()
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	// since we set things manually, we need to compute this here
+	fs.compactItvl = time.Second
+	fs.opts.CompactMinFileSize = -1
+	fs.Unlock()
+
+	cs = getRecoveredChannel(t, state, "foo")
+	ss = cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.compactItvl = time.Second
+	ss.Unlock()
+
+	// Make sure our numbers are correct on recovery
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, threshold-1)
+
+	// Add 1 more ack to cause compaction
+	if err := ss.AckSeqPending(sub.ID, uint64(threshold)); err != nil {
+		t.Fatalf("Unexpected error adding ack: %v", err)
+	}
+	// Now the number of acks should be 0.
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs-threshold, 0)
+	startCount := 1 + totalSeqs - threshold
+
+	// Make sure we don't compact too often
+	start := 10000
+	// Add some
+	for i := 0; i < 2*totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(start+i)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, startCount+2*totalSeqs, 0)
+	// Then remove them all. Total gain/loss is 0.
+	for i := 0; i < 2*totalSeqs; i++ {
+		if err := ss.AckSeqPending(sub.ID, uint64(start+i)); err != nil {
+			t.Fatalf("Unexpected error adding ack: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, startCount+2*totalSeqs, 2*totalSeqs)
+
+	// Wait for longer than compact interval
+	time.Sleep(1500 * time.Millisecond)
+	// Cause a compact
+	willCompactID := uint64(20000)
+	if err := ss.AddSeqPending(sub.ID, willCompactID); err != nil {
+		t.Fatalf("Unexpected error adding seq: %v", err)
+	}
+	if err := ss.AckSeqPending(sub.ID, willCompactID); err != nil {
+		t.Fatalf("Unexpected error adding ack: %v", err)
+	}
+	// Check stats
+	checkSubStoreRecCounts(t, ss, 1, startCount, 0)
+
+	// Check that compacted file is as expected
+	fs.Close()
+	fs, state = openDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	// since we set things manually, we need to compute this here
+	fs.compactItvl = time.Second
+	fs.opts.CompactMinFileSize = -1
+	fs.Unlock()
+
+	cs = getRecoveredChannel(t, state, "foo")
+	ss = cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.compactItvl = time.Second
+	ss.Unlock()
+
+	checkSubStoreRecCounts(t, ss, 1, startCount, 0)
+
+	// Add more sequences
+	start = 30000
+	// Add some
+	for i := 0; i < 2*totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(start+i)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, startCount+2*totalSeqs, 0)
+	// Remove the subscription, this should cause a compact
+	ss.DeleteSub(sub.ID)
+	checkSubStoreRecCounts(t, ss, 0, 0, 0)
+
+	fs.Close()
+	// Wipe-out everything
+	cleanupDatastore(t)
+
+	fs = createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = false
+	fs.Unlock()
+
+	cs = storeCreateChannel(t, fs, "foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	// Create an empty sub, we don't care about the content
+	if err := ss.CreateSub(sub); err != nil {
+		t.Fatalf("Unexpected error creating subscription: %v", err)
+	}
+	// Add sequences
+	for i := 0; i < totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	// Remove all
+	for i := 0; i < totalSeqs; i++ {
+		if err := ss.AckSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, totalSeqs)
+
+	fs.Close()
+	// Wipe-out everything
+	cleanupDatastore(t)
+
+	fs = createDefaultFileStore(t)
+	defer fs.Close()
+
+	// Override options for test purposes
+	fs.Lock()
+	fs.opts.CompactEnabled = true
+	fs.opts.CompactFragmentation = 50
+	fs.opts.CompactMinFileSize = 10 * 1024 * 1024
+	fs.Unlock()
+
+	cs = storeCreateChannel(t, fs, "foo")
+	ss = cs.Subs.(*FileSubStore)
+
+	// Create an empty sub, we don't care about the content
+	if err := ss.CreateSub(sub); err != nil {
+		t.Fatalf("Unexpected error creating subscription: %v", err)
+	}
+	// Add sequences
+	for i := 0; i < totalSeqs; i++ {
+		if err := ss.AddSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	// Remove all
+	for i := 0; i < totalSeqs; i++ {
+		if err := ss.AckSeqPending(sub.ID, uint64(i+1)); err != nil {
+			t.Fatalf("Unexpected error adding seq: %v", err)
+		}
+	}
+	checkSubStoreRecCounts(t, ss, 1, 1+totalSeqs, totalSeqs)
+}
+
+func TestFSNoReferenceToCallerSubState(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	cs := storeCreateChannel(t, s, "foo")
+	ss := cs.Subs
+	sub := &spb.SubState{
+		ClientID:      "me",
+		Inbox:         nuidGen.Next(),
+		AckInbox:      nuidGen.Next(),
+		AckWaitInSecs: 10,
+	}
+	if err := ss.CreateSub(sub); err != nil {
+		t.Fatalf("Error creating subscription")
+	}
+	// Get the fileStore sub object
+	fss := ss.(*FileSubStore)
+	fss.RLock()
+	storeSub := fss.subs[sub.ID].sub
+	fss.RUnlock()
+	// Content of filestore's subscription must match sub
+	if !reflect.DeepEqual(*sub, *storeSub) {
+		t.Fatalf("Expected sub to be %v, got %v", sub, storeSub)
+	}
+	// However, these should not be the same objects (no sharing)
+	if sub == storeSub {
+		t.Fatalf("SubState should not be shared between server and store")
+	}
+}
+
+func TestFSCompactSubsUpdateLastSent(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	cs := storeCreateChannel(t, s, "foo")
+	total := 10
+	for i := 0; i < total; i++ {
+		storeMsg(t, cs, "foo", []byte("hello"))
+	}
+	expectedLastSent := 5
+	subID := storeSub(t, cs, "foo")
+	for i := 0; i < expectedLastSent; i++ {
+		storeSubPending(t, cs, "foo", subID, uint64(i+1))
+	}
+	// Consume the 2 last
+	storeSubAck(t, cs, "foo", subID, 4, 5)
+	// Force a compact
+	ss := cs.Subs.(*FileSubStore)
+	ss.compact(ss.file.name)
+	// Close and re-open store
+	s.Close()
+	s, rs := openDefaultFileStore(t)
+	defer s.Close()
+	// Get sub from recovered state
+	rsubs := getRecoveredSubs(t, rs, "foo", 1)
+	rsub := rsubs[0]
+	if rsub.Sub.LastSent != uint64(expectedLastSent) {
+		t.Fatalf("Expected recovered subscription LastSent to be %v, got %v", expectedLastSent, rsub.Sub.LastSent)
+	}
+}
+
+func TestFSSubStoreVariousBufferSizes(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	sizes := []int{0, subBufMinShrinkSize - subBufMinShrinkSize/10, subBufMinShrinkSize, 3*subBufMinShrinkSize + subBufMinShrinkSize/2}
+	for _, size := range sizes {
+
+		// Create a store with buffer writer of the given size
+		fs := createDefaultFileStore(t, BufferSize(size))
+		defer fs.Close()
+
+		cs := storeCreateChannel(t, fs, "foo")
+		m := storeMsg(t, cs, "foo", []byte("hello"))
+
+		// Perform some activities on subscriptions file
+		subID := storeSub(t, cs, "foo")
+
+		// Get FileSubStore
+		ss := cs.Subs.(*FileSubStore)
+
+		// Cause a flush to empty the buffer
+		ss.Flush()
+
+		// Check that bw is not nil and writer points to the buffer writer
+		ss.RLock()
+		bw := ss.bw
+		writer := ss.writer
+		file := ss.file.handle
+		bufSize := 0
+		if ss.bw != nil {
+			bufSize = ss.bw.buf.Available()
+		}
+		ss.RUnlock()
+		if size == 0 {
+			if bw != nil {
+				t.Fatal("FileSubStore's buffer writer should be nil")
+			}
+		} else if bw == nil {
+			t.Fatal("FileSubStore's buffer writer should not be nil")
+		}
+		if size == 0 {
+			if writer != file {
+				t.Fatal("FileSubStore's writer should be set to file")
+			}
+		} else if writer != bw.buf {
+			t.Fatal("FileSubStore's writer should be set to the buffer writer")
+		}
+		initialSize := size
+		if size > subBufMinShrinkSize {
+			initialSize = subBufMinShrinkSize
+		}
+		if bufSize != initialSize {
+			t.Fatalf("Incorrect initial size, should be %v, got %v", initialSize, bufSize)
+		}
+
+		// Fill up the buffer (meaningfull only when buffer is used)
+		fillBuffer := func() {
+			total := 0
+			for i := 0; i < 1000; i++ {
+				ss.RLock()
+				before := ss.bw.buf.Buffered()
+				ss.RUnlock()
+				storeSubPending(t, cs, "foo", subID, m.Sequence)
+				ss.RLock()
+				if ss.bw.buf.Buffered() > before {
+					total += ss.bw.buf.Buffered() - before
+				} else {
+					total += ss.bw.buf.Buffered()
+				}
+				ss.RUnlock()
+				// Stop when we have persisted at least 2 times the max buffer size
+				if total >= 2*size {
+					// We should have caused buffer to be flushed by now
+					break
+				}
+			}
+			if total < 2*size {
+				t.Fatalf("Did not reach target total (%v, got %v) after limit iterations", 2*size, total)
+			}
+		}
+		if size > 0 {
+			fillBuffer()
+		} else {
+			// Just write a bunch of stuff
+			for i := 0; i < 50; i++ {
+				storeSubPending(t, cs, "foo", subID, m.Sequence)
+			}
+		}
+
+		ss.RLock()
+		bufSize = 0
+		if size > 0 {
+			bufSize = ss.bw.bufSize
+		}
+		ss.RUnlock()
+		if size == 0 {
+			if bufSize != 0 {
+				t.Fatalf("BufferSize is 0, so ss.bufSize should be 0, got %v", bufSize)
+			}
+		} else if size <= subBufMinShrinkSize {
+			// If size is smaller than min shrink size, the buffer should not have
+			// increased in size
+			if bufSize > subBufMinShrinkSize {
+				t.Fatalf("BufferSize=%v - ss.bw size should at or below %v, got %v", size, subBufMinShrinkSize, bufSize)
+			}
+		} else {
+			// We should have started at min size, and now size should have been increased.
+			if bufSize <= subBufMinShrinkSize || bufSize > size {
+				t.Fatalf("BufferSize=%v - ss.bw size should have increased but no more than %v, got %v", size, size, bufSize)
+			}
+		}
+
+		// Delete subscription
+		storeSubDelete(t, cs, "foo", subID)
+		// Compact
+		ss.Lock()
+		err := ss.compact(ss.file.name)
+		ss.Unlock()
+		if err != nil {
+			t.Fatalf("Error during compact: %v", err)
+		}
+		ss.RLock()
+		bw = ss.bw
+		writer = ss.writer
+		file = ss.file.handle
+		shrinkTimerOn := ss.shrinkTimer != nil
+		ss.RUnlock()
+		if size == 0 {
+			if bw != nil {
+				t.Fatal("FileSubStore's buffer writer should be nil")
+			}
+		} else if bw == nil {
+			t.Fatal("FileSubStore's buffer writer should not be nil")
+		}
+		if size == 0 {
+			if writer != file {
+				t.Fatal("FileSubStore's writer should be set to file")
+			}
+		} else if writer != bw.buf {
+			t.Fatal("FileSubStore's writer should be set to the buffer writer")
+		}
+		// When buffer size is greater than min size, see if it shrinks
+		if size > subBufMinShrinkSize {
+			if !shrinkTimerOn {
+				t.Fatal("Timer should have been created to try shrink the buffer")
+			}
+			// Invoke the timer callback manually (so we don't have to wait)
+			// Call many times and make sure size never goes down too low.
+			for i := 0; i < 14; i++ {
+				ss.shrinkBuffer()
+			}
+			// Now check
+			ss.RLock()
+			bufSizeNow := ss.bw.bufSize
+			ss.RUnlock()
+			if bufSizeNow >= bufSize {
+				t.Fatalf("BufferSize=%v - Buffer size expected to decrease, got: %v", size, bufSizeNow)
+			}
+			if bufSizeNow < subBufMinShrinkSize {
+				t.Fatalf("BufferSize=%v - Buffer should not go below %v, got %v", size, subBufMinShrinkSize, bufSizeNow)
+			}
+
+			// Check that the request to shrink is canceled if more data arrive
+			// First make buffer expand.
+			fillBuffer()
+			// Flush to empty it
+			ss.Flush()
+			// Invoke shrink
+			ss.shrinkBuffer()
+			// Check that request is set
+			ss.RLock()
+			shrinkReq := ss.bw.shrinkReq
+			ss.RUnlock()
+			if !shrinkReq {
+				t.Fatal("Shrink request should be true")
+			}
+			// Cause buffer to expand again
+			fillBuffer()
+			// Check that request should have been canceled.
+			ss.RLock()
+			shrinkReq = ss.bw.shrinkReq
+			ss.RUnlock()
+			if shrinkReq {
+				t.Fatal("Shrink request should be false")
+			}
+		}
+		fs.Close()
+		cleanupDatastore(t)
+	}
+}
+
+func TestFSDeleteSubError(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	// No buffer for this test
+	fs := createDefaultFileStore(t, BufferSize(0))
+	defer fs.Close()
+
+	cs := storeCreateChannel(t, fs, "foo")
+	subid := storeSub(t, cs, "foo")
+	ss := cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.file.handle.Close()
+	ss.Unlock()
+
+	if err := ss.DeleteSub(subid); err == nil {
+		t.Fatal("Expected error on sub delete, got none")
+	}
+}
