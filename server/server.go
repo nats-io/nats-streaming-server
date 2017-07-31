@@ -543,9 +543,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 
 	sub.Lock()
 	subject := sub.subject
-	inbox := sub.Inbox
 	clientID := sub.ClientID
-	durName := sub.DurableName
 	sub.removed = true
 	sub.clearAckTimer()
 	durableKey := ""
@@ -732,44 +730,9 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	}
 
 	if log != nil {
-		traceCloseOrUnsubscribeRequest(log, clientID, subject, inbox, qgroup, durName, subid,
-			queueGroupIsEmpty, isDurable, unsubscribe)
+		strace := subTrace{clientID: clientID, isRemove: true, isUnsubscribe: unsubscribe, isGroupEmpty: queueGroupIsEmpty}
+		traceSubStartCloseOrUnsubscribe(log, sub, &strace)
 	}
-}
-
-func traceCloseOrUnsubscribeRequest(log logger.Logger, clientID, subject, inbox, qgroup, durName string,
-	subID uint64, queueGroupIsEmpty, isDurable, unsubscribe bool) {
-
-	var (
-		action   string
-		durable  string
-		specific string
-	)
-	if isDurable {
-		durable = "durable "
-	}
-	if qgroup != "" {
-		if queueGroupIsEmpty {
-			if unsubscribe {
-				action = fmt.Sprintf("Removed %squeue ", durable)
-			} else {
-				action = fmt.Sprintf("Suspended %squeue ", durable)
-			}
-		} else {
-			action = fmt.Sprintf("Removed member from %squeue ", durable)
-		}
-		specific = fmt.Sprintf(" queue=%s,", qgroup)
-	} else {
-		if unsubscribe || !isDurable {
-			action = fmt.Sprintf("Removed %s", durable)
-		} else {
-			action = "Suspended durable "
-		}
-		if isDurable {
-			specific = fmt.Sprintf(" durable=%s,", durName)
-		}
-	}
-	log.Debugf("[Client:%s] %ssubscription, subject=%s, inbox=%s,%s subid=%d", clientID, action, subject, inbox, specific, subID)
 }
 
 // Lookup by durable name.
@@ -3251,7 +3214,8 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		return
 	}
 	if s.debug {
-		traceSubscriptionRequest(s.log, sr, subIsNew, isDurable, subStartTrace, sub.ID)
+		strace := subTrace{clientID: sr.ClientID, isNew: subIsNew, startTrace: subStartTrace}
+		traceSubStartCloseOrUnsubscribe(s.log, sub, &strace)
 	}
 
 	s.monMu.Lock()
@@ -3293,43 +3257,60 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	s.subStartCh <- &subStartInfo{c: c, sub: sub, qs: qs, isDurable: isDurable}
 }
 
-func traceSubscriptionRequest(log logger.Logger, sr *pb.SubscriptionRequest,
-	subIsNew, isDurable bool, subStartTrace string, subID uint64) {
+type subTrace struct {
+	clientID      string
+	isRemove      bool
+	isNew         bool
+	isUnsubscribe bool
+	isGroupEmpty  bool
+	startTrace    string
+}
 
+func traceSubStartCloseOrUnsubscribe(log logger.Logger, sub *subState, trace *subTrace) {
+	sub.RLock()
+	defer sub.RUnlock()
 	var (
 		action   string
 		specific string
 		durable  string
+		sending  string
+		queue    string
+		prefix   string
 	)
-	if isDurable {
+	if sub.IsDurable {
 		durable = "durable "
 	}
-	if sr.QGroup != "" {
-		// subStartTrace not empty means that subIsNew is true and that this is
-		// the very first member creating the queue subscription.
-		if subStartTrace != "" {
-			action = fmt.Sprintf("Started new %squeue ", durable)
-		} else if subIsNew {
-			action = fmt.Sprintf("Added member to %squeue ", durable)
+	if sub.QGroup != "" {
+		queue = "queue "
+	}
+	if trace.isRemove {
+		if (trace.isUnsubscribe || !sub.IsDurable) && (sub.QGroup == "" || trace.isGroupEmpty) {
+			prefix = "Removed"
+		} else if sub.QGroup != "" && !trace.isGroupEmpty {
+			prefix = "Removed member from"
 		} else {
-			action = fmt.Sprintf("Resumed %squeue ", durable)
+			prefix = "Suspended"
 		}
-		specific = fmt.Sprintf(" queue=%s,", sr.QGroup)
 	} else {
-		if subIsNew {
-			action = "Started new " + durable
-		} else if isDurable {
-			action = "Resumed durable "
-		}
-		if sr.DurableName != "" {
-			specific = fmt.Sprintf(" durable=%s,", sr.DurableName)
+		if trace.startTrace != "" {
+			prefix = "Started new"
+		} else if sub.QGroup != "" && trace.isNew {
+			prefix = "Added member to"
+		} else if sub.IsDurable {
+			prefix = "Resumed"
 		}
 	}
-	if subStartTrace != "" {
-		subStartTrace = ", sending " + subStartTrace
+	action = fmt.Sprintf("%s %s%s", prefix, durable, queue)
+	if sub.QGroup != "" {
+		specific = fmt.Sprintf(" queue=%s,", sub.QGroup)
+	} else if sub.IsDurable {
+		specific = fmt.Sprintf(" durable=%s,", sub.DurableName)
+	}
+	if !trace.isRemove && trace.startTrace != "" {
+		sending = ", sending " + trace.startTrace
 	}
 	log.Debugf("[Client:%s] %ssubscription, subject=%s, inbox=%s,%s subid=%d%s",
-		sr.ClientID, action, sr.Subject, sr.Inbox, specific, subID, subStartTrace)
+		trace.clientID, action, sub.subject, sub.Inbox, specific, sub.ID, sending)
 }
 
 // createAckInboxAndSubject returns an AckInbox.
