@@ -6925,7 +6925,7 @@ func TestDeleteSubFailures(t *testing.T) {
 	// server logs an error when trying to move the message to remaining
 	// queue member
 	logger.Lock()
-	logger.checkErrorStr = "update subscription"
+	logger.checkErrorStr = "transfer message"
 	logger.Unlock()
 	if err := dqsub1.Close(); err != nil {
 		t.Fatalf("Error on close: %v", err)
@@ -6976,8 +6976,8 @@ func TestUpdateSubFailure(t *testing.T) {
 	}
 }
 
-func TestQueueSubStoreFailure(t *testing.T) {
-	logger := &checkErrorLogger{checkErrorStr: "update subscription"}
+func TestSendMsgToSubStoreFailure(t *testing.T) {
+	logger := &checkErrorLogger{checkErrorStr: "add pending message"}
 	opts := GetDefaultOptions()
 	opts.CustomLogger = logger
 	s, err := RunServerWithOpts(opts, nil)
@@ -7103,5 +7103,199 @@ func TestAckForUnknownChannel(t *testing.T) {
 	logger.Unlock()
 	if !gotIt {
 		t.Fatalf("Server did not log error about not finding channel")
+	}
+}
+
+func TestTraceSubCreateCloseUnsubscribeRequests(t *testing.T) {
+	// This logger captures any log.XXX() call into a single logger.msg string.
+	// Will use that to compare the expected debug trace.
+	logger := &dummyLogger{}
+	opts := GetDefaultOptions()
+	opts.CustomLogger = logger
+	s, err := RunServerWithOpts(opts, nil)
+	if err != nil {
+		t.Fatalf("Error running server: %v", err)
+	}
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	type optAndText struct {
+		opt    stan.SubscriptionOption
+		txt    string
+		suffix bool
+	}
+	subOpts := []optAndText{
+		optAndText{stan.StartAt(pb.StartPosition_NewOnly), "new-only, seq=1", true},
+		optAndText{stan.StartWithLastReceived(), "last message, seq=1", true},
+		optAndText{stan.StartAtSequence(10), "from sequence, asked_seq=10 actual_seq=1", true},
+		optAndText{stan.StartAt(pb.StartPosition_First), "from beginning, seq=1", true},
+		optAndText{stan.StartAtTimeDelta(time.Hour), "from time time=", false},
+	}
+	for _, o := range subOpts {
+		sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, o.opt)
+		if err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		waitForNumSubs(t, s, clientName, 1)
+		logger.Lock()
+		msg := logger.msg
+		logger.Unlock()
+		if o.suffix {
+			if !strings.HasSuffix(msg, o.txt) {
+				t.Fatalf("Execpected suffix %q, got %q", o.txt, msg)
+			}
+		} else {
+			if !strings.Contains(msg, o.txt) {
+				t.Fatalf("Execpected to contain %q, got %q", o.txt, msg)
+			}
+			if !strings.HasSuffix(msg, "seq=1") {
+				t.Fatalf("Execpected suffix \"seq=1\", got %q", msg)
+			}
+		}
+		if err := sub.Unsubscribe(); err != nil {
+			t.Fatalf("Error on unsubscribe: %v", err)
+		}
+	}
+	checkTrace := func(trace string) {
+		logger.Lock()
+		msg := logger.msg
+		logger.Unlock()
+		trace = "[Client:me] " + trace
+		if !strings.Contains(msg, trace) {
+			stackFatalf(t, "Expected trace %q, got %q", trace, msg)
+		}
+	}
+	type startSub struct {
+		start      func() (stan.Subscription, error)
+		startTrace string
+		end        func(sub stan.Subscription) error
+		endTrace   string
+	}
+	ssubs := []startSub{
+		// New plain subscription followed by Unsubscribe should remove the subscription
+		startSub{
+			start:      func() (stan.Subscription, error) { return sc.Subscribe("foo", func(_ *stan.Msg) {}) },
+			startTrace: "Started new subscription",
+			end:        func(sub stan.Subscription) error { return sub.Unsubscribe() },
+			endTrace:   "Removed subscription",
+		},
+		// New plain subscription followed by Close should remove the subscription
+		startSub{
+			start:      func() (stan.Subscription, error) { return sc.Subscribe("foo", func(_ *stan.Msg) {}) },
+			startTrace: "Started new subscription",
+			end:        func(sub stan.Subscription) error { return sub.Close() },
+			endTrace:   "Removed subscription",
+		},
+		// New durable subscription followed by Close should suspend the subscription
+		startSub{
+			start: func() (stan.Subscription, error) {
+				return sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+			},
+			startTrace: "Started new durable subscription",
+			end:        func(sub stan.Subscription) error { return sub.Close() },
+			endTrace:   "Suspended durable subscription",
+		},
+		// Resuming the durable subscription, followed by Unsubscribe should removed the subscription
+		startSub{
+			start: func() (stan.Subscription, error) {
+				return sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+			},
+			startTrace: "Resumed durable subscription",
+			end:        func(sub stan.Subscription) error { return sub.Unsubscribe() },
+			endTrace:   "Removed durable subscription",
+		},
+		// Non durable queue subscribption
+		startSub{
+			start:      func() (stan.Subscription, error) { return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}) },
+			startTrace: "Started new queue subscription",
+			end:        func(sub stan.Subscription) error { return nil }, endTrace: "",
+		},
+		// Adding a member followed by Unsubscribe should simply remove this member.
+		startSub{
+			start:      func() (stan.Subscription, error) { return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}) },
+			startTrace: "Added member to queue subscription",
+			end:        func(sub stan.Subscription) error { return sub.Unsubscribe() },
+			endTrace:   "Removed member from queue subscription",
+		},
+		// Adding a member followed by Close should simply remove this member.
+		startSub{
+			start:      func() (stan.Subscription, error) { return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}) },
+			startTrace: "Added member to queue subscription",
+			end:        func(sub stan.Subscription) error { return sub.Close() },
+			endTrace:   "Removed member from queue subscription",
+		},
+		// New queue subscription followed by Unsubscribe should remove the queue subscription
+		startSub{
+			start:      func() (stan.Subscription, error) { return sc.QueueSubscribe("foo", "queue2", func(_ *stan.Msg) {}) },
+			startTrace: "Started new queue subscription",
+			end:        func(sub stan.Subscription) error { return sub.Unsubscribe() },
+			endTrace:   "Removed queue subscription",
+		},
+		// New queue subscription followed by Close should remove the queue subscription
+		startSub{
+			start:      func() (stan.Subscription, error) { return sc.QueueSubscribe("foo", "queue2", func(_ *stan.Msg) {}) },
+			startTrace: "Started new queue subscription",
+			end:        func(sub stan.Subscription) error { return sub.Close() },
+			endTrace:   "Removed queue subscription",
+		},
+		// New durable queue subscription followed by Close should suspend the subscription
+		startSub{
+			start: func() (stan.Subscription, error) {
+				return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+			},
+			startTrace: "Started new durable queue subscription",
+			end:        func(sub stan.Subscription) error { return sub.Close() },
+			endTrace:   "Suspended durable queue subscription",
+		},
+		// Resuming durable queue subscription
+		startSub{
+			start: func() (stan.Subscription, error) {
+				return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+			},
+			startTrace: "Resumed durable queue subscription",
+			end:        func(sub stan.Subscription) error { return nil }, endTrace: "",
+		},
+		// Adding a member followed by Close should remove this member only
+		startSub{
+			start: func() (stan.Subscription, error) {
+				return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+			},
+			startTrace: "Added member to durable queue subscription",
+			end:        func(sub stan.Subscription) error { return sub.Close() },
+			endTrace:   "Removed member from durable queue subscription",
+		},
+		// Adding a member followed by Unsubscribe should remove this member only
+		startSub{
+			start: func() (stan.Subscription, error) {
+				return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+			},
+			startTrace: "Added member to durable queue subscription",
+			end:        func(sub stan.Subscription) error { return sub.Unsubscribe() },
+			endTrace:   "Removed member from durable queue subscription",
+		},
+		// New durable subscription followed by Unsubscribe should remove the subscription
+		startSub{
+			start: func() (stan.Subscription, error) {
+				return sc.QueueSubscribe("foo", "queue2", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+			},
+			startTrace: "Started new durable queue subscription",
+			end:        func(sub stan.Subscription) error { return sub.Unsubscribe() },
+			endTrace:   "Removed durable queue subscription",
+		},
+	}
+	for _, s := range ssubs {
+		sub, err := s.start()
+		if err != nil {
+			t.Fatalf("Error starting subscription: %v", err)
+		}
+		checkTrace(s.startTrace)
+		if err := s.end(sub); err != nil {
+			t.Fatalf("Error ending subscription: %v", err)
+		}
+		if s.endTrace != "" {
+			checkTrace(s.endTrace)
+		}
 	}
 }

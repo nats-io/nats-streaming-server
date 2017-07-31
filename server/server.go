@@ -543,7 +543,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 
 	sub.Lock()
 	subject := sub.subject
-	inbox := sub.Inbox
+	clientID := sub.ClientID
 	sub.removed = true
 	sub.clearAckTimer()
 	durableKey := ""
@@ -566,8 +566,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	sub.Unlock()
 
 	reportError := func(err error) {
-		ss.stan.log.Errorf("Error deleting subscription on channel %s (id=%v inbox=%v, ackInbox=%v, err=%v), the subscription may be recovered on restart",
-			subject, subid, inbox, ackInbox, err)
+		ss.stan.log.Errorf("Error deleting subscription subid=%d, subject=%s, err=%v", subid, subject, err)
 	}
 
 	// Delete from storage non durable subscribers on either connection
@@ -580,7 +579,15 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 		}
 	}
 
+	var (
+		log               logger.Logger
+		queueGroupIsEmpty bool
+	)
+
 	ss.Lock()
+	if ss.stan.debug {
+		log = ss.stan.log
+	}
 	// Delete from ackInbox lookup.
 	delete(ss.acks, ackInbox)
 
@@ -600,6 +607,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 		qs.Lock()
 		qs.subs, _ = sub.deleteFromList(qs.subs)
 		if len(qs.subs) == 0 {
+			queueGroupIsEmpty = true
 			// If it was the last being removed, also remove the
 			// queue group from the subStore map, but only if
 			// non durable or explicit unsubscribe.
@@ -648,8 +656,8 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 				qsub.Lock()
 				// Store in storage
 				if err := qsub.store.AddSeqPending(qsub.ID, m.Sequence); err != nil {
-					ss.stan.log.Errorf("[Client:%s] Unable to update subscription for %s:%v (%v)",
-						qsub.ClientID, m.Subject, m.Sequence, err)
+					ss.stan.log.Errorf("[Client:%s] Unable to transfer message to subid=%d, subject=%s, seq=%d, err=%v",
+						clientID, subid, subject, m.Sequence, err)
 					qsub.Unlock()
 					continue
 				}
@@ -719,6 +727,11 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	// mean that messages are going to be redelivered on the spot.
 	for _, qsub := range qsubs {
 		ss.stan.performAckExpirationRedelivery(qsub)
+	}
+
+	if log != nil {
+		traceCtx := subStateTraceCtx{clientID: clientID, isRemove: true, isUnsubscribe: unsubscribe, isGroupEmpty: queueGroupIsEmpty}
+		traceSubState(log, sub, &traceCtx)
 	}
 }
 
@@ -2270,6 +2283,7 @@ func (s *StanServer) performDurableRedelivery(c *channel, sub *subState) {
 	sortedSeqs := makeSortedSequences(sub.acksPending)
 	clientID := sub.ClientID
 	newOnHold := sub.newOnHold
+	subID := sub.ID
 	sub.RUnlock()
 
 	if s.debug && len(sortedSeqs) > 0 {
@@ -2279,7 +2293,7 @@ func (s *StanServer) performDurableRedelivery(c *channel, sub *subState) {
 			durName = sub.QGroup
 		}
 		sub.RUnlock()
-		s.log.Debugf("[Client:%s] Redelivering to durable %s", clientID, durName)
+		s.log.Debugf("[Client:%s] Redelivering to subid=%d, durable=%s", clientID, subID, durName)
 	}
 
 	// If we don't find the client, we are done.
@@ -2295,7 +2309,7 @@ func (s *StanServer) performDurableRedelivery(c *channel, sub *subState) {
 		}
 
 		if s.trace {
-			s.log.Tracef("[Client:%s] Redelivery, sending seqno=%d", clientID, m.Sequence)
+			s.log.Tracef("[Client:%s] Redelivering to subid=%d, seq=%d", clientID, subID, m.Sequence)
 		}
 
 		// Flag as redelivered.
@@ -2328,7 +2342,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	subject := sub.subject
 	qs := sub.qstate
 	clientID := sub.ClientID
-	inbox := sub.Inbox
+	subID := sub.ID
 	if sub.ackTimer == nil {
 		s.setupAckTimer(sub, sub.ackWait)
 	}
@@ -2339,8 +2353,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			sub.ackTimer.Reset(sub.ackWait)
 			sub.Unlock()
 			if s.debug {
-				s.log.Debugf("[Client:%s] Skipping redelivering on ack expiration due to client missed hearbeat, subject=%s, inbox=%s",
-					clientID, subject, inbox)
+				s.log.Debugf("[Client:%s] Skipping redelivery to subid=%d due to missed client heartbeat", clientID, subID)
 			}
 			return
 		}
@@ -2351,17 +2364,11 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 	// Should not happen at this time since channels are not
 	// removed...
 	if c == nil {
-		s.log.Errorf("[Client:%s] Aborting redelivery for non existing channel: %s",
-			clientID, subject)
+		s.log.Errorf("[Client:%s] Aborting redelivery to subid=%d for non existing channel %s", clientID, subID, subject)
 		sub.Lock()
 		sub.clearAckTimer()
 		sub.Unlock()
 		return
-	}
-
-	if s.debug {
-		s.log.Debugf("[Client:%s] Redelivering on ack expiration, subject=%s, inbox=%s",
-			clientID, subject, inbox)
 	}
 
 	now := time.Now().UnixNano()
@@ -2393,7 +2400,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			}
 			if !tracePrinted && s.trace {
 				tracePrinted = true
-				s.log.Tracef("[Client:%s] redelivery, skipping seqno=%d", clientID, m.Sequence)
+				s.log.Tracef("[Client:%s] Redelivery for subid=%d, skipping seq=%d", clientID, subID, m.Sequence)
 			}
 			if needToSetExpireTime {
 				sub.Lock()
@@ -2412,10 +2419,6 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 		// Flag as redelivered.
 		m.Redelivered = true
 
-		if s.trace {
-			s.log.Tracef("[Client:%s] Redelivery, sending seqno=%d", clientID, m.Sequence)
-		}
-
 		// Handle QueueSubscribers differently, since we will choose best subscriber
 		// to redeliver to, not necessarily the same one.
 		if qs != nil {
@@ -2423,7 +2426,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 			pick, sent, _ = s.sendMsgToQueueGroup(qs, m, forceDelivery)
 			qs.Unlock()
 			if pick == nil {
-				s.log.Errorf("[Client:%s] Unable to find queue subscriber", clientID)
+				s.log.Errorf("[Client:%s] Unable to find queue subscriber for subid=%d", clientID, subID)
 				break
 			}
 			// If the message is redelivered to a different queue subscriber,
@@ -2452,7 +2455,8 @@ func (s *StanServer) getMsgForRedelivery(c *channel, sub *subState, seq uint64) 
 	m, err := c.store.Msgs.Lookup(seq)
 	if m == nil || err != nil {
 		if err != nil {
-			s.log.Errorf("Error getting message for redelivery %v:%v (%v)", sub.subject, seq, err)
+			s.log.Errorf("Error getting message for redelivery subid=%d, seq=%d, err=%v",
+				sub.ID, seq, err)
 		}
 		// Ack it so that it does not reincarnate on restart
 		s.processAck(c, sub, seq)
@@ -2473,20 +2477,28 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 		return false, false
 	}
 
-	if s.trace {
-		s.log.Tracef("[Client:%s] Sending msg subject=%s inbox=%s seqno=%d",
-			sub.ClientID, m.Subject, sub.Inbox, m.Sequence)
-	}
-
 	// Don't send if we have too many outstanding already, unless forced to send.
 	ap := int32(len(sub.acksPending))
 	if !force && (ap >= sub.MaxInFlight) {
-		sub.stalled = true
-		if s.debug {
-			s.log.Debugf("[Client:%s] Stalled msgseq %s:%d to %s",
-				sub.ClientID, m.Subject, m.Sequence, sub.Inbox)
+		if !sub.stalled {
+			sub.stalled = true
+			if s.debug {
+				s.log.Debugf("[Client:%s] Stalled subid=%d, subject=%s, seq=%d",
+					sub.ClientID, sub.ID, m.Subject, m.Sequence)
+			}
 		}
 		return false, false
+	}
+
+	if s.trace {
+		var action string
+		if m.Redelivered {
+			action = "Redelivering"
+		} else {
+			action = "Delivering"
+		}
+		s.log.Tracef("[Client:%s] %s msg to subid=%d, subject=%s, seq=%d",
+			sub.ClientID, action, sub.ID, m.Subject, m.Sequence)
 	}
 
 	// Marshal of a pb.MsgProto cannot fail
@@ -2497,8 +2509,8 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 		panic("store implementation returned an empty message")
 	}
 	if err := s.ncs.Publish(sub.Inbox, b); err != nil {
-		s.log.Errorf("[Client:%s] Failed sending message seq %s:%d to %s (%v)",
-			sub.ClientID, m.Subject, m.Sequence, sub.Inbox, err)
+		s.log.Errorf("[Client:%s] Failed sending to subid=%d, subject=%s, seq=%d, err=%v",
+			sub.ClientID, sub.ID, m.Subject, m.Sequence, err)
 		return false, false
 	}
 
@@ -2524,8 +2536,8 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	}
 	// Store in storage
 	if err := sub.store.AddSeqPending(sub.ID, m.Sequence); err != nil {
-		s.log.Errorf("[Client:%s] Unable to update subscription for %s:%v (%v)",
-			sub.ClientID, m.Subject, m.Sequence, err)
+		s.log.Errorf("[Client:%s] Unable to add pending message to subid=%d, subject=%s, seq=%d, err=%v",
+			sub.ClientID, sub.ID, m.Subject, m.Sequence, err)
 		return false, false
 	}
 
@@ -2545,10 +2557,12 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	// have reached the max and tell the caller that it should not
 	// be sending more at this time.
 	if !force && (ap+1 == sub.MaxInFlight) {
-		sub.stalled = true
-		if s.debug {
-			s.log.Debugf("[Client:%s] Stalling after msgseq %s:%d to %s",
-				sub.ClientID, m.Subject, m.Sequence, sub.Inbox)
+		if !sub.stalled {
+			sub.stalled = true
+			if s.debug {
+				s.log.Debugf("[Client:%s] Stalling subid=%d, subject=%s, seq=%d",
+					sub.ClientID, sub.ID, m.Subject, m.Sequence)
+			}
 		}
 		return true, false
 	}
@@ -2869,14 +2883,6 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 	s.numSubs--
 	s.monMu.Unlock()
 
-	if s.debug {
-		if isSubClose {
-			s.log.Debugf("[Client:%s] Closing subscription subject=%s", req.ClientID, req.Subject)
-		} else {
-			s.log.Debugf("[Client:%s] Unsubscribing subject=%s", req.ClientID, req.Subject)
-		}
-	}
-
 	// Create a non-error response
 	resp := &pb.SubscriptionResponse{AckInbox: req.Inbox}
 	b, _ := resp.Marshal()
@@ -3139,6 +3145,10 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 		isDurable = true
 	}
+	var (
+		subStartTrace string
+		subIsNew      bool
+	)
 	if sub != nil {
 		// ok we have a remembered subscription
 		sub.Lock()
@@ -3165,6 +3175,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		// subscriber re-joining a group that was left with pending messages.
 		err = s.updateDurable(ss, sub)
 	} else {
+		subIsNew = true
 		// Create sub here (can be plain, durable or queue subscriber)
 		sub = &subState{
 			SubState: spb.SubState{
@@ -3185,7 +3196,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 		if setStartPos {
 			// set the start sequence of the subscriber.
-			err = s.setSubStartSequence(c, sub, sr)
+			subStartTrace, err = s.setSubStartSequence(c, sub, sr)
 		}
 
 		if err == nil {
@@ -3203,8 +3214,8 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		return
 	}
 	if s.debug {
-		s.log.Debugf("[Client:%s] Added subscription on subject=%s, inbox=%s",
-			sr.ClientID, sr.Subject, sr.Inbox)
+		traceCtx := subStateTraceCtx{clientID: sr.ClientID, isNew: subIsNew, startTrace: subStartTrace}
+		traceSubState(s.log, sub, &traceCtx)
 	}
 
 	s.monMu.Lock()
@@ -3244,6 +3255,62 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	sub.Unlock()
 
 	s.subStartCh <- &subStartInfo{c: c, sub: sub, qs: qs, isDurable: isDurable}
+}
+
+type subStateTraceCtx struct {
+	clientID      string
+	isRemove      bool
+	isNew         bool
+	isUnsubscribe bool
+	isGroupEmpty  bool
+	startTrace    string
+}
+
+func traceSubState(log logger.Logger, sub *subState, ctx *subStateTraceCtx) {
+	sub.RLock()
+	defer sub.RUnlock()
+	var (
+		action   string
+		specific string
+		durable  string
+		sending  string
+		queue    string
+		prefix   string
+	)
+	if sub.IsDurable {
+		durable = "durable "
+	}
+	if sub.QGroup != "" {
+		queue = "queue "
+	}
+	if ctx.isRemove {
+		if (ctx.isUnsubscribe || !sub.IsDurable) && (sub.QGroup == "" || ctx.isGroupEmpty) {
+			prefix = "Removed"
+		} else if sub.QGroup != "" && !ctx.isGroupEmpty {
+			prefix = "Removed member from"
+		} else {
+			prefix = "Suspended"
+		}
+	} else {
+		if ctx.startTrace != "" {
+			prefix = "Started new"
+		} else if sub.QGroup != "" && ctx.isNew {
+			prefix = "Added member to"
+		} else if sub.IsDurable {
+			prefix = "Resumed"
+		}
+	}
+	action = fmt.Sprintf("%s %s%s", prefix, durable, queue)
+	if sub.QGroup != "" {
+		specific = fmt.Sprintf(" queue=%s,", sub.QGroup)
+	} else if sub.IsDurable {
+		specific = fmt.Sprintf(" durable=%s,", sub.DurableName)
+	}
+	if !ctx.isRemove && ctx.startTrace != "" {
+		sending = ", sending " + ctx.startTrace
+	}
+	log.Debugf("[Client:%s] %ssubscription, subject=%s, inbox=%s,%s subid=%d%s",
+		ctx.clientID, action, sub.subject, sub.Inbox, specific, sub.ID, sending)
 }
 
 // createAckInboxAndSubject returns an AckInbox.
@@ -3319,7 +3386,7 @@ func (s *StanServer) processAckMsg(m *nats.Msg) {
 	}
 	c := s.channels.get(ack.Subject)
 	if c == nil {
-		s.log.Errorf("Unable to process ack seq=%v, channel %q not found", ack.Sequence, ack.Subject)
+		s.log.Errorf("Unable to process ack seq=%d, channel %s not found", ack.Sequence, ack.Subject)
 		return
 	}
 	s.processAck(c, c.ss.LookupByAckInbox(m.Subject), ack.Sequence)
@@ -3334,13 +3401,13 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 	sub.Lock()
 
 	if s.trace {
-		s.log.Tracef("[Client:%s] removing pending ack, subj=%s, seq=%d",
-			sub.ClientID, sub.subject, sequence)
+		s.log.Tracef("[Client:%s] Processing ack for subid=%d, subject=%s, seq=%d",
+			sub.ClientID, sub.ID, sub.subject, sequence)
 	}
 
 	if err := sub.store.AckSeqPending(sub.ID, sequence); err != nil {
-		s.log.Errorf("[Client:%s] Unable to persist ack for %s:%v (%v)",
-			sub.ClientID, sub.subject, sequence, err)
+		s.log.Errorf("[Client:%s] Unable to persist ack for subid=%d, subject=%s, seq=%d, err=%v",
+			sub.ClientID, sub.ID, sub.subject, sequence, err)
 		sub.Unlock()
 		return
 	}
@@ -3450,11 +3517,12 @@ func (s *StanServer) getNextMsg(c *channel, nextSeq, lastSent *uint64) *pb.MsgPr
 }
 
 // Setup the start position for the subscriber.
-func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.SubscriptionRequest) error {
+func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.SubscriptionRequest) (string, error) {
 	sub.Lock()
 	defer sub.Unlock()
 
 	lastSent := uint64(0)
+	debugTrace := ""
 
 	// In all start position cases, if there is no message, ensure
 	// lastSent stays at 0.
@@ -3464,30 +3532,28 @@ func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.Subsc
 		var err error
 		lastSent, err = c.store.Msgs.LastSequence()
 		if err != nil {
-			return err
+			return "", err
 		}
 		if s.debug {
-			s.log.Debugf("[Client:%s] Sending new-only subject=%s, seq=%d",
-				sub.ClientID, sub.subject, lastSent)
+			debugTrace = fmt.Sprintf("new-only, seq=%d", lastSent+1)
 		}
 	case pb.StartPosition_LastReceived:
 		lastSeq, err := c.store.Msgs.LastSequence()
 		if err != nil {
-			return err
+			return "", err
 		}
 		if lastSeq > 0 {
 			lastSent = lastSeq - 1
 		}
 		if s.debug {
-			s.log.Debugf("[Client:%s] Sending last message, subject=%s",
-				sub.ClientID, sub.subject)
+			debugTrace = fmt.Sprintf("last message, seq=%d", lastSent+1)
 		}
 	case pb.StartPosition_TimeDeltaStart:
 		startTime := time.Now().UnixNano() - sr.StartTimeDelta
 		// If there is no message, seq will be 0.
 		seq, err := c.store.Msgs.GetSequenceFromTimestamp(startTime)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if seq > 0 {
 			// If the time delta is in the future relative to the last
@@ -3496,14 +3562,13 @@ func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.Subsc
 			lastSent = seq - 1
 		}
 		if s.debug {
-			s.log.Debugf("[Client:%s] Sending from time, subject=%s time='%v' seq=%d",
-				sub.ClientID, sub.subject, time.Unix(0, startTime), lastSent)
+			debugTrace = fmt.Sprintf("from time time='%v' seq=%d", time.Unix(0, startTime), lastSent+1)
 		}
 	case pb.StartPosition_SequenceStart:
 		// If there is no message, firstSeq and lastSeq will be equal to 0.
 		firstSeq, lastSeq, err := c.store.Msgs.FirstAndLastSequence()
 		if err != nil {
-			return err
+			return "", err
 		}
 		// StartSequence is an uint64, so can't be lower than 0.
 		if sr.StartSequence < firstSeq {
@@ -3518,24 +3583,22 @@ func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.Subsc
 			lastSent = sr.StartSequence - 1
 		}
 		if s.debug {
-			s.log.Debugf("[Client:%s] Sending from sequence, subject=%s seq_asked=%d actual_seq=%d",
-				sub.ClientID, sub.subject, sr.StartSequence, lastSent)
+			debugTrace = fmt.Sprintf("from sequence, asked_seq=%d actual_seq=%d", sr.StartSequence, lastSent+1)
 		}
 	case pb.StartPosition_First:
 		firstSeq, err := c.store.Msgs.FirstSequence()
 		if err != nil {
-			return err
+			return "", err
 		}
 		if firstSeq > 0 {
 			lastSent = firstSeq - 1
 		}
 		if s.debug {
-			s.log.Debugf("[Client:%s] Sending from beginning, subject=%s seq=%d",
-				sub.ClientID, sub.subject, lastSent)
+			debugTrace = fmt.Sprintf("from beginning, seq=%d", lastSent+1)
 		}
 	}
 	sub.LastSent = lastSent
-	return nil
+	return debugTrace, nil
 }
 
 // startGoRoutine starts the given function as a go routine if and only if
