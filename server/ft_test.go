@@ -62,7 +62,7 @@ func setFTTestsHBInterval() {
 }
 
 func getTestFTDefaultOptions() *Options {
-	opts := getTestDefaultOptsForFileStore()
+	opts := getTestDefaultOptsForPersistentStore()
 	opts.FTGroupName = "ft"
 	return opts
 }
@@ -76,8 +76,8 @@ func cancelFirstLockAttemptDelay() {
 }
 
 func TestFTConfig(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
 
 	opts := GetDefaultOptions()
 	opts.FTGroupName = "ft"
@@ -122,8 +122,8 @@ func getFTActiveServer(t *testing.T, servers ...*StanServer) *StanServer {
 }
 
 func TestFTBasic(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
 
 	// For this test, use a central NATS server
 	ns := natsdTest.RunDefaultServer()
@@ -216,8 +216,8 @@ func waitForGetLockAttempt() {
 }
 
 func TestFTCanStopFTStandby(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
 
 	delayFirstLockAttempt()
 	defer cancelFirstLockAttemptDelay()
@@ -273,8 +273,8 @@ func TestFTPartition(t *testing.T) {
 	var natsURL string
 	if parentProcess {
 		ds = defaultDataStore
-		cleanupDatastore(t, ds)
-		defer cleanupDatastore(t, ds)
+		cleanupDatastore(t)
+		defer cleanupDatastore(t)
 
 		nOpts.Cluster.ListenStr = "nats://localhost:6222"
 		nOpts.RoutesStr = "nats://localhost:6223"
@@ -387,8 +387,8 @@ func TestFTPartitionReversed(t *testing.T) {
 	var natsURL string
 	if parentProcess {
 		ds = defaultDataStore
-		cleanupDatastore(t, ds)
-		defer cleanupDatastore(t, ds)
+		cleanupDatastore(t)
+		defer cleanupDatastore(t)
 
 		nOpts.Cluster.ListenStr = "nats://localhost:6222"
 		nOpts.RoutesStr = "nats://localhost:6223"
@@ -530,8 +530,8 @@ func TestFTPartitionReversed(t *testing.T) {
 }
 
 func TestFTFailedStartup(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
 
 	opts := getTestFTDefaultOptions()
 	s := runServerWithOpts(t, opts, nil)
@@ -553,8 +553,8 @@ func TestFTFailedStartup(t *testing.T) {
 }
 
 func TestFTImmediateShutdownOnStartup(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
 
 	opts := getTestFTDefaultOptions()
 	s := runServerWithOpts(t, opts, nil)
@@ -563,8 +563,8 @@ func TestFTImmediateShutdownOnStartup(t *testing.T) {
 }
 
 func TestFTGetStoreLockReturnsError(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
 
 	delayFirstLockAttempt()
 	defer cancelFirstLockAttemptDelay()
@@ -582,8 +582,8 @@ func TestFTGetStoreLockReturnsError(t *testing.T) {
 }
 
 func TestFTStayStandbyIfStoreAlreadyLocked(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
 
 	delayFirstLockAttempt()
 	defer cancelFirstLockAttemptDelay()
@@ -600,8 +600,8 @@ func TestFTStayStandbyIfStoreAlreadyLocked(t *testing.T) {
 }
 
 func TestFTSteppingDown(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
 
 	delayFirstLockAttempt()
 	defer cancelFirstLockAttemptDelay()
@@ -649,8 +649,8 @@ func TestFTSteppingDown(t *testing.T) {
 }
 
 func TestFTActiveSendsHB(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
 
 	// For this test, make the HB interval very small so that we have more
 	// chance to get actual failure when we disconnect from NATS.
@@ -727,8 +727,8 @@ func TestFTActiveSendsHB(t *testing.T) {
 }
 
 func TestFTActiveReceivesInvalidHBMessages(t *testing.T) {
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
 
 	ns := natsdTest.RunDefaultServer()
 	defer ns.Shutdown()

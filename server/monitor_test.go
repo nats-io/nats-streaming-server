@@ -365,9 +365,9 @@ func TestMonitorUptime(t *testing.T) {
 
 func TestMonitorServerzAfterRestart(t *testing.T) {
 	resetPreviousHTTPConnections()
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
-	opts := getTestDefaultOptsForFileStore()
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	opts := getTestDefaultOptsForPersistentStore()
 
 	s := runMonitorServer(t, opts)
 	defer s.Shutdown()
@@ -520,9 +520,9 @@ func TestMonitorStorez(t *testing.T) {
 	s := runMonitorServer(t, GetDefaultOptions())
 	testStore(s, stores.TypeMemory)
 
-	cleanupDatastore(t, defaultDataStore)
-	defer cleanupDatastore(t, defaultDataStore)
-	opts := getTestDefaultOptsForFileStore()
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	opts := getTestDefaultOptsForPersistentStore()
 	s = runMonitorServer(t, opts)
 	testStore(s, stores.TypeFile)
 }
