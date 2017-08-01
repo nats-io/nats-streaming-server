@@ -426,9 +426,6 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	setPartitionsVarsForTest()
 	defer resetDefaultPartitionsVars()
 
-	// For this test, use a larger value than other tests
-	partitionsRequestTimeout = time.Second
-
 	ncOpts1 := natsdTest.DefaultTestOptions
 	ncOpts1.Cluster.Host = "localhost"
 	ncOpts1.Cluster.Port = 6222
@@ -513,6 +510,8 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	opts2.Partitioning = true
 	opts2.AddPerChannel("foo", &stores.ChannelLimits{})
 	mu.Lock()
+	// For this test, use a larger value than other tests
+	partitionsRequestTimeout = 2500 * time.Millisecond
 	s2, err = RunServerWithOpts(opts2, nil)
 	if err != nil {
 		// The purpose of this test was to verify that protocols are resent
