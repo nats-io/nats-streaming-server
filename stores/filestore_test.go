@@ -4487,12 +4487,20 @@ func TestFSParallelRecovery(t *testing.T) {
 	}
 	fs.Close()
 
+	numRoutines := runtime.NumGoroutine()
 	// Make several channels fail to recover
 	fname := fmt.Sprintf("%s.1.%s", msgFilesPrefix, datSuffix)
 	ioutil.WriteFile(filepath.Join(defaultDataStore, "foo.50", fname), []byte("dummy"), 0666)
 	ioutil.WriteFile(filepath.Join(defaultDataStore, "foo.51", fname), []byte("dummy"), 0666)
 	if _, _, err := newFileStore(t, defaultDataStore, &testDefaultStoreLimits, ParallelRecovery(10)); err == nil {
 		t.Fatalf("Recovery should have failed")
+	}
+	numRoutinesAfter := runtime.NumGoroutine()
+	// A defect was causing properly recovered channels to not be closed
+	// resulting in go routines left running. Check that at least some
+	// are being closed (not using strict > 0 to avoid flapping tests).
+	if left := numRoutinesAfter - numRoutines; left > 10 {
+		t.Fatalf("Too many go routines left: %v", left)
 	}
 }
 
