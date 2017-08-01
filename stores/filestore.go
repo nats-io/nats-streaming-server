@@ -1208,11 +1208,9 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 		}
 		// We need to wait for all current go routines to exit
 		wg.Wait()
-		select {
-		case err = <-errCh:
-			return nil, err
-		default:
-		}
+		// Also, even if there was an error, we need to collect
+		// all channels that were recovered so that we can close
+		// the msgs/subs stores on exit.
 		done := false
 		for !done {
 			select {
@@ -1222,6 +1220,11 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 			default:
 				done = true
 			}
+		}
+		select {
+		case err = <-errCh:
+			return nil, err
+		default:
 		}
 	}
 	// Create the recovered state to return
