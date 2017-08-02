@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/stores"
@@ -770,7 +771,8 @@ func TestPersistentStoreIgnoreRecoveredSubForUnknownClientID(t *testing.T) {
 	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
-	sc := NewDefaultConnection(t)
+	sc, nc := createConnectionWithNatsOpts(t, clientName, nats.ReconnectWait(50*time.Millisecond))
+	defer nc.Close()
 	defer sc.Close()
 
 	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {

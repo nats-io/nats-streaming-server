@@ -75,6 +75,9 @@ const (
 	// Interval when to check/try to shrink buffer writers
 	defaultBufShrinkInterval = 5 * time.Second
 
+	// Interval an unused file slice is left opened
+	defaultSliceCloseInterval = time.Second
+
 	// If FileStoreOption's BufferSize is > 0, the buffer writer is initially
 	// created with this size (unless this is > than BufferSize, in which case
 	// BufferSize is used). When possible, the buffer will shrink but not lower
@@ -558,7 +561,20 @@ var (
 	bufShrinkInterval     = defaultBufShrinkInterval
 	bkgTasksSleepDuration = defaultBkgTasksSleepDuration
 	cacheTTL              = int64(defaultCacheTTL)
+	sliceCloseInterval    = defaultSliceCloseInterval
 )
+
+// FileStoreTestSetBackgroundTaskInterval is used by tests to reduce the interval
+// at which some tasks are performed in the background
+func FileStoreTestSetBackgroundTaskInterval(wait time.Duration) {
+	bkgTasksSleepDuration = wait
+}
+
+// FileStoreTestResetBackgroundTaskInterval is used by tests to reset the default
+// interval at which some tasks are performed in the background
+func FileStoreTestResetBackgroundTaskInterval() {
+	bkgTasksSleepDuration = defaultBkgTasksSleepDuration
+}
 
 // openFile opens the file specified by `filename`.
 // If the file exists, it checks that the version is supported.
@@ -2654,7 +2670,7 @@ func (ms *FileMsgStore) backgroundTasks() {
 					continue
 				}
 				opened++
-				if slice.lastUsed > 0 && time.Duration(timeTick-slice.lastUsed) >= time.Second {
+				if slice.lastUsed > 0 && time.Duration(timeTick-slice.lastUsed) >= sliceCloseInterval {
 					slice.lastUsed = 0
 					ms.fm.closeFileIfOpened(slice.file)
 					ms.fm.closeFileIfOpened(slice.idxFile)

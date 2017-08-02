@@ -32,7 +32,7 @@ func TestRedelivery(t *testing.T) {
 
 	// Create a plain sub
 	if _, err := sc.Subscribe("foo", cb, stan.SetManualAckMode(),
-		stan.AckWait(time.Second)); err != nil {
+		stan.AckWait(ackWaitInMs(200))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 
@@ -41,7 +41,7 @@ func TestRedelivery(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 	// Add a delay before the next message
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	// Send second message
 	if err := sc.Publish("foo", []byte("hello")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
@@ -66,7 +66,7 @@ func TestRedelivery(t *testing.T) {
 	}
 
 	// Wait for another ackWait to check if timer is cleared
-	time.Sleep(1250 * time.Millisecond)
+	time.Sleep(250 * time.Millisecond)
 
 	// Check state
 	func(sub *subState) {
@@ -93,9 +93,9 @@ func TestMultipleRedeliveries(t *testing.T) {
 	sent := 5
 	count := 0
 	ch := make(chan bool)
-	ackWait := int64(time.Second)
-	lowBound := int64(float64(ackWait) * 0.9)
-	highBound := int64(float64(ackWait) * 1.1)
+	ackWait := int64(15 * time.Millisecond)
+	lowBound := int64(float64(ackWait) * 0.5)
+	highBound := int64(float64(ackWait) * 1.5)
 	errCh := make(chan error)
 	cb := func(m *stan.Msg) {
 		now := time.Now().UnixNano()
@@ -123,14 +123,14 @@ func TestMultipleRedeliveries(t *testing.T) {
 	// Create regular subscriber
 	if _, err := sc.Subscribe("foo", cb,
 		stan.SetManualAckMode(),
-		stan.AckWait(time.Second)); err != nil {
+		stan.AckWait(ackWaitInMs(15))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	// And two queue subscribers from same group
 	for i := 0; i < 2; i++ {
 		if _, err := sc.QueueSubscribe("foo", "bar", cb,
 			stan.SetManualAckMode(),
-			stan.AckWait(time.Second)); err != nil {
+			stan.AckWait(ackWaitInMs(15))); err != nil {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
 	}
@@ -139,7 +139,7 @@ func TestMultipleRedeliveries(t *testing.T) {
 		if err := sc.Publish("foo", []byte("hello")); err != nil {
 			t.Fatalf("Unexpected error on publish: %v", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 	// Wait for all redeliveries or errors
 	select {
@@ -158,14 +158,14 @@ func TestRedeliveryRace(t *testing.T) {
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
 
-	sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.AckWait(time.Second), stan.SetManualAckMode())
+	sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.AckWait(ackWaitInMs(15)), stan.SetManualAckMode())
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	if err := sc.Publish("foo", []byte("hello")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
-	time.Sleep(time.Second)
+	time.Sleep(15 * time.Millisecond)
 	sub.Unsubscribe()
 }
 
@@ -189,7 +189,7 @@ func TestQueueRedelivery(t *testing.T) {
 
 	// Create a queue subscriber
 	if _, err := sc.QueueSubscribe("foo", "group", cb, stan.SetManualAckMode(),
-		stan.AckWait(time.Second)); err != nil {
+		stan.AckWait(ackWaitInMs(50))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 
@@ -198,7 +198,7 @@ func TestQueueRedelivery(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 	// Add a delay before the next message
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(25 * time.Millisecond)
 	// Send second message
 	if err := sc.Publish("foo", []byte("hello")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
@@ -223,7 +223,7 @@ func TestQueueRedelivery(t *testing.T) {
 	}
 
 	// Wait for another ackWait to check if timer is cleared
-	time.Sleep(1250 * time.Millisecond)
+	time.Sleep(75 * time.Millisecond)
 
 	// Check state
 	func(sub *subState) {
@@ -347,12 +347,12 @@ func testStalledRedelivery(t *testing.T, typeSub string) {
 		// and redelivery delay of 1 sec.
 		if _, err := sc.QueueSubscribe("foo", "group", cb,
 			stan.SetManualAckMode(), stan.MaxInflight(1),
-			stan.AckWait(time.Second)); err != nil {
+			stan.AckWait(ackWaitInMs(15))); err != nil {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
 		if _, err := sc.QueueSubscribe("foo", "group", cb,
 			stan.SetManualAckMode(), stan.MaxInflight(1),
-			stan.AckWait(time.Second)); err != nil {
+			stan.AckWait(ackWaitInMs(15))); err != nil {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
 		numSubs = 2
@@ -362,15 +362,14 @@ func testStalledRedelivery(t *testing.T, typeSub string) {
 		// and redelivery delay of 1 sec.
 		if _, err := sc.Subscribe("foo", cb, stan.DurableName("dur"),
 			stan.SetManualAckMode(), stan.MaxInflight(1),
-			stan.AckWait(time.Second)); err != nil {
+			stan.AckWait(ackWaitInMs(15))); err != nil {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
 	} else {
 		// Create a sub with manual ack mode and maxInFlight of 1,
 		// and redelivery delay of 1 sec.
 		if _, err := sc.Subscribe("foo", cb, stan.SetManualAckMode(),
-			stan.MaxInflight(1), stan.AckWait(time.Second),
-			stan.AckWait(time.Second)); err != nil {
+			stan.MaxInflight(1), stan.AckWait(ackWaitInMs(15))); err != nil {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
 	}
@@ -494,7 +493,7 @@ func TestPersistentStoreRedeliveredPerSub(t *testing.T) {
 
 	// Start a subscriber that consumes the message but does not ack it.
 	sub1, err := sc.Subscribe("foo", cb, stan.DeliverAllAvailable(),
-		stan.SetManualAckMode(), stan.AckWait(time.Second))
+		stan.SetManualAckMode(), stan.AckWait(ackWaitInMs(15)))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
@@ -590,11 +589,11 @@ func TestPersistentStoreRedeliveryCbPerSub(t *testing.T) {
 	// Start 2 subscribers that consume the message but do not ack it.
 	var err error
 	if sub1, err = sc.Subscribe("foo", cb, stan.DeliverAllAvailable(),
-		stan.SetManualAckMode(), stan.AckWait(time.Second)); err != nil {
+		stan.SetManualAckMode(), stan.AckWait(ackWaitInMs(15))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	if sub2, err = sc.Subscribe("foo", cb, stan.DeliverAllAvailable(),
-		stan.SetManualAckMode(), stan.AckWait(time.Second)); err != nil {
+		stan.SetManualAckMode(), stan.AckWait(ackWaitInMs(15))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 
@@ -643,16 +642,18 @@ func TestPersistentStorePersistMsgRedeliveredToDifferentQSub(t *testing.T) {
 		}
 	}
 
-	sc := NewDefaultConnection(t)
+	sc, nc := createConnectionWithNatsOpts(t, clientName,
+		nats.ReconnectWait(100*time.Millisecond))
+	defer nc.Close()
 	defer sc.Close()
 
 	// Create two queue subscribers with manual ackMode that will
 	// not ack the message.
-	if _, err := sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(time.Second),
+	if _, err := sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(ackWaitInMs(15)),
 		stan.SetManualAckMode()); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
-	sub2, err = sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(10*time.Second),
+	sub2, err = sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(ackWaitInMs(150)),
 		stan.SetManualAckMode())
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
@@ -738,12 +739,12 @@ func TestPersistentStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 
 	// Create a queue subscriber with manual ackMode that will
 	// not ack the message.
-	if _, err := sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(time.Second),
+	if _, err := sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(ackWaitInMs(15)),
 		stan.SetManualAckMode()); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	// Create this subscriber that will receive and ack the message
-	sub2, err = sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(time.Second))
+	sub2, err = sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(ackWaitInMs(15)))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
@@ -791,7 +792,7 @@ func TestPersistentStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 	select {
 	case e := <-errs:
 		t.Fatalf("%v", e)
-	case <-time.After(1500 * time.Millisecond):
+	case <-time.After(30 * time.Millisecond):
 		break
 	}
 }
@@ -859,7 +860,7 @@ func TestDurableQueueSubRedeliveryOnRejoin(t *testing.T) {
 	if _, err := sc2.QueueSubscribe("foo", "group", cb2,
 		stan.DeliverAllAvailable(),
 		stan.SetManualAckMode(),
-		stan.AckWait(time.Second),
+		stan.AckWait(ackWaitInMs(15)),
 		stan.DurableName("qsub")); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
@@ -929,7 +930,7 @@ func TestPersistentStoreDurableQueueSubRedeliveryOnRejoin(t *testing.T) {
 	// Rejoin the group
 	if _, err := sc.QueueSubscribe("foo", "group", cb,
 		stan.DeliverAllAvailable(),
-		stan.AckWait(time.Second),
+		stan.AckWait(ackWaitInMs(15)),
 		stan.DurableName("qsub")); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
@@ -978,7 +979,7 @@ func TestDroppedMessagesOnRedelivery(t *testing.T) {
 	}
 	if _, err := sc.Subscribe("foo", cb,
 		stan.SetManualAckMode(),
-		stan.AckWait(time.Second),
+		stan.AckWait(ackWaitInMs(15)),
 		stan.DeliverAllAvailable()); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
@@ -1023,14 +1024,14 @@ func TestIgnoreFailedHBInAckRedeliveryForQGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error on connect: %v", err)
 	}
-	if _, err := sc1.QueueSubscribe("foo", "group", cb, stan.AckWait(time.Second)); err != nil {
+	if _, err := sc1.QueueSubscribe("foo", "group", cb, stan.AckWait(ackWaitInMs(15))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 
 	// Create 2nd member.
 	sc2 := NewDefaultConnection(t)
 	defer sc2.Close()
-	if _, err := sc2.QueueSubscribe("foo", "group", cb, stan.AckWait(time.Second)); err != nil {
+	if _, err := sc2.QueueSubscribe("foo", "group", cb, stan.AckWait(ackWaitInMs(15))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 

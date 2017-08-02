@@ -437,14 +437,15 @@ func TestPersistentStoreCheckClientHealthAfterRestart(t *testing.T) {
 	defer shutdownRestartedServerOnTestExit(&s)
 
 	// Create 2 clients
-	sc1, nc1 := createConnectionWithNatsOpts(t, "c1",
-		nats.ReconnectWait(10*time.Second))
-	defer nc1.Close()
+	sc1, err := stan.Connect(clusterName, "c1", stan.ConnectWait(500*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
 	defer sc1.Close()
-
-	sc2, nc2 := createConnectionWithNatsOpts(t, "c2",
-		nats.ReconnectWait(10*time.Second))
-	defer nc2.Close()
+	sc2, err := stan.Connect(clusterName, "c2", stan.ConnectWait(500*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
 	defer sc2.Close()
 
 	// Make sure they are registered
@@ -458,7 +459,7 @@ func TestPersistentStoreCheckClientHealthAfterRestart(t *testing.T) {
 	s = runServerWithOpts(t, opts, nil)
 	// Check that there are 2 clients
 	checkClients(t, s, 2)
-	// Tweak their hbTimer interval to make the test short
+	// Check their hbTimer is set
 	clients := s.clients.getClients()
 	for cID, c := range clients {
 		c.Lock()

@@ -260,6 +260,10 @@ func TestPerChannelLimits(t *testing.T) {
 			defer cleanupDatastore(t)
 
 			opts = getTestDefaultOptsForPersistentStore()
+			if opts.StoreType == stores.TypeFile {
+				stores.FileStoreTestSetBackgroundTaskInterval(15 * time.Millisecond)
+				defer stores.FileStoreTestResetBackgroundTaskInterval()
+			}
 		}
 		opts.MaxMsgs = 10
 		opts.MaxAge = time.Hour
@@ -269,7 +273,7 @@ func TestPerChannelLimits(t *testing.T) {
 		clbar.MaxBytes = 1000
 		clbaz := stores.ChannelLimits{}
 		clbaz.MaxSubscriptions = 1
-		clbaz.MaxAge = time.Second
+		clbaz.MaxAge = 15 * time.Millisecond
 		sl := &opts.StoreLimits
 		sl.AddPerChannel("foo", &clfoo)
 		sl.AddPerChannel("bar", &clbar)
@@ -335,7 +339,7 @@ func TestPerChannelLimits(t *testing.T) {
 			t.Fatalf("Unexpected error on publish: %v", err)
 		}
 		// Wait more than max age
-		time.Sleep(1500 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		// Check state
 		s.mu.RLock()
 		n, _, err = s.channels.msgsState("baz")

@@ -18,6 +18,20 @@ import (
 	"github.com/nats-io/nats-streaming-server/util"
 )
 
+const (
+	testDefaultBackgroundTaskInterval = 15 * time.Millisecond
+	testDefaultBufShrinkInterval      = 15 * time.Millisecond
+	testDefaultCacheTTL               = int64(15 * time.Millisecond)
+	testDefaultSliceCLoseInterval     = 15 * time.Millisecond
+)
+
+func init() {
+	FileStoreTestSetBackgroundTaskInterval(testDefaultBackgroundTaskInterval)
+	bufShrinkInterval = testDefaultBufShrinkInterval
+	cacheTTL = testDefaultCacheTTL
+	sliceCloseInterval = testDefaultSliceCLoseInterval
+}
+
 func TestFSBasicMsgStore(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -51,12 +65,6 @@ func TestFSMaxMsgs(t *testing.T) {
 func TestFSMaxAge(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
-
-	// For this test, reduce the background task go routine sleep interval
-	bkgTasksSleepDuration = 10 * time.Millisecond
-	defer func() {
-		bkgTasksSleepDuration = defaultBkgTasksSleepDuration
-	}()
 
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
@@ -347,12 +355,6 @@ func TestFSGetSeqFromTimestamp(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
-	// For this test, reduce the background task go routine sleep interval
-	bkgTasksSleepDuration = 10 * time.Millisecond
-	defer func() {
-		bkgTasksSleepDuration = defaultBkgTasksSleepDuration
-	}()
-
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
@@ -382,14 +384,6 @@ func TestFSFileSlicesClosed(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
-	// Reduce some filestore values for this test
-	bkgTasksSleepDuration = 100 * time.Millisecond
-	cacheTTL = int64(200 * time.Millisecond)
-	defer func() {
-		bkgTasksSleepDuration = defaultBkgTasksSleepDuration
-		cacheTTL = int64(defaultCacheTTL)
-	}()
-
 	limits := testDefaultStoreLimits
 	limits.MaxMsgs = 50
 	fs, err := NewFileStore(testLogger, defaultDataStore, &limits,
@@ -406,7 +400,7 @@ func TestFSFileSlicesClosed(t *testing.T) {
 	ms := cs.Msgs.(*FileMsgStore)
 	ms.Flush()
 	// Wait for cache to be empty
-	timeout := time.Now().Add(time.Duration(3 * cacheTTL))
+	timeout := time.Now().Add(time.Second)
 	empty := false
 	for time.Now().Before(timeout) {
 		ms.RLock()
@@ -423,7 +417,7 @@ func TestFSFileSlicesClosed(t *testing.T) {
 	for i := 0; i < limits.MaxMsgs; i++ {
 		ms.Lookup(uint64(i + 1))
 	}
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(450 * time.Millisecond)
 	ms.RLock()
 	for i, s := range ms.files {
 		if s == ms.writeSlice {
@@ -1220,12 +1214,6 @@ func TestBufShrink(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
-	// For this test, reduce the buffer shrink interval
-	bufShrinkInterval = time.Second
-	defer func() {
-		bufShrinkInterval = defaultBufShrinkInterval
-	}()
-
 	fs := createDefaultFileStore(t, BufferSize(5*1024*1024))
 	defer fs.Close()
 
@@ -1256,7 +1244,7 @@ func TestBufShrink(t *testing.T) {
 			ok = true
 			break
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 	if !ok {
 		t.Fatalf("Buffer did not shrink")
@@ -1329,12 +1317,10 @@ func TestFSMsgCache(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
-	// For this test, decrease some filestore values
-	bkgTasksSleepDuration = 100 * time.Millisecond
+	// For this test, increase a bit the test values
 	cacheTTL = int64(250 * time.Millisecond)
 	defer func() {
-		bkgTasksSleepDuration = defaultBkgTasksSleepDuration
-		cacheTTL = int64(defaultCacheTTL)
+		cacheTTL = testDefaultCacheTTL
 	}()
 
 	fs := createDefaultFileStore(t)
@@ -1418,17 +1404,11 @@ func TestFSMsgStoreBackgroundTaskCrash(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
-	// For this test, reduce the buffer shrink interval
-	bufShrinkInterval = time.Second
-	defer func() {
-		bufShrinkInterval = defaultBufShrinkInterval
-	}()
-
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
 
 	storeCreateChannel(t, fs, "foo")
 	// Wait for background task to execute
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	// It should not have crashed.
 }
