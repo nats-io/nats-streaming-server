@@ -375,7 +375,8 @@ func parseFileOptions(itf interface{}, opts *Options) error {
 // file contanining both Streaming and NATS parameters.
 func ProcessConfigFiles(stanConfig, natsdConfig string) (*Options, *natsd.Options, error) {
 	stanOpts := GetDefaultOptions()
-	natsOpts := &natsd.Options{}
+	// Apply default values that we would have set in flag.XXXVar() here...
+	natsOpts := &natsd.Options{Logtime: true}
 
 	if stanConfig == "" && natsdConfig == "" {
 		return stanOpts, natsOpts, nil

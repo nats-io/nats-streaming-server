@@ -350,7 +350,7 @@ func TestParseProcessConfigFiles(t *testing.T) {
 	if !reflect.DeepEqual(sopts, GetDefaultOptions()) {
 		t.Fatalf("Did not get default options: %v", sopts)
 	}
-	if !reflect.DeepEqual(nopts, &natsd.Options{}) {
+	if !reflect.DeepEqual(nopts, &natsd.Options{Logtime: true}) {
 		t.Fatalf("Did not get empty NATS options: %v", nopts)
 	}
 

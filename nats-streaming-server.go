@@ -137,66 +137,64 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	// as the actual Options name. We will then use reflection
 	// to apply any command line option to stanOpts, overriding
 	// defaults and options set during file parsing.
-	flag.String("cluster_id", stand.DefaultClusterID, "ID")
-	flag.String("cid", stand.DefaultClusterID, "ID")
-	flag.String("store", stores.TypeMemory, "StoreType")
-	flag.String("st", stores.TypeMemory, "StoreType")
-	flag.String("dir", "", "FilestoreDir")
-	flag.Int("max_channels", stores.DefaultStoreLimits.MaxChannels, "MaxChannels")
-	flag.Int("mc", stores.DefaultStoreLimits.MaxChannels, "MaxChannels")
-	flag.Int("max_subs", stores.DefaultStoreLimits.MaxSubscriptions, "MaxSubscriptions")
-	flag.Int("msu", stores.DefaultStoreLimits.MaxSubscriptions, "MaxSubscriptions")
-	flag.Int("max_msgs", stores.DefaultStoreLimits.MaxMsgs, "MaxMsgs")
-	flag.Int("mm", stores.DefaultStoreLimits.MaxMsgs, "MaxMsgs")
-	flag.String("max_bytes", fmt.Sprintf("%v", stores.DefaultStoreLimits.MaxBytes), "MaxBytes")
-	flag.String("mb", fmt.Sprintf("%v", stores.DefaultStoreLimits.MaxBytes), "MaxBytes")
-	flag.String("max_age", "0s", "MaxAge")
-	flag.String("ma", "0s", "MaxAge")
-	flag.String("hbi", stand.DefaultHeartBeatInterval.String(), "ClientHBInterval")
-	flag.String("hb_interval", stand.DefaultHeartBeatInterval.String(), "ClientHBInterval")
-	flag.String("hbt", stand.DefaultClientHBTimeout.String(), "ClientHBTimeout")
-	flag.String("hb_timeout", stand.DefaultClientHBTimeout.String(), "ClientHBTimeout")
-	flag.Int("hbf", stand.DefaultMaxFailedHeartBeats, "ClientHBFailCount")
-	flag.Int("hb_fail_count", stand.DefaultMaxFailedHeartBeats, "ClientHBFailCount")
-	flag.Bool("SD", false, "Debug")
-	flag.Bool("stan_debug", false, "Debug")
-	flag.Bool("SV", false, "Trace")
-	flag.Bool("stan_trace", false, "Trace")
+	flag.String("cluster_id", stand.DefaultClusterID, "stan.ID")
+	flag.String("cid", stand.DefaultClusterID, "stan.ID")
+	flag.String("store", stores.TypeMemory, "stan.StoreType")
+	flag.String("st", stores.TypeMemory, "stan.StoreType")
+	flag.String("dir", "", "stan.FilestoreDir")
+	flag.Int("max_channels", stores.DefaultStoreLimits.MaxChannels, "stan.MaxChannels")
+	flag.Int("mc", stores.DefaultStoreLimits.MaxChannels, "stan.MaxChannels")
+	flag.Int("max_subs", stores.DefaultStoreLimits.MaxSubscriptions, "stan.MaxSubscriptions")
+	flag.Int("msu", stores.DefaultStoreLimits.MaxSubscriptions, "stan.MaxSubscriptions")
+	flag.Int("max_msgs", stores.DefaultStoreLimits.MaxMsgs, "stan.MaxMsgs")
+	flag.Int("mm", stores.DefaultStoreLimits.MaxMsgs, "stan.MaxMsgs")
+	flag.String("max_bytes", fmt.Sprintf("%v", stores.DefaultStoreLimits.MaxBytes), "stan.MaxBytes")
+	flag.String("mb", fmt.Sprintf("%v", stores.DefaultStoreLimits.MaxBytes), "stan.MaxBytes")
+	flag.String("max_age", "0s", "stan.MaxAge")
+	flag.String("ma", "0s", "stan.MaxAge")
+	flag.String("hbi", stand.DefaultHeartBeatInterval.String(), "stan.ClientHBInterval")
+	flag.String("hb_interval", stand.DefaultHeartBeatInterval.String(), "stan.ClientHBInterval")
+	flag.String("hbt", stand.DefaultClientHBTimeout.String(), "stan.ClientHBTimeout")
+	flag.String("hb_timeout", stand.DefaultClientHBTimeout.String(), "stan.ClientHBTimeout")
+	flag.Int("hbf", stand.DefaultMaxFailedHeartBeats, "stan.ClientHBFailCount")
+	flag.Int("hb_fail_count", stand.DefaultMaxFailedHeartBeats, "stan.ClientHBFailCount")
+	flag.Bool("SD", false, "stan.Debug")
+	flag.Bool("stan_debug", false, "stan.Debug")
+	flag.Bool("SV", false, "stan.Trace")
+	flag.Bool("stan_trace", false, "stan.Trace")
 	flag.BoolVar(&stanDebugAndTrace, "SDV", false, "")
-	flag.Bool("secure", false, "Secure")
-	flag.String("tls_client_cert", "", "ClientCert")
-	flag.String("tls_client_key", "", "ClientKey")
-	flag.String("tls_client_cacert", "", "ClientCA")
-	flag.String("nats_server", "", "NATSServerURL")
-	flag.String("ns", "", "NATSServerURL")
+	flag.Bool("secure", false, "stan.Secure")
+	flag.String("tls_client_cert", "", "stan.ClientCert")
+	flag.String("tls_client_key", "", "stan.ClientKey")
+	flag.String("tls_client_cacert", "", "stan.ClientCA")
+	flag.String("nats_server", "", "stan.NATSServerURL")
+	flag.String("ns", "", "stan.NATSServerURL")
 	flag.StringVar(&stanConfigFile, "sc", "", "")
 	flag.StringVar(&stanConfigFile, "stan_config", "", "")
-	flag.Int("ack_subs", 0, "AckSubsPoolSize")
-	flag.Bool("file_compact_enabled", stores.DefaultFileStoreOptions.CompactEnabled, "FileStoreOpts.CompactEnabled")
-	flag.Int("file_compact_frag", stores.DefaultFileStoreOptions.CompactFragmentation, "FileStoreOpts.CompactFragmentation")
-	flag.Int("file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "FileStoreOpts.CompactInterval")
-	flag.String("file_compact_min_size", fmt.Sprintf("%v", stores.DefaultFileStoreOptions.CompactMinFileSize), "FileStoreOpts.CompactMinFileSize")
-	flag.String("file_buffer_size", fmt.Sprintf("%v", stores.DefaultFileStoreOptions.BufferSize), "FileStoreOpts.BufferSize")
-	flag.Bool("file_crc", stores.DefaultFileStoreOptions.DoCRC, "FileStoreOpts.DoCRC")
-	flag.Int64("file_crc_poly", stores.DefaultFileStoreOptions.CRCPolynomial, "FileStoreOpts.CRCPolynomial")
-	flag.Bool("file_sync", stores.DefaultFileStoreOptions.DoSync, "FileStoreOpts.DoSync")
-	flag.Int("file_slice_max_msgs", stores.DefaultFileStoreOptions.SliceMaxMsgs, "FileStoreOpts.SliceMaxMsgs")
-	flag.String("file_slice_max_bytes", fmt.Sprintf("%v", stores.DefaultFileStoreOptions.SliceMaxBytes), "FileStoreOpts.SliceMaxBytes")
-	flag.String("file_slice_max_age", "0s", "FileStoreOpts.SliceMaxAge")
-	flag.String("file_slice_archive_script", "", "FileStoreOpts.SliceArchiveScript")
-	flag.Int64("file_fds_limit", stores.DefaultFileStoreOptions.FileDescriptorsLimit, "FileStoreOpts.FileDescriptorsLimit")
-	flag.Int("file_parallel_recovery", stores.DefaultFileStoreOptions.ParallelRecovery, "FileStoreOpts.ParallelRecovery")
-	flag.Int("io_batch_size", stand.DefaultIOBatchSize, "IOBatchSize")
-	flag.Int64("io_sleep_time", stand.DefaultIOSleepTime, "IOSleepTime")
-	flag.String("ft_group", "", "FTGroupName")
+	flag.Int("ack_subs", 0, "stan.AckSubsPoolSize")
+	flag.Bool("file_compact_enabled", stores.DefaultFileStoreOptions.CompactEnabled, "stan.FileStoreOpts.CompactEnabled")
+	flag.Int("file_compact_frag", stores.DefaultFileStoreOptions.CompactFragmentation, "stan.FileStoreOpts.CompactFragmentation")
+	flag.Int("file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "stan.FileStoreOpts.CompactInterval")
+	flag.String("file_compact_min_size", fmt.Sprintf("%v", stores.DefaultFileStoreOptions.CompactMinFileSize), "stan.FileStoreOpts.CompactMinFileSize")
+	flag.String("file_buffer_size", fmt.Sprintf("%v", stores.DefaultFileStoreOptions.BufferSize), "stan.FileStoreOpts.BufferSize")
+	flag.Bool("file_crc", stores.DefaultFileStoreOptions.DoCRC, "stan.FileStoreOpts.DoCRC")
+	flag.Int64("file_crc_poly", stores.DefaultFileStoreOptions.CRCPolynomial, "stan.FileStoreOpts.CRCPolynomial")
+	flag.Bool("file_sync", stores.DefaultFileStoreOptions.DoSync, "stan.FileStoreOpts.DoSync")
+	flag.Int("file_slice_max_msgs", stores.DefaultFileStoreOptions.SliceMaxMsgs, "stan.FileStoreOpts.SliceMaxMsgs")
+	flag.String("file_slice_max_bytes", fmt.Sprintf("%v", stores.DefaultFileStoreOptions.SliceMaxBytes), "stan.FileStoreOpts.SliceMaxBytes")
+	flag.String("file_slice_max_age", "0s", "stan.FileStoreOpts.SliceMaxAge")
+	flag.String("file_slice_archive_script", "", "stan.FileStoreOpts.SliceArchiveScript")
+	flag.Int64("file_fds_limit", stores.DefaultFileStoreOptions.FileDescriptorsLimit, "stan.FileStoreOpts.FileDescriptorsLimit")
+	flag.Int("file_parallel_recovery", stores.DefaultFileStoreOptions.ParallelRecovery, "stan.FileStoreOpts.ParallelRecovery")
+	flag.Int("io_batch_size", stand.DefaultIOBatchSize, "stan.IOBatchSize")
+	flag.Int64("io_sleep_time", stand.DefaultIOSleepTime, "stan.IOSleepTime")
+	flag.String("ft_group", "", "stan.FTGroupName")
 
 	// NATS options
 	var showVersion bool
 	var natsDebugAndTrace bool
 	var showTLSHelp bool
 	var gnatsdConfigFile string
-
-	natsOpts := &natsd.Options{}
 
 	// TODO: Expose gnatsd parsing into server options
 	// (cls) This is a development placeholder until gnatsd
@@ -205,47 +203,47 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	// IMPORTANT: Do not use Usage field (last) since this is
 	// used to do reflection. Note that usage is defined in
 	// usageStr anyway.
-	flag.IntVar(&natsOpts.Port, "port", 0, "")
-	flag.IntVar(&natsOpts.Port, "p", 0, "")
-	flag.StringVar(&natsOpts.Host, "addr", "", "")
-	flag.StringVar(&natsOpts.Host, "a", "", "")
-	flag.StringVar(&natsOpts.Host, "net", "", "")
-	flag.BoolVar(&natsOpts.Debug, "D", false, "")
-	flag.BoolVar(&natsOpts.Debug, "debug", false, "")
-	flag.BoolVar(&natsOpts.Trace, "V", false, "")
-	flag.BoolVar(&natsOpts.Trace, "trace", false, "")
+	flag.Int("port", 0, "nats.Port")
+	flag.Int("p", 0, "nats.Port")
+	flag.String("addr", "", "nats.Host")
+	flag.String("a", "", "nats.Host")
+	flag.String("net", "", "nats.Host")
+	flag.Bool("D", false, "nats.Debug")
+	flag.Bool("debug", false, "nats.Debug")
+	flag.Bool("V", false, "nats.Trace")
+	flag.Bool("trace", false, "nats.Trace")
 	flag.BoolVar(&natsDebugAndTrace, "DV", false, "")
-	flag.BoolVar(&natsOpts.Logtime, "T", true, "")
-	flag.BoolVar(&natsOpts.Logtime, "logtime", true, "")
-	flag.StringVar(&natsOpts.Username, "user", "", "")
-	flag.StringVar(&natsOpts.Password, "pass", "", "")
-	flag.StringVar(&natsOpts.Authorization, "auth", "", "")
-	flag.IntVar(&natsOpts.HTTPPort, "m", 0, "")
-	flag.IntVar(&natsOpts.HTTPPort, "http_port", 0, "")
-	flag.IntVar(&natsOpts.HTTPSPort, "ms", 0, "")
-	flag.IntVar(&natsOpts.HTTPSPort, "https_port", 0, "")
+	flag.Bool("T", true, "nats.Logtime")
+	flag.Bool("logtime", true, "nats.Logtime")
+	flag.String("user", "", "nats.Username")
+	flag.String("pass", "", "nats.Password")
+	flag.String("auth", "", "nats.Authorization")
+	flag.Int("m", 0, "nats.HTTPPort")
+	flag.Int("http_port", 0, "nats.HTTPPort")
+	flag.Int("ms", 0, "nats.HTTPSPort")
+	flag.Int("https_port", 0, "nats.HTTPSPort")
 	flag.StringVar(&gnatsdConfigFile, "c", "", "")
 	flag.StringVar(&gnatsdConfigFile, "config", "", "")
-	flag.StringVar(&natsOpts.PidFile, "P", "", "")
-	flag.StringVar(&natsOpts.PidFile, "pid", "", "")
-	flag.StringVar(&natsOpts.LogFile, "l", "", "")
-	flag.StringVar(&natsOpts.LogFile, "log", "", "")
-	flag.BoolVar(&natsOpts.Syslog, "s", false, "")
-	flag.BoolVar(&natsOpts.Syslog, "syslog", false, "")
-	flag.StringVar(&natsOpts.RemoteSyslog, "r", "", "")
-	flag.StringVar(&natsOpts.RemoteSyslog, "remote_syslog", "", "")
+	flag.String("P", "", "nats.PidFile")
+	flag.String("pid", "", "nats.PidFile")
+	flag.String("l", "", "nats.LogFile")
+	flag.String("log", "", "nats.LogFile")
+	flag.Bool("s", false, "nats.Syslog")
+	flag.Bool("syslog", false, "nats.Syslog")
+	flag.String("r", "", "nats.RemoteSyslog")
+	flag.String("remote_syslog", "", "nats.RemoteSyslog")
 	flag.BoolVar(&showVersion, "version", false, "")
 	flag.BoolVar(&showVersion, "v", false, "")
-	flag.IntVar(&natsOpts.ProfPort, "profile", 0, "")
-	flag.StringVar(&natsOpts.RoutesStr, "routes", "", "")
-	flag.StringVar(&natsOpts.Cluster.ListenStr, "cluster", "", "")
-	flag.StringVar(&natsOpts.Cluster.ListenStr, "cluster_listen", "", "")
+	flag.Int("profile", 0, "nats.ProfPort")
+	flag.String("routes", "", "nats.RoutesStr")
+	flag.String("cluster", "", "nats.Cluster.ListenStr")
+	flag.String("cluster_listen", "", "nats.Cluster.ListenStr")
 	flag.BoolVar(&showTLSHelp, "help_tls", false, "")
-	flag.BoolVar(&natsOpts.TLS, "tls", false, "")
-	flag.BoolVar(&natsOpts.TLSVerify, "tlsverify", false, "")
-	flag.StringVar(&natsOpts.TLSCert, "tlscert", "", "")
-	flag.StringVar(&natsOpts.TLSKey, "tlskey", "", "")
-	flag.StringVar(&natsOpts.TLSCaCert, "tlscacert", "", "")
+	flag.Bool("tls", false, "nats.TLS")
+	flag.Bool("tlsverify", false, "nats.TLSVerify")
+	flag.String("tlscert", "", "nats.TLSCert")
+	flag.String("tlskey", "", "nats.TLSKey")
+	flag.String("tlscacert", "", "nats.TLSCaCert")
 
 	flag.Usage = func() {
 		fmt.Printf("%s\n", usageStr)
@@ -277,18 +275,13 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 		usage()
 	}
 
-	stanOpts, natsCfgOpts, err := stand.ProcessConfigFiles(stanConfigFile, gnatsdConfigFile)
+	stanOpts, natsOpts, err := stand.ProcessConfigFiles(stanConfigFile, gnatsdConfigFile)
 	if err != nil {
 		natsd.PrintAndDie(fmt.Sprintf("Configuration error: %v", err.Error()))
 	}
 	// Now apply all parameters provided on the command line.
-	if err := overrideWithCmdLineParams(stanOpts); err != nil {
+	if err := overrideWithCmdLineParams(stanOpts, natsOpts); err != nil {
 		natsd.PrintAndDie(err.Error())
-	}
-
-	// Override NATS config file with options from command line
-	if natsCfgOpts != nil {
-		natsOpts = natsd.MergeOptions(natsCfgOpts, natsOpts)
 	}
 
 	// One flag can set multiple options.
@@ -306,24 +299,34 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 
 // overrideWithCmdLineParams applies the flags passed in the command line
 // to the given options structure.
-func overrideWithCmdLineParams(opts *stand.Options) error {
+func overrideWithCmdLineParams(sopts *stand.Options, nopts *natsd.Options) error {
 	var err error
 	flag.Visit(func(f *flag.Flag) {
 		if err != nil || f.Usage == "" {
 			return
 		}
-		t := reflect.ValueOf(opts).Elem()
+		root := f.Usage[0:5]
+		var t reflect.Value
+		if root == "stan." {
+			t = reflect.ValueOf(sopts).Elem()
+		} else if root == "nats." {
+			t = reflect.ValueOf(nopts).Elem()
+		} else {
+			err = fmt.Errorf("unknown options root: %s", root)
+			return
+		}
+		optName := f.Usage[5:]
 		var o reflect.Value
 		// Lookup for sub structures, ex: FileStoreOpts.CacheMsgs
-		if strings.Contains(f.Usage, ".") {
-			strs := strings.Split(f.Usage, ".")
+		if strings.Contains(optName, ".") {
+			strs := strings.Split(optName, ".")
 			obj := t.FieldByName(strs[0])
 			for i := 1; i < len(strs); i++ {
 				obj = obj.FieldByName(strs[i])
 			}
 			o = obj
 		} else {
-			o = t.FieldByName(f.Usage)
+			o = t.FieldByName(optName)
 		}
 		if !o.IsValid() || !o.CanSet() {
 			return
@@ -336,7 +339,7 @@ func overrideWithCmdLineParams(opts *stand.Options) error {
 		valKind := reflect.ValueOf(val).Kind()
 		switch valKind {
 		case reflect.String:
-			switch f.Usage {
+			switch optName {
 			// Parameters that can be size are configured as string and we then use
 			// gnatsd's configuration parser to convert to a int64.
 			case "MaxBytes", "FileStoreOpts.CompactMinFileSize", "FileStoreOpts.BufferSize", "FileStoreOpts.SliceMaxBytes":
