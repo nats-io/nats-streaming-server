@@ -104,6 +104,7 @@ type Subscriptionz struct {
 	DurableName  string `json:"durable_name,omitempty"`
 	QueueName    string `json:"queue_name,omitempty"`
 	IsDurable    bool   `json:"is_durable"`
+	IsOffline    bool   `json:"is_offline"`
 	MaxInflight  int    `json:"max_inflight"`
 	AckWait      int    `json:"ack_wait"`
 	LastSent     uint64 `json:"last_sent"`
@@ -334,8 +335,11 @@ func getMonitorChannelSubs(ss *subStore) []*Subscriptionz {
 	for _, sub := range ss.psubs {
 		subsz = append(subsz, createSubscriptionz(sub))
 	}
+	// Get only offline durables (the online also appear in ss.psubs)
 	for _, sub := range ss.durables {
-		subsz = append(subsz, createSubscriptionz(sub))
+		if sub.ClientID == "" {
+			subsz = append(subsz, createSubscriptionz(sub))
+		}
 	}
 	for _, qsub := range ss.qsubs {
 		qsub.RLock()
@@ -355,6 +359,7 @@ func createSubscriptionz(sub *subState) *Subscriptionz {
 		DurableName:  sub.DurableName,
 		QueueName:    sub.QGroup,
 		IsDurable:    sub.IsDurable,
+		IsOffline:    (sub.ClientID == ""),
 		MaxInflight:  int(sub.MaxInFlight),
 		AckWait:      int(sub.AckWaitInSecs),
 		LastSent:     sub.LastSent,

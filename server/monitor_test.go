@@ -922,7 +922,9 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 				ss.RLock()
 				subscriptions := getChannelSubs(ss.psubs)
 				for _, dur := range ss.durables {
-					subscriptions = append(subscriptions, createSubz(dur))
+					if dur.ClientID == "" {
+						subscriptions = append(subscriptions, createSubz(dur))
+					}
 				}
 				for _, qsub := range ss.qsubs {
 					qsub.RLock()
@@ -1095,5 +1097,71 @@ func TestMonitorChannelz(t *testing.T) {
 			t.Fatalf("Expected a %d response, got %d\n", http.StatusInternalServerError, resp.StatusCode)
 		}
 		resp.Body.Close()
+	}
+}
+
+func TestMonitorDurableSubs(t *testing.T) {
+	resetPreviousHTTPConnections()
+	s := runMonitorServer(t, GetDefaultOptions())
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	for iter := 0; iter < 2; iter++ {
+		// Create a durable
+		dur, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+		if err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		// Get the subs for this channel, check there is expected number of subs
+		getAndCheck := func(expectedOffline bool, expectedCount int) {
+			var channel *Channelz
+			if iter == 0 {
+				resp, body := getBody(t, ChannelsPath+"?subs=1", expectedJSON)
+				defer resp.Body.Close()
+				channels := &Channelsz{}
+				if err := json.Unmarshal(body, channels); err != nil {
+					stackFatalf(t, "Error unmarshalling: %v", err)
+				}
+				if len(channels.Channels) != 1 {
+					stackFatalf(t, "Expected a single channel, got %v", len(channels.Channels))
+				}
+				channel = channels.Channels[0]
+			} else {
+				resp, body := getBody(t, ChannelsPath+"?channel=foo&subs=1", expectedJSON)
+				defer resp.Body.Close()
+				channel = &Channelz{}
+				if err := json.Unmarshal(body, channel); err != nil {
+					stackFatalf(t, "Error unmarshalling: %v", err)
+				}
+			}
+			if numSubs := len(channel.Subscriptions); numSubs != expectedCount {
+				stackFatalf(t, "Expected %d subscription(s), got %v", expectedCount, numSubs)
+			}
+			if expectedCount == 1 {
+				sub := channel.Subscriptions[0]
+				if sub.IsOffline != expectedOffline {
+					stackFatalf(t, "Unexpected IsOffline, wants %v, got %v", expectedOffline, sub.IsOffline)
+				}
+			}
+		}
+		// There should be 1 sub
+		getAndCheck(false, 1)
+		// Close durable
+		dur.Close()
+		// Check again
+		getAndCheck(true, 1)
+		// Restart durable
+		dur, err = sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+		if err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+		// Check again
+		getAndCheck(false, 1)
+		// Now Unsubscribe
+		dur.Unsubscribe()
+		// There shouldn't be any sub now
+		getAndCheck(false, 0)
 	}
 }
