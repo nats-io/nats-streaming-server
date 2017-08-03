@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 )
 
@@ -121,7 +122,9 @@ func TestPersistentStoreAutomaticDeliveryOnRestart(t *testing.T) {
 	msg := []byte("msg")
 
 	// Get our STAN connection
-	sc := NewDefaultConnection(t)
+	sc, nc := createConnectionWithNatsOpts(t, clientName, nats.ReconnectWait(50*time.Millisecond))
+	defer nc.Close()
+	defer sc.Close()
 
 	// Send messages
 	for i := int32(0); i < toSend; i++ {

@@ -186,7 +186,7 @@ func TestMsgLookupFailures(t *testing.T) {
 	select {
 	case <-rcvCh:
 		t.Fatal("Should not have received the message")
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		// we waited "long enoug" and did not receive anything, which is good
 	}
 	logger.Lock()
@@ -203,7 +203,7 @@ func TestMsgLookupFailures(t *testing.T) {
 	// Create subscription, manual ack mode, don't ack, wait for redelivery
 	sub, err = sc.Subscribe("foo", func(_ *stan.Msg) {
 		rcvCh <- true
-	}, stan.DeliverAllAvailable(), stan.SetManualAckMode(), stan.AckWait(time.Second))
+	}, stan.DeliverAllAvailable(), stan.SetManualAckMode(), stan.AckWait(ackWaitInMs(15)))
 	if err != nil {
 		t.Fatalf("Error on subscribe: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestMsgLookupFailures(t *testing.T) {
 	select {
 	case <-rcvCh:
 		t.Fatal("Should not have received the message")
-	case <-time.After(1500 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		// we waited more than redelivery time and did not receive anything, which is good
 	}
 	logger.Lock()
@@ -245,7 +245,7 @@ func TestMsgLookupFailures(t *testing.T) {
 	// Another member does not ack.
 	qsub2, err := sc.QueueSubscribe("bar", "queue", func(_ *stan.Msg) {
 		rcvCh <- true
-	}, stan.SetManualAckMode(), stan.AckWait(time.Second))
+	}, stan.SetManualAckMode(), stan.AckWait(ackWaitInMs(15)))
 	if err != nil {
 		t.Fatalf("Error on subscribe: %v", err)
 	}

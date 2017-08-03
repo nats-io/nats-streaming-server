@@ -138,6 +138,8 @@ func TestInvalidSubRequest(t *testing.T) {
 	req.ClientID = clientName
 
 	// Test invalid AckWait values
+	// For these tests, we need to disable testAckWaitIsInMillisecond
+	testAckWaitIsInMillisecond = false
 	req.AckWaitInSecs = 0
 	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidAckWait); err != nil {
 		t.Fatalf("%v", err)
@@ -146,6 +148,7 @@ func TestInvalidSubRequest(t *testing.T) {
 	if err := sendInvalidSubRequest(s, nc, req, ErrInvalidAckWait); err != nil {
 		t.Fatalf("%v", err)
 	}
+	testAckWaitIsInMillisecond = true
 
 	// Test invalid MaxInflight values
 	req.AckWaitInSecs = 1

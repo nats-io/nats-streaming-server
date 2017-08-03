@@ -125,6 +125,17 @@ var (
 // A Regexp is safe for concurrent use by multiple goroutines.
 var clientIDRegEx *regexp.Regexp
 
+var testAckWaitIsInMillisecond bool
+
+func computeAckWait(wait int32) time.Duration {
+	unit := time.Second
+	if testAckWaitIsInMillisecond && wait < 0 {
+		wait = wait * -1
+		unit = time.Millisecond
+	}
+	return time.Duration(wait) * unit
+}
+
 func init() {
 	if re, err := regexp.Compile("^[a-zA-Z0-9_-]+$"); err != nil {
 		panic("Unable to compile regular expression")
@@ -1484,7 +1495,7 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 			// Create a subState
 			sub := &subState{
 				subject: channel.name,
-				ackWait: time.Duration(recSub.Sub.AckWaitInSecs) * time.Second,
+				ackWait: computeAckWait(recSub.Sub.AckWaitInSecs),
 				store:   channel.store.Subs,
 			}
 			sub.acksPending = make(map[uint64]int64, len(recSub.Pending))
@@ -3036,8 +3047,9 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		return
 	}
 
-	// AckWait must be >= 1s
-	if sr.AckWaitInSecs <= 0 {
+	// AckWait must be >= 1s (except in test mode where negative value means that
+	// duration should be interpreted as Milliseconds)
+	if !testAckWaitIsInMillisecond && sr.AckWaitInSecs <= 0 {
 		s.log.Errorf("[Client:%s] Invalid AckWait (%v) in subscription request from %s",
 			sr.ClientID, sr.AckWaitInSecs, m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidAckWait)
@@ -3161,7 +3173,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		// Use some of the new options, but ignore the ones regarding start position
 		sub.MaxInFlight = sr.MaxInFlight
 		sub.AckWaitInSecs = sr.AckWaitInSecs
-		sub.ackWait = time.Duration(sr.AckWaitInSecs) * time.Second
+		sub.ackWait = computeAckWait(sr.AckWaitInSecs)
 		sub.stalled = false
 		if len(sub.acksPending) > 0 {
 			// We have a durable with pending messages, set newOnHold
@@ -3189,7 +3201,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 				IsDurable:     isDurable,
 			},
 			subject:     sr.Subject,
-			ackWait:     time.Duration(sr.AckWaitInSecs) * time.Second,
+			ackWait:     computeAckWait(sr.AckWaitInSecs),
 			acksPending: make(map[uint64]int64),
 			store:       c.store.Subs,
 		}

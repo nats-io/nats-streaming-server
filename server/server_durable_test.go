@@ -549,7 +549,7 @@ func TestPersistentStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
 	s = runServerWithOpts(t, opts, nil)
 
 	// We should not get any message, if we do, this is an error
-	if err := WaitTime(failCh, time.Second); err == nil {
+	if err := WaitTime(failCh, 250*time.Millisecond); err == nil {
 		t.Fatal("Consumer got a message")
 	}
 }

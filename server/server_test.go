@@ -94,6 +94,9 @@ func init() {
 	setFTTestsHBInterval()
 	// Dummy/no-op Logger
 	testLogger = logger.NewStanLogger()
+	// Make the server interpret all our sub's AckWait() as milliseconds instead
+	// of seconds.
+	testAckWaitIsInMillisecond = true
 }
 
 func stackFatalf(t tLogger, f string, args ...interface{}) {
@@ -294,6 +297,18 @@ func getTestDefaultOptsForPersistentStore() *Options {
 		opts.FileStoreOpts.BufferSize = 1024
 	}
 	return opts
+}
+
+func ackWaitInMs(val int) time.Duration {
+	// When creating a subscription without AckWait(), the library
+	// sends AckWaitInSecs==30 for 30 seconds. If we want to
+	// use milliseconds we are going to send a negative value
+	// corresponding to the number of milliseconds we want.
+	// The server variable testAckWaitIsInMillisecond is set
+	// to true at the beginning of the test suite. With that,
+	// the server will use the absoulute value and interpret
+	// is as milliseconds.
+	return time.Duration(val*-1) * time.Second
 }
 
 // Dumb wait program to sync on callbacks, etc... Will timeout
@@ -1061,7 +1076,7 @@ func TestPersistentStoreAcksPool(t *testing.T) {
 	}
 	// Create 10 subs
 	for i := 0; i < int(totalSubs); i++ {
-		sub, err := sc.Subscribe("foo", cb, stan.AckWait(time.Second))
+		sub, err := sc.Subscribe("foo", cb, stan.AckWait(ackWaitInMs(15)))
 		if err != nil {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
@@ -1079,7 +1094,7 @@ func TestPersistentStoreAcksPool(t *testing.T) {
 			stackFatalf(t, "Did not get our messages")
 		}
 		// Wait for more than redelivery time
-		time.Sleep(1500 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		// Check that there was no error
 		select {
 		case e := <-errCh:
@@ -1166,7 +1181,7 @@ func TestPersistentStoreAcksPool(t *testing.T) {
 	}
 	// Create a subscription without call unsubscribe and make
 	// sure it does not prevent closing of connection.
-	if _, err := sc.Subscribe("foo", cb, stan.AckWait(time.Second)); err != nil {
+	if _, err := sc.Subscribe("foo", cb, stan.AckWait(ackWaitInMs(15))); err != nil {
 		t.Fatalf("Error on subscribe: %v", err)
 	}
 	checkReceived(1)
@@ -1211,7 +1226,7 @@ func TestAckSubsSubjectsInPoolUseUniqueSubject(t *testing.T) {
 	}
 	if _, err := sc2.Subscribe("foo", cb,
 		stan.SetManualAckMode(),
-		stan.AckWait(time.Second)); err != nil {
+		stan.AckWait(ackWaitInMs(15))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 

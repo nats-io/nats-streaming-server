@@ -107,7 +107,7 @@ func TestServerLoggerDebugAndTrace(t *testing.T) {
 	// trace and debug. May need to be adjusted.
 	str := string(out)
 	if !strings.Contains(str, "NATS conn opts") || !strings.Contains(str, "Publish subject") {
-		t.Fatalf("Expected tracing to include debug and trace, got %v", out)
+		t.Fatalf("Expected tracing to include debug and trace, got %v", str)
 	}
 }
 

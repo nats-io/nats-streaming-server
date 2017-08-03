@@ -48,7 +48,7 @@ func TestQueueSubsWithDifferentAckWait(t *testing.T) {
 	// Create first queue member with high AckWait
 	qsub1, err = sc.QueueSubscribe("foo", "bar", cb,
 		stan.SetManualAckMode(),
-		stan.AckWait(30*time.Second))
+		stan.AckWait(ackWaitInMs(1000)))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestQueueSubsWithDifferentAckWait(t *testing.T) {
 	// Create the second member with low AckWait
 	qsub2, err = sc.QueueSubscribe("foo", "bar", cb,
 		stan.SetManualAckMode(),
-		stan.AckWait(time.Second))
+		stan.AckWait(ackWaitInMs(15)))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
@@ -78,13 +78,13 @@ func TestQueueSubsWithDifferentAckWait(t *testing.T) {
 	select {
 	case <-rch2:
 	// ok
-	case <-time.After(1500 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Message should have been redelivered")
 	}
 	// Create 3rd member with higher AckWait than the 2nd
 	qsub3, err = sc.QueueSubscribe("foo", "bar", cb,
 		stan.SetManualAckMode(),
-		stan.AckWait(10*time.Second))
+		stan.AckWait(ackWaitInMs(150)))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
@@ -94,11 +94,11 @@ func TestQueueSubsWithDifferentAckWait(t *testing.T) {
 	checkQueueGroupSize(t, s, "foo", "bar", true, 1)
 	// Wait for redelivery. It should happen after the remaining
 	// of the first redelivery to qsub2 and its AckWait, which
-	// should be less than a second.
+	// should be less than 15 ms.
 	select {
 	case <-rch3:
 	// ok
-	case <-time.After(1500 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Message should have been redelivered")
 	}
 }
@@ -234,7 +234,7 @@ func TestQueueSubscriberTransferPendingMsgsOnClose(t *testing.T) {
 		t.Fatal("Did not get our message")
 	}
 	// Start 2nd queue subscriber on same group
-	sub2, err = sc.QueueSubscribe("foo", "group", cb, stan.AckWait(time.Second))
+	sub2, err = sc.QueueSubscribe("foo", "group", cb, stan.AckWait(ackWaitInMs(15)))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
@@ -255,7 +255,8 @@ func TestPersistentStoreQueueSubLeavingUpdateQGroupLastSent(t *testing.T) {
 	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
-	sc := NewDefaultConnection(t)
+	sc, nc := createConnectionWithNatsOpts(t, clientName, nats.ReconnectWait(50*time.Millisecond))
+	defer nc.Close()
 	defer sc.Close()
 
 	if err := sc.Publish("foo", []byte("msg1")); err != nil {
@@ -317,7 +318,7 @@ func TestPersistentStoreQueueSubLeavingUpdateQGroupLastSent(t *testing.T) {
 			gotIt = true
 			break
 		}
-	case <-time.After(time.Second):
+	case <-time.After(250 * time.Millisecond):
 		// Wait for a bit to see if we receive extraneous messages
 		break
 	}
@@ -474,7 +475,8 @@ func TestPersistentStoreDurableQueueSub(t *testing.T) {
 	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
-	sc1 := NewDefaultConnection(t)
+	sc1, nc1 := createConnectionWithNatsOpts(t, clientName, nats.ReconnectWait(50*time.Millisecond))
+	defer nc1.Close()
 	defer sc1.Close()
 	if err := sc1.Publish("foo", []byte("msg1")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)

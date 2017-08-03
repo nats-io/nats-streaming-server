@@ -113,7 +113,7 @@ func getFTActiveServer(t *testing.T, servers ...*StanServer) *StanServer {
 		if active != nil {
 			break
 		}
-		time.Sleep(time.Second)
+		time.Sleep(ftHBMissedInterval)
 	}
 	if active == nil {
 		stackFatalf(t, "Unable to find the active server")
@@ -639,7 +639,7 @@ func TestFTSteppingDown(t *testing.T) {
 	ns = natsdTest.RunDefaultServer()
 	// Make sure that streaming has time to reconnect and wait for HBs
 	// exchange to realize that there are 2 actives.
-	time.Sleep(time.Second)
+	time.Sleep(2 * ftHBMissedInterval)
 	// Since s1 activated before s2, we want s1 to stay and s2 to exit.
 	checkState(t, s1, FTActive)
 	checkState(t, s2, Failed)
@@ -708,7 +708,7 @@ func TestFTActiveSendsHB(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	// Shutdown the NATS server
 	ns.Shutdown()
-	time.Sleep(time.Second)
+	time.Sleep(2 * ftHBMissedInterval)
 	// Start again
 	ns = natsdTest.RunDefaultServer()
 	atomic.StoreInt32(&reconnected, 1)
