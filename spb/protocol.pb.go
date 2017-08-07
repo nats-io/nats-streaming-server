@@ -135,6 +135,7 @@ type CtrlMsg struct {
 	MsgType  CtrlMsg_Type `protobuf:"varint,1,opt,name=MsgType,proto3,enum=spb.CtrlMsg_Type" json:"MsgType,omitempty"`
 	ServerID string       `protobuf:"bytes,2,opt,name=ServerID,proto3" json:"ServerID,omitempty"`
 	Data     []byte       `protobuf:"bytes,3,opt,name=Data,proto3" json:"Data,omitempty"`
+	MsgID    string       `protobuf:"bytes,4,opt,name=MsgID,proto3" json:"MsgID,omitempty"`
 }
 
 func (m *CtrlMsg) Reset()         { *m = CtrlMsg{} }
@@ -434,6 +435,12 @@ func (m *CtrlMsg) MarshalTo(data []byte) (int, error) {
 			i += copy(data[i:], m.Data)
 		}
 	}
+	if len(m.MsgID) > 0 {
+		data[i] = 0x22
+		i++
+		i = encodeVarintProtocol(data, i, uint64(len(m.MsgID)))
+		i += copy(data[i:], m.MsgID)
+	}
 	return i, nil
 }
 
@@ -603,6 +610,10 @@ func (m *CtrlMsg) Size() (n int) {
 		if l > 0 {
 			n += 1 + l + sovProtocol(uint64(l))
 		}
+	}
+	l = len(m.MsgID)
+	if l > 0 {
+		n += 1 + l + sovProtocol(uint64(l))
 	}
 	return n
 }
@@ -1644,6 +1655,35 @@ func (m *CtrlMsg) Unmarshal(data []byte) error {
 			if m.Data == nil {
 				m.Data = []byte{}
 			}
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MsgID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowProtocol
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := data[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthProtocol
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.MsgID = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex

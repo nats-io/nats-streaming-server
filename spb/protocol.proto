@@ -70,5 +70,7 @@ message CtrlMsg {
   }
   Type    MsgType  = 1; // Type of the control message.
   string  ServerID = 2; // Allows a server to detect if it is the intended receipient.
-  bytes   Data     = 3; // Optional bytes that carries context information.
+  bytes   Data     = 3; // Optional bytes that carries context information.    
+  string  MsgID    = 4; // A control message may be sent multiple times (to different internal subscriptions).
+                        // It is used by the server to reference count all messages with same MsgID.
 }
