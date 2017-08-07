@@ -158,11 +158,6 @@ type ioPendingMsg struct {
 const ioChannelSize = 64 * 1024
 
 const (
-	useLocking     = true
-	dontUseLocking = false
-)
-
-const (
 	scheduleRequest = true
 	processRequest  = false
 )
@@ -349,11 +344,13 @@ type StanServer struct {
 	ioChannelQuit chan struct{}
 	ioChannelWG   sync.WaitGroup
 
-	// Used to fix out-of-order processing of subUnsub/subClose/connClose
-	// requests due to use of different NATS subscribers for various
-	// protocols.
-	closeProtosMu sync.Mutex     // Mutex used for unsub/close requests.
-	connCloseReqs map[string]int // Key: clientID Value: ref count
+	// Used to fix out-of-order processing of requests due to use of
+	// different internal NATS subscriptions.
+	ctrlMsgMu  sync.Mutex
+	ctrlMsgIDs map[string]int // Key: CtrlMsg's ID, Value: ref count
+
+	// To protect some close related requests
+	closeMu sync.Mutex
 
 	tmpBuf []byte // Used to marshal protocols (right now, only PubAck)
 
@@ -1018,7 +1015,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
 		dupCIDTimeout:     defaultCheckDupCIDTimeout,
 		ioChannelQuit:     make(chan struct{}, 1),
-		connCloseReqs:     make(map[string]int),
+		ctrlMsgIDs:        make(map[string]int),
 		trace:             sOpts.Trace,
 		debug:             sOpts.Debug,
 		subStartCh:        make(chan *subStartInfo, defaultSubStartChanLen),
@@ -1869,7 +1866,7 @@ func (s *StanServer) processConnectRequestWithDupID(c *client, req *pb.ConnectRe
 	// running by sending a ping to that inbox.
 	if _, err := s.nc.Request(hbInbox, nil, s.dupCIDTimeout); err != nil {
 		// The old client didn't reply, assume it is dead, close it and continue.
-		s.closeClient(useLocking, clientID)
+		s.closeClient(clientID)
 
 		// Between the close and the new registration below, it is possible
 		// that a connection request came in (in connectCB) and since the
@@ -1931,9 +1928,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 			// close the client (connection). This locks the
 			// client object internally so unlock here.
 			client.Unlock()
-			// useLocking is not for client.Lock but for the
-			// use closeProtosMu mutex.
-			s.closeClient(useLocking, clientID)
+			s.closeClient(clientID)
 			return
 		}
 	} else {
@@ -1959,11 +1954,9 @@ func (s *StanServer) checkClientHealth(clientID string) {
 }
 
 // Close a client
-func (s *StanServer) closeClient(lock bool, clientID string) bool {
-	if lock {
-		s.closeProtosMu.Lock()
-		defer s.closeProtosMu.Unlock()
-	}
+func (s *StanServer) closeClient(clientID string) bool {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
 	// Remove from our clientStore.
 	client, err := s.clients.unregister(clientID)
 	// The above call may return an error (due to storage) but still return
@@ -2000,12 +1993,11 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	}
 
 	// Lock for the remainder of the function
-	s.closeProtosMu.Lock()
-	defer s.closeProtosMu.Unlock()
-
+	s.ctrlMsgMu.Lock()
 	ctrlMsg := &spb.CtrlMsg{
 		MsgType:  spb.CtrlMsg_ConnClose,
 		ServerID: s.serverID,
+		MsgID:    nuid.Next(),
 		Data:     []byte(req.ClientID),
 	}
 	ctrlBytes, _ := ctrlMsg.Marshal()
@@ -2045,39 +2037,25 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 			sub.Unlock()
 		}
 	}
+	if refs > 0 {
+		// Store our reference count and wait for performConnClose to
+		// be invoked...
+		s.ctrlMsgIDs[ctrlMsg.MsgID] = refs
+	}
+	s.ctrlMsgMu.Unlock()
 	// If were unable to schedule a single proto, then execute
 	// performConnClose from here.
 	if refs == 0 {
-		s.connCloseReqs[req.ClientID] = 1
-		s.performConnClose(dontUseLocking, m, req.ClientID)
-	} else {
-		// Store our reference count and wait for performConnClose to
-		// be invoked...
-		s.connCloseReqs[req.ClientID] = refs
+		s.performConnClose(m, req.ClientID)
 	}
 }
 
 // performConnClose performs a connection close operation after all
 // client's pubMsg or client acks have been processed.
-func (s *StanServer) performConnClose(locking bool, m *nats.Msg, clientID string) {
-	if locking {
-		s.closeProtosMu.Lock()
-		defer s.closeProtosMu.Unlock()
-	}
-
-	refs := s.connCloseReqs[clientID]
-	refs--
-	if refs > 0 {
-		// Not done yet, update reference count
-		s.connCloseReqs[clientID] = refs
-		return
-	}
-	// Perform the connection close here...
-	delete(s.connCloseReqs, clientID)
-
+func (s *StanServer) performConnClose(m *nats.Msg, clientID string) {
 	// The function or the caller is already locking, so do not use
 	// locking in that function.
-	if !s.closeClient(dontUseLocking, clientID) {
+	if !s.closeClient(clientID) {
 		s.log.Errorf("Unknown client %q in close request", clientID)
 		s.sendCloseErr(m.Reply, ErrUnknownClient.Error())
 		return
@@ -2100,8 +2078,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	iopm := &ioPendingMsg{m: m}
 	pm := &iopm.pm
 	if pm.Unmarshal(m.Data) != nil {
-		// Expecting only a connection close request...
-		if s.processInternalCloseRequest(m, true) {
+		if s.processCtrlMsg(m) {
 			return
 		}
 		// else we will report an error below...
@@ -2117,13 +2094,13 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	s.ioChannel <- iopm
 }
 
-// processInternalCloseRequest processes the incoming message has
-// a CtrlMsg. If this is not a CtrlMsg, returns false to indicate an error.
+// processCtrlMsg processes the incoming message has a CtrlMsg.
+// If this is not a CtrlMsg, returns false to indicate an error.
 // If the CtrlMsg's ServerID is not this server, the request is simply
 // ignored and this function returns true (so the caller does not fail).
 // Based on the CtrlMsg type, invokes appropriate function to
-// do final processing of unsub/subclose/conn close request.
-func (s *StanServer) processInternalCloseRequest(m *nats.Msg, onlyConnClose bool) bool {
+// do final processing of unsub/subclose/conn close/etc requests.
+func (s *StanServer) processCtrlMsg(m *nats.Msg) bool {
 	cm := &spb.CtrlMsg{}
 	if cm.Unmarshal(m.Data) != nil {
 		return false
@@ -2133,10 +2110,24 @@ func (s *StanServer) processInternalCloseRequest(m *nats.Msg, onlyConnClose bool
 	if cm.ServerID != s.serverID {
 		return true
 	}
-	// If we expect only a connection close request but get
-	// something else, report as a failure.
-	if onlyConnClose && cm.MsgType != spb.CtrlMsg_ConnClose {
-		return false
+	var process bool
+	s.ctrlMsgMu.Lock()
+	// If present, the ref count should be > 0 at this stage.
+	// If not present, ignore the request, there is a bug somewhere.
+	if refs := s.ctrlMsgIDs[cm.MsgID]; refs > 0 {
+		refs--
+		if refs == 0 {
+			delete(s.ctrlMsgIDs, cm.MsgID)
+			process = true
+		} else {
+			s.ctrlMsgIDs[cm.MsgID] = refs
+		}
+	} else {
+		s.log.Errorf("Unexpected ref count for CtrlMsg %q", cm.MsgType.String())
+	}
+	s.ctrlMsgMu.Unlock()
+	if !process {
+		return true
 	}
 	switch cm.MsgType {
 	case spb.CtrlMsg_SubUnsubscribe:
@@ -2149,7 +2140,7 @@ func (s *StanServer) processInternalCloseRequest(m *nats.Msg, onlyConnClose bool
 		s.performSubUnsubOrClose(cm.MsgType, processRequest, m, req)
 	case spb.CtrlMsg_ConnClose:
 		clientID := string(cm.Data)
-		s.performConnClose(useLocking, m, clientID)
+		s.performConnClose(m, clientID)
 	default:
 		return false // Valid ctrl message, but unexpected type, return failure.
 	}
@@ -2847,17 +2838,15 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 		return
 	}
 
-	// Lock for the remainder of the function
-	s.closeProtosMu.Lock()
-	defer s.closeProtosMu.Unlock()
-
 	if schedule {
 		processInPlace := true
+		s.ctrlMsgMu.Lock()
 		sub.Lock()
 		if !sub.removed {
 			ctrlMsg := &spb.CtrlMsg{
 				MsgType:  reqType,
 				ServerID: s.serverID,
+				MsgID:    nuid.Next(),
 				Data:     m.Data,
 			}
 			ctrlBytes, _ := ctrlMsg.Marshal()
@@ -2868,17 +2857,24 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 				Reply:   m.Reply,
 				Data:    ctrlBytes,
 			}
+			// If we publish the ctrlMsg, we are not going to process this
+			// in place. Instead, we are going to be called back from
+			// processAckMsg with reqType == processRequest.
 			if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
-				// This function will be called from processAckMsg with
-				// internal == true.
 				processInPlace = false
+				s.ctrlMsgIDs[ctrlMsg.MsgID] = 1
 			}
 		}
 		sub.Unlock()
+		s.ctrlMsgMu.Unlock()
 		if !processInPlace {
 			return
 		}
 	}
+
+	// Lock for the remainder of the function
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
 
 	// Remove from Client
 	if !s.clients.removeSub(req.ClientID, sub) {
@@ -3218,9 +3214,9 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 	if err != nil {
 		// Try to undo what has been done.
-		s.closeProtosMu.Lock()
+		s.closeMu.Lock()
 		ss.Remove(c, sub, false)
-		s.closeProtosMu.Unlock()
+		s.closeMu.Unlock()
 		s.log.Errorf("Unable to add subscription for %s: %v", sr.Subject, err)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
@@ -3391,8 +3387,7 @@ func (s *StanServer) processSubscriptionsStart() {
 func (s *StanServer) processAckMsg(m *nats.Msg) {
 	ack := &pb.Ack{}
 	if ack.Unmarshal(m.Data) != nil {
-		// Expecting the full range of "close" requests: subUnsub, subClose, or connClose
-		if s.processInternalCloseRequest(m, false) {
+		if s.processCtrlMsg(m) {
 			return
 		}
 	}
