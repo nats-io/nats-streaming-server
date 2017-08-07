@@ -1076,7 +1076,7 @@ func TestPersistentStoreAcksPool(t *testing.T) {
 	}
 	// Create 10 subs
 	for i := 0; i < int(totalSubs); i++ {
-		sub, err := sc.Subscribe("foo", cb, stan.AckWait(ackWaitInMs(15)))
+		sub, err := sc.Subscribe("foo", cb, stan.AckWait(ackWaitInMs(100)))
 		if err != nil {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
@@ -1094,7 +1094,7 @@ func TestPersistentStoreAcksPool(t *testing.T) {
 			stackFatalf(t, "Did not get our messages")
 		}
 		// Wait for more than redelivery time
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(115 * time.Millisecond)
 		// Check that there was no error
 		select {
 		case e := <-errCh:
