@@ -952,7 +952,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 			// Invoke the timer callback manually (so we don't have to wait)
 			// Call many times and make sure size never goes down too low.
 			for i := 0; i < 14; i++ {
-				ss.shrinkBuffer()
+				ss.shrinkBuffer(false)
 			}
 			// Now check
 			ss.RLock()
@@ -971,7 +971,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 			// Flush to empty it
 			ss.Flush()
 			// Invoke shrink
-			ss.shrinkBuffer()
+			ss.shrinkBuffer(false)
 			// Check that request is set
 			ss.RLock()
 			shrinkReq := ss.bw.shrinkReq

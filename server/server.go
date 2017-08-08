@@ -1921,6 +1921,12 @@ func (s *StanServer) checkClientHealth(clientID string) {
 	_, err := s.nc.Request(hbInbox, nil, s.opts.ClientHBTimeout)
 	// Grab the lock now.
 	client.Lock()
+	// Client could have been unregistered, in which case
+	// client.hbt will be nil.
+	if client.hbt == nil {
+		client.Unlock()
+		return
+	}
 	// If we did not get the reply, increase the number of
 	// failed heartbeats.
 	if err != nil {

@@ -3094,7 +3094,9 @@ func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doR
 		// execution of the callback itself.
 		ss.Lock()
 		ss.allDone.Add(1)
-		ss.shrinkTimer = time.AfterFunc(bufShrinkInterval, ss.shrinkBuffer)
+		ss.shrinkTimer = time.AfterFunc(bufShrinkInterval, func() {
+			ss.shrinkBuffer(true)
+		})
 		ss.Unlock()
 	}
 	fs.fm.unlockFile(ss.file)
@@ -3121,8 +3123,12 @@ func (ss *FileSubStore) lockFile() error {
 	return nil
 }
 
-// shrinkBuffer is a timer callback that shrinks the buffer writer when possible
-func (ss *FileSubStore) shrinkBuffer() {
+// shrinkBuffer is a timer callback that shrinks the buffer writer when possible.
+// Since this function is called directly in tests, the boolean `fromTimer` is
+// used to indicate if this function is invoked from the timer callback (in which
+// case, the timer need to be Reset()) or not. Reseting a timer while timer fires
+// can lead to unexpected behavior.
+func (ss *FileSubStore) shrinkBuffer(fromTimer bool) {
 	ss.Lock()
 	defer ss.Unlock()
 
@@ -3131,7 +3137,9 @@ func (ss *FileSubStore) shrinkBuffer() {
 		return
 	}
 	// Fire again
-	ss.shrinkTimer.Reset(bufShrinkInterval)
+	if fromTimer {
+		ss.shrinkTimer.Reset(bufShrinkInterval)
+	}
 
 	// If file currently opened, lock it, otherwise we are done for now.
 	if !ss.fm.lockFileIfOpened(ss.file) {

@@ -1064,19 +1064,16 @@ func TestPersistentStoreAcksPool(t *testing.T) {
 	defer sc.Close()
 
 	totalSubs := int32(10)
-	errCh := make(chan error, totalSubs)
 	ch := make(chan bool)
 	count := int32(0)
 	cb := func(m *stan.Msg) {
-		if m.Redelivered {
-			errCh <- fmt.Errorf("Unexpected redelivered message: %v", m)
-		} else if atomic.AddInt32(&count, 1) == atomic.LoadInt32(&totalSubs) {
+		if !m.Redelivered && atomic.AddInt32(&count, 1) == atomic.LoadInt32(&totalSubs) {
 			ch <- true
 		}
 	}
 	// Create 10 subs
 	for i := 0; i < int(totalSubs); i++ {
-		sub, err := sc.Subscribe("foo", cb, stan.AckWait(ackWaitInMs(15)))
+		sub, err := sc.Subscribe("foo", cb, stan.AckWait(ackWaitInMs(50)))
 		if err != nil {
 			t.Fatalf("Unexpected error on subscribe: %v", err)
 		}
@@ -1093,13 +1090,30 @@ func TestPersistentStoreAcksPool(t *testing.T) {
 		if err := Wait(ch); err != nil {
 			stackFatalf(t, "Did not get our messages")
 		}
-		// Wait for more than redelivery time
-		time.Sleep(50 * time.Millisecond)
-		// Check that there was no error
-		select {
-		case e := <-errCh:
-			stackFatalf(t, e.Error())
-		default:
+		cs := channelsGet(t, s.channels, "foo")
+		cs.ss.RLock()
+		subsArray := cs.ss.psubs
+		cs.ss.RUnlock()
+		timeout := time.Now().Add(2 * time.Second)
+		ap := false
+		for time.Now().Before(timeout) {
+			for _, s := range subsArray {
+				s.RLock()
+				ap = len(s.acksPending) > 0
+				s.RUnlock()
+				if ap {
+					break
+				}
+			}
+			if ap {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			} else {
+				break
+			}
+		}
+		if ap {
+			stackFatalf(t, "Unexpected unacknowledged messages")
 		}
 	}
 	checkReceived(totalSubs)
