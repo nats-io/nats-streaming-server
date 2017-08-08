@@ -52,14 +52,14 @@ func runMonitorServer(t *testing.T, sOpts *Options) *StanServer {
 	return runServerWithOpts(t, sOpts, &nOpts)
 }
 
-func getBody(t *testing.T, endpoint, expectedContentType string) (*http.Response, []byte) {
-	url := fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, endpoint)
-	resp, err := http.Get(url)
+func getBodyEx(t *testing.T, client *http.Client, scheme, endpoint string, expectedStatus int, expectedContentType string) (*http.Response, []byte) {
+	url := fmt.Sprintf("%s://%s:%d%s", scheme, monitorHost, monitorPort, endpoint)
+	resp, err := client.Get(url)
 	if err != nil {
 		stackFatalf(t, "Expected no error: Got %v\n", err)
 	}
-	if resp.StatusCode != 200 {
-		stackFatalf(t, "Expected a 200 response, got %d\n", resp.StatusCode)
+	if resp.StatusCode != expectedStatus {
+		stackFatalf(t, "Expected a %d response, got %d\n", expectedStatus, resp.StatusCode)
 	}
 	ct := resp.Header.Get("Content-Type")
 	if ct != expectedContentType {
@@ -73,16 +73,24 @@ func getBody(t *testing.T, endpoint, expectedContentType string) (*http.Response
 	return resp, body
 }
 
-func monitorExpectInternalError(t *testing.T, endpoint string) {
-	url := fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, endpoint)
-	resp, err := http.Get(url)
+func getBody(t *testing.T, endpoint, expectedContentType string) (*http.Response, []byte) {
+	return getBodyEx(t, http.DefaultClient, "http", endpoint, http.StatusOK, expectedContentType)
+}
+
+func monitorExpectStatusEx(t *testing.T, client *http.Client, scheme, endpoint string, expectedStatus int) {
+	url := fmt.Sprintf("%s://%s:%d%s", scheme, monitorHost, monitorPort, endpoint)
+	resp, err := client.Get(url)
 	if err != nil {
 		stackFatalf(t, "Expected no error: Got %v\n", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusInternalServerError {
-		stackFatalf(t, "Expected a %d response, got %d\n", http.StatusInternalServerError, resp.StatusCode)
+	if resp.StatusCode != expectedStatus {
+		stackFatalf(t, "Expected a %d response, got %d\n", expectedStatus, resp.StatusCode)
 	}
+}
+
+func monitorExpectStatus(t *testing.T, endpoint string, expectedStatus int) {
+	monitorExpectStatusEx(t, http.DefaultClient, "http", endpoint, expectedStatus)
 }
 
 func TestMonitorUseEmbeddedNATSServer(t *testing.T) {
@@ -141,19 +149,8 @@ func TestMonitorStartOwnHTTPSServer(t *testing.T) {
 	transport := &http.Transport{TLSClientConfig: tlsConfig}
 	httpClient := &http.Client{Transport: transport}
 
-	url := fmt.Sprintf("https://%s:%d%s", monitorHost, monitorPort, RootPath)
-	resp, err := httpClient.Get(url)
-	if err != nil {
-		stackFatalf(t, "Expected no error: Got %v\n", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		stackFatalf(t, "Expected a 200 response, got %d\n", resp.StatusCode)
-	}
-	ct := resp.Header.Get("Content-Type")
-	if ct != expectedText {
-		stackFatalf(t, "Expected %s content-type, got %s\n", expectedText, ct)
-	}
+	r, _ := getBodyEx(t, httpClient, "https", RootPath, http.StatusOK, expectedText)
+	r.Body.Close()
 }
 
 func TestMonitorServerz(t *testing.T) {
@@ -338,12 +335,9 @@ func TestMonitorServerz(t *testing.T) {
 	}
 
 	// Produce store failure
-	c, err := s.lookupOrCreateChannel("foo")
-	if err != nil {
-		t.Fatalf("Error creating channel: %v", err)
-	}
+	c := channelsLookupOrCreate(t, s, "foo")
 	c.store.Msgs = &msgStoreFailMsgState{MsgStore: c.store.Msgs}
-	monitorExpectInternalError(t, ServerPath)
+	monitorExpectStatus(t, ServerPath, http.StatusInternalServerError)
 }
 
 func TestMonitorUptime(t *testing.T) {
@@ -514,7 +508,7 @@ func TestMonitorStorez(t *testing.T) {
 		// Produce store failure
 		c := channelsGet(t, s.channels, "foo")
 		c.store.Msgs = &msgStoreFailMsgState{MsgStore: c.store.Msgs}
-		monitorExpectInternalError(t, StorePath)
+		monitorExpectStatus(t, StorePath, http.StatusInternalServerError)
 	}
 
 	s := runMonitorServer(t, GetDefaultOptions())
@@ -729,15 +723,7 @@ func TestMonitorClientz(t *testing.T) {
 	}
 
 	// Check one that does not exist, expect 404
-	url := fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, ClientsPath+"?client=donotexist")
-	resp, err := http.Get(url)
-	if err != nil {
-		stackFatalf(t, "Expected no error: Got %v\n", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 404 {
-		stackFatalf(t, "Expected a 404 response, got %d\n", resp.StatusCode)
-	}
+	monitorExpectStatus(t, ClientsPath+"?client=donotexist", http.StatusNotFound)
 
 	for _, sc := range scs {
 		sc.Close()
@@ -790,9 +776,7 @@ func TestMonitorChannelsz(t *testing.T) {
 	channels := []string{"bar", "baz", "foo", "foo.bar"}
 	totalChannels := len(channels)
 	for _, c := range channels {
-		if _, err := s.lookupOrCreateChannel(c); err != nil {
-			t.Fatalf("Error creating channel: %v", err)
-		}
+		channelsLookupOrCreate(t, s, c)
 	}
 
 	generateExpectedCZ := func(offset, limit, count int, channels []string) *Channelsz {
@@ -843,15 +827,7 @@ func TestMonitorChannelsz(t *testing.T) {
 	// Produce store failure that prevents getting the list of channels
 	cs.Msgs = &msgStoreFailMsgState{MsgStore: cs.Msgs}
 
-	url := fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, ChannelsPath+"?subs=1")
-	resp, err := http.Get(url)
-	if err != nil {
-		t.Fatalf("Expected no error: Got %v\n", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("Expected a %d response, got %d\n", http.StatusInternalServerError, resp.StatusCode)
-	}
+	monitorExpectStatus(t, ChannelsPath+"?subs=1", http.StatusInternalServerError)
 }
 
 func TestMonitorChannelsWithSubsz(t *testing.T) {
@@ -867,10 +843,7 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 
 	totalSubs := 0
 	for _, c := range channels {
-		cs, err := s.lookupOrCreateChannel(c)
-		if err != nil {
-			t.Fatalf("Error creating channel: %v", err)
-		}
+		cs := channelsLookupOrCreate(t, s, c)
 		for i := 0; i < rand.Intn(10)+1; i++ {
 			cs.store.Msgs.Store([]byte("hello"))
 		}
@@ -1006,10 +979,7 @@ func TestMonitorChannelz(t *testing.T) {
 
 	channels := []string{"bar", "baz", "foo", "foo.bar"}
 	for _, c := range channels {
-		cs, err := s.lookupOrCreateChannel(c)
-		if err != nil {
-			t.Fatalf("Error creating channel: %v", err)
-		}
+		cs := channelsLookupOrCreate(t, s, c)
 		for i := 0; i < rand.Intn(10)+1; i++ {
 			cs.store.Msgs.Store([]byte("hello"))
 		}
@@ -1063,40 +1033,19 @@ func TestMonitorChannelz(t *testing.T) {
 	}
 
 	// Ask for a channel that does not exist
-	url := fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, ChannelsPath+"?channel=donotexist")
-	resp, err := http.Get(url)
-	if err != nil {
-		t.Fatalf("Expected no error: Got %v\n", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("Expected a %d response, got %d\n", http.StatusNotFound, resp.StatusCode)
-	}
-	resp.Body.Close()
+	monitorExpectStatus(t, ChannelsPath+"?channel=donotexist", http.StatusNotFound)
 
 	// Produce various store failures
 	// Avoid race conditions, create a channel for which there is no subscription
-	cs, err := s.lookupOrCreateChannel("nosub")
-	if err != nil {
-		t.Fatalf("Error creating channel: %v", err)
-	}
+	cs := channelsLookupOrCreate(t, s, "nosub")
 	orgCS := cs.store.Msgs
-	url = fmt.Sprintf("http://%s:%d%s", monitorHost, monitorPort, ChannelsPath+"?channel=nosub")
 	msgStores := []stores.MsgStore{
 		&msgStoreFailMsgState{MsgStore: orgCS},
 		&msgStoreFailFirstAndLastSequence{MsgStore: orgCS},
 	}
 	for _, ms := range msgStores {
 		cs.store.Msgs = ms
-		resp, err = http.Get(url)
-		if err != nil {
-			t.Fatalf("Expected no error: Got %v\n", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusInternalServerError {
-			t.Fatalf("Expected a %d response, got %d\n", http.StatusInternalServerError, resp.StatusCode)
-		}
-		resp.Body.Close()
+		monitorExpectStatus(t, ChannelsPath+"?channel=nosub", http.StatusInternalServerError)
 	}
 }
 
