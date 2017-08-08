@@ -607,7 +607,7 @@ func TestPersistentStoreQMemberRemovedFromStore(t *testing.T) {
 	}
 	// Check server state
 	s.mu.RLock()
-	cs, _ := s.lookupOrCreateChannel("foo")
+	cs := channelsLookupOrCreate(t, s, "foo")
 	ss := cs.ss
 	s.mu.RUnlock()
 	ss.RLock()
@@ -661,10 +661,7 @@ func TestPersistentStoreMultipleShadowQSubs(t *testing.T) {
 	// Should not panic
 	s = runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
-	scs, err := s.lookupOrCreateChannel("foo")
-	if err != nil {
-		t.Fatalf("Error looking up channel: %v", err)
-	}
+	scs := channelsLookupOrCreate(t, s, "foo")
 	ss := scs.ss
 	ss.RLock()
 	qs := ss.qsubs["dur:queue"]

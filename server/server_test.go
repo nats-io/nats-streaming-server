@@ -149,6 +149,14 @@ func channelsGet(t tLogger, cs *channelStore, name string) *channel {
 	return c
 }
 
+func channelsLookupOrCreate(t tLogger, s *StanServer, name string) *channel {
+	c, err := s.lookupOrCreateChannel(name)
+	if err != nil {
+		stackFatalf(t, "Error creating/looking up channel %q: %v", name, err)
+	}
+	return c
+}
+
 // Helper function to shutdown last, a server that is being restarted in a test.
 func shutdownRestartedServerOnTestExit(s **StanServer) {
 	srv := *s
