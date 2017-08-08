@@ -346,8 +346,8 @@ type StanServer struct {
 
 	// Used to fix out-of-order processing of requests due to use of
 	// different internal NATS subscriptions.
-	ctrlMsgMu  sync.Mutex
-	ctrlMsgIDs map[string]int // Key: CtrlMsg's ID, Value: ref count
+	ctrlMsgMu     sync.Mutex
+	ctrlMsgRefIDs map[string]int // Key: CtrlMsg's Ref ID, Value: ref count
 
 	// To protect some close related requests
 	closeMu sync.Mutex
@@ -1015,7 +1015,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
 		dupCIDTimeout:     defaultCheckDupCIDTimeout,
 		ioChannelQuit:     make(chan struct{}, 1),
-		ctrlMsgIDs:        make(map[string]int),
+		ctrlMsgRefIDs:     make(map[string]int),
 		trace:             sOpts.Trace,
 		debug:             sOpts.Debug,
 		subStartCh:        make(chan *subStartInfo, defaultSubStartChanLen),
@@ -1988,7 +1988,17 @@ func (s *StanServer) closeClient(clientID string) bool {
 	return true
 }
 
-// processCloseRequest process inbound messages from clients.
+func (s *StanServer) createCtrlMsg(reqType spb.CtrlMsg_Type, useRefID bool, reply string, data []byte) (*spb.CtrlMsg, *nats.Msg) {
+	ctrlMsg := &spb.CtrlMsg{MsgType: reqType, ServerID: s.serverID, Data: data}
+	if useRefID {
+		ctrlMsg.RefID = nuid.Next()
+	}
+	ctrlBytes, _ := ctrlMsg.Marshal()
+	ctrlMsgNatsMsg := &nats.Msg{Reply: reply, Data: ctrlBytes}
+	return ctrlMsg, ctrlMsgNatsMsg
+}
+
+// processCloseRequest will process connection close requests from clients.
 func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	req := &pb.CloseRequest{}
 	err := req.Unmarshal(m.Data)
@@ -1998,32 +2008,23 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 		return
 	}
 
+	// Create the control and corresponding NATS message
+	ctrlMsg, ctrlNatsMsg := s.createCtrlMsg(spb.CtrlMsg_ConnClose, true, m.Reply, []byte(req.ClientID))
+
 	// Lock for the remainder of the function
 	s.ctrlMsgMu.Lock()
-	ctrlMsg := &spb.CtrlMsg{
-		MsgType:  spb.CtrlMsg_ConnClose,
-		ServerID: s.serverID,
-		MsgID:    nuid.Next(),
-		Data:     []byte(req.ClientID),
-	}
-	ctrlBytes, _ := ctrlMsg.Marshal()
-
-	ctrlMsgNatsMsg := &nats.Msg{
-		Reply: m.Reply,
-		Data:  ctrlBytes,
-	}
 	// When using static channels, the server listens to a specific
 	// sets of subjects. We have created a special one that we can
 	// send those control messages to.
 	if s.partitions != nil {
-		ctrlMsgNatsMsg.Subject = s.partitions.ctrlMsgSubject
+		ctrlNatsMsg.Subject = s.partitions.ctrlMsgSubject
 	} else {
 		// Server is listening to s.info.Publish + ".>", so use any
 		// dummy subject suffix.
-		ctrlMsgNatsMsg.Subject = s.info.Publish + ".close"
+		ctrlNatsMsg.Subject = s.info.Publish + ".close"
 	}
 	refs := 0
-	if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
+	if s.ncs.PublishMsg(ctrlNatsMsg) == nil {
 		refs++
 	}
 	subs := s.clients.getSubs(req.ClientID)
@@ -2035,8 +2036,8 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 			if !sub.removed {
 				// Don't use sub.AckInbox directly since it may
 				// need to be prefixed with s.acksSubsPrefix
-				ctrlMsgNatsMsg.Subject = s.getAckSubject(sub)
-				if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
+				ctrlNatsMsg.Subject = s.getAckSubject(sub)
+				if s.ncs.PublishMsg(ctrlNatsMsg) == nil {
 					refs++
 				}
 			}
@@ -2046,7 +2047,7 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	if refs > 0 {
 		// Store our reference count and wait for performConnClose to
 		// be invoked...
-		s.ctrlMsgIDs[ctrlMsg.MsgID] = refs
+		s.ctrlMsgRefIDs[ctrlMsg.RefID] = refs
 	}
 	s.ctrlMsgMu.Unlock()
 	// If were unable to schedule a single proto, then execute
@@ -2116,24 +2117,26 @@ func (s *StanServer) processCtrlMsg(m *nats.Msg) bool {
 	if cm.ServerID != s.serverID {
 		return true
 	}
-	var process bool
-	s.ctrlMsgMu.Lock()
-	// If present, the ref count should be > 0 at this stage.
-	// If not present, ignore the request, there is a bug somewhere.
-	if refs := s.ctrlMsgIDs[cm.MsgID]; refs > 0 {
-		refs--
-		if refs == 0 {
-			delete(s.ctrlMsgIDs, cm.MsgID)
-			process = true
+	if cm.RefID != "" {
+		var process bool
+		s.ctrlMsgMu.Lock()
+		// If present, the ref count should be > 0 at this stage.
+		// If not present, ignore the request, there is a bug somewhere.
+		if refs := s.ctrlMsgRefIDs[cm.RefID]; refs > 0 {
+			refs--
+			if refs == 0 {
+				delete(s.ctrlMsgRefIDs, cm.RefID)
+				process = true
+			} else {
+				s.ctrlMsgRefIDs[cm.RefID] = refs
+			}
 		} else {
-			s.ctrlMsgIDs[cm.MsgID] = refs
+			s.log.Errorf("Unexpected ref count for CtrlMsg %q", cm.MsgType.String())
 		}
-	} else {
-		s.log.Errorf("Unexpected ref count for CtrlMsg %q", cm.MsgType.String())
-	}
-	s.ctrlMsgMu.Unlock()
-	if !process {
-		return true
+		s.ctrlMsgMu.Unlock()
+		if !process {
+			return true
+		}
 	}
 	switch cm.MsgType {
 	case spb.CtrlMsg_SubUnsubscribe:
@@ -2844,43 +2847,30 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 		return
 	}
 
-	if schedule {
-		processInPlace := true
-		s.ctrlMsgMu.Lock()
-		sub.Lock()
-		if !sub.removed {
-			ctrlMsg := &spb.CtrlMsg{
-				MsgType:  reqType,
-				ServerID: s.serverID,
-				MsgID:    nuid.Next(),
-				Data:     m.Data,
-			}
-			ctrlBytes, _ := ctrlMsg.Marshal()
-			// Don't use sub.AckInbox directly since it may
-			// need to be prefixed with s.acksSubsPrefix.
-			ctrlMsgNatsMsg := &nats.Msg{
-				Subject: s.getAckSubject(sub),
-				Reply:   m.Reply,
-				Data:    ctrlBytes,
-			}
-			// If we publish the ctrlMsg, we are not going to process this
-			// in place. Instead, we are going to be called back from
-			// processAckMsg with reqType == processRequest.
-			if s.ncs.PublishMsg(ctrlMsgNatsMsg) == nil {
-				processInPlace = false
-				s.ctrlMsgIDs[ctrlMsg.MsgID] = 1
-			}
-		}
-		sub.Unlock()
-		s.ctrlMsgMu.Unlock()
-		if !processInPlace {
-			return
-		}
-	}
-
 	// Lock for the remainder of the function
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
+
+	if schedule {
+		processInPlace := false
+		sub.Lock()
+		removed := sub.removed
+		if !removed {
+			// We send a single message to a single handler, no need for ref count
+			_, ctrlNatsMsg := s.createCtrlMsg(reqType, false, m.Reply, m.Data)
+			// Don't use sub.AckInbox directly since it may
+			// need to be prefixed with s.acksSubsPrefix.
+			ctrlNatsMsg.Subject = s.getAckSubject(sub)
+			// In case of error, process the request in place.
+			if s.ncs.PublishMsg(ctrlNatsMsg) != nil {
+				processInPlace = true
+			}
+		}
+		sub.Unlock()
+		if !processInPlace || removed {
+			return
+		}
+	}
 
 	// Remove from Client
 	if !s.clients.removeSub(req.ClientID, sub) {
@@ -3183,6 +3173,8 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			sub.newOnHold = true
 			s.setupAckTimer(sub, sub.ackWait)
 		}
+		// Clear the removed flag that was set during a Close()
+		sub.removed = false
 		sub.Unlock()
 
 		// Case of restarted durable subscriber, or first durable queue

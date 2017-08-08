@@ -135,7 +135,9 @@ type CtrlMsg struct {
 	MsgType  CtrlMsg_Type `protobuf:"varint,1,opt,name=MsgType,proto3,enum=spb.CtrlMsg_Type" json:"MsgType,omitempty"`
 	ServerID string       `protobuf:"bytes,2,opt,name=ServerID,proto3" json:"ServerID,omitempty"`
 	Data     []byte       `protobuf:"bytes,3,opt,name=Data,proto3" json:"Data,omitempty"`
-	MsgID    string       `protobuf:"bytes,4,opt,name=MsgID,proto3" json:"MsgID,omitempty"`
+	// A control message may be sent multiple times (to different internal subscriptions).
+	// This field - if set - is used by the server to reference count all messages with same RefID.
+	RefID string `protobuf:"bytes,4,opt,name=RefID,proto3" json:"RefID,omitempty"`
 }
 
 func (m *CtrlMsg) Reset()         { *m = CtrlMsg{} }
@@ -435,11 +437,11 @@ func (m *CtrlMsg) MarshalTo(data []byte) (int, error) {
 			i += copy(data[i:], m.Data)
 		}
 	}
-	if len(m.MsgID) > 0 {
+	if len(m.RefID) > 0 {
 		data[i] = 0x22
 		i++
-		i = encodeVarintProtocol(data, i, uint64(len(m.MsgID)))
-		i += copy(data[i:], m.MsgID)
+		i = encodeVarintProtocol(data, i, uint64(len(m.RefID)))
+		i += copy(data[i:], m.RefID)
 	}
 	return i, nil
 }
@@ -611,7 +613,7 @@ func (m *CtrlMsg) Size() (n int) {
 			n += 1 + l + sovProtocol(uint64(l))
 		}
 	}
-	l = len(m.MsgID)
+	l = len(m.RefID)
 	if l > 0 {
 		n += 1 + l + sovProtocol(uint64(l))
 	}
@@ -1658,7 +1660,7 @@ func (m *CtrlMsg) Unmarshal(data []byte) error {
 			iNdEx = postIndex
 		case 4:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field MsgID", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field RefID", wireType)
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
@@ -1683,7 +1685,7 @@ func (m *CtrlMsg) Unmarshal(data []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.MsgID = string(data[iNdEx:postIndex])
+			m.RefID = string(data[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
