@@ -1901,7 +1901,9 @@ func (ms *FileMsgStore) doLockFiles(fslice *fileSlice, onlyIndexFile bool) error
 	}
 	idxWasOpened, err = ms.fm.lockFile(fslice.idxFile)
 	if err != nil {
-		ms.fm.unlockFile(fslice.file)
+		if !datWasOpened {
+			ms.fm.unlockFile(fslice.file)
+		}
 		return err
 	}
 	if !onlyIndexFile {
@@ -2976,6 +2978,16 @@ func (ms *FileMsgStore) Close() error {
 	}
 
 	ms.closed = true
+
+	// Signal the background tasks go-routine to exit
+	ms.bkgTasksDone <- true
+
+	ms.Unlock()
+
+	// Wait on go routines/timers to finish
+	ms.allDone.Wait()
+
+	ms.Lock()
 	var err error
 	if ms.writeSlice != nil {
 		// Flush current file slice where writes happen
@@ -2994,13 +3006,7 @@ func (ms *FileMsgStore) Close() error {
 			err = util.CloseFile(err, slice.idxFile.handle)
 		}
 	}
-	// Signal the background tasks go-routine to exit
-	ms.bkgTasksDone <- true
-
 	ms.Unlock()
-
-	// Wait on go routines/timers to finish
-	ms.allDone.Wait()
 
 	return err
 }
@@ -3583,6 +3589,12 @@ func (ss *FileSubStore) Close() error {
 			ss.allDone.Done()
 		}
 	}
+	ss.Unlock()
+
+	// Wait on timers/callbacks
+	ss.allDone.Wait()
+
+	ss.Lock()
 	var err error
 	if ss.fm.remove(ss.file) {
 		if ss.file.handle != nil {
@@ -3591,9 +3603,6 @@ func (ss *FileSubStore) Close() error {
 		}
 	}
 	ss.Unlock()
-
-	// Wait on timers/callbacks
-	ss.allDone.Wait()
 
 	return err
 }
