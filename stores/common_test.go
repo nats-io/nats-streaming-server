@@ -829,7 +829,18 @@ func testGetSeqFromStartTime(t *testing.T, s Store) {
 		t.Fatalf("Expected seq to be %v, got %v", msgs[count-1].Sequence+1, seq)
 	}
 	// Wait for all messages to expire
-	time.Sleep(600 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	var n int
+	for time.Now().Before(deadline) {
+		n, _ = msgStoreState(t, cs.Msgs)
+		if n == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n > 0 {
+		stackFatalf(t, "Messages should have all expired by now")
+	}
 	// Now these calls should all return the lastSeq + 1
 	seq1 := msgStoreGetSequenceFromTimestamp(t, cs.Msgs, time.Now().UnixNano()-int64(time.Hour))
 	seq2 := msgStoreGetSequenceFromTimestamp(t, cs.Msgs, time.Now().UnixNano()+int64(time.Hour))
