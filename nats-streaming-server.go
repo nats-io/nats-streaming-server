@@ -41,7 +41,7 @@ Streaming Server Options:
 Streaming Server Clustering Options:
     --cluster_node_id <string>  ID of the node within the cluster.
     --cluster_peers <string>    List of cluster peer IDs.
-	--cluster_log_path <string> Directory to store log replication data.
+    --cluster_log_path <string> Directory to store log replication data.
 
 Streaming Server File Store Options:
     --file_compact_enabled <bool>        Enable file compaction
