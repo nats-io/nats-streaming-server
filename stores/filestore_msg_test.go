@@ -32,36 +32,6 @@ func init() {
 	sliceCloseInterval = testDefaultSliceCLoseInterval
 }
 
-func TestFSBasicMsgStore(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testBasicMsgStore(t, fs)
-}
-
-func TestFSMsgsState(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testMsgsState(t, fs)
-}
-
-func TestFSMaxMsgs(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testMaxMsgs(t, fs)
-}
-
 func TestFSMaxAge(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -1143,12 +1113,12 @@ func TestFSRecoverSlicesOutOfOrder(t *testing.T) {
 	}
 }
 
-func TestFirstAndLastMsg(t *testing.T) {
+func TestFSFirstAndLastMsg(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
 	limit := testDefaultStoreLimits
-	limit.MaxAge = time.Second
+	limit.MaxAge = 100 * time.Millisecond
 	fs, _, err := newFileStore(t, defaultDataStore, &limit)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -1174,7 +1144,7 @@ func TestFirstAndLastMsg(t *testing.T) {
 			ok = true
 			break
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	if !ok {
 		t.Fatal("Timed-out waiting for messages to expire")
@@ -1207,7 +1177,7 @@ func TestFirstAndLastMsg(t *testing.T) {
 	}
 }
 
-func TestBufShrink(t *testing.T) {
+func TestFSBufShrink(t *testing.T) {
 	if disableBufferWriters {
 		t.SkipNow()
 	}

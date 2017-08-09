@@ -3,7 +3,9 @@
 package stores
 
 import (
+	"flag"
 	"fmt"
+	"os"
 	"reflect"
 	"runtime"
 	"strings"
@@ -30,15 +32,65 @@ var testDefaultStoreLimits = StoreLimits{
 	nil,
 }
 
+var testDefaultServerInfo = spb.ServerInfo{
+	ClusterID:   "id",
+	Discovery:   "discovery",
+	Publish:     "publish",
+	Subscribe:   "subscribe",
+	Unsubscribe: "unsubscribe",
+	Close:       "close",
+}
+
 var (
 	nuidGen    *nuid.NUID
 	testLogger logger.Logger
+	storeType  = TypeMemory
 )
 
 func init() {
 	nuidGen = nuid.New()
 	// Create an empty logger (no actual logger is set without calling SetLogger())
 	testLogger = logger.NewStanLogger()
+}
+
+func startTest(t *testing.T) Store {
+	switch storeType {
+	case TypeMemory:
+		return createDefaultMemStore(t)
+	case TypeFile:
+		cleanupDatastore(t)
+		return createDefaultFileStore(t)
+	}
+	return nil
+}
+
+func endTest(t *testing.T) {
+	if storeType == TypeFile {
+		cleanupDatastore(t)
+	}
+}
+
+func TestMain(m *testing.M) {
+	var st string
+	flag.StringVar(&st, "store", "mem", "Store type (mem,file)")
+	flag.BoolVar(&disableBufferWriters, "no_buffer", false, "Disable use of buffer writers")
+	flag.BoolVar(&setFDsLimit, "set_fds_limit", false, "Set some FDs limit")
+	flag.Parse()
+
+	st = strings.ToLower(st)
+	// Will add DB store and others when avail
+	switch st {
+	case "":
+		// use default
+	case "mem":
+		storeType = TypeMemory
+	case "file":
+		storeType = TypeFile
+	default:
+		fmt.Printf("Unknown store %q for store tests\n", st)
+		os.Exit(2)
+	}
+	os.Exit(m.Run())
 }
 
 // Used by both testing.B and testing.T so need to use
@@ -206,13 +258,45 @@ func storeSubDelete(t *testing.T, cs *Channel, channel string, subID ...uint64) 
 	}
 }
 
-func testBasicCreate(t *testing.T, s Store, expectedName string) {
-	if s.Name() != expectedName {
-		t.Fatalf("Expecting name to be %q, got %q", expectedName, s.Name())
+func TestCSBasicCreate(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
+	if s.Name() != storeType {
+		t.Fatalf("Expecting name to be %q, got %q", storeType, s.Name())
 	}
 }
 
-func testNothingRecoveredOnFreshStart(t *testing.T, s Store) {
+func TestCSInit(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
+	info := spb.ServerInfo{
+		ClusterID:   "id",
+		Discovery:   "discovery",
+		Publish:     "publish",
+		Subscribe:   "subscribe",
+		Unsubscribe: "unsubscribe",
+		Close:       "close",
+	}
+	// Should not fail
+	if err := s.Init(&info); err != nil {
+		t.Fatalf("Error during init: %v", err)
+	}
+	info.ClusterID = "newId"
+	// Should not fail
+	if err := s.Init(&info); err != nil {
+		t.Fatalf("Error during init: %v", err)
+	}
+}
+
+func TestCSNothingRecoveredOnFreshStart(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
 	state, err := s.Recover()
 	if err != nil {
 		stackFatalf(t, "Error recovering state: %v", err)
@@ -222,7 +306,11 @@ func testNothingRecoveredOnFreshStart(t *testing.T, s Store) {
 	}
 }
 
-func testNewChannel(t *testing.T, s Store) {
+func TestCSNewChannel(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
 	cs := storeCreateChannel(t, s, "foo")
 	if cs.Subs == nil {
 		t.Fatal("SubStore should not be nil")
@@ -235,7 +323,11 @@ func testNewChannel(t *testing.T, s Store) {
 	}
 }
 
-func testCloseIdempotent(t *testing.T, s Store) {
+func TestCSCloseIdempotent(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
 	cs := storeCreateChannel(t, s, "foo")
 
 	ms := cs.Msgs
@@ -262,7 +354,11 @@ func testCloseIdempotent(t *testing.T, s Store) {
 	}
 }
 
-func testBasicMsgStore(t *testing.T, s Store) {
+func TestCSBasicMsgStore(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
 	cs := storeCreateChannel(t, s, "foo")
 	ms := cs.Msgs
 
@@ -353,7 +449,11 @@ func testBasicMsgStore(t *testing.T, s Store) {
 	}
 }
 
-func testMsgsState(t *testing.T, s Store) {
+func TestCSMsgsState(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
 	payload := []byte("hello")
 
 	cs1 := storeCreateChannel(t, s, "foo")
@@ -383,7 +483,11 @@ func testMsgsState(t *testing.T, s Store) {
 	}
 }
 
-func testMaxMsgs(t *testing.T, s Store) {
+func TestCSMaxMsgs(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
 	payload := []byte("hello")
 
 	_, isFileStore := s.(*FileStore)
@@ -520,56 +624,98 @@ func testMaxMsgs(t *testing.T, s Store) {
 	}
 }
 
-func testMaxChannels(t *testing.T, s Store, prefix string, maxChannels int) {
-	total := maxChannels + 1
-	if maxChannels == 0 {
-		total = 10
+func TestCSMaxChannels(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
+	tests := []struct {
+		name  string
+		limit int
+	}{
+		{"foo", 2},
+		{"bar", 0},
 	}
-	var err error
-	numCh := 0
-	for i := 0; i < total; i++ {
-		_, err = s.CreateChannel(fmt.Sprintf("%s.foo.%d", prefix, i))
-		if err != nil {
-			break
+
+	for _, tm := range tests {
+		maxChannels := tm.limit
+		limits := testDefaultStoreLimits
+		limits.MaxChannels = maxChannels
+		if err := s.SetLimits(&limits); err != nil {
+			t.Fatalf("Error setting limits: %v", err)
 		}
-		numCh++
-	}
-	if maxChannels == 0 && err != nil {
-		t.Fatalf("Should not have failed, got %v", err)
-	} else if maxChannels > 0 {
-		if err == nil || err != ErrTooManyChannels {
-			t.Fatalf("Error should have been ErrTooManyChannels, got %v", err)
+
+		total := maxChannels + 1
+		if maxChannels == 0 {
+			total = 10
 		}
-		if numCh != maxChannels {
-			t.Fatalf("Wrong number of channels: %v vs %v", numCh, maxChannels)
+		var err error
+		numCh := 0
+		for i := 0; i < total; i++ {
+			_, err = s.CreateChannel(fmt.Sprintf("%s.foo.%d", tm.name, i))
+			if err != nil {
+				break
+			}
+			numCh++
+		}
+		if maxChannels == 0 && err != nil {
+			t.Fatalf("Should not have failed, got %v", err)
+		} else if maxChannels > 0 {
+			if err == nil || err != ErrTooManyChannels {
+				t.Fatalf("Error should have been ErrTooManyChannels, got %v", err)
+			}
+			if numCh != maxChannels {
+				t.Fatalf("Wrong number of channels: %v vs %v", numCh, maxChannels)
+			}
 		}
 	}
 }
 
-func testMaxSubs(t *testing.T, s Store, channel string, maxSubs int) {
-	total := maxSubs + 1
-	if maxSubs == 0 {
-		total = 10
+func TestCSMaxSubs(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
+	tests := []struct {
+		name  string
+		limit int
+	}{
+		{"foo", 2},
+		{"bar", 0},
 	}
-	cs := storeCreateChannel(t, s, channel)
-	sub := &spb.SubState{}
-	numSubs := 0
-	var err error
-	for i := 0; i < total; i++ {
-		err = cs.Subs.CreateSub(sub)
-		if err != nil {
-			break
+
+	for _, tm := range tests {
+		maxSubs := tm.limit
+		limits := testDefaultStoreLimits
+		limits.MaxSubscriptions = maxSubs
+		if err := s.SetLimits(&limits); err != nil {
+			t.Fatalf("Error setting limits: %v", err)
 		}
-		numSubs++
-	}
-	if maxSubs == 0 && err != nil {
-		t.Fatalf("Should not have failed, got %v", err)
-	} else if maxSubs > 0 {
-		if err == nil || err != ErrTooManySubs {
-			t.Fatalf("Error should have been ErrTooManySubs, got %v", err)
+
+		total := maxSubs + 1
+		if maxSubs == 0 {
+			total = 10
 		}
-		if numSubs != maxSubs {
-			t.Fatalf("Wrong number of subs: %v vs %v", numSubs, maxSubs)
+		cs := storeCreateChannel(t, s, tm.name)
+		sub := &spb.SubState{}
+		numSubs := 0
+		var err error
+		for i := 0; i < total; i++ {
+			err = cs.Subs.CreateSub(sub)
+			if err != nil {
+				break
+			}
+			numSubs++
+		}
+		if maxSubs == 0 && err != nil {
+			t.Fatalf("Should not have failed, got %v", err)
+		} else if maxSubs > 0 {
+			if err == nil || err != ErrTooManySubs {
+				t.Fatalf("Error should have been ErrTooManySubs, got %v", err)
+			}
+			if numSubs != maxSubs {
+				t.Fatalf("Wrong number of subs: %v vs %v", numSubs, maxSubs)
+			}
 		}
 	}
 }
@@ -608,7 +754,11 @@ func testMaxAge(t *testing.T, s Store) *Channel {
 	return cs
 }
 
-func testBasicSubStore(t *testing.T, s Store) {
+func TestCSBasicSubStore(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
 	cs := storeCreateChannel(t, s, "foo")
 	ss := cs.Subs
 	sub := &spb.SubState{}
@@ -787,7 +937,11 @@ func TestGSNoOps(t *testing.T) {
 	}
 }
 
-func testPerChannelLimits(t *testing.T, s Store) {
+func TestCSPerChannelLimits(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
 	storeLimits := &StoreLimits{MaxChannels: 10}
 	storeLimits.MaxSubscriptions = 10
 	storeLimits.MaxMsgs = 100
@@ -867,32 +1021,6 @@ func testPerChannelLimits(t *testing.T, s Store) {
 	checkLimitsForChannel("global", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
 }
 
-func testIncrementalTimestamp(t *testing.T, s Store) {
-	limits := DefaultStoreLimits
-	limits.MaxMsgs = 2
-	s.SetLimits(&limits)
-
-	cs := storeCreateChannel(t, s, "foo")
-	ms := cs.Msgs
-
-	msg := []byte("msg")
-
-	total := 8000000
-	for i := 0; i < total; i++ {
-		seq1, err1 := ms.Store(msg)
-		seq2, err2 := ms.Store(msg)
-		if err1 != nil || err2 != nil {
-			t.Fatalf("Unexpected error on store: %v %v", err1, err2)
-		}
-		m1 := msgStoreLookup(t, ms, seq1)
-		m2 := msgStoreLookup(t, ms, seq2)
-		if m2.Timestamp < m1.Timestamp {
-			t.Fatalf("Timestamp of msg %v is smaller than previous one. Diff is %vms",
-				m2.Sequence, m1.Timestamp-m2.Timestamp)
-		}
-	}
-}
-
 func testNegativeLimit(t *testing.T, s Store) {
 	limits := DefaultStoreLimits
 
@@ -917,7 +1045,11 @@ func testNegativeLimit(t *testing.T, s Store) {
 	checkLimitError()
 }
 
-func testLimitWithWildcardsInConfig(t *testing.T, s Store) {
+func TestCSLimitWithWildcardsInConfig(t *testing.T) {
+	defer endTest(t)
+	s := startTest(t)
+	defer s.Close()
+
 	lv := DefaultStoreLimits
 	l := &lv
 	cl := &ChannelLimits{}

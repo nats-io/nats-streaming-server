@@ -14,44 +14,6 @@ import (
 	"github.com/nats-io/nats-streaming-server/util"
 )
 
-func TestFSMaxSubs(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	limitCount := 2
-
-	limits := testDefaultStoreLimits
-	limits.MaxSubscriptions = limitCount
-
-	if err := fs.SetLimits(&limits); err != nil {
-		t.Fatalf("Unexpected error setting limits: %v", err)
-	}
-
-	testMaxSubs(t, fs, "foo", limitCount)
-
-	// Set the limit to 0
-	limits.MaxSubscriptions = 0
-	if err := fs.SetLimits(&limits); err != nil {
-		t.Fatalf("Unexpected error setting limits: %v", err)
-	}
-	// Now try to test the limit against
-	// any value, it should not fail
-	testMaxSubs(t, fs, "bar", 0)
-}
-
-func TestFSBasicSubStore(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testBasicSubStore(t, fs)
-}
-
 func TestFSRecoverSubUpdatesForDeleteSubOK(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)

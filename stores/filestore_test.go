@@ -4,7 +4,6 @@ package stores
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -23,15 +22,6 @@ import (
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
 )
-
-var testDefaultServerInfo = spb.ServerInfo{
-	ClusterID:   "id",
-	Discovery:   "discovery",
-	Publish:     "publish",
-	Subscribe:   "subscribe",
-	Unsubscribe: "unsubscribe",
-	Close:       "close",
-}
 
 var defaultDataStore string
 var disableBufferWriters bool
@@ -74,13 +64,6 @@ func getRecoveredSubs(t tLogger, state *RecoveredState, name string, expected in
 		stackFatalf(t, "Channel %q should have %v subscriptions, got %v", name, expected, len(subs))
 	}
 	return subs
-}
-
-func TestMain(m *testing.M) {
-	flag.BoolVar(&disableBufferWriters, "no_buffer", false, "Disable use of buffer writers")
-	flag.BoolVar(&setFDsLimit, "set_fds_limit", false, "Set some FDs limit")
-	flag.Parse()
-	os.Exit(m.Run())
 }
 
 func TestFSFilesManager(t *testing.T) {
@@ -469,16 +452,6 @@ func expectedErrorOpeningDefaultFileStore(t *testing.T) error {
 	return err
 }
 
-func TestFSBasicCreate(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testBasicCreate(t, fs, TypeFile)
-}
-
 func TestFSNoDirectoryError(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -754,36 +727,6 @@ func TestFSOptions(t *testing.T) {
 	badOpts = DefaultFileStoreOptions
 	badOpts.SliceMaxAge = -1
 	expectError(&badOpts, "slice max values")
-}
-
-func TestFSNothingRecoveredOnFreshStart(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testNothingRecoveredOnFreshStart(t, fs)
-}
-
-func TestFSNewChannel(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testNewChannel(t, fs)
-}
-
-func TestFSCloseIdempotent(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testCloseIdempotent(t, fs)
 }
 
 func TestFSBasicRecovery(t *testing.T) {
@@ -1063,34 +1006,6 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 			t.Fatalf("There should be no message recovered, got %v, %v bytes", recMsg, recBytes)
 		}
 	}
-}
-
-func TestFSMaxChannels(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	limitCount := 2
-
-	limits := testDefaultStoreLimits
-	limits.MaxChannels = limitCount
-
-	if err := fs.SetLimits(&limits); err != nil {
-		t.Fatalf("Unexpected error setting limits: %v", err)
-	}
-
-	testMaxChannels(t, fs, "limit", limitCount)
-
-	// Set the limit to 0
-	limits.MaxChannels = 0
-	if err := fs.SetLimits(&limits); err != nil {
-		t.Fatalf("Unexpected error setting limits: %v", err)
-	}
-	// Now try to test the limit against
-	// any value, it should not fail
-	testMaxChannels(t, fs, "nolimit", 0)
 }
 
 func TestFSBadClientFile(t *testing.T) {
@@ -1979,16 +1894,6 @@ func TestFSNoPartialWriteDueToBuffering(t *testing.T) {
 	}
 }
 
-func TestFSPerChannelLimits(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testPerChannelLimits(t, fs)
-}
-
 // Test with 2 processes trying to acquire the lock are tested
 // in the server package (FT tests) with coverpkg set to stores
 // for code coverage.
@@ -2048,14 +1953,6 @@ func TestFSNegativeLimits(t *testing.T) {
 	defer fs.Close()
 
 	testNegativeLimit(t, fs)
-}
-
-func TestFSLimitWithWildcardsInConfig(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-	testLimitWithWildcardsInConfig(t, fs)
 }
 
 func TestFSParallelRecovery(t *testing.T) {
