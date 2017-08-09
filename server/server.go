@@ -5,9 +5,11 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -17,15 +19,19 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hashicorp/raft"
+	"github.com/hashicorp/raft-boltdb"
 	natsdLogger "github.com/nats-io/gnatsd/logger"
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nuid"
+	"github.com/tylertreat/nats-on-a-log"
+
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nats-streaming-server/util"
-	"github.com/nats-io/nuid"
 )
 
 // A single STAN server
@@ -90,6 +96,13 @@ const (
 	natsInboxFirstChar = '_'
 	// Length of a NATS inbox
 	natsInboxLen = 29 // _INBOX.<nuid: 22 characters>
+
+	// Name of the file to store Raft log.
+	raftLogFile = "raft.log"
+	// Size of the Raft log store cache.
+	logCacheSize = 64 * 1024
+	// Number of Raft log snapshots to retain.
+	numLogSnapshots = 2
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -118,6 +131,7 @@ var (
 	ErrInvalidDurName     = errors.New("stan: durable name of a durable queue subscriber can't contain the character ':'")
 	ErrUnknownClient      = errors.New("stan: unknown clientID")
 	ErrNoChannel          = errors.New("stan: no configured channel")
+	ErrNotLeader          = errors.New("stan: server is not channel leader")
 )
 
 // Shared regular expression to check clientID validity.
@@ -181,6 +195,7 @@ const (
 	FTStandby
 	Failed
 	Shutdown
+	Clustered
 )
 
 func (state State) String() string {
@@ -195,6 +210,8 @@ func (state State) String() string {
 		return "FAILED"
 	case Shutdown:
 		return "SHUTDOWN"
+	case Clustered:
+		return "CLUSTERED"
 	default:
 		return "UNKNOW STATE"
 	}
@@ -236,15 +253,94 @@ func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, err
 	if err != nil {
 		return nil, err
 	}
-	return cs.create(s, name, sc), nil
+	return cs.create(s, name, sc)
 }
 
 // low-level creation and storage in memory of a *channel
 // Lock is held on entry or not needed.
-func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) *channel {
+func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (*channel, error) {
 	c := &channel{name: name, store: sc, ss: s.createSubStore()}
+	if err := assignChannelRaft(s, c); err != nil {
+		return nil, err
+	}
 	cs.channels[name] = c
-	return c
+	return c, nil
+}
+
+func assignChannelRaft(s *StanServer, c *channel) error {
+	path := filepath.Join(s.opts.RaftLogPath, c.name)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := os.MkdirAll(path, os.ModePerm); err != nil {
+			return err
+		}
+	}
+	store, err := raftboltdb.NewBoltStore(filepath.Join(path, raftLogFile))
+	if err != nil {
+		return err
+	}
+	cacheStore, err := raft.NewLogCache(logCacheSize, store)
+	if err != nil {
+		return err
+	}
+
+	// TODO: wire up logging appropriately.
+	snapshotStore, err := raft.NewFileSnapshotStore(path, numLogSnapshots, os.Stdout)
+	if err != nil {
+		return err
+	}
+
+	// TODO: should this use a dedicated NATS conn?
+	// TODO: wire up logging appropriately.
+	transport, err := natslog.NewNATSTransport(s.opts.ClusterNodeID, s.nc, 2*time.Second, os.Stdout)
+	if err != nil {
+		return err
+	}
+
+	peersStore := raft.NewJSONPeers(path, transport)
+	peers, err := peersStore.Peers()
+	if err != nil {
+		transport.Close()
+		return err
+	}
+	if len(peers) == 0 {
+		if err := peersStore.SetPeers(s.opts.ClusterPeers); err != nil {
+			transport.Close()
+			return err
+		}
+	}
+
+	config := raft.DefaultConfig()
+
+	// If there are no peers, enable single node mode of operation.
+	if len(s.opts.ClusterPeers) == 0 {
+		config.EnableSingleNode = true
+	}
+
+	node, err := raft.NewRaft(config, c, cacheStore, store, snapshotStore, peersStore, transport)
+	if err != nil {
+		transport.Close()
+		return err
+	}
+
+	// TODO: This is a temporary hack to ensure there is a leader before
+	// publishes are processed.
+	time.Sleep(3 * time.Second)
+
+	c.raft = node
+	go func() {
+		leaderCh := node.LeaderCh()
+		for {
+			select {
+			case isLeader := <-leaderCh:
+				if isLeader {
+					fmt.Printf("***LEADERSHIP ACQUIRED FOR CHANNEL %s***\n", c.name)
+				} else {
+					fmt.Printf("***LEADERSHIP LOST FOR CHANNEL %s***\n", c.name)
+				}
+			}
+		}
+	}()
+	return nil
 }
 
 func (cs *channelStore) getAll() map[string]*channel {
@@ -293,6 +389,42 @@ type channel struct {
 	name  string
 	store *stores.Channel
 	ss    *subStore
+	raft  *raft.Raft
+}
+
+// Apply log is invoked once a log entry is committed.
+// It returns a value which will be made available in the
+// ApplyFuture returned by Raft.Apply method if that
+// method was called on the same Raft node as the FSM.
+func (c *channel) Apply(l *raft.Log) interface{} {
+	// TODO: don't use Raft log index for msg sequence. Should just have leader
+	// assign the sequence.
+	// TODO: this needs to be made idempotent.
+	if err := c.store.Msgs.Store(l.Index, l.Data); err != nil {
+		// TODO: what should we do here?
+		panic(err)
+	}
+	fmt.Printf("stored msg %d on channel %s\n", l.Index, c.name)
+	return nil
+}
+
+// Snapshot is used to support log compaction. This call should
+// return an FSMSnapshot which can be used to save a point-in-time
+// snapshot of the FSM. Apply and Snapshot are not called in multiple
+// threads, but Apply will be called concurrently with Persist. This means
+// the FSM should be implemented in a fashion that allows for concurrent
+// updates while a snapshot is happening.
+func (c *channel) Snapshot() (raft.FSMSnapshot, error) {
+	// TODO
+	return nil, nil
+}
+
+// Restore is used to restore an FSM from a snapshot. It is not called
+// concurrently with any other command. The FSM must discard all previous
+// state.
+func (c *channel) Restore(old io.ReadCloser) error {
+	// TODO
+	return nil
 }
 
 // StanServer structure represents the STAN server
@@ -794,6 +926,9 @@ type Options struct {
 	AckSubsPoolSize    int           // Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription).
 	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
+	ClusterNodeID      string        // ID of the node within the cluster.
+	ClusterPeers       []string      // Cluster peer IDs.
+	RaftLogPath        string        // Path to Raft log store directory.
 }
 
 // Clone returns a deep copy of the Options object.
@@ -1144,7 +1279,14 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 			}
 		}()
 	} else {
-		if err := s.start(Standalone); err != nil {
+		state := Standalone
+		if len(s.opts.ClusterPeers) > 0 {
+			if s.opts.ClusterNodeID == "" {
+				return nil, errors.New("cluster node id not provided")
+			}
+			state = Clustered
+		}
+		if err := s.start(state); err != nil {
 			return nil, err
 		}
 	}
@@ -1249,7 +1391,10 @@ func (s *StanServer) start(runningState State) error {
 		s.processRecoveredClients(recoveredState.Clients)
 
 		// Process recovered channels (if any).
-		recoveredSubs = s.processRecoveredChannels(recoveredState.Channels)
+		recoveredSubs, err = s.processRecoveredChannels(recoveredState.Channels)
+		if err != nil {
+			return err
+		}
 	} else {
 		s.info.ClusterID = s.opts.ID
 		// Generate Subjects
@@ -1481,12 +1626,15 @@ func (s *StanServer) processRecoveredClients(clients []*stores.Client) {
 // We don't use locking in there because there is no communication
 // with the NATS server and/or clients, so no chance that the state
 // changes while we are doing this.
-func (s *StanServer) processRecoveredChannels(channels map[string]*stores.RecoveredChannel) []*subState {
+func (s *StanServer) processRecoveredChannels(channels map[string]*stores.RecoveredChannel) ([]*subState, error) {
 	// We will return the recovered subscriptions
 	allSubs := make([]*subState, 0, 16)
 
 	for channelName, recoveredChannel := range channels {
-		channel := s.channels.create(s, channelName, recoveredChannel.Channel)
+		channel, err := s.channels.create(s, channelName, recoveredChannel.Channel)
+		if err != nil {
+			return nil, err
+		}
 		// Get the recovered subscriptions for this channel.
 		for _, recSub := range recoveredChannel.Subscriptions {
 			// Create a subState
@@ -1545,7 +1693,7 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 			}
 		}
 	}
-	return allSubs
+	return allSubs, nil
 }
 
 // Do some final setup. Be minded of locking here since the server
@@ -2616,16 +2764,26 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 	////////////////////////////////////////////////////////////////////////////
 	storesToFlush := make(map[*channel]struct{}, 64)
 
-	var _pendingMsgs [ioChannelSize]*ioPendingMsg
-	var pendingMsgs = _pendingMsgs[:0]
+	var (
+		_pendingMsgs    [ioChannelSize]*ioPendingMsg
+		pendingMsgs     = _pendingMsgs[:0]
+		_pendingFutures [ioChannelSize]raft.ApplyFuture
+		pendingFutures  = _pendingFutures[:0]
+	)
 
 	storeIOPendingMsg := func(iopm *ioPendingMsg) {
-		cs, err := s.assignAndStore(&iopm.pm)
+		future, cs, err := s.assignAndStore(&iopm.pm)
 		if err != nil {
+			// If we're not the leader for the channel, do nothing since the
+			// message will be handled by another server.
+			if err == ErrNotLeader {
+				return
+			}
 			s.log.Errorf("[Client:%s] Error processing message for subject %q: %v", iopm.pm.ClientID, iopm.m.Subject, err)
 			s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, err)
 		} else {
 			pendingMsgs = append(pendingMsgs, iopm)
+			pendingFutures = append(pendingFutures, future)
 			storesToFlush[cs] = struct{}{}
 		}
 	}
@@ -2696,13 +2854,22 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 
 			// Ack our messages back to the publisher
 			for i := range pendingMsgs {
+				future := pendingFutures[i]
 				iopm := pendingMsgs[i]
-				s.ackPublisher(iopm)
+				// Wait on the result of replication.
+				if err := future.Error(); err != nil {
+					s.log.Errorf("[Client:%s] Error processing message for subject %q: %v", iopm.pm.ClientID, iopm.m.Subject, err)
+					s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, err)
+				} else {
+					s.ackPublisher(iopm)
+				}
 				pendingMsgs[i] = nil
+				pendingFutures[i] = nil
 			}
 
 			// clear out pending messages
 			pendingMsgs = pendingMsgs[:0]
+			pendingFutures = pendingFutures[:0]
 
 		case <-s.ioChannelQuit:
 			return
@@ -2711,15 +2878,16 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 }
 
 // assignAndStore will assign a sequence ID and then store the message.
-func (s *StanServer) assignAndStore(pm *pb.PubMsg) (*channel, error) {
+func (s *StanServer) assignAndStore(pm *pb.PubMsg) (raft.ApplyFuture, *channel, error) {
 	c, err := s.lookupOrCreateChannel(pm.Subject)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if _, err := c.store.Msgs.Store(pm.Data); err != nil {
-		return nil, err
+	if c.raft.State() != raft.Leader {
+		return nil, nil, ErrNotLeader
 	}
-	return c, nil
+	future := c.raft.Apply(pm.Data, 5*time.Second)
+	return future, c, nil
 }
 
 // ackPublisher sends the ack for a message.

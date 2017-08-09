@@ -2192,14 +2192,14 @@ func (ms *FileMsgStore) readIndex(r io.Reader) (uint64, *msgIndex, error) {
 }
 
 // Store a given message.
-func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
+func (ms *FileMsgStore) Store(seq uint64, data []byte) error {
 	ms.Lock()
 	defer ms.Unlock()
 
 	fslice := ms.writeSlice
 	if fslice != nil {
 		if err := ms.lockFiles(fslice); err != nil {
-			return 0, err
+			return err
 		}
 	}
 
@@ -2216,7 +2216,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 			// Close the current file slice (if applicable) and open the next slice
 			if fslice != nil {
 				if err := ms.closeLockedFiles(fslice); err != nil {
-					return 0, err
+					return err
 				}
 			}
 			// Create new slice
@@ -2224,13 +2224,13 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 			idxFName := filepath.Join(ms.channelName, fmt.Sprintf("%s%v%s", msgFilesPrefix, newSliceSeq, idxSuffix))
 			datFile, err := ms.fm.createFile(datFName, defaultFileFlags, nil)
 			if err != nil {
-				return 0, err
+				return err
 			}
 			idxFile, err := ms.fm.createFile(idxFName, defaultFileFlags, nil)
 			if err != nil {
 				ms.fm.closeLockedFile(datFile)
 				ms.fm.remove(datFile)
-				return 0, err
+				return err
 			}
 			// Success, update the store's variables
 			newSlice := &fileSlice{
@@ -2266,7 +2266,6 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	//    goto processErr
 	// }
 
-	seq := ms.last + 1
 	m := ms.genericMsgStore.createMsg(seq, data)
 
 	msgInBuffer := false
@@ -2370,11 +2369,11 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 		}
 	}
 	ms.unlockFiles(fslice)
-	return seq, nil
+	return nil
 
 processErr:
 	ms.unlockFiles(fslice)
-	return 0, err
+	return err
 }
 
 // processBufferedMsgs adds message index records in the given buffer

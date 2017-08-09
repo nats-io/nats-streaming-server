@@ -77,15 +77,15 @@ func (ms *MemoryStore) CreateChannel(channel string) (*Channel, error) {
 ////////////////////////////////////////////////////////////////////////////
 
 // Store a given message.
-func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
+func (ms *MemoryMsgStore) Store(seq uint64, data []byte) error {
 	ms.Lock()
 	defer ms.Unlock()
 
 	if ms.first == 0 {
-		ms.first = 1
+		ms.first = seq
 	}
-	ms.last++
-	m := ms.genericMsgStore.createMsg(ms.last, data)
+	ms.last = seq
+	m := ms.genericMsgStore.createMsg(seq, data)
 	ms.msgs[ms.last] = m
 	ms.totalCount++
 	ms.totalBytes += uint64(m.Size())
@@ -111,7 +111,7 @@ func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
 		}
 	}
 
-	return ms.last, nil
+	return nil
 }
 
 // Lookup returns the stored message with given sequence number.
