@@ -1412,3 +1412,26 @@ func TestFSMsgStoreBackgroundTaskCrash(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	// It should not have crashed.
 }
+
+func TestFSPanicOnStoreCloseWhileMsgsExpire(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	limits := testDefaultStoreLimits
+	limits.MaxAge = 30 * time.Millisecond
+
+	fs, _, err := newFileStore(t, defaultDataStore, &limits)
+	if err != nil {
+		t.Fatalf("Unable to create store: %v", err)
+	}
+	defer fs.Close()
+
+	cs := storeCreateChannel(t, fs, "foo")
+
+	for i := 0; i < 100; i++ {
+		storeMsg(t, cs, "foo", []byte("msg"))
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	fs.Close()
+}
