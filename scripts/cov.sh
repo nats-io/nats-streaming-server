@@ -8,9 +8,10 @@ go test -v -covermode=atomic -coverprofile=./cov/logger.out ./logger
 # repeat these server FT tests but focus on stores package
 go test -v -covermode=atomic -coverprofile=./cov/stores1.out -run=TestFTPartition -coverpkg=./stores ./server
 go test -v -covermode=atomic -coverprofile=./cov/stores2.out ./stores
-go test -v -covermode=atomic -coverprofile=./cov/stores3.out -run=TestFS ./stores -no_buffer
-go test -v -covermode=atomic -coverprofile=./cov/stores4.out -run=TestFS ./stores -set_fds_limit
-go test -v -covermode=atomic -coverprofile=./cov/stores5.out -run=TestFS ./stores -no_buffer -set_fds_limit
+go test -v -covermode=atomic -coverprofile=./cov/stores3.out -run=TestCS ./stores -store file
+go test -v -covermode=atomic -coverprofile=./cov/stores4.out -run=TestFS ./stores -store file -no_buffer
+go test -v -covermode=atomic -coverprofile=./cov/stores5.out -run=TestFS ./stores -store file -set_fds_limit
+go test -v -covermode=atomic -coverprofile=./cov/stores6.out -run=TestFS ./stores -store file -no_buffer -set_fds_limit
 go test -v -covermode=atomic -coverprofile=./cov/util.out ./util
 gocovmerge ./cov/*.out > acc.out
 rm -rf ./cov

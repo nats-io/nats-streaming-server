@@ -6,47 +6,17 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
-	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
 )
 
 func createDefaultMemStore(t *testing.T) *MemoryStore {
 	ms, err := NewMemoryStore(testLogger, &testDefaultStoreLimits)
 	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
+		stackFatalf(t, "Unexpected error: %v", err)
 	}
 	return ms
-}
-
-func TestMSBasicCreate(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	testBasicCreate(t, ms, TypeMemory)
-}
-
-func TestMSInit(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	info := spb.ServerInfo{
-		ClusterID:   "id",
-		Discovery:   "discovery",
-		Publish:     "publish",
-		Subscribe:   "subscribe",
-		Unsubscribe: "unsubscribe",
-		Close:       "close",
-	}
-	// Should not fail
-	if err := ms.Init(&info); err != nil {
-		t.Fatalf("Error during init: %v", err)
-	}
-	info.ClusterID = "newId"
-	// Should not fail
-	if err := ms.Init(&info); err != nil {
-		t.Fatalf("Error during init: %v", err)
-	}
 }
 
 func TestMSUseDefaultLimits(t *testing.T) {
@@ -58,98 +28,6 @@ func TestMSUseDefaultLimits(t *testing.T) {
 	if !reflect.DeepEqual(*ms.limits, DefaultStoreLimits) {
 		t.Fatalf("Default limits are not used: %v\n", *ms.limits)
 	}
-}
-
-func TestMSNothingRecoveredOnFreshStart(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	testNothingRecoveredOnFreshStart(t, ms)
-}
-
-func TestMSNewChannel(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	testNewChannel(t, ms)
-}
-
-func TestMSCloseIdempotent(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	testCloseIdempotent(t, ms)
-}
-
-func TestMSBasicMsgStore(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	testBasicMsgStore(t, ms)
-}
-
-func TestMSMsgsState(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	testMsgsState(t, ms)
-}
-
-func TestMSMaxMsgs(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	testMaxMsgs(t, ms)
-}
-
-func TestMSMaxChannels(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	limitCount := 2
-
-	limits := testDefaultStoreLimits
-	limits.MaxChannels = limitCount
-
-	if err := ms.SetLimits(&limits); err != nil {
-		t.Fatalf("Unexpected error setting limits: %v", err)
-	}
-
-	testMaxChannels(t, ms, "limit", limitCount)
-
-	// Set the limit to 0
-	limits.MaxChannels = 0
-	if err := ms.SetLimits(&limits); err != nil {
-		t.Fatalf("Unexpected error setting limits: %v", err)
-	}
-	// Now try to test the limit against
-	// any value, it should not fail
-	testMaxChannels(t, ms, "nolimit", 0)
-}
-
-func TestMSMaxSubs(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	limitCount := 2
-
-	limits := testDefaultStoreLimits
-	limits.MaxSubscriptions = limitCount
-
-	if err := ms.SetLimits(&limits); err != nil {
-		t.Fatalf("Unexpected error setting limits: %v", err)
-	}
-
-	testMaxSubs(t, ms, "foo", limitCount)
-
-	// Set the limit to 0
-	limits.MaxSubscriptions = 0
-	if err := ms.SetLimits(&limits); err != nil {
-		t.Fatalf("Unexpected error setting limits: %v", err)
-	}
-	// Now try to test the limit against
-	// any value, it should not fail
-	testMaxSubs(t, ms, "bar", 0)
 }
 
 func TestMSMaxAge(t *testing.T) {
@@ -167,13 +45,6 @@ func TestMSMaxAge(t *testing.T) {
 	if !timerSet {
 		t.Fatal("Timer should have been set")
 	}
-}
-
-func TestMSBasicSubStore(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	testBasicSubStore(t, ms)
 }
 
 func TestMSGetSeqFromTimestamp(t *testing.T) {
@@ -197,13 +68,6 @@ func TestMSFlush(t *testing.T) {
 	testFlush(t, ms)
 }
 
-func TestMSPerChannelLimits(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-
-	testPerChannelLimits(t, ms)
-}
-
 func TestMSIncrementalTimestamp(t *testing.T) {
 	// This test need to run without race and may take some time, so
 	// excluding from Travis. Check presence of a known TRAVIS env
@@ -212,10 +76,93 @@ func TestMSIncrementalTimestamp(t *testing.T) {
 	if util.RaceEnabled || os.Getenv("TRAVIS_GO_VERSION") != "" {
 		t.SkipNow()
 	}
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
+	s := createDefaultMemStore(t)
+	defer s.Close()
 
-	testIncrementalTimestamp(t, ms)
+	limits := DefaultStoreLimits
+	limits.MaxMsgs = 2
+	s.SetLimits(&limits)
+
+	cs := storeCreateChannel(t, s, "foo")
+	ms := cs.Msgs
+
+	msg := []byte("msg")
+
+	total := 8000000
+	for i := 0; i < total; i++ {
+		seq1, err1 := ms.Store(msg)
+		seq2, err2 := ms.Store(msg)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("Unexpected error on store: %v %v", err1, err2)
+		}
+		m1 := msgStoreLookup(t, ms, seq1)
+		m2 := msgStoreLookup(t, ms, seq2)
+		if m2.Timestamp < m1.Timestamp {
+			t.Fatalf("Timestamp of msg %v is smaller than previous one. Diff is %vms",
+				m2.Sequence, m1.Timestamp-m2.Timestamp)
+		}
+	}
+}
+
+func TestMSFirstAndLastMsg(t *testing.T) {
+	limit := testDefaultStoreLimits
+	limit.MaxAge = 100 * time.Millisecond
+	s, err := NewMemoryStore(testLogger, &limit)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer s.Close()
+
+	msg := []byte("msg")
+	cs := storeCreateChannel(t, s, "foo")
+	storeMsg(t, cs, "foo", msg)
+	storeMsg(t, cs, "foo", msg)
+
+	if m := msgStoreFirstMsg(t, cs.Msgs); m.Sequence != 1 {
+		t.Fatalf("Unexpected first message: %v", m)
+	}
+	if m := msgStoreLastMsg(t, cs.Msgs); m.Sequence != 2 {
+		t.Fatalf("Unexpected last message: %v", m)
+	}
+	// Wait for all messages to expire
+	timeout := time.Now().Add(3 * time.Second)
+	ok := false
+	for time.Now().Before(timeout) {
+		if n, _ := msgStoreState(t, cs.Msgs); n == 0 {
+			ok = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatal("Timed-out waiting for messages to expire")
+	}
+	ms := cs.Msgs.(*MemoryMsgStore)
+	// By-pass the FirstMsg() and LastMsg() API to make sure that
+	// we don't update based on lookup
+	ms.RLock()
+	firstMsg := ms.msgs[ms.first]
+	lastMsg := ms.msgs[ms.last]
+	ms.RUnlock()
+	if firstMsg != nil {
+		t.Fatalf("Unexpected first message: %v", firstMsg)
+	}
+	if lastMsg != nil {
+		t.Fatalf("Unexpected last message: %v", lastMsg)
+	}
+	// Store two new messages and check first/last updated correctly
+	storeMsg(t, cs, "foo", msg)
+	storeMsg(t, cs, "foo", msg)
+	ms.RLock()
+	firstMsg = ms.msgs[ms.first]
+	lastMsg = ms.msgs[ms.last]
+	ms.RUnlock()
+	if firstMsg == nil || firstMsg.Sequence != 3 {
+		t.Fatalf("Unexpected first message: %v", firstMsg)
+	}
+	if lastMsg == nil || lastMsg.Sequence != 4 {
+		t.Fatalf("Unexpected last message: %v", lastMsg)
+	}
 }
 
 func TestMSGetExclusiveLock(t *testing.T) {
@@ -259,10 +206,4 @@ func TestMSNegativeLimits(t *testing.T) {
 	defer ms.Close()
 
 	testNegativeLimit(t, ms)
-}
-
-func TestMSLimitWithWildcardsInConfig(t *testing.T) {
-	ms := createDefaultMemStore(t)
-	defer ms.Close()
-	testLimitWithWildcardsInConfig(t, ms)
 }
