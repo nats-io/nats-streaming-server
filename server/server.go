@@ -260,8 +260,10 @@ func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, err
 // Lock is held on entry or not needed.
 func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (*channel, error) {
 	c := &channel{name: name, store: sc, ss: s.createSubStore()}
-	if err := assignChannelRaft(s, c); err != nil {
-		return nil, err
+	if s.state == Clustered {
+		if err := assignChannelRaft(s, c); err != nil {
+			return nil, err
+		}
 	}
 	cs.channels[name] = c
 	return c, nil
@@ -309,24 +311,29 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 		}
 	}
 
-	config := raft.DefaultConfig()
-
-	// If there are no peers, enable single node mode of operation.
-	if len(s.opts.ClusterPeers) == 0 {
-		config.EnableSingleNode = true
-	}
-
-	node, err := raft.NewRaft(config, c, cacheStore, store, snapshotStore, peersStore, transport)
+	node, err := raft.NewRaft(raft.DefaultConfig(), c, cacheStore, store, snapshotStore, peersStore, transport)
 	if err != nil {
 		transport.Close()
 		return err
 	}
-
-	// TODO: This is a temporary hack to ensure there is a leader before
-	// publishes are processed.
-	time.Sleep(3 * time.Second)
-
 	c.raft = node
+
+	// Wait for a leader to be elected before proceeding.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if leader := node.Leader(); leader != "" {
+			// Leader was elected.
+			break
+		}
+		// Wait a bit.
+		time.Sleep(5 * time.Millisecond)
+	}
+	if node.Leader() == "" {
+		node.Shutdown()
+		transport.Close()
+		return errors.New("channel leader was not elected in time")
+	}
+
 	go func() {
 		leaderCh := node.LeaderCh()
 		for {
@@ -340,6 +347,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 			}
 		}
 	}()
+
 	return nil
 }
 
@@ -397,14 +405,12 @@ type channel struct {
 // ApplyFuture returned by Raft.Apply method if that
 // method was called on the same Raft node as the FSM.
 func (c *channel) Apply(l *raft.Log) interface{} {
-	// TODO: don't use Raft log index for msg sequence. Should just have leader
-	// assign the sequence.
-	// TODO: this needs to be made idempotent.
-	if err := c.store.Msgs.Store(l.Index, l.Data); err != nil {
+	seq, err := c.store.Msgs.Store(l.Data)
+	if err != nil {
 		// TODO: what should we do here?
 		panic(err)
 	}
-	fmt.Printf("stored msg %d on channel %s\n", l.Index, c.name)
+	fmt.Printf("stored msg %d on channel %s\n", seq, c.name)
 	return nil
 }
 
@@ -1347,6 +1353,8 @@ func (s *StanServer) start(runningState State) error {
 		return nil
 	}
 
+	s.state = runningState
+
 	var (
 		err            error
 		recoveredState *stores.RecoveredState
@@ -1458,7 +1466,6 @@ func (s *StanServer) start(runningState State) error {
 	// and release newOnHold
 	s.wg.Add(1)
 	go s.performRedeliveryOnStartup(recoveredSubs)
-	s.state = runningState
 	return nil
 }
 
@@ -2765,25 +2772,25 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 	storesToFlush := make(map[*channel]struct{}, 64)
 
 	var (
-		_pendingMsgs    [ioChannelSize]*ioPendingMsg
-		pendingMsgs     = _pendingMsgs[:0]
-		_pendingFutures [ioChannelSize]raft.ApplyFuture
-		pendingFutures  = _pendingFutures[:0]
+		_pendingMsgs             [ioChannelSize]*ioPendingMsg
+		pendingMsgs              = _pendingMsgs[:0]
+		_pendingReplicateFutures [ioChannelSize]raft.Future
+		pendingReplicateFutures  = _pendingReplicateFutures[:0]
 	)
 
 	storeIOPendingMsg := func(iopm *ioPendingMsg) {
-		future, cs, err := s.assignAndStore(&iopm.pm)
+		replicateFuture, cs, err := s.assignAndStore(&iopm.pm)
 		if err != nil {
-			// If we're not the leader for the channel, do nothing since the
-			// message will be handled by another server.
 			if err == ErrNotLeader {
+				// If clustered and we're not the channel leader, do nothing.
+				// The message will be handled by another server.
 				return
 			}
 			s.log.Errorf("[Client:%s] Error processing message for subject %q: %v", iopm.pm.ClientID, iopm.m.Subject, err)
 			s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, err)
 		} else {
 			pendingMsgs = append(pendingMsgs, iopm)
-			pendingFutures = append(pendingFutures, future)
+			pendingReplicateFutures = append(pendingReplicateFutures, replicateFuture)
 			storesToFlush[cs] = struct{}{}
 		}
 	}
@@ -2836,6 +2843,19 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 				remaining -= ioChanLen
 			}
 
+			// If clustered, wait on the result of replication.
+			if s.state == Clustered {
+				for i := range pendingReplicateFutures {
+					future := pendingReplicateFutures[i]
+					if err := future.Error(); err != nil {
+						s.log.Errorf("[Client:%s] Error replicating message for subject %q: %v",
+							iopm.pm.ClientID, iopm.m.Subject, err)
+						s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, fmt.Errorf("replication error: %s", err))
+						pendingMsgs[i] = nil
+					}
+				}
+			}
+
 			// flush all the stores with messages written to them...
 			for c := range storesToFlush {
 				if err := c.store.Msgs.Flush(); err != nil {
@@ -2854,22 +2874,18 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 
 			// Ack our messages back to the publisher
 			for i := range pendingMsgs {
-				future := pendingFutures[i]
 				iopm := pendingMsgs[i]
-				// Wait on the result of replication.
-				if err := future.Error(); err != nil {
-					s.log.Errorf("[Client:%s] Error processing message for subject %q: %v", iopm.pm.ClientID, iopm.m.Subject, err)
-					s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, err)
-				} else {
-					s.ackPublisher(iopm)
+				if iopm == nil {
+					// Was removed because replication failed.
+					continue
 				}
+				s.ackPublisher(iopm)
 				pendingMsgs[i] = nil
-				pendingFutures[i] = nil
 			}
 
 			// clear out pending messages
 			pendingMsgs = pendingMsgs[:0]
-			pendingFutures = pendingFutures[:0]
+			pendingReplicateFutures = pendingReplicateFutures[:0]
 
 		case <-s.ioChannelQuit:
 			return
@@ -2878,16 +2894,24 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 }
 
 // assignAndStore will assign a sequence ID and then store the message.
-func (s *StanServer) assignAndStore(pm *pb.PubMsg) (raft.ApplyFuture, *channel, error) {
+func (s *StanServer) assignAndStore(pm *pb.PubMsg) (raft.Future, *channel, error) {
 	c, err := s.lookupOrCreateChannel(pm.Subject)
 	if err != nil {
 		return nil, nil, err
 	}
-	if c.raft.State() != raft.Leader {
-		return nil, nil, ErrNotLeader
+	// If running clustered, replicate the message and return a future.
+	if s.state == Clustered {
+		if c.raft.State() != raft.Leader {
+			return nil, nil, ErrNotLeader
+		}
+		future := c.raft.Apply(pm.Data, 5*time.Second)
+		return future, c, nil
 	}
-	future := c.raft.Apply(pm.Data, 5*time.Second)
-	return future, c, nil
+	// Otherwise, simply store the message.
+	if _, err := c.store.Msgs.Store(pm.Data); err != nil {
+		return nil, nil, err
+	}
+	return nil, c, nil
 }
 
 // ackPublisher sends the ack for a message.

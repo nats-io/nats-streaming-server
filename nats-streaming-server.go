@@ -313,10 +313,6 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 		}
 	}
 
-	if stanOpts.ClusterNodeID == "" {
-		stanOpts.ClusterNodeID = stanOpts.ID
-	}
-
 	if stanOpts.RaftLogPath == "" {
 		stanOpts.RaftLogPath = filepath.Join(stanOpts.ID, stanOpts.ClusterNodeID)
 	}
