@@ -2779,7 +2779,16 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 	)
 
 	storeIOPendingMsg := func(iopm *ioPendingMsg) {
-		replicateFuture, cs, err := s.assignAndStore(&iopm.pm)
+		var (
+			cs              *channel
+			replicateFuture raft.Future
+			err             error
+		)
+		if s.state == Clustered {
+			replicateFuture, cs, err = s.replicate(&iopm.pm)
+		} else {
+			cs, err = s.assignAndStore(&iopm.pm)
+		}
 		if err != nil {
 			if err == ErrNotLeader {
 				// If clustered and we're not the channel leader, do nothing.
@@ -2893,25 +2902,32 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 	}
 }
 
-// assignAndStore will assign a sequence ID and then store the message.
-func (s *StanServer) assignAndStore(pm *pb.PubMsg) (raft.Future, *channel, error) {
+// assignAndStore will assign a sequence ID and then store the message. This
+// should not be called if running in clustered mode.
+func (s *StanServer) assignAndStore(pm *pb.PubMsg) (*channel, error) {
+	c, err := s.lookupOrCreateChannel(pm.Subject)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.store.Msgs.Store(pm.Data); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// replicate will replicate the message to followers and return a future which,
+// when waited upon, will indicate if the replication was successful or not.
+// This should only be called if running in clustered mode.
+func (s *StanServer) replicate(pm *pb.PubMsg) (raft.Future, *channel, error) {
 	c, err := s.lookupOrCreateChannel(pm.Subject)
 	if err != nil {
 		return nil, nil, err
 	}
-	// If running clustered, replicate the message and return a future.
-	if s.state == Clustered {
-		if c.raft.State() != raft.Leader {
-			return nil, nil, ErrNotLeader
-		}
-		future := c.raft.Apply(pm.Data, 5*time.Second)
-		return future, c, nil
+	if c.raft.State() != raft.Leader {
+		return nil, nil, ErrNotLeader
 	}
-	// Otherwise, simply store the message.
-	if _, err := c.store.Msgs.Store(pm.Data); err != nil {
-		return nil, nil, err
-	}
-	return nil, c, nil
+	future := c.raft.Apply(pm.Data, 5*time.Second)
+	return future, c, nil
 }
 
 // ackPublisher sends the ack for a message.
