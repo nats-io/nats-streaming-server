@@ -26,12 +26,18 @@ const (
 	partitionsMsgChanSize = 65536
 	// Number of bytes used to encode a channel name
 	partitionsEncodedChannelLen = 2
+	// Default wait before checking for channels when notified
+	// that the NATS cluster topology has changed. This gives a chance
+	// for the new server joining the cluster to send its subscriptions
+	// list.
+	partitionsDefaultWaitOnTopologyChange = 500 * time.Millisecond
 )
 
 // So that we can override in tests
 var (
 	partitionsRequestTimeout = partitionsDefaultRequestTimeout
 	partitionsNoPanic        = false
+	partitionsWaitOnChange   = partitionsDefaultWaitOnTopologyChange
 )
 
 type partitions struct {
@@ -42,6 +48,8 @@ type partitions struct {
 	nc              *nats.Conn
 	sendListSubject string
 	ctrlMsgSubject  string // send to this subject when processing close/unsub requests
+	processChanSub  *nats.Subscription
+	inboxSub        *nats.Subscription
 	msgsCh          chan *nats.Msg
 	isShutdown      bool
 	quitCh          chan struct{}
@@ -70,11 +78,15 @@ func (s *StanServer) initPartitions(sOpts *Options, nOpts *natsd.Options, storeC
 	p.createChannelsMapAndSublist(storeChannels)
 	p.sendListSubject = partitionsPrefix + "." + sOpts.ID
 	// Use the partitions' own connection for channels list requests
-	sub, err := p.nc.Subscribe(p.sendListSubject, p.processChannelsListRequests)
+	p.processChanSub, err = p.nc.Subscribe(p.sendListSubject, p.processChannelsListRequests)
 	if err != nil {
 		return fmt.Errorf("unable to subscribe: %v", err)
 	}
-	sub.SetPendingLimits(-1, -1)
+	p.processChanSub.SetPendingLimits(-1, -1)
+	p.inboxSub, err = p.nc.SubscribeSync(nats.NewInbox())
+	if err != nil {
+		return fmt.Errorf("unable to subscribe: %v", err)
+	}
 	p.Lock()
 	// Set this before the first attempt so we don't miss any notification
 	// of a change in topology. Since we hold the lock, and even if there
@@ -114,6 +126,11 @@ func (p *partitions) topologyChanged(_ *nats.Conn) {
 	if p.isShutdown {
 		return
 	}
+	// Let's wait before checking (sending the list and waiting for a reply)
+	// so that the new NATS Server has a chance to send its local
+	// subscriptions to the rest of the cluster. That will reduce the risk
+	// of missing the reply from the new server.
+	time.Sleep(partitionsWaitOnChange)
 	if err := p.checkChannelsUniqueInCluster(); err != nil {
 		// If server is started from command line, the Fatalf
 		// call will cause the process to exit. If the server
@@ -169,21 +186,15 @@ func (p *partitions) initSubscriptions() error {
 // responses (we don't know if or how many servers there may be).
 // No server lock used since this is called inside RunServerWithOpts().
 func (p *partitions) checkChannelsUniqueInCluster() error {
-	// We will use a subscription on an inbox to get the replies
-	replyInbox := nats.NewInbox()
-	replySub, err := p.nc.SubscribeSync(replyInbox)
-	if err != nil {
-		return fmt.Errorf("unable to create sync subscription: %v", err)
-	}
-	defer replySub.Unsubscribe()
+	// We use the subscription on an inbox to get the replies.
 	// Send our list
-	if err := p.sendChannelsList(replyInbox); err != nil {
+	if err := p.sendChannelsList(p.inboxSub.Subject); err != nil {
 		return fmt.Errorf("unable to send channels list: %v", err)
 	}
 	// Since we don't know how many servers are out there, keep
 	// calling NextMsg until we get a timeout
 	for {
-		reply, err := replySub.NextMsg(partitionsRequestTimeout)
+		reply, err := p.inboxSub.NextMsg(partitionsRequestTimeout)
 		if err == nats.ErrTimeout {
 			return nil
 		}
