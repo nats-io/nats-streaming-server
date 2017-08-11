@@ -1,8 +1,8 @@
 language: go
 sudo: false
 go:
-- 1.7.6
-- 1.8.3
+- 1.7.x
+- 1.8.x
 install:
 - go get -t ./...
 - go get github.com/nats-io/gnatsd
@@ -21,6 +21,6 @@ before_script:
 - staticcheck -ignore "$(cat staticcheck.ignore)" $EXCLUDE_VENDOR
 script:
 - go test -i -race $EXCLUDE_VENDOR
-- if [[ "$TRAVIS_GO_VERSION" == 1.7.* ]]; then ./scripts/cov.sh TRAVIS; else go test -race -v -p=1 $EXCLUDE_VENDOR; fi
+- if [[ "$TRAVIS_GO_VERSION" == 1.7.* ]]; then ./scripts/cov.sh TRAVIS; else go test -race $EXCLUDE_VENDOR; fi
 after_success:
 - if [[ "$TRAVIS_GO_VERSION" == 1.7.* ]] && [ "$TRAVIS_TAG" != "" ]; then ./scripts/cross_compile.sh $TRAVIS_TAG; ghr --owner nats-io --token $GITHUB_TOKEN --draft --replace $TRAVIS_TAG pkg/; fi

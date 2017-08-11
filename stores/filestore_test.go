@@ -40,32 +40,6 @@ func init() {
 	defaultDataStore = tmpDir
 }
 
-func getRecoveredChannel(t tLogger, state *RecoveredState, name string) *Channel {
-	if state == nil {
-		stackFatalf(t, "Expected state to be recovered")
-	}
-	rc := state.Channels[name]
-	if rc == nil {
-		stackFatalf(t, "Channel %q should have been recovered", name)
-	}
-	return rc.Channel
-}
-
-func getRecoveredSubs(t tLogger, state *RecoveredState, name string, expected int) []*RecoveredSubscription {
-	if state == nil {
-		stackFatalf(t, "Expected state to be recovered")
-	}
-	rc := state.Channels[name]
-	if rc == nil {
-		stackFatalf(t, "Channel %q should have been recovered", name)
-	}
-	subs := rc.Subscriptions
-	if len(subs) != expected {
-		stackFatalf(t, "Channel %q should have %v subscriptions, got %v", name, expected, len(subs))
-	}
-	return subs
-}
-
 func TestFSFilesManager(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -434,8 +408,15 @@ func createDefaultFileStore(t *testing.T, options ...FileStoreOption) *FileStore
 }
 
 func openDefaultFileStore(t *testing.T, options ...FileStoreOption) (*FileStore, *RecoveredState) {
-	limits := testDefaultStoreLimits
-	fs, state, err := newFileStore(t, defaultDataStore, &limits, options...)
+	return openDefaultFileStoreWithLimits(t, nil, options...)
+}
+
+func openDefaultFileStoreWithLimits(t *testing.T, limits *StoreLimits, options ...FileStoreOption) (*FileStore, *RecoveredState) {
+	if limits == nil {
+		l := testDefaultStoreLimits
+		limits = &l
+	}
+	fs, state, err := newFileStore(t, defaultDataStore, limits, options...)
 	if err != nil {
 		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 	}
@@ -462,37 +443,6 @@ func TestFSNoDirectoryError(t *testing.T) {
 			fs.Close()
 		}
 		t.Fatalf("Expected error about missing root directory, got: %v", err)
-	}
-}
-
-func TestFSInit(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	// Init is done in createDefaultFileStore().
-	// A second call to Init() should not fail, and data should be replaced.
-	newInfo := testDefaultServerInfo
-	newInfo.ClusterID = "newID"
-	if err := fs.Init(&newInfo); err != nil {
-		t.Fatalf("Unexpected failure on store init: %v", err)
-	}
-
-	// Close the store
-	fs.Close()
-
-	fs, state := openDefaultFileStore(t)
-	defer fs.Close()
-	if state == nil {
-		t.Fatal("Expected state to be recovered")
-	}
-	// Check content
-	info := *state.Info
-	if !reflect.DeepEqual(newInfo, info) {
-		t.Fatalf("Unexpected server info, expected %v, got %v",
-			newInfo, info)
 	}
 }
 
@@ -727,123 +677,6 @@ func TestFSOptions(t *testing.T) {
 	badOpts = DefaultFileStoreOptions
 	badOpts.SliceMaxAge = -1
 	expectError(&badOpts, "slice max values")
-}
-
-func TestFSBasicRecovery(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	state, err := fs.Recover()
-	if err != nil {
-		t.Fatalf("Error recovering state: %v", err)
-	}
-	if state != nil && (len(state.Clients) > 0 || len(state.Channels) > 0) {
-		t.Fatal("Nothing should have been recovered")
-	}
-
-	cFoo := storeCreateChannel(t, fs, "foo")
-
-	foo1 := storeMsg(t, cFoo, "foo", []byte("foomsg"))
-	foo2 := storeMsg(t, cFoo, "foo", []byte("foomsg"))
-	foo3 := storeMsg(t, cFoo, "foo", []byte("foomsg"))
-
-	cBar := storeCreateChannel(t, fs, "bar")
-
-	bar1 := storeMsg(t, cBar, "bar", []byte("barmsg"))
-	bar2 := storeMsg(t, cBar, "bar", []byte("barmsg"))
-	bar3 := storeMsg(t, cBar, "bar", []byte("barmsg"))
-	bar4 := storeMsg(t, cBar, "bar", []byte("barmsg"))
-
-	sub1 := storeSub(t, cFoo, "foo")
-	sub2 := storeSub(t, cBar, "bar")
-
-	storeSubPending(t, cFoo, "foo", sub1, foo1.Sequence, foo2.Sequence, foo3.Sequence)
-	storeSubAck(t, cFoo, "foo", sub1, foo1.Sequence, foo3.Sequence)
-
-	storeSubPending(t, cBar, "bar", sub2, bar1.Sequence, bar2.Sequence, bar3.Sequence, bar4.Sequence)
-	storeSubAck(t, cBar, "bar", sub2, bar4.Sequence)
-
-	fs.Close()
-
-	fs, state = openDefaultFileStore(t)
-	defer fs.Close()
-	if state == nil {
-		t.Fatal("Expected state to be recovered")
-	}
-
-	// Check that subscriptions are restored
-	for channel, rc := range state.Channels {
-		recoveredSubs := rc.Subscriptions
-		if len(recoveredSubs) != 1 {
-			t.Fatalf("Incorrect size of recovered subs. Expected 1, got %v ", len(recoveredSubs))
-		}
-		recSub := recoveredSubs[0]
-		subID := recSub.Sub.ID
-
-		switch channel {
-		case "foo":
-			if subID != sub1 {
-				t.Fatalf("Invalid subscription id. Expected %v, got %v", sub1, subID)
-			}
-			for seq := range recSub.Pending {
-				if seq != foo2.Sequence {
-					t.Fatalf("Unexpected recovered pending seqno for sub1: %v", seq)
-				}
-			}
-		case "bar":
-			if subID != sub2 {
-				t.Fatalf("Invalid subscription id. Expected %v, got %v", sub2, subID)
-			}
-			for seq := range recSub.Pending {
-				if seq != bar1.Sequence && seq != bar2.Sequence && seq != bar3.Sequence {
-					t.Fatalf("Unexpected recovered pending seqno for sub2: %v", seq)
-				}
-			}
-		default:
-			t.Fatalf("Recovered unknown channel: %v", channel)
-		}
-	}
-
-	cs := getRecoveredChannel(t, state, "foo")
-	// In message store, the first message should still be foo1,
-	// regardless of what has been consumed.
-	m := msgStoreFirstMsg(t, cs.Msgs)
-	if m == nil || m.Sequence != foo1.Sequence {
-		t.Fatalf("Unexpected message for foo channel: %v", m)
-	}
-	// Check that messages recovered from MsgStore are never
-	// marked as redelivered.
-	checkRedelivered := func(ms MsgStore) bool {
-		start, end := msgStoreFirstAndLastSequence(t, ms)
-		for i := start; i <= end; i++ {
-			if m := msgStoreLookup(t, ms, i); m != nil && m.Redelivered {
-				return true
-			}
-		}
-		return false
-	}
-	if checkRedelivered(cs.Msgs) {
-		t.Fatalf("Messages in MsgStore should not be marked as redelivered")
-	}
-
-	cs = getRecoveredChannel(t, state, "bar")
-	// In message store, the first message should still be bar1,
-	// regardless of what has been consumed.
-	m = msgStoreFirstMsg(t, cs.Msgs)
-	if m == nil || m.Sequence != bar1.Sequence {
-		t.Fatalf("Unexpected message for bar channel: %v", m)
-	}
-	if checkRedelivered(cs.Msgs) {
-		t.Fatalf("Messages in MsgStore should not be marked as redelivered")
-	}
-
-	rc := state.Channels["baz"]
-	if rc != nil {
-		t.Fatal("Expected to get nil channel for baz, got something instead")
-	}
 }
 
 func TestFSLimitsOnRecovery(t *testing.T) {
@@ -1143,33 +976,6 @@ func TestFSBadClientFile(t *testing.T) {
 		t.Fatalf("Unexpected error closing file: %v", err)
 	}
 	expectedErrorOpeningDefaultFileStore(t)
-}
-
-func TestFSClientAPIs(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testClientAPIs(t, fs)
-
-	// Restart the store
-	fs.Close()
-
-	fs, state := openDefaultFileStore(t)
-	defer fs.Close()
-	if state == nil {
-		t.Fatal("Expected state to be recovered")
-	}
-	if len(state.Clients) != 2 {
-		t.Fatalf("Expected 2 clients to be recovered, got %v", len(state.Clients))
-	}
-	for _, c := range state.Clients {
-		if c.ID != "client2" && c.ID != "client3" {
-			t.Fatalf("Unexpected recovered client: %v", c.ID)
-		}
-	}
 }
 
 func TestFSBadServerFile(t *testing.T) {
@@ -1490,70 +1296,6 @@ func TestFSCompactClientFile(t *testing.T) {
 	}
 	// No client, but no reduction in number of delete records since no compaction
 	check(fs, 0, total)
-}
-
-func TestFSFlush(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t, DoSync(true))
-	defer fs.Close()
-
-	cs := testFlush(t, fs)
-
-	// Now specific tests to File store
-	msg := storeMsg(t, cs, "foo", []byte("new msg"))
-	subID := storeSub(t, cs, "foo")
-	storeSubPending(t, cs, "foo", subID, msg.Sequence)
-	// Close the underlying file
-	ms := cs.Msgs.(*FileMsgStore)
-	ms.Lock()
-	ms.writeSlice.file.handle.Close()
-	ms.Unlock()
-	// Expect Flush to fail
-	if err := cs.Msgs.Flush(); err == nil {
-		t.Fatal("Expected Flush to fail, did not")
-	}
-	// Close the underlying file
-	ss := cs.Subs.(*FileSubStore)
-	ss.Lock()
-	ss.file.handle.Close()
-	ss.Unlock()
-	// Expect Flush to fail
-	if err := cs.Subs.Flush(); err == nil {
-		t.Fatal("Expected Flush to fail, did not")
-	}
-
-	// Close and re-open
-	fs.Close()
-	fs, state := openDefaultFileStore(t, DoSync(true))
-	defer fs.Close()
-
-	// Check that Flush() is still doing Sync even if
-	// buf writer is empty
-	cs = getRecoveredChannel(t, state, "foo")
-	// Close the underlying file
-	ms = cs.Msgs.(*FileMsgStore)
-	ms.Lock()
-	ms.writeSlice.file.handle.Close()
-	ms.Unlock()
-	// Expect Flush to fail
-	if err := cs.Msgs.Flush(); err == nil {
-		t.Fatal("Expected Flush to fail, did not")
-	}
-	// Close the underlying file
-	ss = cs.Subs.(*FileSubStore)
-	ss.Lock()
-	ss.file.handle.Close()
-	// Simulate that there was activity (alternatively,
-	// we would need a buffer size smaller than a sub record
-	// being written so that buffer writer is by-passed).
-	ss.activity = true
-	ss.Unlock()
-	// Expect Flush to fail
-	if err := cs.Subs.Flush(); err == nil {
-		t.Fatal("Expected Flush to fail, did not")
-	}
 }
 
 func TestFSDoSync(t *testing.T) {
@@ -1937,7 +1679,7 @@ func TestFSGetExclusiveLock(t *testing.T) {
 	}
 }
 
-func TestFSNegativeLimits(t *testing.T) {
+func TestFSNegativeLimitsOnCreate(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
@@ -1949,10 +1691,6 @@ func TestFSNegativeLimits(t *testing.T) {
 		}
 		t.Fatal("Should have failed to create store with a negative limit")
 	}
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testNegativeLimit(t, fs)
 }
 
 func TestFSParallelRecovery(t *testing.T) {

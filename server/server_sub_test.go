@@ -20,7 +20,7 @@ func TestSubscribeShrink(t *testing.T) {
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
 
-	nsubs := 1000
+	nsubs := 10
 	subs := make([]stan.Subscription, 0, nsubs)
 	for i := 1; i <= nsubs; i++ {
 		sub, err := sc.Subscribe("foo", nil)
