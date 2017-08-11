@@ -372,27 +372,6 @@ func (d *dummyLogger) Tracef(format string, args ...interface{})  { d.log(format
 func (d *dummyLogger) Errorf(format string, args ...interface{})  { d.log(format, args...) }
 func (d *dummyLogger) Fatalf(format string, args ...interface{})  { d.log(format, args...) }
 
-// RunServerWithDebugTrace is a helper to assist debugging
-func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) (*StanServer, error) {
-	var sOpts *Options
-
-	if opts == nil {
-		sOpts = GetDefaultOptions()
-	} else {
-		sOpts = opts.Clone()
-	}
-
-	nOpts := natsd.Options{}
-
-	sOpts.Debug = enableDebug
-	sOpts.Trace = enableTrace
-	nOpts.NoLog = false
-	nOpts.NoSigs = true
-
-	sOpts.EnableLogging = true
-	return RunServerWithOpts(sOpts, &nOpts)
-}
-
 func TestChannelStore(t *testing.T) {
 	s := runServer(t, clusterName)
 	defer s.Shutdown()
