@@ -8,17 +8,15 @@ install:
 - go get github.com/nats-io/gnatsd
 - go get github.com/mattn/goveralls
 - go get github.com/wadey/gocovmerge
-- go get -u honnef.co/go/tools/cmd/staticcheck
-- go get -u honnef.co/go/tools/cmd/gosimple
+- go get -u honnef.co/go/tools/cmd/megacheck
 - go get -u github.com/client9/misspell/cmd/misspell
 before_script:
 - EXCLUDE_VENDOR=$(go list ./... | grep -v "/vendor/")
 - go build
 - $(exit $(go fmt $EXCLUDE_VENDOR | wc -l))
 - go vet $EXCLUDE_VENDOR
-- ./misspell.sh
-- gosimple $EXCLUDE_VENDOR
-- staticcheck -ignore "$(cat staticcheck.ignore)" $EXCLUDE_VENDOR
+- $(exit $(misspell -locale US . | grep -v "vendor/" | wc -l))
+- megacheck -ignore "$(cat staticcheck.ignore)" $EXCLUDE_VENDOR
 script:
 - go test -i -race $EXCLUDE_VENDOR
 - if [[ "$TRAVIS_GO_VERSION" == 1.7.* ]]; then ./scripts/cov.sh TRAVIS; else go test -race $EXCLUDE_VENDOR; fi
