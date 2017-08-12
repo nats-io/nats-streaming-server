@@ -11,7 +11,8 @@ import (
 )
 
 func createDefaultMemStore(t *testing.T) *MemoryStore {
-	ms, err := NewMemoryStore(testLogger, &testDefaultStoreLimits)
+	limits := testDefaultStoreLimits
+	ms, err := NewMemoryStore(testLogger, &limits)
 	if err != nil {
 		stackFatalf(t, "Unexpected error: %v", err)
 	}

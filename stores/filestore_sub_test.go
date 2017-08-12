@@ -15,8 +15,8 @@ import (
 )
 
 func TestFSBadSubFile(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	// Create a valid store file first
 	fs := createDefaultFileStore(t)
@@ -29,7 +29,7 @@ func TestFSBadSubFile(t *testing.T) {
 	fs.Close()
 
 	// First delete the file...
-	fileName := filepath.Join(defaultDataStore, "foo", subsFileName)
+	fileName := filepath.Join(testFSDefaultDatastore, "foo", subsFileName)
 	if err := os.Remove(fileName); err != nil {
 		t.Fatalf("Unable to delete the subscriptions file %q: %v", fileName, err)
 	}
@@ -114,8 +114,8 @@ func checkSubStoreRecCounts(t *testing.T, s *FileSubStore, expectedSubs, expecte
 }
 
 func TestFSCompactSubsFileOnDelete(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
@@ -211,7 +211,7 @@ func TestFSCompactSubsFileOnDelete(t *testing.T) {
 
 	fs.Close()
 	// Wipe-out everything
-	cleanupDatastore(t)
+	cleanupFSDatastore(t)
 
 	fs = createDefaultFileStore(t)
 	defer fs.Close()
@@ -240,7 +240,7 @@ func TestFSCompactSubsFileOnDelete(t *testing.T) {
 
 	fs.Close()
 	// Wipe-out everything
-	cleanupDatastore(t)
+	cleanupFSDatastore(t)
 
 	fs = createDefaultFileStore(t)
 	defer fs.Close()
@@ -271,8 +271,8 @@ func TestFSCompactSubsFileOnDelete(t *testing.T) {
 }
 
 func TestFSCompactSubsFileOnAck(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
@@ -413,7 +413,7 @@ func TestFSCompactSubsFileOnAck(t *testing.T) {
 
 	fs.Close()
 	// Wipe-out everything
-	cleanupDatastore(t)
+	cleanupFSDatastore(t)
 
 	fs = createDefaultFileStore(t)
 	defer fs.Close()
@@ -446,7 +446,7 @@ func TestFSCompactSubsFileOnAck(t *testing.T) {
 
 	fs.Close()
 	// Wipe-out everything
-	cleanupDatastore(t)
+	cleanupFSDatastore(t)
 
 	fs = createDefaultFileStore(t)
 	defer fs.Close()
@@ -481,8 +481,8 @@ func TestFSCompactSubsFileOnAck(t *testing.T) {
 }
 
 func TestFSNoReferenceToCallerSubState(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	s := createDefaultFileStore(t)
 	defer s.Close()
@@ -514,8 +514,8 @@ func TestFSNoReferenceToCallerSubState(t *testing.T) {
 }
 
 func TestFSCompactSubsUpdateLastSent(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	s := createDefaultFileStore(t)
 	defer s.Close()
@@ -548,8 +548,8 @@ func TestFSCompactSubsUpdateLastSent(t *testing.T) {
 }
 
 func TestFSSubStoreVariousBufferSizes(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	sizes := []int{0, subBufMinShrinkSize - subBufMinShrinkSize/10, subBufMinShrinkSize, 3*subBufMinShrinkSize + subBufMinShrinkSize/2}
 	for _, size := range sizes {
@@ -734,13 +734,13 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 			}
 		}
 		fs.Close()
-		cleanupDatastore(t)
+		cleanupFSDatastore(t)
 	}
 }
 
 func TestFSSubAPIsOnFileErrors(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	// No buffer for this test
 	fs := createDefaultFileStore(t, BufferSize(0))
@@ -765,8 +765,8 @@ func TestFSSubAPIsOnFileErrors(t *testing.T) {
 }
 
 func TestFSCreateSubNotCountedOnError(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	// No buffer for this test
 	fs := createDefaultFileStore(t, BufferSize(0))

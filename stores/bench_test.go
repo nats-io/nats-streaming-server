@@ -14,13 +14,14 @@ import (
 )
 
 func benchCleanupDatastore(b *testing.B) {
-	if err := os.RemoveAll(defaultDataStore); err != nil {
+	if err := os.RemoveAll(testFSDefaultDatastore); err != nil {
 		stackFatalf(b, "Error cleaning up datastore: %v", err)
 	}
 }
 
 func benchCreateDefaultFileStore(t *testing.B) (*FileStore, *RecoveredState) {
-	fs, err := NewFileStore(testLogger, defaultDataStore, &testDefaultStoreLimits)
+	limits := testDefaultStoreLimits
+	fs, err := NewFileStore(testLogger, testFSDefaultDatastore, &limits)
 	if err != nil {
 		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
 	}
@@ -131,8 +132,9 @@ func BenchmarkRecoverSubs(b *testing.B) {
 
 	// Measure recovery
 	b.N = count * numSubs
+	limits := testDefaultStoreLimits
 	b.StartTimer()
-	s, err = NewFileStore(testLogger, defaultDataStore, &testDefaultStoreLimits)
+	s, err = NewFileStore(testLogger, testFSDefaultDatastore, &limits)
 	b.StopTimer()
 	if err != nil {
 		b.Fatalf("Unable to create a FileStore instance: %v", err)

@@ -49,7 +49,11 @@ type testStore struct {
 var (
 	nuidGen    *nuid.NUID
 	testLogger logger.Logger
-	testStores = []*testStore{&testStore{TypeMemory, false}, &testStore{TypeFile, true}}
+	testStores = []*testStore{
+		&testStore{TypeMemory, false},
+		&testStore{TypeFile, true},
+		&testStore{TypeSQL, false},
+	}
 )
 
 func init() {
@@ -254,8 +258,11 @@ func startTest(t *testing.T, ts *testStore) Store {
 	case TypeMemory:
 		return createDefaultMemStore(t)
 	case TypeFile:
-		cleanupDatastore(t)
+		cleanupFSDatastore(t)
 		return createDefaultFileStore(t)
+	case TypeSQL:
+		cleanupSQLDatastore(t)
+		return createDefaultSQLStore(t)
 	default:
 		stackFatalf(t, "Cannot start test for store type: ", ts.name)
 	}
@@ -264,7 +271,7 @@ func startTest(t *testing.T, ts *testStore) Store {
 
 func endTest(t *testing.T, ts *testStore) {
 	if ts.name == TypeFile {
-		cleanupDatastore(t)
+		cleanupFSDatastore(t)
 	}
 }
 
@@ -280,8 +287,10 @@ func testReOpenStore(t *testing.T, ts *testStore, limits *StoreLimits) (Store, *
 }
 
 func TestMain(m *testing.M) {
-	flag.BoolVar(&disableBufferWriters, "no_buffer", false, "Disable use of buffer writers")
-	flag.BoolVar(&setFDsLimit, "set_fds_limit", false, "Set some FDs limit")
+	flag.BoolVar(&testFSDisableBufferWriters, "fs_no_buffer", false, "Disable use of buffer writers")
+	flag.BoolVar(&testFSSetFDsLimit, "fs_set_fds_limit", false, "Set some FDs limit")
+	flag.StringVar(&testSQLDriver, "sql_driver", testSQLDriver, "SQL Driver to use")
+	flag.StringVar(&testSQLSource, "sql_source", testSQLSource, "SQL data source")
 	flag.Parse()
 	os.Exit(m.Run())
 }

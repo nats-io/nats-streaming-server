@@ -19,22 +19,22 @@ import (
 )
 
 const (
-	testDefaultBackgroundTaskInterval = 15 * time.Millisecond
-	testDefaultBufShrinkInterval      = 15 * time.Millisecond
-	testDefaultCacheTTL               = int64(15 * time.Millisecond)
-	testDefaultSliceCLoseInterval     = 15 * time.Millisecond
+	testFSDefaultBackgroundTaskInterval = 15 * time.Millisecond
+	testFSDefaultBufShrinkInterval      = 15 * time.Millisecond
+	testFSDefaultCacheTTL               = int64(15 * time.Millisecond)
+	testFSDefaultSliceCLoseInterval     = 15 * time.Millisecond
 )
 
 func init() {
-	FileStoreTestSetBackgroundTaskInterval(testDefaultBackgroundTaskInterval)
-	bufShrinkInterval = testDefaultBufShrinkInterval
-	cacheTTL = testDefaultCacheTTL
-	sliceCloseInterval = testDefaultSliceCLoseInterval
+	FileStoreTestSetBackgroundTaskInterval(testFSDefaultBackgroundTaskInterval)
+	bufShrinkInterval = testFSDefaultBufShrinkInterval
+	cacheTTL = testFSDefaultCacheTTL
+	sliceCloseInterval = testFSDefaultSliceCLoseInterval
 }
 
 func TestFSBadMsgFile(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	// Create a valid store file first
 	fs := createDefaultFileStore(t)
@@ -162,7 +162,7 @@ func TestFSBadMsgFile(t *testing.T) {
 	// ADD INVALID MESSAGE FILE NAME
 	//
 	os.Remove(firstSliceFileName)
-	fileName := filepath.Join(defaultDataStore, "foo", msgFilesPrefix+"a"+datSuffix)
+	fileName := filepath.Join(testFSDefaultDatastore, "foo", msgFilesPrefix+"a"+datSuffix)
 	file, err = openFile(fileName)
 	if err != nil {
 		t.Fatalf("Error creating file: %v", err)
@@ -175,7 +175,7 @@ func TestFSBadMsgFile(t *testing.T) {
 	expectedErrorOpeningDefaultFileStore(t)
 	os.Remove(fileName)
 	// Try with other malformed name
-	fileName = filepath.Join(defaultDataStore, "foo", msgFilesPrefix+datSuffix[1:])
+	fileName = filepath.Join(testFSDefaultDatastore, "foo", msgFilesPrefix+datSuffix[1:])
 	file, err = openFile(fileName)
 	if err != nil {
 		t.Fatalf("Error creating file: %v", err)
@@ -189,8 +189,8 @@ func TestFSBadMsgFile(t *testing.T) {
 }
 
 func TestFSStoreMsgCausesFlush(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t, BufferSize(50))
 	defer fs.Close()
@@ -238,8 +238,8 @@ func TestFSStoreMsgCausesFlush(t *testing.T) {
 }
 
 func TestFSRecoveryFileSlices(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t, SliceConfig(1, 0, 0, ""))
 	defer fs.Close()
@@ -265,15 +265,15 @@ func TestFSRecoveryFileSlices(t *testing.T) {
 }
 
 func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t)
 	fs.Close()
 
 	limit := testDefaultStoreLimits
 	limit.MaxMsgs = 100
-	fs, err := NewFileStore(testLogger, defaultDataStore, &limit)
+	fs, err := NewFileStore(testLogger, testFSDefaultDatastore, &limit)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
 	fs.Close()
 
 	limit.MaxMsgs = 10
-	fs, err = NewFileStore(testLogger, defaultDataStore, &limit)
+	fs, err = NewFileStore(testLogger, testFSDefaultDatastore, &limit)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -312,12 +312,12 @@ func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
 }
 
 func TestFSFileSlicesClosed(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	limits := testDefaultStoreLimits
 	limits.MaxMsgs = 50
-	fs, err := NewFileStore(testLogger, defaultDataStore, &limits,
+	fs, err := NewFileStore(testLogger, testFSDefaultDatastore, &limits,
 		SliceConfig(10, 0, 0, ""))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
@@ -367,8 +367,8 @@ func TestFSFileSlicesClosed(t *testing.T) {
 }
 
 func TestFSRecoverWithoutIndexFiles(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
@@ -416,8 +416,8 @@ func TestFSRecoverWithoutIndexFiles(t *testing.T) {
 }
 
 func TestFSEmptySlice(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
@@ -428,7 +428,7 @@ func TestFSEmptySlice(t *testing.T) {
 	fs.Close()
 
 	// Add an empty slice
-	file, err := openFile(filepath.Join(defaultDataStore, "foo", msgFilesPrefix+"2"+datSuffix))
+	file, err := openFile(filepath.Join(testFSDefaultDatastore, "foo", msgFilesPrefix+"2"+datSuffix))
 	if err != nil {
 		t.Fatalf("Error creating file: %v", err)
 	}
@@ -449,8 +449,8 @@ func TestFSEmptySlice(t *testing.T) {
 }
 
 func TestFSRemoveFileSlices(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	// Set config such that each slice store only 1 message
 	fs := createDefaultFileStore(t, SliceConfig(1, 0, 0, ""))
@@ -495,8 +495,8 @@ func TestFSRemoveFileSlices(t *testing.T) {
 }
 
 func TestFSFirstEmptySliceRemovedOnCreateNewSlice(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t, SliceConfig(0, 0, time.Second, ""))
 	defer fs.Close()
@@ -586,8 +586,8 @@ func TestFSFirstEmptySliceRemovedOnCreateNewSlice(t *testing.T) {
 }
 
 func TestFSMsgStoreVariousBufferSizes(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	sizes := []int{0, msgBufMinShrinkSize - msgBufMinShrinkSize/10, msgBufMinShrinkSize, 3*msgBufMinShrinkSize + msgBufMinShrinkSize/2}
 	for _, size := range sizes {
@@ -742,13 +742,13 @@ func TestFSMsgStoreVariousBufferSizes(t *testing.T) {
 			}
 		}
 		fs.Close()
-		cleanupDatastore(t)
+		cleanupFSDatastore(t)
 	}
 }
 
 func TestFSArchiveScript(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	tmpDir, err := ioutil.TempDir(".", "")
 	if err != nil {
@@ -824,7 +824,7 @@ func TestFSArchiveScript(t *testing.T) {
 	// Close store
 	fs.Close()
 	// Cleanup datastore
-	cleanupDatastore(t)
+	cleanupFSDatastore(t)
 
 	// Create a script that will error out
 	os.Remove(scriptFile)
@@ -876,8 +876,8 @@ func TestFSArchiveScript(t *testing.T) {
 }
 
 func TestFSNoSliceLimitAndNoChannelLimits(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	// No slice limit
 	fs := createDefaultFileStore(t, SliceConfig(0, 0, 0, ""))
@@ -911,11 +911,11 @@ func TestFSNoSliceLimitAndNoChannelLimits(t *testing.T) {
 
 func TestFSMsgRemovedWhileBuffered(t *testing.T) {
 	// Test is irrelevant if no buffering used
-	if disableBufferWriters {
+	if testFSDisableBufferWriters {
 		t.SkipNow()
 	}
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
@@ -935,7 +935,7 @@ func TestFSMsgRemovedWhileBuffered(t *testing.T) {
 
 	fs.Close()
 
-	fs, state, err := newFileStore(t, defaultDataStore, &limits)
+	fs, state, err := newFileStore(t, testFSDefaultDatastore, &limits)
 	if err != nil {
 		t.Fatalf("Unexpected error opening store: %v", err)
 	}
@@ -946,8 +946,8 @@ func TestFSMsgRemovedWhileBuffered(t *testing.T) {
 }
 
 func TestFSSliceLimitsBasedOnChannelLimits(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t, SliceConfig(0, 0, 0, ""))
 	defer fs.Close()
@@ -982,7 +982,7 @@ func TestFSSliceLimitsBasedOnChannelLimits(t *testing.T) {
 		t.Fatalf("Expected slice limit age to be 1sec, got %v", time.Duration(slAge))
 	}
 	fs.Close()
-	cleanupDatastore(t)
+	cleanupFSDatastore(t)
 
 	// Open with different limits
 	limits.MaxMsgs = 100
@@ -1017,8 +1017,8 @@ func TestFSSliceLimitsBasedOnChannelLimits(t *testing.T) {
 }
 
 func TestFSRecoverSlicesOutOfOrder(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	// Make a slice hold only 1 message
 	fs := createDefaultFileStore(t, SliceConfig(1, 0, 0, ""))
@@ -1075,11 +1075,11 @@ func TestFSRecoverSlicesOutOfOrder(t *testing.T) {
 }
 
 func TestFSBufShrink(t *testing.T) {
-	if disableBufferWriters {
+	if testFSDisableBufferWriters {
 		t.SkipNow()
 	}
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t, BufferSize(5*1024*1024))
 	defer fs.Close()
@@ -1119,8 +1119,8 @@ func TestFSBufShrink(t *testing.T) {
 }
 
 func TestFSCacheList(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	// Increase cacheTTL so eviction does not happen while we test content of list
 	cacheTTL = int64(10 * time.Second)
@@ -1181,13 +1181,13 @@ func TestFSCacheList(t *testing.T) {
 }
 
 func TestFSMsgCache(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	// For this test, increase a bit the test values
 	cacheTTL = int64(250 * time.Millisecond)
 	defer func() {
-		cacheTTL = testDefaultCacheTTL
+		cacheTTL = testFSDefaultCacheTTL
 	}()
 
 	fs := createDefaultFileStore(t)
@@ -1268,8 +1268,8 @@ func TestFSMsgCache(t *testing.T) {
 }
 
 func TestFSMsgStoreBackgroundTaskCrash(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
@@ -1281,13 +1281,13 @@ func TestFSMsgStoreBackgroundTaskCrash(t *testing.T) {
 }
 
 func TestFSPanicOnStoreCloseWhileMsgsExpire(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
 
 	limits := testDefaultStoreLimits
 	limits.MaxAge = 30 * time.Millisecond
 
-	fs, _, err := newFileStore(t, defaultDataStore, &limits)
+	fs, _, err := newFileStore(t, testFSDefaultDatastore, &limits)
 	if err != nil {
 		t.Fatalf("Unable to create store: %v", err)
 	}

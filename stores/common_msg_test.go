@@ -498,6 +498,12 @@ func TestCSFirstAndLastMsg(t *testing.T) {
 					firstMsg = ms.firstMsg
 					lastMsg = ms.lastMsg
 					ms.RUnlock()
+				case TypeSQL:
+					ms := cs.Msgs.(*MemoryMsgStore)
+					ms.RLock()
+					firstMsg = ms.msgs[ms.first]
+					lastMsg = ms.msgs[ms.last]
+					ms.RUnlock()
 				default:
 					stackFatalf(t, "Fix test for store type: %v", st.name)
 				}
