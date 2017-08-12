@@ -389,6 +389,10 @@ func TestParseProcessConfigFiles(t *testing.T) {
 	if nopts.Port != 5223 {
 		t.Fatalf("Unexpected listen port: %v", nopts.Port)
 	}
+	// Since logtime is not defined, it should default to `true`
+	if !nopts.Logtime {
+		t.Fatalf("Unexpected logtime value: %v", nopts.Logtime)
+	}
 
 	// Now pass only one file, and verify that the single file is used
 	// for both streaming and nats.
@@ -408,6 +412,10 @@ func TestParseProcessConfigFiles(t *testing.T) {
 		if nopts.Port != 4223 {
 			t.Fatalf("Unexpected listen port: %v", nopts.Port)
 		}
+		// Since logtime is not defined, it should default to `true`
+		if !nopts.Logtime {
+			t.Fatalf("Unexpected logtime value: %v", nopts.Logtime)
+		}
 	}
 	// Same with other conf file
 	for i := 0; i < 2; i++ {
@@ -425,6 +433,31 @@ func TestParseProcessConfigFiles(t *testing.T) {
 		// This should be the port defined in scontent
 		if nopts.Port != 5223 {
 			t.Fatalf("Unexpected listen port: %v", nopts.Port)
+		}
+		// Since logtime is not defined, it should default to `true`
+		if !nopts.Logtime {
+			t.Fatalf("Unexpected logtime value: %v", nopts.Logtime)
+		}
+	}
+	// Ensure that if logtime is present in the config file, its value is used.
+	for i := 0; i < 2; i++ {
+		os.Remove(nconf)
+		if i == 0 {
+			ncontent = []byte(`logtime: false`)
+		} else {
+			ncontent = []byte(`logtime: true`)
+		}
+		if err := ioutil.WriteFile(nconf, ncontent, 0660); err != nil {
+			t.Fatalf("Error creating conf file: %v", err)
+		}
+		_, nopts, err = ProcessConfigFiles(sconf, nconf)
+		if err != nil {
+			t.Fatalf("Error processing config files: %v", err)
+		}
+		// Logtime is specified in the log, so it should be the value that is in
+		// the file.
+		if i == 0 && nopts.Logtime || i == 1 && !nopts.Logtime {
+			t.Fatalf("Unexpected logtime value: %v", nopts.Logtime)
 		}
 	}
 }
