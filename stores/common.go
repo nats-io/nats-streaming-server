@@ -4,7 +4,6 @@ package stores
 
 import (
 	"sync"
-	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/logger"
@@ -210,25 +209,6 @@ func (gms *genericMsgStore) init(subject string, log logger.Logger, limits *MsgS
 	gms.subject = subject
 	gms.limits = *limits
 	gms.log = log
-}
-
-// createMsg creates a MsgProto with the given sequence number.
-// A timestamp is assigned with the guarantee that it will be at least
-// same than the previous message. That is, given that M1 is stored
-// before M2, this ensures that:
-// M1.Sequence<M2.Sequence && M1.Timestamp <= M2.Timestamp
-func (gms *genericMsgStore) createMsg(seq uint64, data []byte) *pb.MsgProto {
-	m := &pb.MsgProto{
-		Sequence:  seq,
-		Subject:   gms.subject,
-		Data:      data,
-		Timestamp: time.Now().UnixNano(),
-	}
-	if gms.lTimestamp > 0 && m.Timestamp < gms.lTimestamp {
-		m.Timestamp = gms.lTimestamp
-	}
-	gms.lTimestamp = m.Timestamp
-	return m
 }
 
 // State returns some statistics related to this store

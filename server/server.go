@@ -3,6 +3,7 @@
 package server
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -260,6 +261,12 @@ func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, err
 // Lock is held on entry or not needed.
 func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (*channel, error) {
 	c := &channel{name: name, store: sc, ss: s.createSubStore()}
+	lastSequence, err := c.store.Msgs.LastSequence()
+	if err != nil {
+		return nil, err
+	}
+	c.nextSequence = lastSequence + 1
+	c.leaderNextSequence = c.nextSequence
 	if s.state == Clustered {
 		if err := assignChannelRaft(s, c); err != nil {
 			return nil, err
@@ -293,23 +300,12 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 
 	// TODO: should this use a dedicated NATS conn?
 	// TODO: wire up logging appropriately.
-	transport, err := natslog.NewNATSTransport(s.opts.ClusterNodeID, s.nc, 2*time.Second, os.Stdout)
+	transport, err := natslog.NewNATSTransport(s.opts.ClusterNodeID, s.ncr, 2*time.Second, os.Stdout)
 	if err != nil {
 		return err
 	}
 
-	peersStore := raft.NewJSONPeers(path, transport)
-	peers, err := peersStore.Peers()
-	if err != nil {
-		transport.Close()
-		return err
-	}
-	if len(peers) == 0 {
-		if err := peersStore.SetPeers(s.opts.ClusterPeers); err != nil {
-			transport.Close()
-			return err
-		}
-	}
+	peersStore := &raft.StaticPeers{StaticPeers: s.opts.ClusterPeers}
 
 	node, err := raft.NewRaft(raft.DefaultConfig(), c, cacheStore, store, snapshotStore, peersStore, transport)
 	if err != nil {
@@ -319,7 +315,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	c.raft = node
 
 	// Wait for a leader to be elected before proceeding.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if leader := node.Leader(); leader != "" {
 			// Leader was elected.
@@ -394,10 +390,12 @@ func (cs *channelStore) count() int {
 }
 
 type channel struct {
-	name  string
-	store *stores.Channel
-	ss    *subStore
-	raft  *raft.Raft
+	name               string
+	store              *stores.Channel
+	ss                 *subStore
+	raft               *raft.Raft
+	leaderNextSequence uint64
+	nextSequence       uint64
 }
 
 // Apply log is invoked once a log entry is committed.
@@ -405,13 +403,45 @@ type channel struct {
 // ApplyFuture returned by Raft.Apply method if that
 // method was called on the same Raft node as the FSM.
 func (c *channel) Apply(l *raft.Log) interface{} {
-	seq, err := c.store.Msgs.Store(l.Data)
-	if err != nil {
-		// TODO: what should we do here?
+	// TODO: seems like we could avoid unmarshaling the entire struct here.
+	msg := &pb.MsgProto{}
+	if err := msg.Unmarshal(l.Data); err != nil {
+		panic(fmt.Sprintf("failed to unmarshal replicated message: %v", err))
+	}
+	if err := c.storeMsg(msg); err != nil {
 		panic(err)
 	}
-	fmt.Printf("stored msg %d on channel %s\n", seq, c.name)
 	return nil
+}
+
+func (c *channel) storeMsg(msg *pb.MsgProto) error {
+	if msg.Sequence < c.nextSequence {
+		// Message already stored, do nothing.
+		return nil
+	}
+	if msg.Sequence > c.nextSequence {
+		return fmt.Errorf("detected message gap in channel %s - expected sequence %d, got %d",
+			c.name, c.nextSequence, msg.Sequence)
+	}
+	_, err := c.store.Msgs.Store(msg)
+	if err != nil {
+		return fmt.Errorf("failed to store replicated message %d on channel %s: %v", msg.Sequence, c.name, err)
+	}
+	//if msg.Sequence%1000 == 0 {
+	//	fmt.Printf("stored msg %d on channel %s\n", msg.Sequence, c.name)
+	//}
+	c.nextSequence++
+	return nil
+}
+
+func (c *channel) pubMsgToMsgProto(pm *pb.PubMsg, seq uint64) *pb.MsgProto {
+	return &pb.MsgProto{
+		Sequence:  seq,
+		Subject:   pm.Subject,
+		Reply:     pm.Reply,
+		Data:      pm.Data,
+		Timestamp: time.Now().UnixNano(), // TODO: ensure timestamps are monotonic
+	}
 }
 
 // Snapshot is used to support log compaction. This call should
@@ -421,16 +451,38 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 // the FSM should be implemented in a fashion that allows for concurrent
 // updates while a snapshot is happening.
 func (c *channel) Snapshot() (raft.FSMSnapshot, error) {
-	// TODO
-	return nil, nil
+	return newChannelSnapshot(c), nil
 }
 
 // Restore is used to restore an FSM from a snapshot. It is not called
 // concurrently with any other command. The FSM must discard all previous
 // state.
 func (c *channel) Restore(old io.ReadCloser) error {
-	// TODO
-	return nil
+	fmt.Println("restoring from snapshot")
+	defer old.Close()
+	sizeBuf := make([]byte, 4)
+	for {
+		if _, err := io.ReadFull(old, sizeBuf); err != nil {
+			if err == io.EOF {
+				fmt.Println("done restoring from snapshot")
+				break
+			}
+			return err
+		}
+		size := binary.BigEndian.Uint32(sizeBuf)
+		buf := make([]byte, size)
+		if _, err := io.ReadFull(old, buf); err != nil {
+			return err
+		}
+		msg := &pb.MsgProto{}
+		if err := msg.Unmarshal(buf); err != nil {
+			return err
+		}
+		if err := c.storeMsg(msg); err != nil {
+			return err
+		}
+	}
+	return c.store.Msgs.Flush()
 }
 
 // StanServer structure represents the STAN server
@@ -450,9 +502,10 @@ type StanServer struct {
 	startTime  time.Time
 
 	// For scalability, a dedicated connection is used to publish
-	// messages to subscribers.
+	// messages to subscribers and for replication.
 	nc  *nats.Conn // used for most protocol messages
 	ncs *nats.Conn // used for sending to subscribers and acking publishers
+	ncr *nats.Conn // used for raft messages
 
 	wg sync.WaitGroup // Wait on go routines during shutdown
 
@@ -1120,6 +1173,9 @@ func (s *StanServer) createNatsConnections(sOpts *Options, nOpts *server.Options
 	}
 	if err == nil && sOpts.FTGroupName != "" {
 		s.ftnc, err = s.createNatsClientConn("ft", sOpts, nOpts)
+	}
+	if err == nil && len(sOpts.ClusterPeers) > 0 {
+		s.ncr, err = s.createNatsClientConn("raft", sOpts, nOpts)
 	}
 	return err
 }
@@ -2909,9 +2965,11 @@ func (s *StanServer) assignAndStore(pm *pb.PubMsg) (*channel, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := c.store.Msgs.Store(pm.Data); err != nil {
+	msg := c.pubMsgToMsgProto(pm, c.nextSequence)
+	if _, err := c.store.Msgs.Store(msg); err != nil {
 		return nil, err
 	}
+	c.nextSequence++
 	return c, nil
 }
 
@@ -2926,7 +2984,13 @@ func (s *StanServer) replicate(pm *pb.PubMsg) (raft.Future, *channel, error) {
 	if c.raft.State() != raft.Leader {
 		return nil, nil, ErrNotLeader
 	}
-	future := c.raft.Apply(pm.Data, 5*time.Second)
+	msg := c.pubMsgToMsgProto(pm, c.leaderNextSequence)
+	data, err := msg.Marshal()
+	if err != nil {
+		return nil, nil, err
+	}
+	c.leaderNextSequence++
+	future := c.raft.Apply(data, 5*time.Second)
 	return future, c, nil
 }
 
@@ -3884,6 +3948,7 @@ func (s *StanServer) Shutdown() {
 	// without locking. Once closed, s.nc.xxx() calls will simply fail, but
 	// we won't panic.
 	ncs := s.ncs
+	ncr := s.ncr
 	nc := s.nc
 	ftnc := s.ftnc
 
@@ -3919,6 +3984,18 @@ func (s *StanServer) Shutdown() {
 	}
 	if ncs != nil {
 		ncs.Close()
+	}
+	if s.state == Clustered {
+		if s.channels != nil {
+			for _, channel := range s.channels.channels {
+				if channel.raft != nil {
+					channel.raft.Shutdown()
+				}
+			}
+		}
+		if ncr != nil {
+			ncr.Close()
+		}
 	}
 	if nc != nil {
 		nc.Close()
