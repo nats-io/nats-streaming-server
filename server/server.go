@@ -100,8 +100,8 @@ const (
 
 	// Name of the file to store Raft log.
 	raftLogFile = "raft.log"
-	// Size of the Raft log store cache.
-	logCacheSize = 64 * 1024
+	// Number of Raft log entries to cache in memory to reduce disk IO.
+	logCacheSize = 512
 	// Number of Raft log snapshots to retain.
 	numLogSnapshots = 2
 )
@@ -2946,6 +2946,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 				}
 				s.ackPublisher(iopm)
 				pendingMsgs[i] = nil
+				pendingReplicateFutures[i] = nil
 			}
 
 			// clear out pending messages
