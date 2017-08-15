@@ -27,7 +27,7 @@ import (
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nuid"
-	"github.com/tylertreat/nats-on-a-log"
+	//"github.com/tylertreat/nats-on-a-log"
 
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
@@ -298,9 +298,13 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 		return err
 	}
 
-	// TODO: should this use a dedicated NATS conn?
 	// TODO: wire up logging appropriately.
-	transport, err := natslog.NewNATSTransport(s.opts.ClusterNodeID, s.ncr, 2*time.Second, os.Stdout)
+	//transport, err := natslog.NewNATSTransport(s.opts.ClusterNodeID, s.ncr, 2*time.Second, os.Stdout)
+	localAddr, err := net.ResolveTCPAddr("tcp", s.opts.ClusterNodeID)
+	if err != nil {
+		return err
+	}
+	transport, err := raft.NewTCPTransport(s.opts.ClusterNodeID, localAddr, 3, 2*time.Second, os.Stdout)
 	if err != nil {
 		return err
 	}
@@ -396,6 +400,7 @@ type channel struct {
 	raft               *raft.Raft
 	leaderNextSequence uint64
 	nextSequence       uint64
+	pendingReplication map[uint64][]byte
 }
 
 // Apply log is invoked once a log entry is committed.
@@ -403,7 +408,6 @@ type channel struct {
 // ApplyFuture returned by Raft.Apply method if that
 // method was called on the same Raft node as the FSM.
 func (c *channel) Apply(l *raft.Log) interface{} {
-	// TODO: seems like we could avoid unmarshaling the entire struct here.
 	msg := &pb.MsgProto{}
 	if err := msg.Unmarshal(l.Data); err != nil {
 		panic(fmt.Sprintf("failed to unmarshal replicated message: %v", err))
