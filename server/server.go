@@ -2181,7 +2181,9 @@ func (s *StanServer) sendPublishErr(subj, guid string, err error) {
 
 // FIXME(dlc) - place holder to pick sub that has least outstanding, should just sort,
 // or use insertion sort, etc.
-func findBestQueueSub(sl []*subState) (rsub *subState) {
+func findBestQueueSub(sl []*subState) *subState {
+	var rsub *subState
+
 	for _, sub := range sl {
 
 		if rsub == nil {
@@ -2203,7 +2205,7 @@ func findBestQueueSub(sl []*subState) (rsub *subState) {
 
 		// Favor non stalled subscribers and clients that do not have
 		// failed heartbeats
-		if (!sStalled || rStalled) && (!sHasFailedHB || rHasFailedHB) && (sOut < rOut) {
+		if (!sStalled && !sHasFailedHB && (rStalled || rHasFailedHB)) || (sOut < rOut) {
 			rsub = sub
 		}
 	}
@@ -2214,15 +2216,12 @@ func findBestQueueSub(sl []*subState) (rsub *subState) {
 		sl[len-1] = rsub
 	}
 
-	return
+	return rsub
 }
 
 // Send a message to the queue group
 // Assumes qs lock held for write
 func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force bool) (*subState, bool, bool) {
-	if qs == nil {
-		return nil, false, false
-	}
 	sub := findBestQueueSub(qs.subs)
 	if sub == nil {
 		return nil, false, false
