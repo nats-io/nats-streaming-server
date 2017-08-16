@@ -2182,20 +2182,11 @@ func (s *StanServer) sendPublishErr(subj, guid string, err error) {
 // FIXME(dlc) - place holder to pick sub that has least outstanding, should just sort,
 // or use insertion sort, etc.
 func findBestQueueSub(sl []*subState) *subState {
-	var rsub *subState
-
+	var (
+		leastOutstanding = int(^uint(0) >> 1)
+		rsub             *subState
+	)
 	for _, sub := range sl {
-
-		if rsub == nil {
-			rsub = sub
-			continue
-		}
-
-		rsub.RLock()
-		rOut := len(rsub.acksPending)
-		rStalled := rsub.stalled
-		rHasFailedHB := rsub.hasFailedHB
-		rsub.RUnlock()
 
 		sub.RLock()
 		sOut := len(sub.acksPending)
@@ -2203,14 +2194,19 @@ func findBestQueueSub(sl []*subState) *subState {
 		sHasFailedHB := sub.hasFailedHB
 		sub.RUnlock()
 
-		// Favor non stalled subscribers and clients that do not have
-		// failed heartbeats
-		if (!sStalled && !sHasFailedHB && (rStalled || rHasFailedHB)) || (sOut < rOut) {
-			rsub = sub
+		// Favor non stalled subscribers and clients that do not have failed heartbeats
+		if !sStalled && !sHasFailedHB {
+			if sOut < leastOutstanding {
+				leastOutstanding = sOut
+				rsub = sub
+			}
 		}
 	}
 
 	len := len(sl)
+	if rsub == nil && len > 0 {
+		rsub = sl[0]
+	}
 	if len > 1 && rsub == sl[0] {
 		copy(sl, sl[1:len])
 		sl[len-1] = rsub
