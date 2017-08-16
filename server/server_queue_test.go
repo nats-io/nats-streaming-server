@@ -680,3 +680,52 @@ func TestPersistentStoreMultipleShadowQSubs(t *testing.T) {
 		t.Fatalf("Recovered shadow queue sub should be ID 2, lastSent 2, got %v, %v", shadow.ID, lastSent)
 	}
 }
+
+func TestQueueWithOneStalledMemberDoesNotStallGroup(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	ch := make(chan bool, 1)
+	// Create a member with low MaxInflight and Manual ack mode
+	if _, err := sc.QueueSubscribe("foo", "queue",
+		func(_ *stan.Msg) {
+			ch <- true
+		},
+		stan.MaxInflight(1),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Check message is received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Create another member with higher MaxInFlight and manual ack mode too.
+	count := 0
+	total := 5
+	if _, err := sc.QueueSubscribe("foo", "queue",
+		func(_ *stan.Msg) {
+			count++
+			if count == total {
+				ch <- true
+			}
+		},
+		stan.MaxInflight(10),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Send messages and ensure they are received by 2nd member
+	for i := 0; i < total; i++ {
+		if err := sc.Publish("foo", []byte("msg")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+}
