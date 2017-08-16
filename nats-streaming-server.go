@@ -1,5 +1,7 @@
 // Copyright 2017 Apcera Inc. All rights reserved.
 
+//go:generate protoc -I=. -I=$GOPATH/src  --gofast_out=. ./spb/protocol.proto
+
 package main
 
 import (

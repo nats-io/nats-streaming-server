@@ -76,3 +76,8 @@ message CtrlMsg {
   // This field - if set - is used by the server to reference count all messages with same RefID.
   string  RefID    = 4; 
 }
+
+// Batch is a batch of messages for replication.
+message Batch {
+  repeated bytes Messages = 1; // Serialized MsgProtos to replicate.
+}
