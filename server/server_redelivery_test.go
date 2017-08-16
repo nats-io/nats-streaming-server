@@ -3,6 +3,7 @@ package server
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1050,5 +1051,128 @@ func TestIgnoreFailedHBInAckRedeliveryForQGroup(t *testing.T) {
 	// Wait for messages to be received
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our messages")
+	}
+}
+
+type trackDeliveredMsgs struct {
+	dummyLogger
+	newSeq   int
+	redelSeq int
+	errCh    chan error
+}
+
+func (l *trackDeliveredMsgs) Tracef(format string, args ...interface{}) {
+	l.dummyLogger.Lock()
+	l.msg = fmt.Sprintf(format, args...)
+	if strings.Contains(l.msg, "Redelivering") {
+		l.redelSeq++
+	} else if strings.Contains(l.msg, "Delivering") {
+		if l.newSeq != l.redelSeq+1 {
+			l.errCh <- fmt.Errorf("Got %q while there were only %d redelivered messages", l.msg, l.redelSeq)
+		} else {
+			l.errCh <- nil
+		}
+	}
+	l.dummyLogger.Unlock()
+}
+
+func TestQueueRedeliveryOnStartup(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	opts := getTestDefaultOptsForPersistentStore()
+	s := runServerWithOpts(t, opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc, nc := createConnectionWithNatsOpts(t, clientName, nats.ReconnectWait(100*time.Millisecond))
+	defer nc.Close()
+	defer sc.Close()
+
+	ch := make(chan bool, 1)
+	errCh := make(chan error, 4)
+	restarted := int32(0)
+	totalMsgs := int32(10)
+	delivered := int32(0)
+	redelivered := int32(0)
+	type qinfo struct {
+		r    int
+		msgs map[uint64]struct{}
+	}
+	newCb := func(id int) func(m *stan.Msg) {
+		q := qinfo{msgs: make(map[uint64]struct{}, 2)}
+		return func(m *stan.Msg) {
+			if !m.Redelivered {
+				if atomic.LoadInt32(&restarted) == 0 {
+					q.msgs[m.Sequence] = struct{}{}
+					if atomic.AddInt32(&delivered, 1) == totalMsgs {
+						ch <- true
+					}
+				} else {
+					m.Ack()
+					if q.r != len(q.msgs) {
+						errCh <- fmt.Errorf("Unexpected new message %v into sub %d before getting all undelivered first", m.Sequence, id)
+					}
+				}
+			} else {
+				if _, present := q.msgs[m.Sequence]; !present {
+					errCh <- fmt.Errorf("Unexpected message %v into sub %d", m.Sequence, id)
+				} else {
+					m.Ack()
+					q.r++
+					if atomic.AddInt32(&redelivered, 1) == totalMsgs {
+						ch <- true
+					}
+				}
+			}
+		}
+	}
+	if _, err := sc.QueueSubscribe("foo", "queue",
+		newCb(1),
+		stan.MaxInflight(int(totalMsgs/2)),
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(250))); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if _, err := sc.QueueSubscribe("foo", "queue",
+		newCb(2),
+		stan.MaxInflight(int(totalMsgs/2)),
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(250))); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Send more messages that can be accepted, both member should stall
+	for i := 0; i < int(totalMsgs+1); i++ {
+		if err := sc.Publish("foo", []byte("msg")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Wait for all messages to be received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+	// Now stop server and wait more than AckWait before resarting
+	s.Shutdown()
+	time.Sleep(300 * time.Millisecond)
+	atomic.StoreInt32(&restarted, 1)
+	l := &trackDeliveredMsgs{newSeq: int(totalMsgs + 1), errCh: make(chan error, 1)}
+	opts.Trace = true
+	opts.CustomLogger = l
+	s = runServerWithOpts(t, opts, nil)
+	// Check that messages are delivered to members that
+	// originally got them. Wait for all messages to be redelivered
+	select {
+	case e := <-errCh:
+		t.Fatalf(e.Error())
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("Did not get all redelivered messages")
+	}
+	// Check that we find in log that all messages were redelivered before
+	// the new message was delivered.
+	select {
+	case e := <-l.errCh:
+		if e != nil {
+			t.Fatalf(e.Error())
+		}
+	case <-time.After(250 * time.Millisecond):
 	}
 }

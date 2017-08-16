@@ -412,10 +412,11 @@ type subStore struct {
 // tracks lastSent for the group.
 type queueState struct {
 	sync.RWMutex
-	lastSent uint64
-	subs     []*subState
-	stalled  bool
-	shadow   *subState // For durable case, when last member leaves and group is not closed.
+	lastSent  uint64
+	subs      []*subState
+	shadow    *subState // For durable case, when last member leaves and group is not closed.
+	stalled   bool
+	newOnHold bool
 }
 
 // When doing message redelivery due to ack expiration, the function
@@ -528,6 +529,12 @@ func (ss *subStore) updateState(sub *subState) {
 		// based on the recovered subscriptions.
 		if sub.LastSent > qs.lastSent {
 			qs.lastSent = sub.LastSent
+		}
+		// If the added sub has newOnHold it means that we are doing recovery and
+		// that this member had unacknowledged messages. Mark the queue group
+		// with newOnHold
+		if sub.newOnHold {
+			qs.newOnHold = true
 		}
 		qs.Unlock()
 		sub.qstate = qs
@@ -734,7 +741,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	// that the ackTimer is properly set. It does not necessarily
 	// mean that messages are going to be redelivered on the spot.
 	for _, qsub := range qsubs {
-		ss.stan.performAckExpirationRedelivery(qsub)
+		ss.stan.performAckExpirationRedelivery(qsub, false)
 	}
 
 	if log != nil {
@@ -1629,6 +1636,8 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 	defer s.wg.Done()
 
+	queues := make(map[*queueState]*channel)
+
 	for _, sub := range recoveredSubs {
 		// Ignore subs that did not have any ack pendings on startup.
 		sub.Lock()
@@ -1645,7 +1654,7 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 		// Unlock in order to call function below
 		sub.Unlock()
 		// Send old messages (lock is acquired in that function)
-		s.performAckExpirationRedelivery(sub)
+		s.performAckExpirationRedelivery(sub, true)
 		// Regrab lock
 		sub.Lock()
 		// Allow new messages to be delivered
@@ -1659,10 +1668,17 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 		}
 		// Kick delivery of (possible) new messages
 		if qs != nil {
-			s.sendAvailableMessagesToQueue(c, qs)
+			queues[qs] = c
 		} else {
 			s.sendAvailableMessages(c, sub)
 		}
+	}
+	// Kick delivery for queues that had members with newOnHold
+	for qs, c := range queues {
+		qs.Lock()
+		qs.newOnHold = false
+		qs.Unlock()
+		s.sendAvailableMessagesToQueue(c, qs)
 	}
 }
 
@@ -2340,7 +2356,7 @@ func (s *StanServer) performDurableRedelivery(c *channel, sub *subState) {
 }
 
 // Redeliver all outstanding messages that have expired.
-func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
+func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup bool) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.Lock()
 	sortedPendingMsgs := makeSortedPendingMsgs(sub.acksPending)
@@ -2432,7 +2448,9 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState) {
 
 		// Handle QueueSubscribers differently, since we will choose best subscriber
 		// to redeliver to, not necessarily the same one.
-		if qs != nil {
+		// However, on startup, resends only to member that had previously this message
+		// otherwise this could cause a message to be redelivered to multiple members.
+		if qs != nil && !isStartup {
 			qs.Lock()
 			pick, sent, _ = s.sendMsgToQueueGroup(qs, m, forceDelivery)
 			qs.Unlock()
@@ -2585,7 +2603,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 // sub's lock held on entry.
 func (s *StanServer) setupAckTimer(sub *subState, d time.Duration) {
 	sub.ackTimer = time.AfterFunc(d, func() {
-		s.performAckExpirationRedelivery(sub)
+		s.performAckExpirationRedelivery(sub, false)
 	})
 }
 
@@ -3453,6 +3471,10 @@ func (s *StanServer) sendAvailableMessagesToQueue(c *channel, qs *queueState) {
 	}
 
 	qs.Lock()
+	if qs.newOnHold {
+		qs.Unlock()
+		return
+	}
 	for nextSeq := qs.lastSent + 1; ; nextSeq++ {
 		nextMsg := s.getNextMsg(c, &nextSeq, &qs.lastSent)
 		if nextMsg == nil {
