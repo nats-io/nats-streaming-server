@@ -997,3 +997,46 @@ func TestTraceSubCreateCloseUnsubscribeRequests(t *testing.T) {
 		}
 	}
 }
+
+func TestSubStalledSemantics(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	ch := make(chan bool, 1)
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {
+		ch <- true
+	}, stan.SetManualAckMode(), stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Replace store with one that will report if Lookup was used
+	s.channels.Lock()
+	c := s.channels.channels["foo"]
+	orgMS := c.store.Msgs
+	ms := &queueGroupStalledMsgStore{c.store.Msgs, make(chan struct{}, 1)}
+	c.store.Msgs = ms
+	s.channels.Unlock()
+
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	select {
+	case <-ms.lookupCh:
+		t.Fatalf("Lookup should not have been invoked")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Then replace store with original one before exit.
+	s.channels.Lock()
+	c = s.channels.channels["foo"]
+	c.store.Msgs = orgMS
+	s.channels.Unlock()
+}

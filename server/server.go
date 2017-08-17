@@ -415,7 +415,7 @@ type queueState struct {
 	lastSent  uint64
 	subs      []*subState
 	shadow    *subState // For durable case, when last member leaves and group is not closed.
-	stalled   bool
+	stalled   int       // number of stalled members
 	newOnHold bool
 }
 
@@ -536,6 +536,10 @@ func (ss *subStore) updateState(sub *subState) {
 		if sub.newOnHold {
 			qs.newOnHold = true
 		}
+		// Update stalled (on recovery)
+		if sub.stalled {
+			qs.stalled++
+		}
 		qs.Unlock()
 		sub.qstate = qs
 	} else {
@@ -637,13 +641,16 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 				// but didn't call Unsubscribe(). Need to keep a reference
 				// to this sub to maintain the state.
 				qs.shadow = sub
-				// Clear the stalled flag
-				qs.stalled = false
+				// Clear the number of stalled members
+				qs.stalled = 0
 				// Will need to update the LastSent and clear the ClientID
 				// with a storage update.
 				storageUpdate = true
 			}
 		} else {
+			if sub.stalled && qs.stalled > 0 {
+				qs.stalled--
+			}
 			now := time.Now().UnixNano()
 			// If there are pending messages in this sub, they need to be
 			// transferred to remaining queue subscribers.
@@ -2230,7 +2237,7 @@ func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force b
 		qs.lastSent = lastSent
 	}
 	if !sendMore {
-		qs.stalled = true
+		qs.stalled++
 	}
 	return sub, didSend, sendMore
 }
@@ -2504,13 +2511,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	// Don't send if we have too many outstanding already, unless forced to send.
 	ap := int32(len(sub.acksPending))
 	if !force && (ap >= sub.MaxInFlight) {
-		if !sub.stalled {
-			sub.stalled = true
-			if s.debug {
-				s.log.Debugf("[Client:%s] Stalled subid=%d, subject=%s, seq=%d",
-					sub.ClientID, sub.ID, m.Subject, m.Sequence)
-			}
-		}
+		sub.stalled = true
 		return false, false
 	}
 
@@ -2581,13 +2582,7 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	// have reached the max and tell the caller that it should not
 	// be sending more at this time.
 	if !force && (ap+1 == sub.MaxInFlight) {
-		if !sub.stalled {
-			sub.stalled = true
-			if s.debug {
-				s.log.Debugf("[Client:%s] Stalling subid=%d, subject=%s, seq=%d",
-					sub.ClientID, sub.ID, m.Subject, m.Sequence)
-			}
-		}
+		sub.stalled = true
 		return true, false
 	}
 
@@ -3416,6 +3411,8 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 		return
 	}
 
+	var stalled bool
+
 	sub.Lock()
 
 	if s.trace {
@@ -3430,10 +3427,14 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 		return
 	}
 
-	delete(sub.acksPending, sequence)
-	stalled := sub.stalled
-	if int32(len(sub.acksPending)) < sub.MaxInFlight {
-		sub.stalled = false
+	// Do this here only if this is not a queue member. If it is, it has
+	// to be done under the qs's Lock, which we should not grab under sub's Lock.
+	if sub.qstate == nil {
+		delete(sub.acksPending, sequence)
+		stalled = sub.stalled
+		if int32(len(sub.acksPending)) < sub.MaxInFlight {
+			sub.stalled = false
+		}
 	}
 
 	// Leave the reset/cancel of the ackTimer to the redelivery cb.
@@ -3443,8 +3444,21 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 
 	if qs != nil {
 		qs.Lock()
-		stalled = qs.stalled
-		qs.stalled = false
+		stalled = qs.stalled == len(qs.subs)
+		sub.Lock()
+		delete(sub.acksPending, sequence)
+		if int32(len(sub.acksPending)) < sub.MaxInFlight {
+			if sub.stalled {
+				// Member was stalled and now below the MaxInflight,
+				// so it is no longer stalled, which means that the
+				// queue itself is no longer stalled.
+				sub.stalled = false
+				if qs.stalled > 0 {
+					qs.stalled--
+				}
+			}
+		}
+		sub.Unlock()
 		qs.Unlock()
 	}
 
@@ -3470,7 +3484,7 @@ func (s *StanServer) sendAvailableMessagesToQueue(c *channel, qs *queueState) {
 		qs.Unlock()
 		return
 	}
-	for nextSeq := qs.lastSent + 1; ; nextSeq++ {
+	for nextSeq := qs.lastSent + 1; qs.stalled < len(qs.subs); nextSeq++ {
 		nextMsg := s.getNextMsg(c, &nextSeq, &qs.lastSent)
 		if nextMsg == nil {
 			break
@@ -3485,7 +3499,7 @@ func (s *StanServer) sendAvailableMessagesToQueue(c *channel, qs *queueState) {
 // Send any messages that are ready to be sent that have been queued.
 func (s *StanServer) sendAvailableMessages(c *channel, sub *subState) {
 	sub.Lock()
-	for nextSeq := sub.LastSent + 1; ; nextSeq++ {
+	for nextSeq := sub.LastSent + 1; !sub.stalled; nextSeq++ {
 		nextMsg := s.getNextMsg(c, &nextSeq, &sub.LastSent)
 		if nextMsg == nil {
 			break
