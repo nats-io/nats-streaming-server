@@ -313,7 +313,6 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	peersStore := &raft.StaticPeers{StaticPeers: peers}
 
 	config := raft.DefaultConfig()
-	config.SnapshotInterval = time.Hour
 	node, err := raft.NewRaft(config, c, cacheStore, store, snapshotStore, peersStore, transport)
 	if err != nil {
 		transport.Close()
