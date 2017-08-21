@@ -7,6 +7,7 @@ syntax = "proto3";
 package spb;
 
 import "github.com/gogo/protobuf/gogoproto/gogo.proto";
+import "github.com/nats-io/go-nats-streaming/pb/protocol.proto";
 
 option (gogoproto.marshaler_all) = true;
 option (gogoproto.sizer_all) = true;
@@ -79,5 +80,5 @@ message CtrlMsg {
 
 // Batch is a batch of messages for replication.
 message Batch {
-  repeated bytes Messages = 1; // Serialized MsgProtos to replicate.
+  repeated pb.MsgProto Messages = 1; // Serialized MsgProtos to replicate.
 }

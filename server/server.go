@@ -321,6 +321,22 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	}
 	c.raft = node
 
+	// Wait for a leader to be elected before proceeding.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if leader := node.Leader(); leader != "" {
+			// Leader was elected.
+			break
+		}
+		// Wait a bit.
+		time.Sleep(5 * time.Millisecond)
+	}
+	if node.Leader() == "" {
+		node.Shutdown()
+		transport.Close()
+		return errors.New("channel leader was not elected in time")
+	}
+
 	return nil
 }
 
@@ -385,11 +401,7 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 		panic(err)
 	}
 	for _, msg := range batch.Messages {
-		m := &pb.MsgProto{}
-		if err := m.Unmarshal(msg); err != nil {
-			panic(fmt.Sprintf("failed to unmarshal replicated message: %v", err))
-		}
-		if err := c.storeMsg(m); err != nil {
+		if err := c.storeMsg(msg); err != nil {
 			panic(err)
 		}
 	}
@@ -3010,16 +3022,12 @@ func (s *StanServer) replicate(iopms []*ioPendingMsg) (map[*channel]raft.Future,
 			return nil, err
 		}
 		msg := c.pubMsgToMsgProto(pm, c.leaderNextSequence)
-		data, err := msg.Marshal()
-		if err != nil {
-			return nil, err
-		}
 		batch := batches[c]
 		if batch == nil {
 			batch = &spb.Batch{}
 			batches[c] = batch
 		}
-		batch.Messages = append(batch.Messages, data)
+		batch.Messages = append(batch.Messages, msg)
 		iopm.c = c
 		c.leaderNextSequence++
 	}
