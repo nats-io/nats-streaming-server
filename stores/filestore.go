@@ -2267,6 +2267,7 @@ func (ms *FileMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 	// }
 
 	seq := ms.last + 1
+	m.Sequence = seq
 
 	msgInBuffer := false
 

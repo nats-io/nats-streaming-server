@@ -160,7 +160,7 @@ func storeDeleteClient(t tLogger, s Store, clientID string) {
 
 func storeMsg(t *testing.T, cs *Channel, channel string, data []byte) *pb.MsgProto {
 	ms := cs.Msgs
-	seq, err := ms.Store(data)
+	seq, err := ms.Store(&pb.MsgProto{Data: data, Subject: channel, Timestamp: time.Now().UnixNano()})
 	if err != nil {
 		stackFatalf(t, "Error storing message into channel [%v]: %v", channel, err)
 	}
@@ -712,7 +712,7 @@ func testClientAPIs(t *testing.T, s Store) {
 
 func testFlush(t *testing.T, s Store) *Channel {
 	cs := storeCreateChannel(t, s, "foo")
-	seq, err := cs.Msgs.Store([]byte("hello"))
+	seq, err := cs.Msgs.Store(&pb.MsgProto{Data: []byte("hello")})
 	if err != nil {
 		t.Fatalf("Unexpected error on store: %v", err)
 	}
@@ -771,7 +771,7 @@ func TestGSNoOps(t *testing.T) {
 		gms.Close() != nil {
 		t.Fatal("Expected no value since these should not be implemented for generic store")
 	}
-	if seq, err := gms.Store([]byte("hello")); seq != 0 || err != nil {
+	if seq, err := gms.Store(&pb.MsgProto{Data: []byte("hello")}); seq != 0 || err != nil {
 		t.Fatal("Expected no value since this should not be implemented for generic store")
 	}
 
@@ -843,7 +843,7 @@ func testPerChannelLimits(t *testing.T, s Store) {
 	checkLimitsForChannel := func(channelName string, maxMsgs, maxSubs int) {
 		cs := storeCreateChannel(t, s, channelName)
 		for i := 0; i < maxMsgs+10; i++ {
-			if _, err := cs.Msgs.Store([]byte("hello")); err != nil {
+			if _, err := cs.Msgs.Store(&pb.MsgProto{Data: []byte("hello")}); err != nil {
 				stackFatalf(t, "Unexpected error on store: %v", err)
 			}
 		}
@@ -879,8 +879,8 @@ func testIncrementalTimestamp(t *testing.T, s Store) {
 
 	total := 8000000
 	for i := 0; i < total; i++ {
-		seq1, err1 := ms.Store(msg)
-		seq2, err2 := ms.Store(msg)
+		seq1, err1 := ms.Store(&pb.MsgProto{Data: msg})
+		seq2, err2 := ms.Store(&pb.MsgProto{Data: msg})
 		if err1 != nil || err2 != nil {
 			t.Fatalf("Unexpected error on store: %v %v", err1, err2)
 		}

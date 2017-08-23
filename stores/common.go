@@ -220,7 +220,7 @@ func (gms *genericMsgStore) State() (numMessages int, byteSize uint64, err error
 }
 
 // Store implements the MsgStore interface
-func (gms *genericMsgStore) Store(data []byte) (uint64, error) {
+func (gms *genericMsgStore) Store(msg *pb.MsgProto) (uint64, error) {
 	// no-op
 	return 0, nil
 }

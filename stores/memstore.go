@@ -85,6 +85,7 @@ func (ms *MemoryMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 		ms.first = 1
 	}
 	ms.last++
+	m.Sequence = ms.last
 	ms.msgs[ms.last] = m
 	ms.totalCount++
 	ms.totalBytes += uint64(m.Size())
