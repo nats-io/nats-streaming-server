@@ -412,11 +412,11 @@ type subStore struct {
 // tracks lastSent for the group.
 type queueState struct {
 	sync.RWMutex
-	lastSent  uint64
-	subs      []*subState
-	shadow    *subState // For durable case, when last member leaves and group is not closed.
-	stalled   int       // number of stalled members
-	newOnHold bool
+	lastSent        uint64
+	subs            []*subState
+	shadow          *subState // For durable case, when last member leaves and group is not closed.
+	stalledSubCount int       // number of stalled members
+	newOnHold       bool
 }
 
 // When doing message redelivery due to ack expiration, the function
@@ -538,7 +538,7 @@ func (ss *subStore) updateState(sub *subState) {
 		}
 		// Update stalled (on recovery)
 		if sub.stalled {
-			qs.stalled++
+			qs.stalledSubCount++
 		}
 		qs.Unlock()
 		sub.qstate = qs
@@ -642,14 +642,14 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 				// to this sub to maintain the state.
 				qs.shadow = sub
 				// Clear the number of stalled members
-				qs.stalled = 0
+				qs.stalledSubCount = 0
 				// Will need to update the LastSent and clear the ClientID
 				// with a storage update.
 				storageUpdate = true
 			}
 		} else {
-			if sub.stalled && qs.stalled > 0 {
-				qs.stalled--
+			if sub.stalled && qs.stalledSubCount > 0 {
+				qs.stalledSubCount--
 			}
 			now := time.Now().UnixNano()
 			// If there are pending messages in this sub, they need to be
@@ -2237,7 +2237,7 @@ func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force b
 		qs.lastSent = lastSent
 	}
 	if !sendMore {
-		qs.stalled++
+		qs.stalledSubCount++
 	}
 	return sub, didSend, sendMore
 }
@@ -3427,24 +3427,22 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 		return
 	}
 
-	// Do this here only if this is not a queue member. If it is, it has
-	// to be done under the qs's Lock, which we should not grab under sub's Lock.
-	if sub.qstate == nil {
+	qs := sub.qstate
+	if qs == nil {
 		delete(sub.acksPending, sequence)
 		stalled = sub.stalled
 		if int32(len(sub.acksPending)) < sub.MaxInFlight {
 			sub.stalled = false
 		}
-	}
+		sub.Unlock()
+	} else {
+		// In the case of a queue member, we should grab the lock in the following
+		// order: qs.Lock() -> sub.Lock().
+		// So release the sub's lock now, will grab it after under the qs' lock.
+		sub.Unlock()
 
-	// Leave the reset/cancel of the ackTimer to the redelivery cb.
-
-	qs := sub.qstate
-	sub.Unlock()
-
-	if qs != nil {
 		qs.Lock()
-		stalled = qs.stalled == len(qs.subs)
+		stalled = qs.stalledSubCount == len(qs.subs)
 		sub.Lock()
 		delete(sub.acksPending, sequence)
 		if int32(len(sub.acksPending)) < sub.MaxInFlight {
@@ -3453,14 +3451,16 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 				// so it is no longer stalled, which means that the
 				// queue itself is no longer stalled.
 				sub.stalled = false
-				if qs.stalled > 0 {
-					qs.stalled--
+				if qs.stalledSubCount > 0 {
+					qs.stalledSubCount--
 				}
 			}
 		}
 		sub.Unlock()
 		qs.Unlock()
 	}
+
+	// Leave the reset/cancel of the ackTimer to the redelivery cb.
 
 	if !stalled {
 		return
@@ -3484,7 +3484,7 @@ func (s *StanServer) sendAvailableMessagesToQueue(c *channel, qs *queueState) {
 		qs.Unlock()
 		return
 	}
-	for nextSeq := qs.lastSent + 1; qs.stalled < len(qs.subs); nextSeq++ {
+	for nextSeq := qs.lastSent + 1; qs.stalledSubCount < len(qs.subs); nextSeq++ {
 		nextMsg := s.getNextMsg(c, &nextSeq, &qs.lastSent)
 		if nextMsg == nil {
 			break

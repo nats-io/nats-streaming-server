@@ -778,7 +778,7 @@ func TestQueueGroupStalledSemantics(t *testing.T) {
 			qs := c.ss.qsubs["queue"]
 			c.ss.RUnlock()
 			qs.RLock()
-			stalled = qs.stalled == len(qs.subs)
+			stalled = qs.stalledSubCount == len(qs.subs)
 			qs.RUnlock()
 			if stalled != expected {
 				time.Sleep(10 * time.Millisecond)
