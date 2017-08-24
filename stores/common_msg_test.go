@@ -308,7 +308,7 @@ func TestCSMaxAge(t *testing.T) {
 			defer s.Close()
 
 			sl := testDefaultStoreLimits
-			sl.MaxAge = 250 * time.Millisecond
+			sl.MaxAge = 100 * time.Millisecond
 			s.SetLimits(&sl)
 
 			cs := storeCreateChannel(t, s, "foo")
@@ -317,13 +317,13 @@ func TestCSMaxAge(t *testing.T) {
 				storeMsg(t, cs, "foo", msg)
 			}
 			// Wait a bit
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(60 * time.Millisecond)
 			// Send more
 			for i := 0; i < 5; i++ {
 				storeMsg(t, cs, "foo", msg)
 			}
 			// Wait a bit
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(60 * time.Millisecond)
 			// We should have the first 10 expired and 5 left.
 			expectedFirst := uint64(11)
 			expectedLast := uint64(15)
@@ -333,22 +333,59 @@ func TestCSMaxAge(t *testing.T) {
 					expectedFirst, expectedLast, first, last)
 			}
 			// Wait more and all should be gone.
-			time.Sleep(sl.MaxAge)
+			time.Sleep(60 * time.Millisecond)
 			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
 				t.Fatalf("All messages should have expired, got %v", n)
 			}
+
+			// We are going to set a limit of MaxMsgs to 1 on top
+			// of the expiration and make sure that expiration works
+			// ok if first message that was supposed to expire is
+			// gone by the time it should have expired.
+			sl.MaxMsgs = 1
+			s.SetLimits(&sl)
+
+			cs = storeCreateChannel(t, s, "bar")
+			storeMsg(t, cs, "bar", msg)
+			// Wait a bit
+			time.Sleep(60 * time.Millisecond)
+			// Send another message that should replace the first one
+			m2 := storeMsg(t, cs, "bar", msg)
+			// Wait more so that max age of initial message is passed
+			time.Sleep(60 * time.Millisecond)
+			// Ensure there is still 1 message...
+			if n, _ := msgStoreState(t, cs.Msgs); n != 1 {
+				t.Fatalf("There should be 1 message, got %v", n)
+			}
+			// ...which should be m2: this should not fail
+			msgStoreLookup(t, cs.Msgs, m2.Sequence)
+			// Again, wait more and second message should not be gone
+			time.Sleep(60 * time.Millisecond)
+			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
+				t.Fatalf("All messages should have expired, got %v", n)
+			}
+
 			if st.name == TypeMemory {
-				// Store a message
-				storeMsg(t, cs, "foo", []byte("msg"))
 				// Verify timer is set
-				ms := s.(*MemoryStore)
-				ms.RLock()
-				timerSet := cs.Msgs.(*MemoryMsgStore).ageTimer != nil
-				ms.RUnlock()
-				if !timerSet {
+				isSet := func() bool {
+					var timerSet bool
+					if st.name == TypeMemory {
+						ms := cs.Msgs.(*MemoryMsgStore)
+						ms.RLock()
+						timerSet = ms.ageTimer != nil
+						ms.RUnlock()
+					}
+					return timerSet
+				}
+				if isSet() {
+					t.Fatal("Timer should not be set")
+				}
+				// Store a message
+				storeMsg(t, cs, "bar", []byte("msg"))
+				// Now timer should have been set again
+				if !isSet() {
 					t.Fatal("Timer should have been set")
 				}
-
 			}
 		})
 	}
@@ -499,11 +536,10 @@ func TestCSFirstAndLastMsg(t *testing.T) {
 					lastMsg = ms.lastMsg
 					ms.RUnlock()
 				case TypeSQL:
-					ms := cs.Msgs.(*MemoryMsgStore)
-					ms.RLock()
-					firstMsg = ms.msgs[ms.first]
-					lastMsg = ms.msgs[ms.last]
-					ms.RUnlock()
+					// Not applicable since this store does not store
+					// the first and last message.
+					firstMsg = msgStoreFirstMsg(t, cs.Msgs)
+					lastMsg = msgStoreLastMsg(t, cs.Msgs)
 				default:
 					stackFatalf(t, "Fix test for store type: %v", st.name)
 				}

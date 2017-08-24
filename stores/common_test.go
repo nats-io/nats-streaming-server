@@ -270,8 +270,11 @@ func startTest(t *testing.T, ts *testStore) Store {
 }
 
 func endTest(t *testing.T, ts *testStore) {
-	if ts.name == TypeFile {
+	switch ts.name {
+	case TypeFile:
 		cleanupFSDatastore(t)
+	case TypeSQL:
+		cleanupSQLDatastore(t)
 	}
 }
 
@@ -291,6 +294,8 @@ func TestMain(m *testing.M) {
 	flag.BoolVar(&testFSSetFDsLimit, "fs_set_fds_limit", false, "Set some FDs limit")
 	flag.StringVar(&testSQLDriver, "sql_driver", testSQLDriver, "SQL Driver to use")
 	flag.StringVar(&testSQLSource, "sql_source", testSQLSource, "SQL data source")
+	flag.StringVar(&testSQLSourceAdmin, "sql_source_admin", testSQLSource, "SQL data source to create the database")
+	flag.StringVar(&testSQLDatabaseName, "sql_db_name", testSQLDatabaseName, "SQL database name")
 	flag.Parse()
 	os.Exit(m.Run())
 }
