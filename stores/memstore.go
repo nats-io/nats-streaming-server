@@ -81,11 +81,15 @@ func (ms *MemoryMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 	ms.Lock()
 	defer ms.Unlock()
 
-	if ms.first == 0 {
-		ms.first = 1
+	if m.Sequence <= ms.last {
+		// We've already seen this message.
+		return m.Sequence, nil
 	}
-	ms.last++
-	m.Sequence = ms.last
+
+	if ms.first == 0 {
+		ms.first = m.Sequence
+	}
+	ms.last = m.Sequence
 	ms.msgs[ms.last] = m
 	ms.totalCount++
 	ms.totalBytes += uint64(m.Size())

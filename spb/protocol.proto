@@ -78,6 +78,16 @@ message CtrlMsg {
   string  RefID    = 4; 
 }
 
+// RaftOperation is a Raft log message.
+message RaftOperation {
+  enum Type {
+    Publish = 0; // Message publish.
+  }
+  Type   OpType       = 1; // Log message type.
+  string Leader       = 2; // The node that proposed the operation.
+  Batch  PublishBatch = 3; // Publish operation data.
+}
+
 // Batch is a batch of messages for replication.
 message Batch {
   repeated pb.MsgProto Messages = 1; // Serialized MsgProtos to replicate.
