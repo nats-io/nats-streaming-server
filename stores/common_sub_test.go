@@ -42,11 +42,13 @@ func TestCSMaxSubs(t *testing.T) {
 				sub := &spb.SubState{}
 				numSubs := 0
 				var err error
+				lastSubID := uint64(0)
 				for i := 0; i < total; i++ {
 					err = cs.Subs.CreateSub(sub)
 					if err != nil {
 						break
 					}
+					lastSubID = sub.ID
 					numSubs++
 				}
 				if maxSubs == 0 && err != nil {
@@ -57,6 +59,22 @@ func TestCSMaxSubs(t *testing.T) {
 					}
 					if numSubs != maxSubs {
 						t.Fatalf("Wrong number of subs: %v vs %v", numSubs, maxSubs)
+					}
+					// Remove the last subscription, and do it twice (second
+					// time should have no effect).
+					for i := 0; i < 2; i++ {
+						if err := cs.Subs.DeleteSub(lastSubID); err != nil {
+							t.Fatalf("Error on delete: %v", err)
+						}
+					}
+					// Now try to add back 2 subscriptions...
+					// First should be fine
+					if err := cs.Subs.CreateSub(sub); err != nil {
+						t.Fatalf("Error on create: %v", err)
+					}
+					// This one should fail:
+					if err := cs.Subs.CreateSub(sub); err == nil || err != ErrTooManySubs {
+						t.Fatalf("Error should have been ErrTooManySubs, got %v", err)
 					}
 				}
 			}

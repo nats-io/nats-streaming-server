@@ -453,7 +453,6 @@ type FileSubStore struct {
 	bw          *bufferedWriter
 	delSub      spb.SubStateDelete
 	updateSub   spb.SubStateUpdate
-	subs        map[uint64]*subscription
 	opts        *FileStoreOptions // points to options from FileStore
 	compactItvl time.Duration
 	fileSize    int64
@@ -1305,7 +1304,8 @@ func (fs *FileStore) recoverOneChannel(dir, name string, limits *ChannelLimits, 
 	}
 
 	// Fill that array with what we got from newFileSubStore.
-	for _, sub := range subStore.subs {
+	for _, subi := range subStore.subs {
+		sub := subi.(*subscription)
 		// The server is making a copy of rss.Sub, still it is not
 		// a good idea to return a pointer to an object that belong
 		// to the store. So make a copy and return the pointer to
@@ -3060,11 +3060,10 @@ func (ms *FileMsgStore) Flush() error {
 func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doRecover bool) (*FileSubStore, error) {
 	ss := &FileSubStore{
 		fm:       fs.fm,
-		subs:     make(map[uint64]*subscription),
 		opts:     &fs.opts,
 		crcTable: fs.crcTable,
 	}
-	ss.init(channel, fs.log, limits)
+	ss.init(fs.log, limits)
 	// Convert the CompactInterval in time.Duration
 	ss.compactItvl = time.Duration(ss.opts.CompactInterval) * time.Second
 
@@ -3192,8 +3191,6 @@ func (ss *FileSubStore) recoverSubscriptions(file *os.File) error {
 				seqnos: make(map[uint64]struct{}),
 			}
 			ss.subs[newSub.ID] = sub
-			// Keep track of the subscriptions count
-			ss.subsCount++
 			// Keep track of max subscription ID found.
 			if newSub.ID > ss.maxSubID {
 				ss.maxSubID = newSub.ID
@@ -3205,8 +3202,9 @@ func (ss *FileSubStore) recoverSubscriptions(file *os.File) error {
 				return err
 			}
 			// Search if the create has been recovered.
-			sub, exists := ss.subs[modifiedSub.ID]
+			subi, exists := ss.subs[modifiedSub.ID]
 			if exists {
+				sub := subi.(*subscription)
 				sub.sub = modifiedSub
 				// An update means that the previous version is free space.
 				ss.delRecs++
@@ -3227,10 +3225,9 @@ func (ss *FileSubStore) recoverSubscriptions(file *os.File) error {
 			if err := delSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
 				return err
 			}
-			if s, exists := ss.subs[delSub.ID]; exists {
+			if si, exists := ss.subs[delSub.ID]; exists {
+				s := si.(*subscription)
 				delete(ss.subs, delSub.ID)
-				// Keep track of the subscriptions count
-				ss.subsCount--
 				// Delete and count all non-ack'ed messages free space.
 				ss.delRecs++
 				ss.delRecs += len(s.seqnos)
@@ -3244,7 +3241,8 @@ func (ss *FileSubStore) recoverSubscriptions(file *os.File) error {
 			if err := updateSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
 				return err
 			}
-			if sub, exists := ss.subs[updateSub.ID]; exists {
+			if subi, exists := ss.subs[updateSub.ID]; exists {
+				sub := subi.(*subscription)
 				seqno := updateSub.Seqno
 				// Same seqno/ack can appear several times for the same sub.
 				// See queue subscribers redelivery.
@@ -3259,7 +3257,8 @@ func (ss *FileSubStore) recoverSubscriptions(file *os.File) error {
 			if err := updateSub.Unmarshal(ss.tmpSubBuf[:recSize]); err != nil {
 				return err
 			}
-			if sub, exists := ss.subs[updateSub.ID]; exists {
+			if subi, exists := ss.subs[updateSub.ID]; exists {
+				sub := subi.(*subscription)
 				delete(sub.seqnos, updateSub.Seqno)
 				// A message is ack'ed
 				ss.delRecs++
@@ -3278,10 +3277,11 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 	// subscription count)
 	ss.Lock()
 	defer ss.Unlock()
-	if err := ss.createSub(sub); err != nil {
+	if err := ss.createSubLocked(sub); err != nil {
 		return err
 	}
 	if err := ss.writeRecord(nil, subRecNew, sub); err != nil {
+		delete(ss.subs, sub.ID)
 		return err
 	}
 	// We need to get a copy of the passed sub, we can't hold a reference
@@ -3302,8 +3302,9 @@ func (ss *FileSubStore) UpdateSub(sub *spb.SubState) error {
 	// We need to get a copy of the passed sub, we can't hold a reference
 	// to it.
 	csub := *sub
-	s := ss.subs[sub.ID]
-	if s != nil {
+	si := ss.subs[sub.ID]
+	if si != nil {
+		s := si.(*subscription)
 		s.sub = &csub
 	} else {
 		s := &subscription{sub: &csub, seqnos: make(map[uint64]struct{})}
@@ -3319,7 +3320,8 @@ func (ss *FileSubStore) DeleteSub(subid uint64) error {
 	err := ss.writeRecord(nil, subRecDel, &ss.delSub)
 	// Even if there is an error, continue with cleanup. If later
 	// a compact is successful, the sub won't be present in the compacted file.
-	if s, exists := ss.subs[subid]; exists {
+	if si, exists := ss.subs[subid]; exists {
+		s := si.(*subscription)
 		delete(ss.subs, subid)
 		// writeRecord has already accounted for the count of the
 		// delete record. We add to this the number of pending messages
@@ -3371,8 +3373,9 @@ func (ss *FileSubStore) AddSeqPending(subid, seqno uint64) error {
 		ss.Unlock()
 		return err
 	}
-	s := ss.subs[subid]
-	if s != nil {
+	si := ss.subs[subid]
+	if si != nil {
+		s := si.(*subscription)
 		if seqno > s.sub.LastSent {
 			s.sub.LastSent = seqno
 		}
@@ -3391,8 +3394,9 @@ func (ss *FileSubStore) AckSeqPending(subid, seqno uint64) error {
 		ss.Unlock()
 		return err
 	}
-	s := ss.subs[subid]
-	if s != nil {
+	si := ss.subs[subid]
+	if si != nil {
+		s := si.(*subscription)
 		delete(s.seqnos, seqno)
 		// Test if we should compact
 		if ss.shouldCompact() {
@@ -3434,7 +3438,8 @@ func (ss *FileSubStore) compact(orgFileName string) error {
 	ss.numRecs = 0
 	ss.delRecs = 0
 	ss.fileSize = 0
-	for _, sub := range ss.subs {
+	for _, subi := range ss.subs {
+		sub := subi.(*subscription)
 		err = ss.writeRecord(tmpBW, subRecNew, sub.sub)
 		if err != nil {
 			return err

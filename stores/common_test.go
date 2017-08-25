@@ -331,7 +331,7 @@ func TestGSNoOps(t *testing.T) {
 
 	gss := &genericSubStore{}
 	defer gss.Close()
-	gss.init("foo", testLogger, &limits.SubStoreLimits)
+	gss.init(testLogger, &limits.SubStoreLimits)
 	if gss.UpdateSub(&spb.SubState{}) != nil ||
 		gss.AddSeqPending(1, 1) != nil ||
 		gss.AckSeqPending(1, 1) != nil ||
