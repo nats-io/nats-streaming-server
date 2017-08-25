@@ -501,7 +501,7 @@ func TestFSNoReferenceToCallerSubState(t *testing.T) {
 	// Get the fileStore sub object
 	fss := ss.(*FileSubStore)
 	fss.RLock()
-	storeSub := fss.subs[sub.ID].sub
+	storeSub := fss.subs[sub.ID].(*subscription).sub
 	fss.RUnlock()
 	// Content of filestore's subscription must match sub
 	if !reflect.DeepEqual(*sub, *storeSub) {
@@ -738,7 +738,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 	}
 }
 
-func TestFSDeleteSubError(t *testing.T) {
+func TestFSSubAPIsOnFileErrors(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
@@ -747,13 +747,47 @@ func TestFSDeleteSubError(t *testing.T) {
 	defer fs.Close()
 
 	cs := storeCreateChannel(t, fs, "foo")
-	subid := storeSub(t, cs, "foo")
 	ss := cs.Subs.(*FileSubStore)
 	ss.Lock()
 	ss.file.handle.Close()
 	ss.Unlock()
 
-	if err := ss.DeleteSub(subid); err == nil {
-		t.Fatal("Expected error on sub delete, got none")
+	expectToFail := func(f func() error) {
+		if err := f(); err == nil {
+			stackFatalf(t, "Expected to get error about file being closed, got none")
+		}
+	}
+	expectToFail(func() error { return cs.Subs.CreateSub(&spb.SubState{}) })
+	expectToFail(func() error { return cs.Subs.UpdateSub(&spb.SubState{}) })
+	expectToFail(func() error { return cs.Subs.AddSeqPending(1, 1) })
+	expectToFail(func() error { return cs.Subs.AckSeqPending(1, 1) })
+	expectToFail(func() error { return cs.Subs.DeleteSub(1) })
+}
+
+func TestFSCreateSubNotCountedOnError(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	// No buffer for this test
+	fs := createDefaultFileStore(t, BufferSize(0))
+	defer fs.Close()
+
+	cs := storeCreateChannel(t, fs, "foo")
+	ss := cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.file.handle.Close()
+	ss.Unlock()
+
+	sub := &spb.SubState{}
+	if err := ss.CreateSub(sub); err == nil {
+		t.Fatal("Expected error on sub create, got none")
+	}
+
+	// Verify that the subscriptions' map is empty
+	ss.RLock()
+	lm := len(ss.subs)
+	ss.RUnlock()
+	if lm != 0 {
+		t.Fatalf("Expected subs map to be empty, got %v", lm)
 	}
 }
