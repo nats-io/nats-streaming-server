@@ -478,7 +478,7 @@ func TestPersistentStoreDurableCanReceiveAfterRestart(t *testing.T) {
 	}
 }
 
-func TestPersistentStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
+func TestPersistentStoreDontSendToOfflineDurablesAfterServerRestart(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
@@ -499,23 +499,46 @@ func TestPersistentStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
 	}
 
 	durName := "mydur"
+	gotFirstCh := make(chan bool, 2)
+	gotFirstCb := func(m *stan.Msg) {
+		if !m.Redelivered {
+			gotFirstCh <- true
+		}
+	}
 	// Create a durable with manual ack mode (don't ack the message)
-	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {},
+	if _, err := sc.Subscribe("foo", gotFirstCb,
 		stan.DurableName(durName),
 		stan.DeliverAllAvailable(),
-		stan.SetManualAckMode()); err != nil {
-		stackFatalf(t, "Unexpected error on subscribe: %v", err)
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(100))); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Create a durable queue sub too.
+	if _, err := sc.QueueSubscribe("foo", "queue", gotFirstCb,
+		stan.DurableName(durName),
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(100))); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	// Make sure durable is created
-	subs := checkSubs(t, s, clientName, 1)
-	if len(subs) != 1 {
-		stackFatalf(t, "Should be only 1 durable, got %v", len(subs))
+	subs := checkSubs(t, s, clientName, 2)
+	if len(subs) != 2 {
+		stackFatalf(t, "Should be only 2 durables, got %v", len(subs))
 	}
-	dur := subs[0]
-	dur.RLock()
-	inbox := dur.Inbox
-	dur.RUnlock()
+	inboxes := []string{}
+	for _, dur := range subs {
+		dur.RLock()
+		inboxes = append(inboxes, dur.Inbox)
+		dur.RUnlock()
+	}
 
+	// Ensure original messages are received
+	for i := 0; i < 2; i++ {
+		if err := Wait(gotFirstCh); err != nil {
+			t.Fatal("Did not get our ")
+		}
+	}
 	// Close the client
 	sc.Close()
 
@@ -533,24 +556,39 @@ func TestPersistentStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
 	}
 	defer nc.Close()
 
-	failCh := make(chan bool, 10)
-	// Setup a consumer on the durable inbox
-	sub, err := nc.Subscribe(inbox, func(_ *nats.Msg) {
-		failCh <- true
-	})
-	if err != nil {
-		t.Fatalf("Error on subscribe: %v", err)
+	failCh := make(chan *pb.MsgProto, 10)
+	// Setup a consumer on the durable inboxes
+	for _, inbox := range inboxes {
+		sub, err := nc.Subscribe(inbox, func(m *nats.Msg) {
+			sm := &pb.MsgProto{}
+			sm.Unmarshal(m.Data)
+			failCh <- sm
+		})
+		if err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		defer sub.Unsubscribe()
 	}
-	defer sub.Unsubscribe()
 
 	// Stop the Streaming server
 	s.Shutdown()
+	// Wait a bit more than the redelivery wait time (30ms)
+	time.Sleep(110 * time.Millisecond)
 	// Restart the Streaming server
 	s = runServerWithOpts(t, opts, nil)
 
-	// We should not get any message, if we do, this is an error
-	if err := WaitTime(failCh, 250*time.Millisecond); err == nil {
-		t.Fatal("Consumer got a message")
+	newSender = NewDefaultConnection(t)
+	defer newSender.Close()
+	if err := newSender.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	newSender.Close()
+
+	select {
+	case m := <-failCh:
+		t.Fatalf("Server sent this message: %v", m)
+	case <-time.After(250 * time.Millisecond):
+		// Did not receive message, we are ok.
 	}
 }
 

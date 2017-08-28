@@ -485,7 +485,7 @@ func (ss *subStore) Store(sub *subState) error {
 	}
 
 	ss.Lock()
-	ss.updateState(sub)
+	ss.updateState(sub, false)
 	ss.Unlock()
 
 	return nil
@@ -494,7 +494,7 @@ func (ss *subStore) Store(sub *subState) error {
 // Updates the subStore state with this sub.
 // The subStore is locked on entry (or does not need, as during server restart).
 // However, `sub` does not need locking since it has just been created.
-func (ss *subStore) updateState(sub *subState) {
+func (ss *subStore) updateState(sub *subState, isOffline bool) {
 	// First store by ackInbox for ack direct lookup
 	ss.acks[sub.AckInbox] = sub
 
@@ -542,7 +542,7 @@ func (ss *subStore) updateState(sub *subState) {
 		}
 		qs.Unlock()
 		sub.qstate = qs
-	} else {
+	} else if !isOffline {
 		// Plain subscriber.
 		ss.psubs = append(ss.psubs, sub)
 	}
@@ -1540,12 +1540,17 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 					s.log.Noticef("WARN: Not recovering ghost durable queue subscriber: [%s]:[%s] subject=%s inbox=%s", sub.ClientID, sub.QGroup, sub.subject, sub.Inbox)
 					continue
 				}
+				isOffline := false
+				// Detect if this is a durable and if so, is it offline.
+				if durableSub && !added {
+					isOffline = true
+				}
 				// Add this subscription to subStore.
-				channel.ss.updateState(sub)
+				channel.ss.updateState(sub, isOffline)
 				// If this is a durable and the client was not recovered
 				// (was offline), we need to clear the ClientID otherwise
 				// it won't be able to reconnect
-				if durableSub && !added {
+				if isOffline {
 					sub.ClientID = ""
 				}
 				// Add to the array, unless this is the shadow durable queue sub that
