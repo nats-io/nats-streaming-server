@@ -14,6 +14,7 @@ import (
 
 	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats-streaming"
+	"github.com/nats-io/go-nats-streaming/pb"
 
 	"github.com/nats-io/nats-streaming-server/stores"
 )
@@ -78,7 +79,16 @@ func getChannelLeader(t *testing.T, channel string, timeout time.Duration, serve
 	return
 }
 
-func assertMsg(t *testing.T, msg *stan.Msg, expectedData []byte, expectedSeq uint64) {
+func removeServer(servers []*StanServer, s *StanServer) []*StanServer {
+	for i, srv := range servers {
+		if srv == s {
+			servers = append(servers[:i], servers[i+1:]...)
+		}
+	}
+	return servers
+}
+
+func assertMsg(t *testing.T, msg pb.MsgProto, expectedData []byte, expectedSeq uint64) {
 	if !bytes.Equal(msg.Data, expectedData) {
 		stackFatalf(t, "Msg data incorrect, expected: %s, got: %s", expectedData, msg.Data)
 	}
@@ -102,6 +112,11 @@ func TestClusteringConfig(t *testing.T) {
 	}
 }
 
+// Ensure basic replication works as expected. This test starts three servers
+// in a cluster, publishes messages to the cluster, kills the leader, publishes
+// more messages, kills the new leader, verifies progress cannot be made when
+// there is no leader, then brings the cluster back online and verifies
+// catchup and consistency.
 func TestClusteringBasic(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -136,8 +151,13 @@ func TestClusteringBasic(t *testing.T) {
 	}
 	defer s3.Shutdown()
 
+	servers := []*StanServer{s1, s2, s3}
+
 	// Create a client connection.
-	sc := NewDefaultConnection(t)
+	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(5*time.Second))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
 	defer sc.Close()
 
 	// Publish a message (this will create the channel and form the Raft group).
@@ -156,7 +176,7 @@ func TestClusteringBasic(t *testing.T) {
 
 	select {
 	case msg := <-ch:
-		assertMsg(t, msg, []byte("hello"), 1)
+		assertMsg(t, msg.MsgProto, []byte("hello"), 1)
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected msg")
 	}
@@ -166,12 +186,13 @@ func TestClusteringBasic(t *testing.T) {
 	stopped := []*StanServer{}
 
 	// Take down the leader.
-	leader := getChannelLeader(t, channel, 5*time.Second, s1, s2, s3)
+	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
 	leader.Shutdown()
 	stopped = append(stopped, leader)
+	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	leader = getChannelLeader(t, channel, 5*time.Second, s1, s2, s3)
+	leader = getChannelLeader(t, channel, 5*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -189,16 +210,110 @@ func TestClusteringBasic(t *testing.T) {
 	}
 	select {
 	case msg := <-ch:
-		assertMsg(t, msg, []byte("hello"), 1)
+		assertMsg(t, msg.MsgProto, []byte("hello"), 1)
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected msg")
 	}
 	for i := 0; i < 5; i++ {
 		select {
 		case msg := <-ch:
-			assertMsg(t, msg, []byte(strconv.Itoa(i)), uint64(i+2))
+			assertMsg(t, msg.MsgProto, []byte(strconv.Itoa(i)), uint64(i+2))
 		case <-time.After(2 * time.Second):
 			t.Fatal("expected msg")
+		}
+	}
+
+	sub.Unsubscribe()
+
+	// Take down the leader.
+	leader.Shutdown()
+	stopped = append(stopped, leader)
+	servers = removeServer(servers, leader)
+
+	// New subscriptions should be rejected since no leader can be established.
+	_, err = sc.Subscribe(channel, func(msg *stan.Msg) {}, stan.DeliverAllAvailable())
+	if err == nil {
+		t.Fatal("Expected error on subscribe")
+	}
+
+	// Publishes should also fail.
+	if err := sc.Publish(channel, []byte("foo")); err == nil {
+		t.Fatal("Expected error on publish")
+	}
+
+	// Bring one node back up.
+	s := stopped[0]
+	stopped = stopped[1:]
+	s, err = RunServerWithOpts(s.opts, nil)
+	if err != nil {
+		t.Fatalf("Error starting server: %v", err)
+	}
+	servers = append(servers, s)
+	defer s.Shutdown()
+
+	// Wait for the new leader to be elected.
+	getChannelLeader(t, channel, 5*time.Second, servers...)
+
+	// Publish some more messages.
+	for i := 0; i < 5; i++ {
+		if err := sc.Publish(channel, []byte("foo-"+strconv.Itoa(i))); err != nil {
+			t.Fatalf("Unexpected error on publish %d: %v", i, err)
+		}
+	}
+
+	// Bring the last node back up.
+	s = stopped[0]
+	s, err = RunServerWithOpts(s.opts, nil)
+	if err != nil {
+		t.Fatalf("Error starting server: %v", err)
+	}
+	servers = append(servers, s)
+	defer s.Shutdown()
+
+	// Ensure there is still a leader.
+	leader = getChannelLeader(t, channel, 5*time.Second, servers...)
+
+	// Publish one more message.
+	if err := sc.Publish(channel, []byte("goodbye")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	type msg struct {
+		sequence uint64
+		data     []byte
+	}
+	expected := make([]msg, 12)
+	expected[0] = msg{sequence: 1, data: []byte("hello")}
+	for i := 0; i < 5; i++ {
+		expected[i+1] = msg{sequence: uint64(i + 2), data: []byte(strconv.Itoa(i))}
+	}
+	for i := 0; i < 5; i++ {
+		expected[i+6] = msg{sequence: uint64(i + 7), data: []byte("foo-" + strconv.Itoa(i))}
+	}
+	expected[11] = msg{sequence: 12, data: []byte("goodbye")}
+
+	// Wait for the cluster to quiesce.
+	time.Sleep(2 * time.Second)
+
+	// Verify the server stores are consistent.
+	for _, server := range servers {
+		store := server.channels.channels[channel].store.Msgs
+		first, last, err := store.FirstAndLastSequence()
+		if err != nil {
+			t.Fatalf("Error getting sequence numbers: %v", err)
+		}
+		if first != 1 {
+			t.Fatalf("Unexpected first sequence: expected 1, got %d", first)
+		}
+		if last != 12 {
+			t.Fatalf("Unexpected last sequence: expected 12, got %d", last)
+		}
+		for i := first; i <= last; i++ {
+			msg, err := store.Lookup(i)
+			if err != nil {
+				t.Fatalf("Error getting message %d: %v", i, err)
+			}
+			assertMsg(t, *msg, expected[i-1].data, expected[i-1].sequence)
 		}
 	}
 }

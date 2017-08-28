@@ -288,8 +288,10 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	if err != nil {
 		return err
 	}
+	c.raftStore = store
 	cacheStore, err := raft.NewLogCache(logCacheSize, store)
 	if err != nil {
+		store.Close()
 		return err
 	}
 
@@ -332,6 +334,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 
 	snapshotStore, err := raft.NewFileSnapshotStore(path, numLogSnapshots, logWriter)
 	if err != nil {
+		store.Close()
 		return err
 	}
 
@@ -339,6 +342,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	transport, err := natslog.NewNATSTransport(
 		fmt.Sprintf("%s.%s", s.opts.ClusterNodeID, c.name), s.ncr, 2*time.Second, logWriter)
 	if err != nil {
+		store.Close()
 		return err
 	}
 
@@ -351,6 +355,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	node, err := raft.NewRaft(config, c, cacheStore, store, snapshotStore, peersStore, transport)
 	if err != nil {
 		transport.Close()
+		store.Close()
 		return err
 	}
 	c.raft = node
@@ -368,6 +373,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	if node.Leader() == "" {
 		node.Shutdown()
 		transport.Close()
+		store.Close()
 		return errors.New("channel leader was not elected in time")
 	}
 
@@ -452,6 +458,7 @@ type channel struct {
 	store        *stores.Channel
 	ss           *subStore
 	raft         *raft.Raft
+	raftStore    *raftboltdb.BoltStore
 }
 
 // Apply log is invoked once a log entry is committed.
@@ -4105,6 +4112,11 @@ func (s *StanServer) Shutdown() {
 			if channel.raft != nil {
 				if err := channel.raft.Shutdown().Error(); err != nil {
 					s.log.Errorf("Failed to stop Raft node for channel %s: %v", channel.name, err)
+				}
+			}
+			if channel.raftStore != nil {
+				if err := channel.raftStore.Close(); err != nil {
+					s.log.Errorf("Failed to close Raft log store for channel %s: %v", channel.name, err)
 				}
 			}
 		}
