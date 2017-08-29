@@ -385,7 +385,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 		select {
 		case isLeader := <-node.LeaderCh():
 			if isLeader {
-				// Use a barrier to ensure all preceeding operations are
+				// Use a barrier to ensure all preceding operations are
 				// applied to the FSM, then update nextSequence.
 				if err := node.Barrier(0).Error(); err != nil {
 					// TODO: probably step down as leader?
