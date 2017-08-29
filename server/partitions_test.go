@@ -311,6 +311,9 @@ func TestPartitionsWithClusterOfServers(t *testing.T) {
 			stackFatalf(t, "Unexpected error on publish: %v", err)
 		}
 	}
+	// Wait for client to be registered on both servers
+	waitForNumClients(t, s1, 1)
+	waitForNumClients(t, s2, 1)
 	// Should not be a problem to send a message to "foo"
 	send(fooSubj)
 	// Sending to bar should work too..
@@ -427,9 +430,10 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	defer resetDefaultPartitionsVars()
 
 	ncOpts1 := natsdTest.DefaultTestOptions
-	ncOpts1.Cluster.Host = "localhost"
+	ncOpts1.Host = "127.0.0.1"
+	ncOpts1.Cluster.Host = "127.0.0.1"
 	ncOpts1.Cluster.Port = 6222
-	ncOpts1.Routes = natsd.RoutesFromStr("nats://localhost:6223")
+	ncOpts1.Routes = natsd.RoutesFromStr("nats://127.0.0.1:6223")
 	ns1 := natsdTest.RunServer(&ncOpts1)
 	defer ns1.Shutdown()
 
@@ -466,7 +470,7 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	}
 
 	opts1 := GetDefaultOptions()
-	opts1.NATSServerURL = "nats://localhost:4222"
+	opts1.NATSServerURL = "nats://127.0.0.1:4222"
 	opts1.Partitioning = true
 	opts1.AddPerChannel("foo", &stores.ChannelLimits{})
 	// Do this under this lock since the list will be received in the callback
@@ -485,8 +489,9 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	// Once the route is established, this should trigger a resend
 	// of the list and then the two servers should fail.
 	ncOpts2 := natsdTest.DefaultTestOptions
+	ncOpts2.Host = "127.0.0.1"
 	ncOpts2.Port = 4223
-	ncOpts2.Cluster.Host = "localhost"
+	ncOpts2.Cluster.Host = "127.0.0.1"
 	ncOpts2.Cluster.Port = 6223
 	ns2 := natsdTest.RunServer(&ncOpts2)
 	defer ns2.Shutdown()
@@ -505,14 +510,13 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	}
 
 	opts2 := GetDefaultOptions()
-	opts2.NATSServerURL = "nats://localhost:4223"
+	opts2.NATSServerURL = "nats://127.0.0.1:4223"
 	opts2.MaxChannels = 1000
 	opts2.Partitioning = true
 	opts2.AddPerChannel("foo", &stores.ChannelLimits{})
 	mu.Lock()
-	// For this test, use a larger value than other tests
-	partitionsRequestTimeout = 2500 * time.Millisecond
 	s2, err = RunServerWithOpts(opts2, nil)
+	mu.Unlock()
 	if err != nil {
 		// The purpose of this test was to verify that protocols are resent
 		// after the route is established. If, due to timing, the route
@@ -524,7 +528,6 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 		t.Fatalf("Unexpected error on startup: %v", err)
 	}
 	defer s2.Shutdown()
-	mu.Unlock()
 
 	// Wait for ns1 and ns2 to report that the route is established
 	timeout := time.Now().Add(4 * time.Second)
@@ -534,7 +537,7 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 			ok = true
 			break
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	if !ok {
 		t.Fatal("Route still not established")
@@ -548,7 +551,7 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 		cs1, cs2     int
 		s1Err, s2Err error
 	)
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 30; i++ {
 		time.Sleep(100 * time.Millisecond)
 		mu.Lock()
 		cs1 = fooFromS1

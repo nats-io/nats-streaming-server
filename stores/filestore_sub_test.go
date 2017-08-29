@@ -14,262 +14,6 @@ import (
 	"github.com/nats-io/nats-streaming-server/util"
 )
 
-func TestFSMaxSubs(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	limitCount := 2
-
-	limits := testDefaultStoreLimits
-	limits.MaxSubscriptions = limitCount
-
-	if err := fs.SetLimits(&limits); err != nil {
-		t.Fatalf("Unexpected error setting limits: %v", err)
-	}
-
-	testMaxSubs(t, fs, "foo", limitCount)
-
-	// Set the limit to 0
-	limits.MaxSubscriptions = 0
-	if err := fs.SetLimits(&limits); err != nil {
-		t.Fatalf("Unexpected error setting limits: %v", err)
-	}
-	// Now try to test the limit against
-	// any value, it should not fail
-	testMaxSubs(t, fs, "bar", 0)
-}
-
-func TestFSBasicSubStore(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testBasicSubStore(t, fs)
-}
-
-func TestFSRecoverSubUpdatesForDeleteSubOK(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	cs := storeCreateChannel(t, fs, "foo")
-	// Store one sub for which we are going to store updates
-	// and then delete
-	sub1 := storeSub(t, cs, "foo")
-	// This one will stay and should be recovered
-	sub2 := storeSub(t, cs, "foo")
-
-	// Add several pending seq for sub1
-	storeSubPending(t, cs, "foo", sub1, 1, 2, 3)
-
-	// Delete sub
-	storeSubDelete(t, cs, "foo", sub1)
-
-	// Add more updates
-	storeSubPending(t, cs, "foo", sub1, 4, 5)
-	storeSubAck(t, cs, "foo", sub1, 1)
-
-	// Delete unexisting subs
-	storeSubDelete(t, cs, "foo", sub2+1, sub2+2, sub2+3)
-
-	// Close the store
-	fs.Close()
-
-	// Recovers now, should not have any error
-	limits := testDefaultStoreLimits
-	limits.MaxSubscriptions = 1
-	fs, state, err := newFileStore(t, defaultDataStore, &limits)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	defer fs.Close()
-
-	cs = getRecoveredChannel(t, state, "foo")
-	getRecoveredSubs(t, state, "foo", 1)
-	// Make sure the subs count was not messed-up by the fact
-	// that the store recovered delete requests for un-recovered
-	// subscriptions.
-	// Since we have set the limit of subs to 1, and we have
-	// recovered one, we should fail creating a new one.
-	sub := &spb.SubState{
-		ClientID:      "me",
-		Inbox:         nuidGen.Next(),
-		AckInbox:      nuidGen.Next(),
-		AckWaitInSecs: 10,
-	}
-	if err := cs.Subs.CreateSub(sub); err == nil || err != ErrTooManySubs {
-		t.Fatalf("Should have failed creating a sub, got %v", err)
-	}
-}
-
-func TestFSNoSubIdCollisionAfterRecovery(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	cs := storeCreateChannel(t, fs, "foo")
-	// Store a subscription.
-	sub1 := storeSub(t, cs, "foo")
-
-	// Close the store
-	fs.Close()
-
-	// Recovers now
-	fs, state := openDefaultFileStore(t)
-	defer fs.Close()
-	cs = getRecoveredChannel(t, state, "foo")
-	getRecoveredSubs(t, state, "foo", 1)
-	// Store new subscription
-	sub2 := storeSub(t, cs, "foo")
-
-	if sub2 <= sub1 {
-		t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", sub1+1, sub2)
-	}
-
-	// Store a delete subscription with higher ID and make sure
-	// we use something higher on restart
-	delSub := uint64(sub1 + 10)
-	storeSubDelete(t, cs, "foo", delSub)
-
-	// Close the store
-	fs.Close()
-
-	// Recovers now
-	fs, state = openDefaultFileStore(t)
-	defer fs.Close()
-	cs = getRecoveredChannel(t, state, "foo")
-	// sub1 & sub2 should be recovered
-	getRecoveredSubs(t, state, "foo", 2)
-
-	// Store new subscription
-	sub3 := storeSub(t, cs, "foo")
-
-	if sub3 <= sub1 || sub3 <= delSub {
-		t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", delSub+1, sub3)
-	}
-}
-
-func TestFSSubLastSentCorrectOnRecovery(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	cs := storeCreateChannel(t, fs, "foo")
-	// Store a subscription.
-	subID := storeSub(t, cs, "foo")
-
-	// A message
-	msg := []byte("hello")
-
-	// Store msg seq 1 and 2
-	m1 := storeMsg(t, cs, "foo", msg)
-	m2 := storeMsg(t, cs, "foo", msg)
-
-	// Store m1 and m2 for this subscription, then m1 again.
-	storeSubPending(t, cs, "foo", subID, m1.Sequence, m2.Sequence, m1.Sequence)
-
-	// Restart server
-	fs.Close()
-	fs, state := openDefaultFileStore(t)
-	defer fs.Close()
-	subs := getRecoveredSubs(t, state, "foo", 1)
-	sub := subs[0]
-	// Check that sub's last seq is m2.Sequence
-	if sub.Sub.LastSent != m2.Sequence {
-		t.Fatalf("Expected LastSent to be %v, got %v", m2.Sequence, sub.Sub.LastSent)
-	}
-}
-
-func TestFSUpdatedSub(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	cs := storeCreateChannel(t, fs, "foo")
-	// Creeate a subscription.
-	subID := storeSub(t, cs, "foo")
-
-	// A message
-	msg := []byte("hello")
-
-	// Store msg seq 1 and 2
-	m1 := storeMsg(t, cs, "foo", msg)
-	m2 := storeMsg(t, cs, "foo", msg)
-	m3 := storeMsg(t, cs, "foo", msg)
-
-	// Store m1 and m2 for this subscription
-	storeSubPending(t, cs, "foo", subID, m1.Sequence, m2.Sequence)
-
-	// Update the subscription
-	ss := cs.Subs
-	updatedSub := &spb.SubState{
-		ID:            subID,
-		ClientID:      "me",
-		Inbox:         nuidGen.Next(),
-		AckInbox:      "newAckInbox",
-		AckWaitInSecs: 10,
-	}
-	if err := ss.UpdateSub(updatedSub); err != nil {
-		t.Fatalf("Error updating subscription: %v", err)
-	}
-	// Store m3 for this subscription
-	storeSubPending(t, cs, "foo", subID, m3.Sequence)
-
-	// Store a subscription with update only, should be recovered
-	subWithoutNew := &spb.SubState{
-		ID:            subID + 1,
-		ClientID:      "me",
-		Inbox:         nuidGen.Next(),
-		AckInbox:      nuidGen.Next(),
-		AckWaitInSecs: 10,
-	}
-	if err := ss.UpdateSub(subWithoutNew); err != nil {
-		t.Fatalf("Error updating subscription: %v", err)
-	}
-
-	// Restart server
-	fs.Close()
-	fs, state := openDefaultFileStore(t)
-	defer fs.Close()
-	subs := getRecoveredSubs(t, state, "foo", 2)
-	// Subscriptions are recovered from a map, and then returned as an array.
-	// There is no guarantee that we get them in the order they were persisted.
-	for _, s := range subs {
-		if s.Sub.ID == subID {
-			// Check that sub's last seq is m3.Sequence
-			if s.Sub.LastSent != m3.Sequence {
-				t.Fatalf("Expected LastSent to be %v, got %v", m3.Sequence, s.Sub.LastSent)
-			}
-			// Update lastSent since we know it is correct.
-			updatedSub.LastSent = m3.Sequence
-			// Now compare that what we recovered is same that we used to update.
-			if !reflect.DeepEqual(*s.Sub, *updatedSub) {
-				t.Fatalf("Expected subscription to be %v, got %v", updatedSub, s.Sub)
-			}
-		} else if s.Sub.ID == subID+1 {
-			// Compare that what we recovered is same that we used to update.
-			if !reflect.DeepEqual(*s.Sub, *subWithoutNew) {
-				t.Fatalf("Expected subscription to be %v, got %v", subWithoutNew, s.Sub)
-			}
-		} else {
-			t.Fatalf("Unexpected subscription ID: %v", s.Sub.ID)
-		}
-	}
-}
-
 func TestFSBadSubFile(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -757,7 +501,7 @@ func TestFSNoReferenceToCallerSubState(t *testing.T) {
 	// Get the fileStore sub object
 	fss := ss.(*FileSubStore)
 	fss.RLock()
-	storeSub := fss.subs[sub.ID].sub
+	storeSub := fss.subs[sub.ID].(*subscription).sub
 	fss.RUnlock()
 	// Content of filestore's subscription must match sub
 	if !reflect.DeepEqual(*sub, *storeSub) {
@@ -779,7 +523,7 @@ func TestFSCompactSubsUpdateLastSent(t *testing.T) {
 	cs := storeCreateChannel(t, s, "foo")
 	total := 10
 	for i := 0; i < total; i++ {
-		storeMsg(t, cs, "foo", []byte("hello"))
+		storeMsg(t, cs, "foo", uint64(i+1), []byte("hello"))
 	}
 	expectedLastSent := 5
 	subID := storeSub(t, cs, "foo")
@@ -807,6 +551,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
+	seq := uint64(1)
 	sizes := []int{0, subBufMinShrinkSize - subBufMinShrinkSize/10, subBufMinShrinkSize, 3*subBufMinShrinkSize + subBufMinShrinkSize/2}
 	for _, size := range sizes {
 
@@ -815,7 +560,8 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 		defer fs.Close()
 
 		cs := storeCreateChannel(t, fs, "foo")
-		m := storeMsg(t, cs, "foo", []byte("hello"))
+		m := storeMsg(t, cs, "foo", seq, []byte("hello"))
+		seq++
 
 		// Perform some activities on subscriptions file
 		subID := storeSub(t, cs, "foo")
@@ -994,7 +740,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 	}
 }
 
-func TestFSDeleteSubError(t *testing.T) {
+func TestFSSubAPIsOnFileErrors(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
@@ -1003,13 +749,47 @@ func TestFSDeleteSubError(t *testing.T) {
 	defer fs.Close()
 
 	cs := storeCreateChannel(t, fs, "foo")
-	subid := storeSub(t, cs, "foo")
 	ss := cs.Subs.(*FileSubStore)
 	ss.Lock()
 	ss.file.handle.Close()
 	ss.Unlock()
 
-	if err := ss.DeleteSub(subid); err == nil {
-		t.Fatal("Expected error on sub delete, got none")
+	expectToFail := func(f func() error) {
+		if err := f(); err == nil {
+			stackFatalf(t, "Expected to get error about file being closed, got none")
+		}
+	}
+	expectToFail(func() error { return cs.Subs.CreateSub(&spb.SubState{}) })
+	expectToFail(func() error { return cs.Subs.UpdateSub(&spb.SubState{}) })
+	expectToFail(func() error { return cs.Subs.AddSeqPending(1, 1) })
+	expectToFail(func() error { return cs.Subs.AckSeqPending(1, 1) })
+	expectToFail(func() error { return cs.Subs.DeleteSub(1) })
+}
+
+func TestFSCreateSubNotCountedOnError(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	// No buffer for this test
+	fs := createDefaultFileStore(t, BufferSize(0))
+	defer fs.Close()
+
+	cs := storeCreateChannel(t, fs, "foo")
+	ss := cs.Subs.(*FileSubStore)
+	ss.Lock()
+	ss.file.handle.Close()
+	ss.Unlock()
+
+	sub := &spb.SubState{}
+	if err := ss.CreateSub(sub); err == nil {
+		t.Fatal("Expected error on sub create, got none")
+	}
+
+	// Verify that the subscriptions' map is empty
+	ss.RLock()
+	lm := len(ss.subs)
+	ss.RUnlock()
+	if lm != 0 {
+		t.Fatalf("Expected subs map to be empty, got %v", lm)
 	}
 }

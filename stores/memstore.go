@@ -61,7 +61,7 @@ func (ms *MemoryStore) CreateChannel(channel string) (*Channel, error) {
 	msgStore.init(channel, ms.log, &channelLimits.MsgStoreLimits)
 
 	subStore := &MemorySubStore{}
-	subStore.init(channel, ms.log, &channelLimits.SubStoreLimits)
+	subStore.init(ms.log, &channelLimits.SubStoreLimits)
 
 	c := &Channel{
 		Subs: subStore,

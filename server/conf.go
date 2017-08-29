@@ -375,11 +375,9 @@ func parseFileOptions(itf interface{}, opts *Options) error {
 // file contanining both Streaming and NATS parameters.
 func ProcessConfigFiles(stanConfig, natsdConfig string) (*Options, *natsd.Options, error) {
 	stanOpts := GetDefaultOptions()
-	// Apply default values that we would have set in flag.XXXVar() here...
-	natsOpts := &natsd.Options{Logtime: true}
-
 	if stanConfig == "" && natsdConfig == "" {
-		return stanOpts, natsOpts, nil
+		// Apply default values that we would have set in flag.XXXVar() here...
+		return stanOpts, &natsd.Options{Logtime: true}, nil
 	}
 
 	// If stan config (-sc or --stan_config) file is provided, uses this one,
@@ -397,10 +395,20 @@ func ProcessConfigFiles(stanConfig, natsdConfig string) (*Options, *natsd.Option
 	if cfgFile == "" && stanConfig != "" {
 		cfgFile = stanConfig
 	}
-	opts, err := natsd.ProcessConfigFile(cfgFile)
+	natsOpts, err := natsd.ProcessConfigFile(cfgFile)
 	if err != nil {
 		return nil, nil, err
 	}
-	natsOpts = opts
+	// Hack for now to know if Logtime was explicitly set to `false` in config file.
+	if !natsOpts.Logtime {
+		m, err := conf.ParseFile(cfgFile)
+		if err != nil {
+			return nil, nil, err
+		}
+		// If the option is not set in the file, set it to our default of `true`.
+		if _, present := m["logtime"]; !present {
+			natsOpts.Logtime = true
+		}
+	}
 	return stanOpts, natsOpts, nil
 }

@@ -386,6 +386,13 @@ func overrideWithCmdLineParams(sopts *stand.Options, nopts *natsd.Options) error
 					return
 				}
 				o.SetInt(int64(dur))
+			case "RoutesStr":
+				routesStr := val.(string)
+				routesUrls := natsd.RoutesFromStr(routesStr)
+				if routesUrls != nil {
+					nopts.Routes = routesUrls
+					nopts.RoutesStr = routesStr
+				}
 			default:
 				o.SetString(val.(string))
 			}

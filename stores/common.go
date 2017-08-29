@@ -32,14 +32,16 @@ type genericStore struct {
 	channels map[string]*Channel
 }
 
+// Used as the value for the genericSubStore's subs map.
+var emptySub = struct{}{}
+
 // genericSubStore is the generic store implementation that manages subscriptions
 // for a given channel.
 type genericSubStore struct {
 	commonStore
-	limits    SubStoreLimits
-	subject   string // Can't be wildcard
-	subsCount int
-	maxSubID  uint64
+	limits   SubStoreLimits
+	subs     map[uint64]interface{}
+	maxSubID uint64
 }
 
 // genericMsgStore is the generic store implementation that manages messages
@@ -284,10 +286,10 @@ func (gms *genericMsgStore) Close() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // init initializes the structure of a generic sub store
-func (gss *genericSubStore) init(channel string, log logger.Logger, limits *SubStoreLimits) {
-	gss.subject = channel
+func (gss *genericSubStore) init(log logger.Logger, limits *SubStoreLimits) {
 	gss.limits = *limits
 	gss.log = log
+	gss.subs = make(map[uint64]interface{})
 }
 
 // CreateSub records a new subscription represented by SubState. On success,
@@ -295,7 +297,7 @@ func (gss *genericSubStore) init(channel string, log logger.Logger, limits *SubS
 // by the other SubStore methods.
 func (gss *genericSubStore) CreateSub(sub *spb.SubState) error {
 	gss.Lock()
-	err := gss.createSub(sub)
+	err := gss.createSubLocked(sub)
 	gss.Unlock()
 	return err
 }
@@ -305,19 +307,22 @@ func (gss *genericSubStore) UpdateSub(sub *spb.SubState) error {
 	return nil
 }
 
-// createSub is the unlocked version of CreateSub that can be used by
-// non-generic implementations.
-func (gss *genericSubStore) createSub(sub *spb.SubState) error {
-	if gss.limits.MaxSubscriptions > 0 && gss.subsCount >= gss.limits.MaxSubscriptions {
+// createSubLocked checks that the number of subscriptions is below the max
+// and if so, assigns a new subscription ID and keep track of it in a map.
+// Lock is assumed to be held on entry.
+func (gss *genericSubStore) createSubLocked(sub *spb.SubState) error {
+	if gss.limits.MaxSubscriptions > 0 && len(gss.subs) >= gss.limits.MaxSubscriptions {
 		return ErrTooManySubs
 	}
 
 	// Bump the max value before assigning it to the new subscription.
 	gss.maxSubID++
-	gss.subsCount++
 
 	// This new subscription has the max value.
 	sub.ID = gss.maxSubID
+	// Store anything. Some implementations may replace with specific
+	// object.
+	gss.subs[sub.ID] = emptySub
 
 	return nil
 }
@@ -325,7 +330,7 @@ func (gss *genericSubStore) createSub(sub *spb.SubState) error {
 // DeleteSub invalidates this subscription.
 func (gss *genericSubStore) DeleteSub(subid uint64) error {
 	gss.Lock()
-	gss.subsCount--
+	delete(gss.subs, subid)
 	gss.Unlock()
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
+	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 )
@@ -679,4 +680,184 @@ func TestPersistentStoreMultipleShadowQSubs(t *testing.T) {
 	if shadow.ID != 2 || lastSent != 2 {
 		t.Fatalf("Recovered shadow queue sub should be ID 2, lastSent 2, got %v, %v", shadow.ID, lastSent)
 	}
+}
+
+func TestQueueWithOneStalledMemberDoesNotStallGroup(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	ch := make(chan bool, 1)
+	// Create a member with low MaxInflight and Manual ack mode
+	if _, err := sc.QueueSubscribe("foo", "queue",
+		func(_ *stan.Msg) {
+			ch <- true
+		},
+		stan.MaxInflight(1),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Check message is received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Create another member with higher MaxInFlight and manual ack mode too.
+	count := 0
+	total := 5
+	if _, err := sc.QueueSubscribe("foo", "queue",
+		func(_ *stan.Msg) {
+			count++
+			if count == total {
+				ch <- true
+			}
+		},
+		stan.MaxInflight(10),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Send messages and ensure they are received by 2nd member
+	for i := 0; i < total; i++ {
+		if err := sc.Publish("foo", []byte("msg")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+}
+
+type queueGroupStalledMsgStore struct {
+	stores.MsgStore
+	lookupCh chan struct{}
+}
+
+func (s *queueGroupStalledMsgStore) Lookup(seq uint64) (*pb.MsgProto, error) {
+	s.lookupCh <- struct{}{}
+	return s.MsgStore.Lookup(seq)
+}
+
+func TestQueueGroupStalledSemantics(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	opts := getTestDefaultOptsForPersistentStore()
+	s := runServerWithOpts(t, opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc, nc := createConnectionWithNatsOpts(t, clientName, nats.ReconnectWait(50*time.Millisecond))
+	defer nc.Close()
+	defer sc.Close()
+
+	ch := make(chan bool)
+	cb := func(m *stan.Msg) {
+		ch <- true
+	}
+	// Create a member with manual ack and MaxInFlight of 1
+	if _, err := sc.QueueSubscribe("foo", "queue", cb,
+		stan.SetManualAckMode(), stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// This member is stalled, and since there is only one member, the
+	// group itself should be stalled.
+	checkStalled := func(expected bool) {
+		var stalled bool
+		timeout := time.Now().Add(time.Second)
+		for time.Now().Before(timeout) {
+			c := channelsGet(t, s.channels, "foo")
+			c.ss.RLock()
+			qs := c.ss.qsubs["queue"]
+			c.ss.RUnlock()
+			qs.RLock()
+			stalled = qs.stalledSubCount == len(qs.subs)
+			qs.RUnlock()
+			if stalled != expected {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
+			break
+		}
+		if stalled != expected {
+			stackFatalf(t, "Expected stalled to be %v, got %v", expected, stalled)
+		}
+	}
+	checkStalled(true)
+
+	// Create another member that has a higher MaxInFlight
+	if _, err := sc.QueueSubscribe("foo", "queue", cb,
+		stan.SetManualAckMode(), stan.MaxInflight(3)); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// That should make the queue sub not stalled
+	checkStalled(false)
+	// Publish 3 messages, check state for each iteration
+	for i := 0; i < 3; i++ {
+		if err := sc.Publish("foo", []byte("msg")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+		if err := Wait(ch); err != nil {
+			t.Fatal("Did not get our message")
+		}
+		stalled := i == 2
+		checkStalled(stalled)
+	}
+	checkStalled(true)
+	// Replace store with one that will report if Lookup was used
+	s.channels.Lock()
+	c := s.channels.channels["foo"]
+	ms := &queueGroupStalledMsgStore{c.store.Msgs, make(chan struct{}, 2)}
+	c.store.Msgs = ms
+	s.channels.Unlock()
+	// Publish a message
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	// Check that no Lookup was done
+	select {
+	case <-ms.lookupCh:
+		t.Fatalf("Lookup should not have been invoked")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Restart server...
+	s.Shutdown()
+	s = runServerWithOpts(t, opts, nil)
+	// Serve will check if messages need to be redelivered, but since it
+	// is less than the AckWait of 30 seconds, it won't send them. Still,
+	// they are looked up at this point. So wait a little before swapping
+	// with mock store.
+	time.Sleep(100 * time.Millisecond)
+
+	// Replace store with one that will report if Lookup was used
+	s.channels.Lock()
+	c = s.channels.channels["foo"]
+	orgMS := c.store.Msgs
+	ms = &queueGroupStalledMsgStore{c.store.Msgs, make(chan struct{}, 2)}
+	c.store.Msgs = ms
+	s.channels.Unlock()
+
+	// Publish a message
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	select {
+	case <-ms.lookupCh:
+		t.Fatalf("Lookup should not have been invoked")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Then replace store with original one before exit.
+	s.channels.Lock()
+	c = s.channels.channels["foo"]
+	c.store.Msgs = orgMS
+	s.channels.Unlock()
 }

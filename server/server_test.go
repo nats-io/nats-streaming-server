@@ -21,9 +21,10 @@ import (
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nuid"
+
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/stores"
-	"github.com/nats-io/nuid"
 )
 
 const (
@@ -372,27 +373,6 @@ func (d *dummyLogger) Tracef(format string, args ...interface{})  { d.log(format
 func (d *dummyLogger) Errorf(format string, args ...interface{})  { d.log(format, args...) }
 func (d *dummyLogger) Fatalf(format string, args ...interface{})  { d.log(format, args...) }
 
-// RunServerWithDebugTrace is a helper to assist debugging
-func RunServerWithDebugTrace(opts *Options, enableDebug, enableTrace bool) (*StanServer, error) {
-	var sOpts *Options
-
-	if opts == nil {
-		sOpts = GetDefaultOptions()
-	} else {
-		sOpts = opts.Clone()
-	}
-
-	nOpts := natsd.Options{}
-
-	sOpts.Debug = enableDebug
-	sOpts.Trace = enableTrace
-	nOpts.NoLog = false
-	nOpts.NoSigs = true
-
-	sOpts.EnableLogging = true
-	return RunServerWithOpts(sOpts, &nOpts)
-}
-
 func TestChannelStore(t *testing.T) {
 	s := runServer(t, clusterName)
 	defer s.Shutdown()
@@ -437,8 +417,8 @@ func TestChannelStore(t *testing.T) {
 	if _, _, err := cs.msgsState("baz"); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("Channel baz does not exist, call should have failed, got %v", err)
 	}
-	c.store.Msgs.Store(&pb.MsgProto{Data: []byte("foo")})
-	c4.store.Msgs.Store(&pb.MsgProto{Data: []byte("bar")})
+	c.store.Msgs.Store(&pb.MsgProto{Sequence: 1, Data: []byte("foo")})
+	c4.store.Msgs.Store(&pb.MsgProto{Sequence: 1, Data: []byte("bar")})
 	if n, _, err := cs.msgsState(""); n != 2 || err != nil {
 		t.Fatalf("Expected 2 messages, got %v err=%v", n, err)
 	}

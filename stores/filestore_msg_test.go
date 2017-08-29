@@ -32,46 +32,6 @@ func init() {
 	sliceCloseInterval = testDefaultSliceCLoseInterval
 }
 
-func TestFSBasicMsgStore(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testBasicMsgStore(t, fs)
-}
-
-func TestFSMsgsState(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testMsgsState(t, fs)
-}
-
-func TestFSMaxMsgs(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testMaxMsgs(t, fs)
-}
-
-func TestFSMaxAge(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testMaxAge(t, fs)
-}
-
 func TestFSBadMsgFile(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -81,7 +41,7 @@ func TestFSBadMsgFile(t *testing.T) {
 
 	cs := storeCreateChannel(t, fs, "foo")
 	// Store a message
-	storeMsg(t, cs, "foo", []byte("msg"))
+	storeMsg(t, cs, "foo", 1, []byte("msg"))
 
 	msgStore := cs.Msgs.(*FileMsgStore)
 	firstSliceFileName := msgStore.files[1].file.name
@@ -236,7 +196,7 @@ func TestFSStoreMsgCausesFlush(t *testing.T) {
 	defer fs.Close()
 
 	cs := storeCreateChannel(t, fs, "foo")
-	m1 := storeMsg(t, cs, "foo", []byte("hello"))
+	m1 := storeMsg(t, cs, "foo", 1, []byte("hello"))
 	ms := cs.Msgs.(*FileMsgStore)
 	ms.RLock()
 	buffered := ms.bw.buf.Buffered()
@@ -249,7 +209,7 @@ func TestFSStoreMsgCausesFlush(t *testing.T) {
 		t.Fatalf("Expected 1 buffered message, got %v", bufferedMsgs)
 	}
 
-	m2 := storeMsg(t, cs, "foo", []byte("hello again!"))
+	m2 := storeMsg(t, cs, "foo", 2, []byte("hello again!"))
 	ms.RLock()
 	buffered = ms.bw.buf.Buffered()
 	bufferedMsgs = len(ms.bufferedMsgs)
@@ -264,7 +224,7 @@ func TestFSStoreMsgCausesFlush(t *testing.T) {
 	// Now store a message that is bigger than the buffer, it should be
 	// directly written to file
 	payload := make([]byte, 200)
-	storeMsg(t, cs, "foo", payload)
+	storeMsg(t, cs, "foo", 3, payload)
 	ms.RLock()
 	buffered = ms.bw.buf.Buffered()
 	bufferedMsgs = len(ms.bufferedMsgs)
@@ -285,8 +245,8 @@ func TestFSRecoveryFileSlices(t *testing.T) {
 	defer fs.Close()
 
 	cs := storeCreateChannel(t, fs, "foo")
-	storeMsg(t, cs, "foo", []byte("msg1"))
-	storeMsg(t, cs, "foo", []byte("msg2"))
+	storeMsg(t, cs, "foo", 1, []byte("msg1"))
+	storeMsg(t, cs, "foo", 2, []byte("msg2"))
 
 	// Close the store
 	fs.Close()
@@ -322,7 +282,7 @@ func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
 	cs := storeCreateChannel(t, fs, "foo")
 	msg := []byte("hello")
 	for i := 0; i < 50; i++ {
-		storeMsg(t, cs, "foo", msg)
+		storeMsg(t, cs, "foo", uint64(i+1), msg)
 	}
 
 	fs.Close()
@@ -339,7 +299,7 @@ func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
 	}
 	cs = getRecoveredChannel(t, state, "foo")
 	for i := 0; i < 10; i++ {
-		storeMsg(t, cs, "foo", msg)
+		storeMsg(t, cs, "foo", uint64(i+51), msg)
 	}
 
 	first, last := msgStoreFirstAndLastSequence(t, cs.Msgs)
@@ -348,35 +308,6 @@ func TestFSNoPanicAfterRestartWithSmallerLimits(t *testing.T) {
 	if first != expectedFirst || last != expectedLast {
 		t.Fatalf("Expected first/last to be %v/%v, got %v/%v",
 			expectedFirst, expectedLast, first, last)
-	}
-}
-
-func TestFSGetSeqFromTimestamp(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	fs := createDefaultFileStore(t)
-	defer fs.Close()
-
-	testGetSeqFromStartTime(t, fs)
-
-	// Restart the server, make sure we can get the expected sequence
-	times := []int64{
-		time.Now().UnixNano() - int64(time.Hour),
-		time.Now().UnixNano() + int64(time.Hour),
-	}
-	expectedSeqs := []uint64{1, 101}
-
-	for i := 0; i < len(times); i++ {
-		fs.Close()
-		fs, state := openDefaultFileStore(t)
-		defer fs.Close()
-
-		cs := getRecoveredChannel(t, state, "foo")
-		seq := msgStoreGetSequenceFromTimestamp(t, cs.Msgs, times[i])
-		if seq != expectedSeqs[i] {
-			t.Fatalf("Expected seq to be %v, got %v", expectedSeqs[i], seq)
-		}
 	}
 }
 
@@ -395,7 +326,7 @@ func TestFSFileSlicesClosed(t *testing.T) {
 	payload := []byte("hello")
 	cs := storeCreateChannel(t, fs, "foo")
 	for i := 0; i < limits.MaxMsgs; i++ {
-		storeMsg(t, cs, "foo", payload)
+		storeMsg(t, cs, "foo", uint64(i+1), payload)
 	}
 	ms := cs.Msgs.(*FileMsgStore)
 	ms.Flush()
@@ -453,7 +384,7 @@ func TestFSRecoverWithoutIndexFiles(t *testing.T) {
 	msgs := make([]*pb.MsgProto, 0, total)
 	cs := storeCreateChannel(t, fs, "foo")
 	for i := 0; i < total; i++ {
-		msgs = append(msgs, storeMsg(t, cs, "foo", payload))
+		msgs = append(msgs, storeMsg(t, cs, "foo", uint64(i+1), payload))
 	}
 	msgStore := cs.Msgs.(*FileMsgStore)
 	// Get the index file names
@@ -492,7 +423,7 @@ func TestFSEmptySlice(t *testing.T) {
 	defer fs.Close()
 
 	cs := storeCreateChannel(t, fs, "foo")
-	m := storeMsg(t, cs, "foo", []byte("hello"))
+	m := storeMsg(t, cs, "foo", 1, []byte("hello"))
 
 	fs.Close()
 
@@ -537,7 +468,7 @@ func TestFSRemoveFileSlices(t *testing.T) {
 	payload := []byte("hello")
 	cs := storeCreateChannel(t, fs, "foo")
 	for i := 0; i < total; i++ {
-		storeMsg(t, cs, "foo", payload)
+		storeMsg(t, cs, "foo", uint64(i+1), payload)
 	}
 	// Check first and last indexes
 	ms := cs.Msgs.(*FileMsgStore)
@@ -578,7 +509,7 @@ func TestFSFirstEmptySliceRemovedOnCreateNewSlice(t *testing.T) {
 
 	cs := storeCreateChannel(t, fs, "foo")
 	// Store a message
-	storeMsg(t, cs, "foo", []byte("test"))
+	storeMsg(t, cs, "foo", 1, []byte("test"))
 
 	// Wait for message to expire
 	timeout := time.Now().Add(5 * time.Second)
@@ -627,7 +558,7 @@ func TestFSFirstEmptySliceRemovedOnCreateNewSlice(t *testing.T) {
 	}
 
 	// Send another message...
-	storeMsg(t, cs, "foo", []byte("test"))
+	storeMsg(t, cs, "foo", 2, []byte("test"))
 
 	timeout = time.Now().Add(5 * time.Second)
 	ok = false
@@ -665,8 +596,10 @@ func TestFSMsgStoreVariousBufferSizes(t *testing.T) {
 		fs := createDefaultFileStore(t, BufferSize(size))
 		defer fs.Close()
 
+		seq := uint64(1)
 		cs := storeCreateChannel(t, fs, "foo")
-		storeMsg(t, cs, "foo", []byte("hello"))
+		storeMsg(t, cs, "foo", seq, []byte("hello"))
+		seq++
 
 		// Get FileMsgStore
 		ms := cs.Msgs.(*FileMsgStore)
@@ -713,8 +646,9 @@ func TestFSMsgStoreVariousBufferSizes(t *testing.T) {
 				ms.RLock()
 				before := ms.bw.buf.Buffered()
 				ms.RUnlock()
-				storeMsg(t, cs, "foo", []byte("hello"))
+				storeMsg(t, cs, "foo", seq, []byte("hello"))
 				ms.RLock()
+				seq++
 				if ms.bw.buf.Buffered() > before {
 					total += ms.bw.buf.Buffered() - before
 				} else {
@@ -736,7 +670,8 @@ func TestFSMsgStoreVariousBufferSizes(t *testing.T) {
 		} else {
 			// Just write a bunch of stuff
 			for i := 0; i < 50; i++ {
-				storeMsg(t, cs, "foo", []byte("hello"))
+				storeMsg(t, cs, "foo", seq, []byte("hello"))
+				seq++
 			}
 		}
 
@@ -851,7 +786,7 @@ func TestFSArchiveScript(t *testing.T) {
 
 	cs := storeCreateChannel(t, fs, "foo")
 	// Store one message
-	storeMsg(t, cs, "foo", []byte("msg1"))
+	storeMsg(t, cs, "foo", 1, []byte("msg1"))
 
 	ms := cs.Msgs.(*FileMsgStore)
 	ms.RLock()
@@ -860,7 +795,7 @@ func TestFSArchiveScript(t *testing.T) {
 
 	// Store one more message. Should move to next slice and invoke script
 	// for first slice.
-	storeMsg(t, cs, "foo", []byte("msg2"))
+	storeMsg(t, cs, "foo", 2, []byte("msg2"))
 
 	// Original file should not be present
 	ok := false
@@ -909,11 +844,11 @@ func TestFSArchiveScript(t *testing.T) {
 
 	cs = storeCreateChannel(t, fs, "foo")
 	// Store one message
-	storeMsg(t, cs, "foo", []byte("msg1"))
+	storeMsg(t, cs, "foo", 1, []byte("msg1"))
 
 	// Store one more message. Should move to next slice and invoke script
 	// for first slice.
-	storeMsg(t, cs, "foo", []byte("msg2"))
+	storeMsg(t, cs, "foo", 2, []byte("msg2"))
 
 	// Original file should not be present
 	ok = false
@@ -962,7 +897,7 @@ func TestFSNoSliceLimitAndNoChannelLimits(t *testing.T) {
 	msg := []byte("msg")
 	cs := storeCreateChannel(t, fs, "foo")
 	for i := 0; i < total; i++ {
-		storeMsg(t, cs, "foo", msg)
+		storeMsg(t, cs, "foo", uint64(i+1), msg)
 	}
 
 	ms := cs.Msgs.(*FileMsgStore)
@@ -999,7 +934,7 @@ func TestFSMsgRemovedWhileBuffered(t *testing.T) {
 	msg := []byte("msg")
 	cs := storeCreateChannel(t, fs, "foo")
 	for i := 0; i < total; i++ {
-		storeMsg(t, cs, "foo", msg)
+		storeMsg(t, cs, "foo", uint64(i+1), msg)
 	}
 
 	fs.Close()
@@ -1032,7 +967,7 @@ func TestFSSliceLimitsBasedOnChannelLimits(t *testing.T) {
 	}
 
 	cs := storeCreateChannel(t, fs, "foo")
-	storeMsg(t, cs, "foo", []byte("msg"))
+	storeMsg(t, cs, "foo", 1, []byte("msg"))
 
 	ms := cs.Msgs.(*FileMsgStore)
 	ms.RLock()
@@ -1065,7 +1000,7 @@ func TestFSSliceLimitsBasedOnChannelLimits(t *testing.T) {
 	}
 
 	cs = storeCreateChannel(t, fs, "foo")
-	storeMsg(t, cs, "foo", []byte("msg"))
+	storeMsg(t, cs, "foo", 2, []byte("msg"))
 
 	ms = cs.Msgs.(*FileMsgStore)
 	ms.RLock()
@@ -1098,7 +1033,7 @@ func TestFSRecoverSlicesOutOfOrder(t *testing.T) {
 	cs := storeCreateChannel(t, fs, "foo")
 	// Create slices
 	for i := 0; i < total; i++ {
-		storeMsg(t, cs, "foo", msg)
+		storeMsg(t, cs, "foo", uint64(i+1), msg)
 	}
 
 	ms := cs.Msgs.(*FileMsgStore)
@@ -1143,71 +1078,7 @@ func TestFSRecoverSlicesOutOfOrder(t *testing.T) {
 	}
 }
 
-func TestFirstAndLastMsg(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-
-	limit := testDefaultStoreLimits
-	limit.MaxAge = time.Second
-	fs, _, err := newFileStore(t, defaultDataStore, &limit)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	defer fs.Close()
-
-	msg := []byte("msg")
-	cs := storeCreateChannel(t, fs, "foo")
-	storeMsg(t, cs, "foo", msg)
-	storeMsg(t, cs, "foo", msg)
-
-	if m := msgStoreFirstMsg(t, cs.Msgs); m.Sequence != 1 {
-		t.Fatalf("Unexpected first message: %v", m)
-	}
-	if m := msgStoreLastMsg(t, cs.Msgs); m.Sequence != 2 {
-		t.Fatalf("Unexpected last message: %v", m)
-	}
-	// Wait for all messages to expire
-	timeout := time.Now().Add(3 * time.Second)
-	ok := false
-	for time.Now().Before(timeout) {
-		if n, _ := msgStoreState(t, cs.Msgs); n == 0 {
-			ok = true
-			break
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	if !ok {
-		t.Fatal("Timed-out waiting for messages to expire")
-	}
-	ms := cs.Msgs.(*FileMsgStore)
-	// By-pass the FirstMsg() and LastMsg() API to make sure that
-	// we don't update based on lookup
-	ms.RLock()
-	firstMsg := ms.firstMsg
-	lastMsg := ms.lastMsg
-	ms.RUnlock()
-	if firstMsg != nil {
-		t.Fatalf("Unexpected first message: %v", firstMsg)
-	}
-	if lastMsg != nil {
-		t.Fatalf("Unexpected last message: %v", lastMsg)
-	}
-	// Store two new messages and check first/last updated correctly
-	storeMsg(t, cs, "foo", msg)
-	storeMsg(t, cs, "foo", msg)
-	ms.RLock()
-	firstMsg = ms.firstMsg
-	lastMsg = ms.lastMsg
-	ms.RUnlock()
-	if firstMsg == nil || firstMsg.Sequence != 3 {
-		t.Fatalf("Unexpected first message: %v", firstMsg)
-	}
-	if lastMsg == nil || lastMsg.Sequence != 4 {
-		t.Fatalf("Unexpected last message: %v", lastMsg)
-	}
-}
-
-func TestBufShrink(t *testing.T) {
+func TestFSBufShrink(t *testing.T) {
 	if disableBufferWriters {
 		t.SkipNow()
 	}
@@ -1219,7 +1090,7 @@ func TestBufShrink(t *testing.T) {
 
 	msg := make([]byte, 1024*1024)
 	cs := storeCreateChannel(t, fs, "foo")
-	storeMsg(t, cs, "foo", msg)
+	storeMsg(t, cs, "foo", 1, msg)
 
 	ms := cs.Msgs.(*FileMsgStore)
 	// Check that buffer size is at least 1MB
@@ -1268,7 +1139,7 @@ func TestFSCacheList(t *testing.T) {
 	cs := storeCreateChannel(t, fs, "foo")
 	// Store messages 1, 2, 3
 	for i := 0; i < 3; i++ {
-		storeMsg(t, cs, "foo", msg)
+		storeMsg(t, cs, "foo", uint64(i+1), msg)
 	}
 
 	ms := cs.Msgs.(*FileMsgStore)
@@ -1328,7 +1199,9 @@ func TestFSMsgCache(t *testing.T) {
 
 	payload := []byte("data")
 	cs := storeCreateChannel(t, fs, "foo")
-	msg := storeMsg(t, cs, "foo", payload)
+	seq := uint64(1)
+	msg := storeMsg(t, cs, "foo", seq, payload)
+	seq++
 
 	ms := cs.Msgs.(*FileMsgStore)
 	// Wait for stored message to be removed from cache
@@ -1384,7 +1257,8 @@ func TestFSMsgCache(t *testing.T) {
 	i := 0
 	cs = storeCreateChannel(t, fs, "bar")
 	for time.Now().Before(end) {
-		storeMsg(t, cs, "bar", payload)
+		storeMsg(t, cs, "bar", seq, payload)
+		seq++
 		i++
 		if i == 100 {
 			time.Sleep(15 * time.Millisecond)
@@ -1411,4 +1285,27 @@ func TestFSMsgStoreBackgroundTaskCrash(t *testing.T) {
 	// Wait for background task to execute
 	time.Sleep(50 * time.Millisecond)
 	// It should not have crashed.
+}
+
+func TestFSPanicOnStoreCloseWhileMsgsExpire(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	limits := testDefaultStoreLimits
+	limits.MaxAge = 30 * time.Millisecond
+
+	fs, _, err := newFileStore(t, defaultDataStore, &limits)
+	if err != nil {
+		t.Fatalf("Unable to create store: %v", err)
+	}
+	defer fs.Close()
+
+	cs := storeCreateChannel(t, fs, "foo")
+
+	for i := 0; i < 100; i++ {
+		storeMsg(t, cs, "foo", uint64(i+1), []byte("msg"))
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	fs.Close()
 }
