@@ -268,7 +268,7 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 		return nil, err
 	}
 	c.nextSequence = lastSequence + 1
-	if s.state == Clustered {
+	if s.isClustered() {
 		if err := assignChannelRaft(s, c); err != nil {
 			return nil, err
 		}
@@ -651,6 +651,10 @@ type StanServer struct {
 	trace bool
 	debug bool
 	log   *logger.StanLogger
+}
+
+func (s *StanServer) isClustered() bool {
+	return len(s.opts.ClusterPeers) > 0
 }
 
 // subStore holds all known state for all subscriptions
@@ -2397,7 +2401,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 		return
 	}
 
-	if s.state == Clustered {
+	if s.isClustered() {
 		c, err := s.lookupOrCreateChannel(pm.Subject)
 		if err != nil {
 			s.log.Errorf("Failed to lookup or create channel: %v", err)
@@ -2928,7 +2932,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 			succeeded        []*ioPendingMsg
 			failed           []*ioPendingMsg
 		)
-		if s.state == Clustered {
+		if s.isClustered() {
 			futuresMap, err = s.replicate(iopms)
 			if err != nil {
 				failed = iopms
@@ -3015,7 +3019,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 			replicateFutures := storeIOPendingMsgs(batch)
 
 			// If clustered, wait on the result of replication.
-			if s.state == Clustered {
+			if s.isClustered() {
 				for i, future := range replicateFutures {
 					iopm = pendingMsgs[i]
 					if err := future.Error(); err != nil {
@@ -3493,7 +3497,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	// In clustered mode, drop the request if we are not the channel leader.
 	// Another server will handle it.
-	if s.state == Clustered && !c.isLeader() {
+	if s.isClustered() && !c.isLeader() {
 		return
 	}
 

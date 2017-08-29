@@ -58,7 +58,9 @@ func getChannelLeader(t *testing.T, channel string, timeout time.Duration, serve
 			if s.state == Shutdown {
 				continue
 			}
+			s.channels.Lock()
 			c := s.channels.channels[channel]
+			s.channels.Unlock()
 			if c == nil || c.raft == nil {
 				continue
 			}
@@ -297,7 +299,9 @@ func TestClusteringBasic(t *testing.T) {
 
 	// Verify the server stores are consistent.
 	for _, server := range servers {
+		server.channels.Lock()
 		store := server.channels.channels[channel].store.Msgs
+		server.channels.Unlock()
 		first, last, err := store.FirstAndLastSequence()
 		if err != nil {
 			t.Fatalf("Error getting sequence numbers: %v", err)
