@@ -271,7 +271,7 @@ func TestClusteringBasic(t *testing.T) {
 	defer s.Shutdown()
 
 	// Ensure there is still a leader.
-	leader = getChannelLeader(t, channel, 5*time.Second, servers...)
+	getChannelLeader(t, channel, 5*time.Second, servers...)
 
 	// Publish one more message.
 	if err := sc.Publish(channel, []byte("goodbye")); err != nil {

@@ -52,7 +52,6 @@ type genericMsgStore struct {
 	subject    string // Can't be wildcard
 	first      uint64
 	last       uint64
-	lTimestamp int64 // Timestamp of last message
 	totalCount int
 	totalBytes uint64
 	hitLimit   bool // indicates if store had to drop messages due to limit
