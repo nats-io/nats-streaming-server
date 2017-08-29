@@ -2,15 +2,6 @@
 	"version": 0,
 	"dependencies": [
 		{
-			"importpath": "github.com/DataDog/datadog-go/statsd",
-			"repository": "https://github.com/DataDog/datadog-go",
-			"vcs": "git",
-			"revision": "b10af4b12965a1ad08d164f57d14195b4140d8de",
-			"branch": "master",
-			"path": "/statsd",
-			"notests": true
-		},
-		{
 			"importpath": "github.com/armon/go-metrics",
 			"repository": "https://github.com/armon/go-metrics",
 			"vcs": "git",
@@ -32,14 +23,6 @@
 			"repository": "https://github.com/boltdb/bolt",
 			"vcs": "git",
 			"revision": "2f1ce7a837dcb8da3ec595b1dac9d0632f0f99e8",
-			"branch": "master",
-			"notests": true
-		},
-		{
-			"importpath": "github.com/circonus-labs/circonus-gometrics",
-			"repository": "https://github.com/circonus-labs/circonus-gometrics",
-			"vcs": "git",
-			"revision": "6731e6ad43ce5933e5cbc1d8f8257b3a21e2d9a5",
 			"branch": "master",
 			"notests": true
 		},
