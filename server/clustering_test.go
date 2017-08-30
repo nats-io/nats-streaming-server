@@ -50,8 +50,11 @@ func getTestDefaultOptsForClustering(id string, peers []string) *Options {
 	return opts
 }
 
-func getChannelLeader(t *testing.T, channel string, timeout time.Duration, servers ...*StanServer) (leader *StanServer) {
-	deadline := time.Now().Add(timeout)
+func getChannelLeader(t *testing.T, channel string, timeout time.Duration, servers ...*StanServer) *StanServer {
+	var (
+		leader   *StanServer
+		deadline = time.Now().Add(timeout)
+	)
 	for time.Now().Before(deadline) {
 		for i := 0; i < len(servers); i++ {
 			s := servers[i]
@@ -78,7 +81,7 @@ func getChannelLeader(t *testing.T, channel string, timeout time.Duration, serve
 	if leader == nil {
 		stackFatalf(t, "Unable to find the channel leader")
 	}
-	return
+	return leader
 }
 
 func removeServer(servers []*StanServer, s *StanServer) []*StanServer {
@@ -109,7 +112,9 @@ func TestClusteringConfig(t *testing.T) {
 	opts.ClusterPeers = []string{"a", "b"}
 	s, err := RunServerWithOpts(opts, nil)
 	if s != nil || err == nil {
-		s.Shutdown()
+		if s != nil {
+			s.Shutdown()
+		}
 		t.Fatal("Server should have failed to start with cluster peers and no cluster node id")
 	}
 }
@@ -131,32 +136,26 @@ func TestClusteringBasic(t *testing.T) {
 
 	// Configure first server
 	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
-	s1, err := RunServerWithOpts(s1sOpts, nil)
-	if err != nil {
-		t.Fatalf("Error starting server: %v", err)
-	}
+	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
 	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
-	s2, err := RunServerWithOpts(s2sOpts, nil)
-	if err != nil {
-		t.Fatalf("Error starting server: %v", err)
-	}
+	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
 	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
-	s3, err := RunServerWithOpts(s3sOpts, nil)
-	if err != nil {
-		t.Fatalf("Error starting server: %v", err)
-	}
+	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
 
 	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
 
 	// Create a client connection.
-	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(5*time.Second))
+	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(2*time.Second))
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v", err)
 	}
@@ -232,24 +231,28 @@ func TestClusteringBasic(t *testing.T) {
 	stopped = append(stopped, leader)
 	servers = removeServer(servers, leader)
 
+	// Create a new connection with lower timeouts to test when we don't have a leader.
+	sc2, err := stan.Connect(clusterName, clientName+"-2", stan.PubAckWait(time.Second), stan.ConnectWait(time.Second))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc2.Close()
+
 	// New subscriptions should be rejected since no leader can be established.
-	_, err = sc.Subscribe(channel, func(msg *stan.Msg) {}, stan.DeliverAllAvailable())
+	_, err = sc2.Subscribe(channel, func(msg *stan.Msg) {}, stan.DeliverAllAvailable())
 	if err == nil {
 		t.Fatal("Expected error on subscribe")
 	}
 
 	// Publishes should also fail.
-	if err := sc.Publish(channel, []byte("foo")); err == nil {
+	if err := sc2.Publish(channel, []byte("foo")); err == nil {
 		t.Fatal("Expected error on publish")
 	}
 
 	// Bring one node back up.
 	s := stopped[0]
 	stopped = stopped[1:]
-	s, err = RunServerWithOpts(s.opts, nil)
-	if err != nil {
-		t.Fatalf("Error starting server: %v", err)
-	}
+	s = runServerWithOpts(t, s.opts, nil)
 	servers = append(servers, s)
 	defer s.Shutdown()
 
@@ -265,10 +268,7 @@ func TestClusteringBasic(t *testing.T) {
 
 	// Bring the last node back up.
 	s = stopped[0]
-	s, err = RunServerWithOpts(s.opts, nil)
-	if err != nil {
-		t.Fatalf("Error starting server: %v", err)
-	}
+	s = runServerWithOpts(t, s.opts, nil)
 	servers = append(servers, s)
 	defer s.Shutdown()
 

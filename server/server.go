@@ -2404,7 +2404,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	if s.isClustered() {
 		c, err := s.lookupOrCreateChannel(pm.Subject)
 		if err != nil {
-			s.log.Errorf("Failed to lookup or create channel: %v", err)
+			s.log.Errorf("Failed to lookup or create channel %s: %v", pm.Subject, err)
 			s.sendPublishErr(m.Reply, pm.Guid, err)
 			return
 		}
@@ -2925,7 +2925,6 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 
 	storeIOPendingMsgs := func(iopms []*ioPendingMsg) []raft.Future {
 		var (
-			channels         []*channel
 			futuresMap       map[*channel]raft.Future
 			replicateFutures []raft.Future
 			err              error
@@ -2939,19 +2938,16 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 			} else {
 				succeeded = iopms
 				replicateFutures = make([]raft.Future, len(iopms))
-				channels = make([]*channel, len(futuresMap))
 
-				i := 0
 				for c, _ := range futuresMap {
-					channels[i] = c
-					i++
+					storesToFlush[c] = struct{}{}
 				}
 				for i, iopm := range iopms {
 					replicateFutures[i] = futuresMap[iopm.c]
 				}
 			}
 		} else {
-			channels, succeeded, failed, err = s.assignAndStore(iopms)
+			succeeded, failed, err = s.assignAndStore(iopms, storesToFlush)
 		}
 		if err != nil {
 			for _, iopm := range failed {
@@ -2961,21 +2957,21 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 			}
 		}
 		pendingMsgs = append(pendingMsgs, succeeded...)
-		for _, cs := range channels {
-			storesToFlush[cs] = struct{}{}
-		}
 
 		return replicateFutures
 	}
 
-	batchSize := s.opts.IOBatchSize
-	sleepTime := s.opts.IOSleepTime
-	sleepDur := time.Duration(sleepTime) * time.Microsecond
-	max := 0
+	var (
+		batchSize = s.opts.IOBatchSize
+		sleepTime = s.opts.IOSleepTime
+		sleepDur  = time.Duration(sleepTime) * time.Microsecond
+		max       = 0
+		batch     = make([]*ioPendingMsg, 0, batchSize)
+	)
 
 	ready.Done()
 	for {
-		batch := make([]*ioPendingMsg, 0, 100)
+		batch = batch[:0]
 		select {
 		case iopm := <-s.ioChannel:
 			batch = append(batch, iopm)
@@ -3069,30 +3065,32 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 
 // assignAndStore will assign a sequence ID and then store the message. This
 // should not be called if running in clustered mode.
-func (s *StanServer) assignAndStore(iopms []*ioPendingMsg) ([]*channel, []*ioPendingMsg, []*ioPendingMsg, error) {
-	channels := make([]*channel, 0, len(iopms))
+func (s *StanServer) assignAndStore(iopms []*ioPendingMsg, storesToFlush map[*channel]struct{}) ([]*ioPendingMsg, []*ioPendingMsg, error) {
 	for i, iopm := range iopms {
 		pm := &iopm.pm
 		c, err := s.lookupOrCreateChannel(pm.Subject)
 		if err != nil {
-			return channels, iopms[:i], iopms[i:], err
+			return iopms[:i], iopms[i:], err
 		}
 		msg := c.pubMsgToMsgProto(pm, c.nextSequence)
 		if _, err := c.store.Msgs.Store(msg); err != nil {
-			return channels, iopms[:i], iopms[i:], err
+			return iopms[:i], iopms[i:], err
 		}
 		c.nextSequence++
-		channels = append(channels, c)
+		storesToFlush[c] = struct{}{}
 	}
-	return channels, iopms, nil, nil
+	return iopms, nil, nil
 }
 
-// replicate will replicate the message to followers and return a future which,
-// when waited upon, will indicate if the replication was successful or not.
-// This should only be called if running in clustered mode.
+// replicate will replicate the batch of messages to followers and return
+// futures (one for each channel messages were replicated for) which, when
+// waited upon, will indicate if the replication was successful or not. This
+// should only be called if running in clustered mode.
 func (s *StanServer) replicate(iopms []*ioPendingMsg) (map[*channel]raft.Future, error) {
-	futures := make(map[*channel]raft.Future)
-	batches := make(map[*channel]*spb.Batch)
+	var (
+		futures = make(map[*channel]raft.Future)
+		batches = make(map[*channel]*spb.Batch)
+	)
 	for _, iopm := range iopms {
 		pm := &iopm.pm
 		c, err := s.lookupOrCreateChannel(pm.Subject)
@@ -3483,9 +3481,6 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			return
 		}
 	}
-
-	// In clustered mode, drop the request if we are not the channel leader.
-	// Another server will handle it.
 
 	// Grab channel state, create a new one if needed.
 	c, err := s.lookupOrCreateChannel(sr.Subject)
