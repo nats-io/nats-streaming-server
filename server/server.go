@@ -4129,6 +4129,8 @@ func (s *StanServer) Shutdown() {
 	if s.partitions != nil {
 		s.partitions.shutdown()
 	}
+	// Capture this under lock
+	channelStore := s.channels
 	s.mu.Unlock()
 
 	// Make sure the StoreIOLoop returns before closing the Store
@@ -4136,17 +4138,10 @@ func (s *StanServer) Shutdown() {
 		s.ioChannelWG.Wait()
 	}
 
-	// Close/Shutdown resources. Note that unless one instantiates StanServer
-	// directly (instead of calling RunServer() and the like), these should
-	// not be nil.
-	if store != nil {
-		store.Close()
-	}
-	if ncs != nil {
-		ncs.Close()
-	}
-	if s.channels != nil {
-		for _, channel := range s.channels.channels {
+	// Close channels RAFT related resources before closing store.
+	if channelStore != nil {
+		channels := channelStore.getAll()
+		for _, channel := range channels {
 			if channel.raft != nil {
 				if err := channel.raft.Shutdown().Error(); err != nil {
 					s.log.Errorf("Failed to stop Raft node for channel %s: %v", channel.name, err)
@@ -4158,6 +4153,16 @@ func (s *StanServer) Shutdown() {
 				}
 			}
 		}
+	}
+
+	// Close/Shutdown resources. Note that unless one instantiates StanServer
+	// directly (instead of calling RunServer() and the like), these should
+	// not be nil.
+	if store != nil {
+		store.Close()
+	}
+	if ncs != nil {
+		ncs.Close()
 	}
 	if ncr != nil {
 		ncr.Close()

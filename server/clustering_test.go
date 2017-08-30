@@ -6,9 +6,11 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,9 +63,7 @@ func getChannelLeader(t *testing.T, channel string, timeout time.Duration, serve
 			if s.state == Shutdown {
 				continue
 			}
-			s.channels.Lock()
-			c := s.channels.channels[channel]
-			s.channels.Unlock()
+			c := s.channels.get(channel)
 			if c == nil || c.raft == nil {
 				continue
 			}
@@ -299,9 +299,7 @@ func TestClusteringBasic(t *testing.T) {
 
 	// Verify the server stores are consistent.
 	for _, server := range servers {
-		server.channels.Lock()
-		store := server.channels.channels[channel].store.Msgs
-		server.channels.Unlock()
+		store := server.channels.get(channel).store.Msgs
 		first, last, err := store.FirstAndLastSequence()
 		if err != nil {
 			t.Fatalf("Error getting sequence numbers: %v", err)
@@ -320,4 +318,66 @@ func TestClusteringBasic(t *testing.T) {
 			assertMsg(t, *msg, expected[i-1].data, expected[i-1].sequence)
 		}
 	}
+}
+
+func TestClusteringNoPanicOnShutdown(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b"})
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a"})
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+
+	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(time.Second))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc.Close()
+
+	sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {})
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	leader := getChannelLeader(t, "foo", 5*time.Second, servers...)
+
+	// Unsubscribe since this is not about that
+	sub.Unsubscribe()
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for {
+			if err := sc.Publish("foo", []byte("msg")); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Wait so that go-routine is in middle of sending messages
+	time.Sleep(time.Duration(rand.Intn(500)+100) * time.Millisecond)
+
+	// We shutdown the follower, it should not panic.
+	if s1 == leader {
+		s2.Shutdown()
+	} else {
+		s1.Shutdown()
+	}
+	wg.Wait()
 }
