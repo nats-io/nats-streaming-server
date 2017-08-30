@@ -100,11 +100,19 @@ func TestCSBasicSubStore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Unexpected error on create sub: %v", err)
 			}
+			subID := sub.ID
 			if sub.ID == 0 {
 				t.Fatalf("Expected a positive subID, got: %v", sub.ID)
 			}
 			if err := ss.AddSeqPending(sub.ID, 1); err != nil {
 				t.Fatalf("Unexpected error on AddSeqPending: %v", err)
+			}
+			// Make sure call is idempotent
+			if err := ss.AddSeqPending(sub.ID, 1); err != nil {
+				t.Fatalf("Unexpected error on AddSeqPending: %v", err)
+			}
+			if err := ss.AckSeqPending(sub.ID, 1); err != nil {
+				t.Fatalf("Unexpected error on AckSeqPending: %v", err)
 			}
 			if err := ss.AckSeqPending(sub.ID, 1); err != nil {
 				t.Fatalf("Unexpected error on AckSeqPending: %v", err)
@@ -123,6 +131,39 @@ func TestCSBasicSubStore(t *testing.T) {
 			// Check that ack update for non existent sub is OK
 			if err := ss.AckSeqPending(sub.ID+1, 10); err != nil {
 				t.Fatalf("Unexpected error on AddSeqPending: %v", err)
+			}
+
+			// Create a new subscription, make sure subID is not reused
+			err = ss.CreateSub(sub)
+			if err != nil {
+				t.Fatalf("Error on create sub: %v", err)
+			}
+			if sub.ID <= subID {
+				t.Fatalf("Unexpected subID: %v", sub.ID)
+			}
+			subToDelete := sub.ID
+			subID = sub.ID
+			// Create another
+			err = ss.CreateSub(sub)
+			if err != nil {
+				t.Fatalf("Error on create sub: %v", err)
+			}
+			if sub.ID <= subID {
+				t.Fatalf("Unexpected subID: %v", sub.ID)
+			}
+			subID = sub.ID
+			// Remove the sub created before the last
+			if err := ss.DeleteSub(subToDelete); err != nil {
+				t.Fatalf("Error on delete sub: %v", err)
+			}
+			// Create a last one and make sure it does not collide with the
+			// second sub we created.
+			err = ss.CreateSub(sub)
+			if err != nil {
+				t.Fatalf("Error on create sub: %v", err)
+			}
+			if sub.ID <= subID {
+				t.Fatalf("Unexpected subID: %v", sub.ID)
 			}
 		})
 	}

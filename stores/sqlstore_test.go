@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats-streaming-server/spb"
 )
 
 var (
@@ -53,6 +55,8 @@ func cleanupSQLDatastore(t *testing.T) {
 			"CREATE TABLE IF NOT EXISTS Clients (id VARCHAR(1024) PRIMARY KEY, hbinbox TEXT)",
 			"CREATE TABLE IF NOT EXISTS Channels (id INTEGER PRIMARY KEY, name VARCHAR(1024) NOT NULL, deleted BOOL DEFAULT FALSE, INDEX Idx_ChannelsName (name))",
 			"CREATE TABLE IF NOT EXISTS Messages (id INTEGER, seq BIGINT UNSIGNED, timestamp BIGINT, expiration BIGINT, size INTEGER, data BLOB, INDEX Idx_MsgsTimestamp (timestamp), INDEX Idx_MsgsExpiration (expiration), CONSTRAINT PK_MsgKey PRIMARY KEY(id, seq))",
+			"CREATE TABLE IF NOT EXISTS Subscriptions (id INTEGER, subid BIGINT UNSIGNED, proto BLOB, deleted BOOL DEFAULT FALSE, CONSTRAINT PK_SubKey PRIMARY KEY(id, subid))",
+			"CREATE TABLE IF NOT EXISTS SubsPending (subid BIGINT UNSIGNED, seq BIGINT UNSIGNED, CONSTRAINT PK_MsgPendingKey PRIMARY KEY(subid, seq))",
 		}
 	}
 	for _, stmt := range sqlCreateDatabase {
@@ -135,8 +139,18 @@ func TestSQLErrorsDueToFailDBConnection(t *testing.T) {
 	s := createDefaultSQLStore(t)
 	defer s.Close()
 
+	sl := testDefaultStoreLimits
+	cl := &ChannelLimits{}
+	cl.MaxSubscriptions = -1 // no sub limit for this channel
+	sl.AddPerChannel("baz", cl)
+	s.SetLimits(&sl)
+
 	cs := storeCreateChannel(t, s, "foo")
 	storeMsg(t, cs, "foo", []byte("msg"))
+	subID1 := storeSub(t, cs, "foo")
+	subID2 := storeSub(t, cs, "foo")
+
+	cs2 := storeCreateChannel(t, s, "baz")
 
 	failDBConnection(t, s)
 
@@ -168,6 +182,13 @@ func TestSQLErrorsDueToFailDBConnection(t *testing.T) {
 		_, err := cs.Msgs.GetSequenceFromTimestamp(time.Now().UnixNano())
 		return err
 	})
+	expectToFail(func() error { return cs.Subs.CreateSub(&spb.SubState{}) })
+	expectToFail(func() error { return cs.Subs.UpdateSub(&spb.SubState{}) })
+	expectToFail(func() error { return cs.Subs.AddSeqPending(subID1, 1) })
+	expectToFail(func() error { return cs.Subs.AckSeqPending(subID1, 1) })
+	expectToFail(func() error { return cs.Subs.DeleteSub(subID1) })
+	expectToFail(func() error { return cs.Subs.DeleteSub(subID2) })
+	expectToFail(func() error { return cs2.Subs.CreateSub(&spb.SubState{}) })
 
 	restoreDBConnection(t, s)
 }
@@ -320,5 +341,43 @@ func TestSQLExpiredMsgsOnLookup(t *testing.T) {
 	if nm != nil {
 		t.Fatalf("Message should have expired about %v ago, but still got the message",
 			time.Duration(beforeLookup-(m.Timestamp+int64(50*time.Millisecond))))
+	}
+}
+
+func TestSQLDeleteLastSubKeepRecord(t *testing.T) {
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	s := createDefaultSQLStore(t)
+	defer s.Close()
+
+	cs := storeCreateChannel(t, s, "foo")
+
+	sub := &spb.SubState{}
+	if err := cs.Subs.CreateSub(sub); err != nil {
+		t.Fatalf("Error on create sub: %v", err)
+	}
+	if err := cs.Subs.DeleteSub(sub.ID); err != nil {
+		t.Fatalf("Error on delete sub: %v", err)
+	}
+
+	db, err := sql.Open(testSQLDriver, testSQLSource)
+	if err != nil {
+		t.Fatalf("Error on sql.Open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("USE " + testSQLDatabaseName); err != nil {
+		t.Fatalf("Error selecting database: %v", err)
+	}
+	r := db.QueryRow("SELECT deleted FROM Subscriptions WHERE id=1 AND subid=1")
+	deleted := sql.NullBool{}
+	if err := r.Scan(&deleted); err != nil {
+		t.Fatalf("Error on Scan: %v", err)
+	}
+	if !deleted.Valid {
+		t.Fatal("Deleted flag not found")
+	}
+	if !deleted.Bool {
+		t.Fatalf("Deleted flag should have been set to true")
 	}
 }

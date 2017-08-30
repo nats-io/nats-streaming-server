@@ -10,7 +10,6 @@ import (
 
 	_ "github.com/go-sql-driver/mysql" // mysql driver
 	_ "github.com/lib/pq"              // postgres driver
-	// _ "github.com/mattn/go-sqlite3"    // sqlite3 driver (used for default SQL tests)
 
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/logger"
@@ -33,6 +32,14 @@ const (
 	sqlDeletedMsgsWithSeqLowerThan
 	sqlGetSizeOfMessage
 	sqlDeleteMessage
+	sqlCheckMaxSubs
+	sqlCreateSub
+	sqlUpdateSub
+	sqlMarkSubscriptionAsDeleted
+	sqlDeleteSubscription
+	sqlDeleteSubPendingMessages
+	sqlSubAddPending
+	sqlSubDeletePending
 )
 
 var sqlStmts = []string{
@@ -50,6 +57,14 @@ var sqlStmts = []string{
 	"DELETE FROM Messages WHERE id=? AND seq<=?",                                                                                        // sqlDeletedMsgsWithSeqLowerThan
 	"SELECT size FROM Messages WHERE id=? AND seq=?",                                                                                    // sqlGetSizeOfMessage
 	"DELETE FROM Messages WHERE id=? AND seq=?",                                                                                         // sqlDeleteMessage
+	"SELECT COUNT(subid) FROM Subscriptions WHERE id=? AND deleted=FALSE",                                                               // sqlCheckMaxSubs
+	"INSERT INTO Subscriptions (id, subid, proto) VALUES (?, ?, ?)",                                                                     // sqlCreateSub
+	"UPDATE Subscriptions SET proto=? WHERE id=? AND subid=?",                                                                           // sqlUpdateSub
+	"UPDATE Subscriptions SET deleted=TRUE WHERE id=? AND subid=?",                                                                      // sqlMarkSubscriptionAsDeleted
+	"DELETE FROM Subscriptions WHERE id=? AND subid=?",                                                                                  // sqlDeleteSubscription
+	"DELETE FROM SubsPending WHERE subid=?",                                                                                             // sqlDeleteSubPendingMessages
+	"INSERT IGNORE INTO SubsPending (subid, seq) SELECT ?, ? FROM Subscriptions WHERE subid=?",                                          // sqlSubAddPending
+	"DELETE FROM SubsPending WHERE subid=? AND seq=?",                                                                                   // sqlSubDeletePending
 }
 
 const (
@@ -91,19 +106,15 @@ type SQLStore struct {
 	expireTimer  *time.Timer
 	doneCh       chan struct{}
 	wg           sync.WaitGroup
-
-	// Temp until we implement everything we need
-	ms Store
 }
 
 // SQLSubStore is a subscription store backed by an SQL Database
 type SQLSubStore struct {
-	// genericSubStore
-	SubStore
-	db *sql.DB
-
-	// Temp
-	sync.RWMutex
+	commonStore
+	maxSubID  *uint64 // Points to the uint64 stored in SQLStore and is used with atomic operations
+	channelID int64
+	db        *sql.DB
+	limits    SubStoreLimits
 }
 
 // SQLMsgStore is a per channel message store backed by an SQL Database
@@ -139,7 +150,6 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits) 
 		s.Close()
 		return nil, err
 	}
-	s.ms, _ = NewMemoryStore(log, limits)
 	s.wg.Add(2)
 	go s.timeTick()
 	go s.backgroundTasks()
@@ -186,10 +196,9 @@ func (s *SQLStore) CreateChannel(channel string) (*Channel, error) {
 	msgStore := &SQLMsgStore{db: s.db, channelID: cid, sqlStore: s}
 	msgStore.init(channel, s.log, &channelLimits.MsgStoreLimits)
 
-	// Temp
-	cs, _ := s.ms.CreateChannel(channel)
-	subStore := &SQLSubStore{SubStore: cs.Subs, db: s.db}
-	// subStore.init(channel, s.log, &channelLimits.SubStoreLimits)
+	subStore := &SQLSubStore{db: s.db, channelID: cid, limits: channelLimits.SubStoreLimits}
+	subStore.log = s.log
+	subStore.maxSubID = &s.maxSubID
 
 	c := &Channel{
 		Subs: subStore,
@@ -198,15 +207,6 @@ func (s *SQLStore) CreateChannel(channel string) (*Channel, error) {
 	s.channels[channel] = c
 
 	return c, nil
-}
-
-// SetLimits @@IK: Remove
-func (s *SQLStore) SetLimits(limits *StoreLimits) error {
-	err := s.genericStore.SetLimits(limits)
-	if lerr := s.ms.SetLimits(limits); lerr != nil && err == nil {
-		err = lerr
-	}
-	return err
 }
 
 // AddClient implements the Store interface
@@ -582,4 +582,86 @@ func (ms *SQLMsgStore) expireMsgsLocked() {
 	ms.first = maxSeq + 1
 	ms.totalCount -= count
 	ms.totalBytes -= totalSize
+}
+
+////////////////////////////////////////////////////////////////////////////
+// SQLSubStore methods
+////////////////////////////////////////////////////////////////////////////
+
+// CreateSub implements the SubStore interface
+func (ss *SQLSubStore) CreateSub(sub *spb.SubState) error {
+	ss.Lock()
+	defer ss.Unlock()
+	// Check limits only if needed
+	if ss.limits.MaxSubscriptions > 0 {
+		r := ss.db.QueryRow(sqlStmts[sqlCheckMaxSubs], ss.channelID)
+		count := 0
+		if err := r.Scan(&count); err != nil {
+			return err
+		}
+		if count >= ss.limits.MaxSubscriptions {
+			return ErrTooManySubs
+		}
+	}
+	subID := atomic.AddUint64(ss.maxSubID, 1)
+	subBytes, _ := sub.Marshal()
+	if _, err := ss.db.Exec(sqlStmts[sqlCreateSub], ss.channelID, subID, subBytes); err != nil {
+		return err
+	}
+	sub.ID = subID
+	return nil
+}
+
+// UpdateSub implements the SubStore interface
+func (ss *SQLSubStore) UpdateSub(sub *spb.SubState) error {
+	ss.Lock()
+	defer ss.Unlock()
+	subBytes, _ := sub.Marshal()
+	_, err := ss.db.Exec(sqlStmts[sqlUpdateSub], subBytes, ss.channelID, sub.ID)
+	return err
+}
+
+// DeleteSub implements the SubStore interface
+func (ss *SQLSubStore) DeleteSub(subid uint64) error {
+	ss.Lock()
+	defer ss.Unlock()
+	if subid == atomic.LoadUint64(ss.maxSubID) {
+		if _, err := ss.db.Exec(sqlStmts[sqlMarkSubscriptionAsDeleted], ss.channelID, subid); err != nil {
+			return err
+		}
+	} else {
+		if _, err := ss.db.Exec(sqlStmts[sqlDeleteSubscription], ss.channelID, subid); err != nil {
+			return err
+		}
+	}
+	// Ignore error on this since subscription would not be recovered
+	// if above executed ok.
+	ss.db.Exec(sqlStmts[sqlDeleteSubPendingMessages], subid)
+	return nil
+}
+
+// AddSeqPending implements the SubStore interface
+func (ss *SQLSubStore) AddSeqPending(subid, seqno uint64) error {
+	ss.Lock()
+	_, err := ss.db.Exec(sqlStmts[sqlSubAddPending], subid, seqno, subid)
+	ss.Unlock()
+	return err
+}
+
+// AckSeqPending implements the SubStore interface
+func (ss *SQLSubStore) AckSeqPending(subid, seqno uint64) error {
+	ss.Lock()
+	_, err := ss.db.Exec(sqlStmts[sqlSubDeletePending], subid, seqno)
+	ss.Unlock()
+	return err
+}
+
+// Flush implements the SubStore interface
+func (ss *SQLSubStore) Flush() error {
+	return nil
+}
+
+// Close implements the SubStore interface
+func (ss *SQLSubStore) Close() error {
+	return nil
 }
