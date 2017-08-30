@@ -525,3 +525,22 @@ func TestCSFirstAndLastMsg(t *testing.T) {
 		})
 	}
 }
+
+func TestCSMsgStoreIdempotent(t *testing.T) {
+	for _, st := range testStores {
+		st := st
+		t.Run(st.name, func(t *testing.T) {
+			t.Parallel()
+			defer endTest(t, st)
+			s := startTest(t, st)
+			defer s.Close()
+
+			cs := storeCreateChannel(t, s, "foo")
+			m1 := storeMsg(t, cs, "foo", 1, []byte("msg1"))
+			m := storeMsg(t, cs, "foo", 1, []byte("this should not be stored since it uses same seq"))
+			if !reflect.DeepEqual(m, m1) {
+				t.Fatalf("Expected MsgStore.Store to be idempotent, got %v", m)
+			}
+		})
+	}
+}
