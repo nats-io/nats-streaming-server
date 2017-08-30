@@ -43,7 +43,7 @@ const (
 )
 
 var sqlStmts = []string{
-	"UPDATE ServerInfo SET id=?, data=?, version=?",                                                                                     // sqlUpdateServerInfo
+	"UPDATE ServerInfo SET id=?, data=?, version=? WHERE uniquerow=1",                                                                   // sqlUpdateServerInfo
 	"INSERT INTO ServerInfo (id, data, version) VALUES (?, ?, ?)",                                                                       // sqlAddServerInfo
 	"INSERT INTO Clients (id, hbinbox) VALUES (?, ?)",                                                                                   // sqlAddClient
 	"DELETE FROM Clients WHERE id=?",                                                                                                    // sqlDeleteClient

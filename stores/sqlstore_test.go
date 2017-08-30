@@ -51,7 +51,7 @@ func cleanupSQLDatastore(t *testing.T) {
 	var sqlCreateDatabase []string
 	if testSQLDriver == "mysql" {
 		sqlCreateDatabase = []string{
-			"CREATE TABLE IF NOT EXISTS ServerInfo (id VARCHAR(1024) PRIMARY KEY, data BLOB, version INTEGER)",
+			"CREATE TABLE IF NOT EXISTS ServerInfo (uniquerow INT DEFAULT 1, id VARCHAR(1024) PRIMARY KEY, data BLOB, version INTEGER)",
 			"CREATE TABLE IF NOT EXISTS Clients (id VARCHAR(1024) PRIMARY KEY, hbinbox TEXT)",
 			"CREATE TABLE IF NOT EXISTS Channels (id INTEGER PRIMARY KEY, name VARCHAR(1024) NOT NULL, deleted BOOL DEFAULT FALSE, INDEX Idx_ChannelsName (name))",
 			"CREATE TABLE IF NOT EXISTS Messages (id INTEGER, seq BIGINT UNSIGNED, timestamp BIGINT, expiration BIGINT, size INTEGER, data BLOB, INDEX Idx_MsgsTimestamp (timestamp), INDEX Idx_MsgsExpiration (expiration), CONSTRAINT PK_MsgKey PRIMARY KEY(id, seq))",
@@ -130,6 +130,37 @@ func TestSQLErrorOnNewStore(t *testing.T) {
 			s.Close()
 		}
 		t.Fatal("Should have failed to create store with a negative limit")
+	}
+}
+
+func TestSQLInitUniqueRow(t *testing.T) {
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+	s := createDefaultSQLStore(t)
+	defer s.Close()
+
+	si := testDefaultServerInfo
+	if err := s.Init(&si); err != nil {
+		t.Fatalf("Error on init: %v", err)
+	}
+	si.ClusterID = "other id"
+	if err := s.Init(&si); err != nil {
+		t.Fatalf("Error on init: %v", err)
+	}
+
+	// Ensure there is only 1 row in the ServerInfo table
+	db, err := sql.Open(testSQLDriver, testSQLSource)
+	if err != nil {
+		t.Fatalf("Error on open: %v", err)
+	}
+	defer db.Close()
+	r := db.QueryRow("select count(*) from ServerInfo")
+	count := 0
+	if err := r.Scan(&count); err != nil {
+		t.Fatalf("Error on scan: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Expected 1 row, got %v", count)
 	}
 }
 
