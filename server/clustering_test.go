@@ -17,14 +17,13 @@ import (
 	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
-
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
 var defaultRaftLog string
 
 func init() {
-	tmpDir, err := ioutil.TempDir(".", "raft_logs_")
+	tmpDir, err := ioutil.TempDir("", "raft_logs_")
 	if err != nil {
 		panic("Could not create tmp dir")
 	}

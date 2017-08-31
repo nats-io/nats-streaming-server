@@ -280,7 +280,7 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 func assignChannelRaft(s *StanServer, c *channel) error {
 	path := filepath.Join(s.opts.RaftLogPath, c.name)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.MkdirAll(path, os.ModePerm); err != nil {
+		if err := os.MkdirAll(path, os.ModeDir+os.ModePerm); err != nil {
 			return err
 		}
 	}
