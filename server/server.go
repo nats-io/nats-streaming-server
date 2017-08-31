@@ -352,6 +352,10 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	}
 	peersStore := &raft.StaticPeers{StaticPeers: peers}
 
+	// Set up a channel for reliable leader notifications.
+	raftNotifyCh := make(chan bool, 1)
+	config.NotifyCh = raftNotifyCh
+
 	node, err := raft.NewRaft(config, c, cacheStore, store, snapshotStore, peersStore, transport)
 	if err != nil {
 		transport.Close()
@@ -382,27 +386,31 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	}
 
 	go func() {
-		select {
-		case isLeader := <-node.LeaderCh():
-			if isLeader {
-				// Use a barrier to ensure all preceding operations are
-				// applied to the FSM, then update nextSequence.
-				if err := node.Barrier(0).Error(); err != nil {
-					// TODO: probably step down as leader?
-					panic(err)
+		for {
+			select {
+			case isLeader := <-raftNotifyCh:
+				if isLeader {
+					// Use a barrier to ensure all preceding operations are
+					// applied to the FSM, then update nextSequence.
+					if err := node.Barrier(0).Error(); err != nil {
+						if err == raft.ErrLeadershipLost {
+							break
+						}
+						panic(err)
+					}
+					lastSequence, err := c.store.Msgs.LastSequence()
+					if err != nil {
+						// TODO: probably step down as leader?
+						panic(err)
+					}
+					atomic.StoreUint64(&c.nextSequence, lastSequence+1)
+					atomic.StoreUint32(&c.leader, 1)
+				} else {
+					atomic.StoreUint32(&c.leader, 0)
 				}
-				lastSequence, err := c.store.Msgs.LastSequence()
-				if err != nil {
-					// TODO: probably step down as leader?
-					panic(err)
-				}
-				atomic.StoreUint64(&c.nextSequence, lastSequence+1)
-				atomic.StoreUint32(&c.leader, 1)
-			} else {
-				atomic.StoreUint32(&c.leader, 0)
+			case <-s.shutdownCh:
+				return
 			}
-		case <-s.shutdownCh:
-			return
 		}
 	}()
 

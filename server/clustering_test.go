@@ -83,6 +83,18 @@ func getChannelLeader(t *testing.T, channel string, timeout time.Duration, serve
 	return leader
 }
 
+func verifyNoLeader(t *testing.T, channel string, servers ...*StanServer) {
+	for _, server := range servers {
+		c := server.channels.get(channel)
+		if c == nil || c.raft == nil {
+			continue
+		}
+		if c.isLeader() {
+			stackFatalf(t, "Found unexpected leader for channel %s", channel)
+		}
+	}
+}
+
 func removeServer(servers []*StanServer, s *StanServer) []*StanServer {
 	for i, srv := range servers {
 		if srv == s {
@@ -379,4 +391,66 @@ func TestClusteringNoPanicOnShutdown(t *testing.T) {
 		s1.Shutdown()
 	}
 	wg.Wait()
+}
+
+func TestClusteringLeaderFlap(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b"})
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a"})
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+
+	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(2*time.Second))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc.Close()
+
+	// Publish a message (this will create the channel and form the Raft group).
+	channel := "foo"
+	if err := sc.Publish(channel, []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Wait for leader to be elected.
+	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
+
+	// Kill the follower.
+	var follower *StanServer
+	if s1 == leader {
+		s2.Shutdown()
+		follower = s2
+	} else {
+		s1.Shutdown()
+		follower = s1
+	}
+
+	// Wait for leader to step down.
+	time.Sleep(time.Second)
+
+	// Ensure there is no leader now.
+	verifyNoLeader(t, channel, s1, s2)
+
+	// Bring the follower back up.
+	follower = runServerWithOpts(t, follower.opts, nil)
+	servers = []*StanServer{leader, follower}
+	defer follower.Shutdown()
+
+	// Ensure there is a new leader.
+	getChannelLeader(t, channel, 5*time.Second, servers...)
 }
