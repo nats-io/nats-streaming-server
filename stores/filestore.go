@@ -1139,6 +1139,8 @@ type recoveredChannel struct {
 
 // Recover implements the Store interface
 func (fs *FileStore) Recover() (*RecoveredState, error) {
+	fs.Lock()
+	defer fs.Unlock()
 	var (
 		err               error
 		recoveredState    *RecoveredState
