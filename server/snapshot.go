@@ -72,6 +72,5 @@ func (c *channelSnapshot) Persist(sink raft.SnapshotSink) (err error) {
 	return
 }
 
-func (c *channelSnapshot) Release() {
-	// TODO
-}
+// Release is a no-op.
+func (c *channelSnapshot) Release() {}

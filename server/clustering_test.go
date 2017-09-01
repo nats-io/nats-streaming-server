@@ -47,6 +47,8 @@ func getTestDefaultOptsForClustering(id string, peers []string) *Options {
 	opts.ClusterPeers = peers
 	opts.ClusterNodeID = id
 	opts.RaftLogPath = filepath.Join(defaultRaftLog, id)
+	opts.LogCacheSize = DefaultLogCacheSize
+	opts.LogSnapshots = 1
 	opts.NATSServerURL = "nats://localhost:4222"
 	return opts
 }
@@ -453,4 +455,120 @@ func TestClusteringLeaderFlap(t *testing.T) {
 
 	// Ensure there is a new leader.
 	getChannelLeader(t, channel, 5*time.Second, servers...)
+}
+
+func TestClusteringLogSnapshotCatchup(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts.TrailingLogs = 0
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts.TrailingLogs = 0
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts.TrailingLogs = 0
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Create a client connection.
+	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(2*time.Second))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Publish some messages (this will create the channel and form the Raft group).
+	channel := "foo"
+	for i := 0; i < 5; i++ {
+		if err := sc.Publish(channel, []byte(strconv.Itoa(i+1))); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+
+	// Wait for leader to be elected.
+	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
+
+	// Kill a follower.
+	var follower *StanServer
+	for _, s := range servers {
+		if leader != s {
+			follower = s
+			break
+		}
+	}
+	follower.Shutdown()
+
+	// Publish some more messages.
+	for i := 0; i < 5; i++ {
+		if err := sc.Publish(channel, []byte(strconv.Itoa(i+6))); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+
+	// Force a log compaction on the leader.
+	if err := leader.channels.get(channel).raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Unexpected error on snapshot: %v", err)
+	}
+
+	// Bring the follower back up.
+	follower = runServerWithOpts(t, follower.opts, nil)
+	defer follower.Shutdown()
+	for i, server := range servers {
+		if server.opts.ClusterNodeID == follower.opts.ClusterNodeID {
+			servers[i] = follower
+			break
+		}
+	}
+
+	// Publish a message to force a timely catch up.
+	if err := sc.Publish(channel, []byte("11")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Wait for the cluster to quiesce.
+	time.Sleep(6 * time.Second)
+
+	// Verify the server stores are consistent.
+	for _, server := range servers {
+		expected := uint64(1)
+		store := server.channels.get(channel).store.Msgs
+		first, last, err := store.FirstAndLastSequence()
+		if err != nil {
+			t.Fatalf("Error getting sequence numbers: %v", err)
+		}
+		if first != 1 {
+			t.Fatalf("Unexpected first sequence: expected 1, got %d", first)
+		}
+		if last != 11 {
+			t.Fatalf("Unexpected last sequence: expected 11, got %d", last)
+		}
+		for i := first; i <= last; i++ {
+			msg, err := store.Lookup(i)
+			if err != nil {
+				t.Fatalf("Error getting message %d: %v", i, err)
+			}
+			assertMsg(t, *msg, []byte(strconv.Itoa(int(expected))), expected)
+			expected++
+		}
+	}
 }

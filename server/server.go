@@ -82,6 +82,17 @@ const (
 	// before starting processing. Set to 0 (or negative) to disable the wait.
 	DefaultIOSleepTime = int64(0)
 
+	// DefaultLogCacheSize is the number of Raft log entries to cache in memory
+	// to reduce disk IO.
+	DefaultLogCacheSize = 512
+
+	// DefaultLogSnapshots is the number of Raft log snapshots to retain.
+	DefaultLogSnapshots = 2
+
+	// DefaultTrailingLogs is the number of log entries to leave after a
+	// snapshot and compaction.
+	DefaultTrailingLogs = 10240
+
 	// Length of the channel used to schedule subscriptions start requests.
 	// Subscriptions requests are processed from the same NATS subscription.
 	// When a subscriber starts and it has pending messages, the server
@@ -102,10 +113,6 @@ const (
 
 	// Name of the file to store Raft log.
 	raftLogFile = "raft.log"
-	// Number of Raft log entries to cache in memory to reduce disk IO.
-	logCacheSize = 512
-	// Number of Raft log snapshots to retain.
-	numLogSnapshots = 2
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -289,13 +296,14 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 		return err
 	}
 	c.raftStore = store
-	cacheStore, err := raft.NewLogCache(logCacheSize, store)
+	cacheStore, err := raft.NewLogCache(s.opts.LogCacheSize, store)
 	if err != nil {
 		store.Close()
 		return err
 	}
 
 	config := raft.DefaultConfig()
+	config.TrailingLogs = s.opts.TrailingLogs
 
 	// FIXME: Send output of Raft logger
 	// Raft expects a *log.Logger so can not swap that with another one,
@@ -332,7 +340,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 		}
 	}()
 
-	snapshotStore, err := raft.NewFileSnapshotStore(path, numLogSnapshots, logWriter)
+	snapshotStore, err := raft.NewFileSnapshotStore(path, s.opts.LogSnapshots, logWriter)
 	if err != nil {
 		store.Close()
 		return err
@@ -529,13 +537,11 @@ func (c *channel) Snapshot() (raft.FSMSnapshot, error) {
 // concurrently with any other command. The FSM must discard all previous
 // state.
 func (c *channel) Restore(old io.ReadCloser) error {
-	fmt.Println("restoring from snapshot")
 	defer old.Close()
 	sizeBuf := make([]byte, 4)
 	for {
 		if _, err := io.ReadFull(old, sizeBuf); err != nil {
 			if err == io.EOF {
-				fmt.Println("done restoring from snapshot")
 				break
 			}
 			return err
@@ -1075,9 +1081,14 @@ type Options struct {
 	AckSubsPoolSize    int           // Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription).
 	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
-	ClusterNodeID      string        // ID of the node within the cluster.
-	ClusterPeers       []string      // Cluster peer IDs.
-	RaftLogPath        string        // Path to Raft log store directory.
+
+	// Clustering options
+	ClusterNodeID string   // ID of the node within the cluster.
+	ClusterPeers  []string // Cluster peer IDs.
+	RaftLogPath   string   // Path to Raft log store directory.
+	LogCacheSize  int      // Number of Raft log entries to cache in memory to reduce disk IO.
+	LogSnapshots  int      // Number of Raft log snapshots to retain.
+	TrailingLogs  uint64   // Number of logs left after a snapshot.
 }
 
 // Clone returns a deep copy of the Options object.
