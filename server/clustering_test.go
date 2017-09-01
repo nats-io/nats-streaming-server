@@ -85,16 +85,61 @@ func getChannelLeader(t *testing.T, channel string, timeout time.Duration, serve
 	return leader
 }
 
-func verifyNoLeader(t *testing.T, channel string, servers ...*StanServer) {
-	for _, server := range servers {
-		c := server.channels.get(channel)
-		if c == nil || c.raft == nil {
-			continue
+func verifyNoLeader(t *testing.T, channel string, timeout time.Duration, servers ...*StanServer) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, server := range servers {
+			c := server.channels.get(channel)
+			if c == nil || c.raft == nil {
+				continue
+			}
+			if c.isLeader() {
+				time.Sleep(100 * time.Millisecond)
+				break
+			}
 		}
-		if c.isLeader() {
-			stackFatalf(t, "Found unexpected leader for channel %s", channel)
-		}
+		return
 	}
+	stackFatalf(t, "Found unexpected leader for channel %s", channel)
+}
+
+type msg struct {
+	sequence uint64
+	data     []byte
+}
+
+func verifyChannelConsistency(t *testing.T, channel string, timeout time.Duration,
+	expectedFirstSeq, expectedLastSeq uint64, expectedMsgs []msg, servers ...*StanServer) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, server := range servers {
+			store := server.channels.get(channel).store.Msgs
+			first, last, err := store.FirstAndLastSequence()
+			if err != nil {
+				stackFatalf(t, "Error getting sequence numbers: %v", err)
+			}
+			if first != expectedFirstSeq {
+				time.Sleep(100 * time.Millisecond)
+				break
+			}
+			if last != expectedLastSeq {
+				time.Sleep(100 * time.Millisecond)
+				break
+			}
+			for i := first; i <= last; i++ {
+				msg, err := store.Lookup(i)
+				if err != nil {
+					t.Fatalf("Error getting message %d: %v", i, err)
+				}
+				if !compareMsg(t, *msg, expectedMsgs[i].data, expectedMsgs[i].sequence) {
+					time.Sleep(100 * time.Millisecond)
+					break
+				}
+			}
+		}
+		return
+	}
+	stackFatalf(t, "Message stores are inconsistent")
 }
 
 func removeServer(servers []*StanServer, s *StanServer) []*StanServer {
@@ -113,6 +158,13 @@ func assertMsg(t *testing.T, msg pb.MsgProto, expectedData []byte, expectedSeq u
 	if msg.Sequence != expectedSeq {
 		stackFatalf(t, "Msg sequence incorrect, expected: %d, got: %d", expectedSeq, msg.Sequence)
 	}
+}
+
+func compareMsg(t *testing.T, msg pb.MsgProto, expectedData []byte, expectedSeq uint64) bool {
+	if !bytes.Equal(msg.Data, expectedData) {
+		return false
+	}
+	return msg.Sequence == expectedSeq
 }
 
 func TestClusteringConfig(t *testing.T) {
@@ -293,10 +345,7 @@ func TestClusteringBasic(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
-	type msg struct {
-		sequence uint64
-		data     []byte
-	}
+	// Verify the server stores are consistent.
 	expected := make([]msg, 12)
 	expected[0] = msg{sequence: 1, data: []byte("hello")}
 	for i := 0; i < 5; i++ {
@@ -306,31 +355,7 @@ func TestClusteringBasic(t *testing.T) {
 		expected[i+6] = msg{sequence: uint64(i + 7), data: []byte("foo-" + strconv.Itoa(i))}
 	}
 	expected[11] = msg{sequence: 12, data: []byte("goodbye")}
-
-	// Wait for the cluster to quiesce.
-	time.Sleep(2 * time.Second)
-
-	// Verify the server stores are consistent.
-	for _, server := range servers {
-		store := server.channels.get(channel).store.Msgs
-		first, last, err := store.FirstAndLastSequence()
-		if err != nil {
-			t.Fatalf("Error getting sequence numbers: %v", err)
-		}
-		if first != 1 {
-			t.Fatalf("Unexpected first sequence: expected 1, got %d", first)
-		}
-		if last != 12 {
-			t.Fatalf("Unexpected last sequence: expected 12, got %d", last)
-		}
-		for i := first; i <= last; i++ {
-			msg, err := store.Lookup(i)
-			if err != nil {
-				t.Fatalf("Error getting message %d: %v", i, err)
-			}
-			assertMsg(t, *msg, expected[i-1].data, expected[i-1].sequence)
-		}
-	}
+	verifyChannelConsistency(t, channel, 10*time.Second, 1, 12, expected, servers...)
 }
 
 func TestClusteringNoPanicOnShutdown(t *testing.T) {
@@ -442,11 +467,8 @@ func TestClusteringLeaderFlap(t *testing.T) {
 		follower = s1
 	}
 
-	// Wait for leader to step down.
-	time.Sleep(time.Second)
-
 	// Ensure there is no leader now.
-	verifyNoLeader(t, channel, s1, s2)
+	verifyNoLeader(t, channel, 5*time.Second, s1, s2)
 
 	// Bring the follower back up.
 	follower = runServerWithOpts(t, follower.opts, nil)
@@ -549,26 +571,9 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	time.Sleep(6 * time.Second)
 
 	// Verify the server stores are consistent.
-	for _, server := range servers {
-		expected := uint64(1)
-		store := server.channels.get(channel).store.Msgs
-		first, last, err := store.FirstAndLastSequence()
-		if err != nil {
-			t.Fatalf("Error getting sequence numbers: %v", err)
-		}
-		if first != 1 {
-			t.Fatalf("Unexpected first sequence: expected 1, got %d", first)
-		}
-		if last != 11 {
-			t.Fatalf("Unexpected last sequence: expected 11, got %d", last)
-		}
-		for i := first; i <= last; i++ {
-			msg, err := store.Lookup(i)
-			if err != nil {
-				t.Fatalf("Error getting message %d: %v", i, err)
-			}
-			assertMsg(t, *msg, []byte(strconv.Itoa(int(expected))), expected)
-			expected++
-		}
+	expected := make([]msg, 11)
+	for i := 1; i < 12; i++ {
+		expected[i-1] = msg{sequence: uint64(i), data: []byte(strconv.Itoa(i))}
 	}
+	verifyChannelConsistency(t, channel, 10*time.Second, 1, 11, expected, servers...)
 }

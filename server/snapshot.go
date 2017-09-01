@@ -4,7 +4,7 @@ package server
 
 import (
 	"encoding/binary"
-	"errors"
+	"fmt"
 
 	"github.com/hashicorp/raft"
 	"github.com/nats-io/go-nats-streaming/pb"
@@ -49,10 +49,10 @@ func (c *channelSnapshot) Persist(sink raft.SnapshotSink) (err error) {
 		if err != nil {
 			return
 		}
+		// If msg is nil, channel truncation has occurred while snapshotting.
 		if msg == nil {
 			// Channel truncation has occurred while snapshotting.
-			err = errors.New("channel was truncated while snapshotting")
-			return
+			return fmt.Errorf("channel %q was truncated while snapshotting", c.channel.name)
 		}
 		data, err = msg.Marshal()
 		if err != nil {
@@ -68,8 +68,7 @@ func (c *channelSnapshot) Persist(sink raft.SnapshotSink) (err error) {
 			return
 		}
 	}
-	err = sink.Close()
-	return
+	return sink.Close()
 }
 
 // Release is a no-op.
