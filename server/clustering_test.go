@@ -112,6 +112,7 @@ func verifyChannelConsistency(t *testing.T, channel string, timeout time.Duratio
 	expectedFirstSeq, expectedLastSeq uint64, expectedMsgs []msg, servers ...*StanServer) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+	INNER:
 		for _, server := range servers {
 			store := server.channels.get(channel).store.Msgs
 			first, last, err := store.FirstAndLastSequence()
@@ -120,11 +121,11 @@ func verifyChannelConsistency(t *testing.T, channel string, timeout time.Duratio
 			}
 			if first != expectedFirstSeq {
 				time.Sleep(100 * time.Millisecond)
-				break
+				break INNER
 			}
 			if last != expectedLastSeq {
 				time.Sleep(100 * time.Millisecond)
-				break
+				break INNER
 			}
 			for i := first; i <= last; i++ {
 				msg, err := store.Lookup(i)
@@ -133,7 +134,7 @@ func verifyChannelConsistency(t *testing.T, channel string, timeout time.Duratio
 				}
 				if !compareMsg(t, *msg, expectedMsgs[i].data, expectedMsgs[i].sequence) {
 					time.Sleep(100 * time.Millisecond)
-					break
+					break INNER
 				}
 			}
 		}
