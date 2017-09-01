@@ -386,6 +386,7 @@ func newFileStore(t *testing.T, dataStore string, limits *StoreLimits, options .
 	}
 	state, err := fs.Recover()
 	if err != nil {
+		fs.Close()
 		return nil, nil, err
 	}
 	return fs, state, nil
