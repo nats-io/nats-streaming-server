@@ -28,8 +28,8 @@ import (
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-on-a-log"
 	"github.com/nats-io/nuid"
-	"github.com/tylertreat/nats-on-a-log"
 
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"

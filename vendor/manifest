@@ -162,6 +162,14 @@
 			"notests": true
 		},
 		{
+			"importpath": "github.com/nats-io/nats-on-a-log",
+			"repository": "https://github.com/nats-io/nats-on-a-log",
+			"vcs": "git",
+			"revision": "0b352a1151bc4edc63a7e6958ca9a42dfeccf6cd",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/nats-io/nuid",
 			"repository": "https://github.com/nats-io/nuid",
 			"vcs": "git",
@@ -219,14 +227,6 @@
 			"repository": "https://github.com/prometheus/procfs",
 			"vcs": "git",
 			"revision": "e645f4e5aaa8506fc71d6edbc5c4ff02c04c46f2",
-			"branch": "master",
-			"notests": true
-		},
-		{
-			"importpath": "github.com/tylertreat/nats-on-a-log",
-			"repository": "https://github.com/tylertreat/nats-on-a-log",
-			"vcs": "git",
-			"revision": "0b352a1151bc4edc63a7e6958ca9a42dfeccf6cd",
 			"branch": "master",
 			"notests": true
 		},
