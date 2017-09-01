@@ -401,6 +401,10 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 					// Use a barrier to ensure all preceding operations are
 					// applied to the FSM, then update nextSequence.
 					if err := node.Barrier(0).Error(); err != nil {
+						if err == raft.ErrRaftShutdown {
+							// We were shutdown, so just kill the goroutine.
+							return
+						}
 						if err == raft.ErrLeadershipLost {
 							break
 						}

@@ -514,7 +514,7 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	}
 
 	// Create a client connection.
-	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(2*time.Second))
+	sc, err := stan.Connect(clusterName, clientName)
 	if err != nil {
 		t.Fatalf("Expected to connect correctly, got err %v", err)
 	}
