@@ -567,9 +567,6 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
-	// Wait for the cluster to quiesce.
-	time.Sleep(6 * time.Second)
-
 	// Verify the server stores are consistent.
 	expected := make([]msg, 11)
 	for i := 1; i < 12; i++ {
