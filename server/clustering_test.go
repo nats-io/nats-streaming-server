@@ -563,6 +563,9 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 		}
 	}
 
+	// Ensure there is a leader before publishing.
+	getChannelLeader(t, channel, 5*time.Second, servers...)
+
 	// Publish a message to force a timely catch up.
 	if err := sc.Publish(channel, []byte("11")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
