@@ -165,7 +165,7 @@
 			"importpath": "github.com/nats-io/nats-on-a-log",
 			"repository": "https://github.com/nats-io/nats-on-a-log",
 			"vcs": "git",
-			"revision": "0b352a1151bc4edc63a7e6958ca9a42dfeccf6cd",
+			"revision": "fd32bdc334170fea207959e7ab0360e69e71eaed",
 			"branch": "master",
 			"notests": true
 		},
