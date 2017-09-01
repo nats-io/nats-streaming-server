@@ -26,12 +26,14 @@ func benchCreateDefaultFileStore(t *testing.B) (*FileStore, *RecoveredState) {
 	}
 	state, err := fs.Recover()
 	if err != nil {
+		fs.Close()
 		stackFatalf(t, "Unable to restore the state: %v", err)
 	}
 	if state == nil {
 		info := testDefaultServerInfo
 
 		if err := fs.Init(&info); err != nil {
+			fs.Close()
 			stackFatalf(t, "Unexpected error durint Init: %v", err)
 		}
 	}

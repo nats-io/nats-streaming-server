@@ -1156,9 +1156,6 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 		if fs.clientsFile != nil {
 			fs.fm.unlockFile(fs.clientsFile)
 		}
-		if err != nil {
-			fs.Close()
-		}
 	}()
 
 	// Open/Create the server file (note that this file must not be opened,
