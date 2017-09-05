@@ -24,13 +24,44 @@ var (
 	testSQLDatabaseName = "test_nats_streaming"
 )
 
-func createDefaultSQLStore(t *testing.T) Store {
-	limits := testDefaultStoreLimits
-	ss, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, &limits)
+func newSQLStore(t *testing.T, driver, source string, limits *StoreLimits) (*SQLStore, *RecoveredState, error) {
+	ss, err := NewSQLStore(testLogger, driver, source, limits)
 	if err != nil {
-		stackFatalf(t, "Unexpected error: %v", err)
+		return nil, nil, err
+	}
+	state, err := ss.Recover()
+	if err != nil {
+		ss.Close()
+		return nil, nil, err
+	}
+	return ss, state, nil
+}
+
+func createDefaultSQLStore(t *testing.T) *SQLStore {
+	limits := testDefaultStoreLimits
+	ss, state, err := newSQLStore(t, testSQLDriver, testSQLSource, &limits)
+	if err != nil {
+		stackFatalf(t, "Unable to create a SQLStore instance: %v", err)
+	}
+	if state == nil {
+		info := testDefaultServerInfo
+		if err := ss.Init(&info); err != nil {
+			stackFatalf(t, "Error on Init: %v", err)
+		}
 	}
 	return ss
+}
+
+func openDefaultSQLStoreWithLimits(t *testing.T, limits *StoreLimits) (*SQLStore, *RecoveredState) {
+	if limits == nil {
+		l := testDefaultStoreLimits
+		limits = &l
+	}
+	ss, state, err := newSQLStore(t, testSQLDriver, testSQLSource, limits)
+	if err != nil {
+		stackFatalf(t, "unable to open SqlStore instance: %v", err)
+	}
+	return ss, state
 }
 
 func cleanupSQLDatastore(t *testing.T) {
@@ -51,9 +82,9 @@ func cleanupSQLDatastore(t *testing.T) {
 	var sqlCreateDatabase []string
 	if testSQLDriver == "mysql" {
 		sqlCreateDatabase = []string{
-			"CREATE TABLE IF NOT EXISTS ServerInfo (uniquerow INT DEFAULT 1, id VARCHAR(1024) PRIMARY KEY, data BLOB, version INTEGER)",
+			"CREATE TABLE IF NOT EXISTS ServerInfo (uniquerow INT DEFAULT 1, id VARCHAR(1024) PRIMARY KEY, proto BLOB, version INTEGER)",
 			"CREATE TABLE IF NOT EXISTS Clients (id VARCHAR(1024) PRIMARY KEY, hbinbox TEXT)",
-			"CREATE TABLE IF NOT EXISTS Channels (id INTEGER PRIMARY KEY, name VARCHAR(1024) NOT NULL, deleted BOOL DEFAULT FALSE, INDEX Idx_ChannelsName (name))",
+			"CREATE TABLE IF NOT EXISTS Channels (id INTEGER PRIMARY KEY, name VARCHAR(1024) NOT NULL, maxseq BIGINT UNSIGNED DEFAULT 0, deleted BOOL DEFAULT FALSE, INDEX Idx_ChannelsName (name))",
 			"CREATE TABLE IF NOT EXISTS Messages (id INTEGER, seq BIGINT UNSIGNED, timestamp BIGINT, expiration BIGINT, size INTEGER, data BLOB, INDEX Idx_MsgsTimestamp (timestamp), INDEX Idx_MsgsExpiration (expiration), CONSTRAINT PK_MsgKey PRIMARY KEY(id, seq))",
 			"CREATE TABLE IF NOT EXISTS Subscriptions (id INTEGER, subid BIGINT UNSIGNED, proto BLOB, deleted BOOL DEFAULT FALSE, CONSTRAINT PK_SubKey PRIMARY KEY(id, subid))",
 			"CREATE TABLE IF NOT EXISTS SubsPending (subid BIGINT UNSIGNED, seq BIGINT UNSIGNED, CONSTRAINT PK_MsgPendingKey PRIMARY KEY(subid, seq))",
@@ -97,6 +128,22 @@ func restoreDBConnection(t *testing.T, s Store) {
 	if err != nil {
 		stackFatalf(t, "Error failing db connection: %v", err)
 	}
+}
+
+func getDBConnection(t *testing.T) *sql.DB {
+	db, err := sql.Open(testSQLDriver, testSQLSource)
+	if err != nil {
+		stackFatalf(t, "Error opening db: %v", err)
+	}
+	return db
+}
+
+func mustExecute(t *testing.T, db *sql.DB, query string, args ...interface{}) sql.Result {
+	r, err := db.Exec(query, args...)
+	if err != nil {
+		stackFatalf(t, "Error executing query %q: %v", query, err)
+	}
+	return r
 }
 
 func TestSQLErrorOnNewStore(t *testing.T) {
@@ -149,10 +196,7 @@ func TestSQLInitUniqueRow(t *testing.T) {
 	}
 
 	// Ensure there is only 1 row in the ServerInfo table
-	db, err := sql.Open(testSQLDriver, testSQLSource)
-	if err != nil {
-		t.Fatalf("Error on open: %v", err)
-	}
+	db := getDBConnection(t)
 	defer db.Close()
 	r := db.QueryRow("select count(*) from ServerInfo")
 	count := 0
@@ -198,6 +242,10 @@ func TestSQLErrorsDueToFailDBConnection(t *testing.T) {
 	})
 	expectToFail(func() error {
 		_, err := s.AddClient("me", "hbInbox")
+		return err
+	})
+	expectToFail(func() error {
+		_, err := s.Recover()
 		return err
 	})
 	expectToFail(func() error { return s.DeleteClient("me") })
@@ -291,10 +339,8 @@ func TestSQLUpdateNow(t *testing.T) {
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 
-	gs := createDefaultSQLStore(t)
-	defer gs.Close()
-
-	s := gs.(*SQLStore)
+	s := createDefaultSQLStore(t)
+	defer s.Close()
 
 	now := atomic.LoadInt64(&s.nowInNano)
 
@@ -392,14 +438,8 @@ func TestSQLDeleteLastSubKeepRecord(t *testing.T) {
 		t.Fatalf("Error on delete sub: %v", err)
 	}
 
-	db, err := sql.Open(testSQLDriver, testSQLSource)
-	if err != nil {
-		t.Fatalf("Error on sql.Open: %v", err)
-	}
+	db := getDBConnection(t)
 	defer db.Close()
-	if _, err := db.Exec("USE " + testSQLDatabaseName); err != nil {
-		t.Fatalf("Error selecting database: %v", err)
-	}
 	r := db.QueryRow("SELECT deleted FROM Subscriptions WHERE id=1 AND subid=1")
 	deleted := sql.NullBool{}
 	if err := r.Scan(&deleted); err != nil {
@@ -410,5 +450,95 @@ func TestSQLDeleteLastSubKeepRecord(t *testing.T) {
 	}
 	if !deleted.Bool {
 		t.Fatalf("Deleted flag should have been set to true")
+	}
+}
+
+func TestSQLRecoverBadVersion(t *testing.T) {
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	s := createDefaultSQLStore(t)
+	defer s.Close()
+
+	db := getDBConnection(t)
+	defer db.Close()
+	// Change version
+	mustExecute(t, db, "UPDATE ServerInfo SET version=2 WHERE uniquerow=1")
+	db.Close()
+
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil)
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	state, err := s.Recover()
+	if state != nil || err == nil {
+		t.Fatalf("Expected no state and error about version, got %v - %v", state, err)
+	}
+}
+
+func TestSQLRecoverVariousErrors(t *testing.T) {
+	defer cleanupSQLDatastore(t)
+
+	var realStmts []string
+	realStmts = append(realStmts, sqlStmts...)
+
+	var (
+		db    *sql.DB
+		subID uint64
+	)
+
+	errs := []func(){
+		func() { mustExecute(t, db, "UPDATE ServerInfo SET id=? WHERE uniquerow=1", "not-same-than-proto") },
+		func() { mustExecute(t, db, "UPDATE ServerInfo SET proto=? WHERE uniquerow=1", "unmarshal_failure") },
+		func() {
+			mustExecute(t, db, "UPDATE Subscriptions SET proto=? WHERE subid=?", "unmarshal_failure", subID)
+		},
+		func() { sqlStmts[sqlRecoverServerInfo] = "SELECT x FROM ServerInfo" },
+		func() { sqlStmts[sqlRecoverClients] = "SELECT x FROM Clients" },
+		func() { sqlStmts[sqlRecoverClients] = "SELECT id FROM Clients" },
+		func() { sqlStmts[sqlRecoverMaxChannelID] = "SELECT x FROM Channels" },
+		func() { sqlStmts[sqlRecoverMaxSubID] = "SELECT x FROM Subscriptions" },
+		func() { sqlStmts[sqlRecoverChannelsList] = "SELECT x FROM Channels" },
+		func() { sqlStmts[sqlRecoverChannelsList] = "SELECT id FROM Channels" },
+		func() { sqlStmts[sqlRecoverChannelMsgs] = "SELECT x FROM Messages WHERE id=?" },
+		func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT x FROM Subscriptions WHERE id=?" },
+		func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT id, proto FROM Subscriptions WHERE id=?" },
+		func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT x FROM SubsPending WHERE subid=?" },
+		func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT subid, seq FROM SubsPending WHERE subid=?" },
+	}
+
+	for _, produceError := range errs {
+		func() {
+			defer func() {
+				sqlStmts = nil
+				sqlStmts = append(sqlStmts, realStmts...)
+			}()
+			cleanupSQLDatastore(t)
+			s := createDefaultSQLStore(t)
+			defer s.Close()
+
+			storeAddClient(t, s, "me", "myinbox")
+			cs := storeCreateChannel(t, s, "foo")
+			msg := storeMsg(t, cs, "foo", []byte("msg"))
+			subID = storeSub(t, cs, "foo")
+			storeSubPending(t, cs, "foo", subID, msg.Sequence)
+
+			s.Close()
+
+			db = getDBConnection(t)
+			defer db.Close()
+
+			produceError()
+
+			rs, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil)
+			if err != nil {
+				t.Fatalf("Error on create: %v", err)
+			}
+			defer rs.Close()
+			state, err := rs.Recover()
+			if state != nil || err == nil {
+				t.Fatalf("Expected no state and error on recovery, got %v - %v", state, err)
+			}
+		}()
 	}
 }

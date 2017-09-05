@@ -52,7 +52,7 @@ var (
 	testStores = []*testStore{
 		&testStore{TypeMemory, false},
 		&testStore{TypeFile, true},
-		&testStore{TypeSQL, false},
+		&testStore{TypeSQL, true},
 	}
 )
 
@@ -285,6 +285,10 @@ func testReOpenStore(t *testing.T, ts *testStore, limits *StoreLimits) (Store, *
 	switch ts.name {
 	case TypeFile:
 		return openDefaultFileStoreWithLimits(t, limits)
+	case TypeSQL:
+		return openDefaultSQLStoreWithLimits(t, limits)
+	default:
+		stackFatalf(t, "Store type %q is recoverable, add to the switch!", ts.name)
 	}
 	return nil, nil
 }

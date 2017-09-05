@@ -454,16 +454,16 @@ func TestCSGetSeqFromStartTime(t *testing.T) {
 			}
 
 			if st.recoverable {
-				// Restart the server, make sure we can get the expected sequence
+				// Restart the store, make sure we can get the expected sequence
 				times := []int64{
 					time.Now().UnixNano() - int64(time.Hour),
 					time.Now().UnixNano() + int64(time.Hour),
 				}
-				expectedSeqs := []uint64{1, 101}
+				expectedSeqs := []uint64{101, 101}
 
 				for i := 0; i < len(times); i++ {
 					s.Close()
-					s, state := testReOpenStore(t, st, nil)
+					s, state := testReOpenStore(t, st, &limits)
 					defer s.Close()
 
 					cs := getRecoveredChannel(t, state, "foo")

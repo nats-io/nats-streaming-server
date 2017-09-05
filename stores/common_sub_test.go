@@ -261,10 +261,15 @@ func TestCSNoSubIDCollisionAfterRecovery(t *testing.T) {
 				t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", sub1+1, sub2)
 			}
 
-			// Store a delete subscription with higher ID and make sure
-			// we use something higher on restart
-			delSub := uint64(sub1 + 10)
-			storeSubDelete(t, cs, "foo", delSub)
+			// Delete sub1, and create a new one. sub1 ID should not be reused
+			storeSubDelete(t, cs, "foo", sub1)
+			sub3 := storeSub(t, cs, "foo")
+			if sub3 <= sub2 {
+				t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", sub2+1, sub3)
+			}
+
+			// Delete the last sub and make sure after recovery we get a higher id
+			storeSubDelete(t, cs, "foo", sub3)
 
 			// Close the store
 			s.Close()
@@ -273,14 +278,14 @@ func TestCSNoSubIDCollisionAfterRecovery(t *testing.T) {
 			s, state = testReOpenStore(t, st, nil)
 			defer s.Close()
 			cs = getRecoveredChannel(t, state, "foo")
-			// sub1 & sub2 should be recovered
-			getRecoveredSubs(t, state, "foo", 2)
+			// sub2 should be recovered
+			getRecoveredSubs(t, state, "foo", 1)
 
 			// Store new subscription
-			sub3 := storeSub(t, cs, "foo")
+			sub4 := storeSub(t, cs, "foo")
 
-			if sub3 <= sub1 || sub3 <= delSub {
-				t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", delSub+1, sub3)
+			if sub4 <= sub3 {
+				t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", sub3+1, sub4)
 			}
 		})
 	}
