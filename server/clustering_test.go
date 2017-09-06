@@ -578,3 +578,88 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	}
 	verifyChannelConsistency(t, channel, 10*time.Second, 1, 11, expected, servers...)
 }
+
+//func TestClusteringSubscriberFailover(t *testing.T) {
+//	cleanupDatastore(t)
+//	defer cleanupDatastore(t)
+//	cleanupRaftLog(t)
+//	defer cleanupRaftLog(t)
+//
+//	// For this test, use a central NATS server.
+//	ns := natsdTest.RunDefaultServer()
+//	defer ns.Shutdown()
+//
+//	// Configure first server
+//	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+//	s1 := runServerWithOpts(t, s1sOpts, nil)
+//	defer s1.Shutdown()
+//
+//	// Configure second server.
+//	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+//	s2 := runServerWithOpts(t, s2sOpts, nil)
+//	defer s2.Shutdown()
+//
+//	// Configure third server.
+//	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+//	s3 := runServerWithOpts(t, s3sOpts, nil)
+//	defer s3.Shutdown()
+//
+//	servers := []*StanServer{s1, s2, s3}
+//	for _, s := range servers {
+//		checkState(t, s, Clustered)
+//	}
+//
+//	// Create a client connection.
+//	sc, err := stan.Connect(clusterName, clientName)
+//	if err != nil {
+//		t.Fatalf("Expected to connect correctly, got err %v", err)
+//	}
+//	defer sc.Close()
+//
+//	// Publish a message (this will create the channel and form the Raft group).
+//	channel := "foo"
+//	if err := sc.Publish(channel, []byte("hello")); err != nil {
+//		t.Fatalf("Unexpected error on publish: %v", err)
+//	}
+//
+//	ch := make(chan *stan.Msg, 100)
+//	sub, err := sc.Subscribe(channel, func(msg *stan.Msg) {
+//		ch <- msg
+//	}, stan.DeliverAllAvailable())
+//	if err != nil {
+//		t.Fatalf("Error subscribing: %v", err)
+//	}
+//	defer sub.Unsubscribe()
+//
+//	select {
+//	case msg := <-ch:
+//		assertMsg(t, msg.MsgProto, []byte("hello"), 1)
+//	case <-time.After(2 * time.Second):
+//		t.Fatal("expected msg")
+//	}
+//
+//	// Take down the leader.
+//	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
+//	leader.Shutdown()
+//	servers = removeServer(servers, leader)
+//
+//	// Wait for the new leader to be elected.
+//	leader = getChannelLeader(t, channel, 5*time.Second, servers...)
+//
+//	// Publish some more messages.
+//	for i := 0; i < 5; i++ {
+//		if err := sc.Publish(channel, []byte(strconv.Itoa(i))); err != nil {
+//			t.Fatalf("Unexpected error on publish %d: %v", i, err)
+//		}
+//	}
+//
+//	// Ensure we received the messages.
+//	for i := 0; i < 5; i++ {
+//		select {
+//		case msg := <-ch:
+//			assertMsg(t, msg.MsgProto, []byte(strconv.Itoa(i)), uint64(i+2))
+//		case <-time.After(2 * time.Second):
+//			t.Fatal("expected msg")
+//		}
+//	}
+//}
