@@ -175,9 +175,14 @@ func storeDeleteClient(t tLogger, s Store, clientID string) {
 	}
 }
 
-func storeMsg(t *testing.T, cs *Channel, channel string, data []byte) *pb.MsgProto {
+func storeMsg(t *testing.T, cs *Channel, channel string, seq uint64, data []byte) *pb.MsgProto {
 	ms := cs.Msgs
-	seq, err := ms.Store(data)
+	seq, err := ms.Store(&pb.MsgProto{
+		Sequence:  seq,
+		Data:      data,
+		Subject:   channel,
+		Timestamp: time.Now().UnixNano(),
+	})
 	if err != nil {
 		stackFatalf(t, "Error storing message into channel [%v]: %v", channel, err)
 	}
@@ -325,7 +330,7 @@ func TestGSNoOps(t *testing.T) {
 		gms.Close() != nil {
 		t.Fatal("Expected no value since these should not be implemented for generic store")
 	}
-	if seq, err := gms.Store([]byte("hello")); seq != 0 || err != nil {
+	if seq, err := gms.Store(&pb.MsgProto{Data: []byte("hello")}); seq != 0 || err != nil {
 		t.Fatal("Expected no value since this should not be implemented for generic store")
 	}
 
@@ -454,16 +459,16 @@ func TestCSBasicRecovery(t *testing.T) {
 
 			cFoo := storeCreateChannel(t, s, "foo")
 
-			foo1 := storeMsg(t, cFoo, "foo", []byte("foomsg"))
-			foo2 := storeMsg(t, cFoo, "foo", []byte("foomsg"))
-			foo3 := storeMsg(t, cFoo, "foo", []byte("foomsg"))
+			foo1 := storeMsg(t, cFoo, "foo", 1, []byte("foomsg"))
+			foo2 := storeMsg(t, cFoo, "foo", 2, []byte("foomsg"))
+			foo3 := storeMsg(t, cFoo, "foo", 3, []byte("foomsg"))
 
 			cBar := storeCreateChannel(t, s, "bar")
 
-			bar1 := storeMsg(t, cBar, "bar", []byte("barmsg"))
-			bar2 := storeMsg(t, cBar, "bar", []byte("barmsg"))
-			bar3 := storeMsg(t, cBar, "bar", []byte("barmsg"))
-			bar4 := storeMsg(t, cBar, "bar", []byte("barmsg"))
+			bar1 := storeMsg(t, cBar, "bar", 1, []byte("barmsg"))
+			bar2 := storeMsg(t, cBar, "bar", 2, []byte("barmsg"))
+			bar3 := storeMsg(t, cBar, "bar", 3, []byte("barmsg"))
+			bar4 := storeMsg(t, cBar, "bar", 4, []byte("barmsg"))
 
 			sub1 := storeSub(t, cFoo, "foo")
 			sub2 := storeSub(t, cBar, "bar")
@@ -730,7 +735,7 @@ func TestCSFlush(t *testing.T) {
 			defer s.Close()
 
 			cs := storeCreateChannel(t, s, "foo")
-			seq, err := cs.Msgs.Store([]byte("hello"))
+			seq, err := cs.Msgs.Store(&pb.MsgProto{Sequence: 1, Data: []byte("hello")})
 			if err != nil {
 				t.Fatalf("Unexpected error on store: %v", err)
 			}
@@ -750,7 +755,7 @@ func TestCSFlush(t *testing.T) {
 
 			if st.name == TypeFile {
 				// Now specific tests to File store
-				msg := storeMsg(t, cs, "foo", []byte("new msg"))
+				msg := storeMsg(t, cs, "foo", 2, []byte("new msg"))
 				subID := storeSub(t, cs, "foo")
 				storeSubPending(t, cs, "foo", subID, msg.Sequence)
 				// Close the underlying file
@@ -871,9 +876,7 @@ func TestCSPerChannelLimits(t *testing.T) {
 			checkLimitsForChannel := func(channelName string, maxMsgs, maxSubs int) {
 				cs := storeCreateChannel(t, s, channelName)
 				for i := 0; i < maxMsgs+10; i++ {
-					if _, err := cs.Msgs.Store([]byte("hello")); err != nil {
-						stackFatalf(t, "Unexpected error on store: %v", err)
-					}
+					storeMsg(t, cs, channelName, uint64(i+1), []byte("hello"))
 				}
 				if n, _ := msgStoreState(t, cs.Msgs); n != maxMsgs {
 					stackFatalf(t, "Expected %v messages, got %v", maxMsgs, n)
@@ -951,21 +954,21 @@ func TestCSLimitWithWildcardsInConfig(t *testing.T) {
 			s.SetLimits(l)
 			foobar := "foo.bar"
 			cFooBar := storeCreateChannel(t, s, foobar)
-			m1 := storeMsg(t, cFooBar, foobar, []byte("msg1"))
-			storeMsg(t, cFooBar, foobar, []byte("msg2"))
+			m1 := storeMsg(t, cFooBar, foobar, 1, []byte("msg1"))
+			storeMsg(t, cFooBar, foobar, 2, []byte("msg2"))
 			// This should kick out m1 since for foo.bar, limit will be 2
-			storeMsg(t, cFooBar, foobar, []byte("msg3"))
+			storeMsg(t, cFooBar, foobar, 3, []byte("msg3"))
 			if msgStoreLookup(t, cFooBar.Msgs, m1.Sequence) != nil {
 				stackFatalf(t, "M1 should have been removed")
 			}
 			// For bar, however, we should be able to store 3 messages
 			bar := "bar"
 			cBar := storeCreateChannel(t, s, bar)
-			m1 = storeMsg(t, cBar, bar, []byte("msg1"))
-			storeMsg(t, cBar, bar, []byte("msg2"))
-			storeMsg(t, cBar, bar, []byte("msg3"))
+			m1 = storeMsg(t, cBar, bar, 1, []byte("msg1"))
+			storeMsg(t, cBar, bar, 2, []byte("msg2"))
+			storeMsg(t, cBar, bar, 3, []byte("msg3"))
 			// Now, a 4th one should evict m1
-			storeMsg(t, cBar, bar, []byte("msg4"))
+			storeMsg(t, cBar, bar, 4, []byte("msg4"))
 			if msgStoreLookup(t, cBar.Msgs, m1.Sequence) != nil {
 				stackFatalf(t, "M1 should have been removed")
 			}

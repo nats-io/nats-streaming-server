@@ -2194,9 +2194,14 @@ func (ms *FileMsgStore) readIndex(r io.Reader) (uint64, *msgIndex, error) {
 }
 
 // Store a given message.
-func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
+func (ms *FileMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 	ms.Lock()
 	defer ms.Unlock()
+
+	if m.Sequence <= ms.last {
+		// We've already seen this message.
+		return m.Sequence, nil
+	}
 
 	fslice := ms.writeSlice
 	if fslice != nil {
@@ -2268,8 +2273,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	//    goto processErr
 	// }
 
-	seq := ms.last + 1
-	m := ms.genericMsgStore.createMsg(seq, data)
+	seq := m.Sequence
 
 	msgInBuffer := false
 

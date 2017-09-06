@@ -523,7 +523,7 @@ func TestFSCompactSubsUpdateLastSent(t *testing.T) {
 	cs := storeCreateChannel(t, s, "foo")
 	total := 10
 	for i := 0; i < total; i++ {
-		storeMsg(t, cs, "foo", []byte("hello"))
+		storeMsg(t, cs, "foo", uint64(i+1), []byte("hello"))
 	}
 	expectedLastSent := 5
 	subID := storeSub(t, cs, "foo")
@@ -551,6 +551,7 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
+	seq := uint64(1)
 	sizes := []int{0, subBufMinShrinkSize - subBufMinShrinkSize/10, subBufMinShrinkSize, 3*subBufMinShrinkSize + subBufMinShrinkSize/2}
 	for _, size := range sizes {
 
@@ -559,7 +560,8 @@ func TestFSSubStoreVariousBufferSizes(t *testing.T) {
 		defer fs.Close()
 
 		cs := storeCreateChannel(t, fs, "foo")
-		m := storeMsg(t, cs, "foo", []byte("hello"))
+		m := storeMsg(t, cs, "foo", seq, []byte("hello"))
+		seq++
 
 		// Perform some activities on subscriptions file
 		subID := storeSub(t, cs, "foo")

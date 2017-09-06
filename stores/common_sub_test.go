@@ -265,8 +265,8 @@ func TestCSSubLastSentCorrectOnRecovery(t *testing.T) {
 			msg := []byte("hello")
 
 			// Store msg seq 1 and 2
-			m1 := storeMsg(t, cs, "foo", msg)
-			m2 := storeMsg(t, cs, "foo", msg)
+			m1 := storeMsg(t, cs, "foo", 1, msg)
+			m2 := storeMsg(t, cs, "foo", 2, msg)
 
 			// Store m1 and m2 for this subscription, then m1 again.
 			storeSubPending(t, cs, "foo", subID, m1.Sequence, m2.Sequence, m1.Sequence)
@@ -305,9 +305,9 @@ func TestCSUpdatedSub(t *testing.T) {
 			msg := []byte("hello")
 
 			// Store msg seq 1 and 2
-			m1 := storeMsg(t, cs, "foo", msg)
-			m2 := storeMsg(t, cs, "foo", msg)
-			m3 := storeMsg(t, cs, "foo", msg)
+			m1 := storeMsg(t, cs, "foo", 1, msg)
+			m2 := storeMsg(t, cs, "foo", 2, msg)
+			m3 := storeMsg(t, cs, "foo", 3, msg)
 
 			// Store m1 and m2 for this subscription
 			storeSubPending(t, cs, "foo", subID, m1.Sequence, m2.Sequence)

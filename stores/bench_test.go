@@ -39,7 +39,7 @@ func benchCreateDefaultFileStore(t *testing.B) (*FileStore, *RecoveredState) {
 }
 
 func benchStoreMsg(b *testing.B, ms MsgStore, data []byte) *pb.MsgProto {
-	seq, err := ms.Store(data)
+	seq, err := ms.Store(&pb.MsgProto{Data: data})
 	if err != nil {
 		stackFatalf(b, "Error storing message: %v", err)
 	}

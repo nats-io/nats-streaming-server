@@ -1,4 +1,6 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2017 Apcera Inc. All rights reserved.
+
+//go:generate protoc -I=. -I=$GOPATH/src  --gofast_out=. ./spb/protocol.proto
 
 package main
 
@@ -6,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -36,6 +39,14 @@ Streaming Server Options:
     -hbf, --hb_fail_count <int>      Number of failed heartbeats before server closes the client connection
           --ack_subs <int>           Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription)
           --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+
+Streaming Server Clustering Options:
+    --cluster_node_id <string>        ID of the node within the cluster.
+    --cluster_peers <string>          List of cluster peer IDs.
+    --cluster_log_path <string>       Directory to store log replication data.
+    --cluster_log_cache_size <int>    Number of log entries to cache in memory to reduce disk IO. (default:512)
+    --cluster_num_log_snapshots <int> Number of log snapshots to retain. (default: 2)
+    --cluster_trailing_logs <int>     Number of log entries to leave after a snapshot and compaction.
 
 Streaming Server File Store Options:
     --file_compact_enabled <bool>        Enable file compaction
@@ -130,8 +141,11 @@ func main() {
 func parseFlags() (*stand.Options, *natsd.Options) {
 
 	// STAN options
-	var stanDebugAndTrace bool
-	var stanConfigFile string
+	var (
+		stanDebugAndTrace bool
+		stanConfigFile    string
+		stanClusterPeers  string
+	)
 
 	// Define the flags for STAN. We use the Usage (last field)
 	// as the actual Options name. We will then use reflection
@@ -189,6 +203,12 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	flag.Int("io_batch_size", stand.DefaultIOBatchSize, "stan.IOBatchSize")
 	flag.Int64("io_sleep_time", stand.DefaultIOSleepTime, "stan.IOSleepTime")
 	flag.String("ft_group", "", "stan.FTGroupName")
+	flag.String("cluster_node_id", "", "stan.ClusterNodeID")
+	flag.StringVar(&stanClusterPeers, "cluster_peers", "", "")
+	flag.String("cluster_log_path", "", "stan.RaftLogPath")
+	flag.Int("cluster_log_cache_size", stand.DefaultLogCacheSize, "stan.LogCacheSize")
+	flag.Int("cluster_log_snapshots", stand.DefaultLogSnapshots, "stan.LogSnapshots")
+	flag.Int("cluster_trailing_logs", stand.DefaultTrailingLogs, "stan.TrailingLogs")
 
 	// NATS options
 	var showVersion bool
@@ -292,6 +312,17 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 	// One flag can set multiple options.
 	if stanDebugAndTrace {
 		stanOpts.Trace, stanOpts.Debug = true, true
+	}
+
+	if len(stanClusterPeers) > 0 {
+		stanOpts.ClusterPeers = strings.Split(stanClusterPeers, ",")
+		for i, peer := range stanOpts.ClusterPeers {
+			stanOpts.ClusterPeers[i] = strings.TrimSpace(peer)
+		}
+	}
+
+	if stanOpts.RaftLogPath == "" {
+		stanOpts.RaftLogPath = filepath.Join(stanOpts.ID, stanOpts.ClusterNodeID)
 	}
 
 	return stanOpts, natsOpts

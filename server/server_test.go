@@ -21,9 +21,10 @@ import (
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nuid"
+
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/stores"
-	"github.com/nats-io/nuid"
 )
 
 const (
@@ -416,8 +417,8 @@ func TestChannelStore(t *testing.T) {
 	if _, _, err := cs.msgsState("baz"); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("Channel baz does not exist, call should have failed, got %v", err)
 	}
-	c.store.Msgs.Store([]byte("foo"))
-	c4.store.Msgs.Store([]byte("bar"))
+	c.store.Msgs.Store(&pb.MsgProto{Sequence: 1, Data: []byte("foo")})
+	c4.store.Msgs.Store(&pb.MsgProto{Sequence: 1, Data: []byte("bar")})
 	if n, _, err := cs.msgsState(""); n != 2 || err != nil {
 		t.Fatalf("Expected 2 messages, got %v err=%v", n, err)
 	}

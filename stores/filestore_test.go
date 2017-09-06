@@ -466,7 +466,7 @@ func TestFSUnsupportedFileVersion(t *testing.T) {
 	fs := createDefaultFileStore(t)
 	defer fs.Close()
 	cs := storeCreateChannel(t, fs, "foo")
-	storeMsg(t, cs, "foo", []byte("test"))
+	storeMsg(t, cs, "foo", 1, []byte("test"))
 	storeSub(t, cs, "foo")
 
 	// Close store
@@ -697,6 +697,7 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 	for c := 0; c < chanCount; c++ {
 		channelName := fmt.Sprintf("channel.%d", (c + 1))
 		cs := storeCreateChannel(t, fs, channelName)
+		seq := uint64(1)
 
 		// Create several subscriptions per channel.
 		for s := 0; s < subsCount; s++ {
@@ -704,7 +705,8 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 		}
 
 		for m := 0; m < msgCount; m++ {
-			msg := storeMsg(t, cs, channelName, payload)
+			msg := storeMsg(t, cs, channelName, seq, payload)
+			seq++
 			expectedMsgBytes += uint64(msg.Size())
 			if c == 0 {
 				if m < maxMsgsAfterRecovery {
@@ -778,7 +780,7 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 	}
 
 	// Store one message
-	lastMsg := storeMsg(t, channelOne, "channel.1", payload)
+	lastMsg := storeMsg(t, channelOne, "channel.1", uint64(msgCount+1), payload)
 
 	// Check limits (should be 4 msgs)
 	recMsg, recBytes = msgStoreState(t, channelOne.Msgs)
@@ -1304,6 +1306,7 @@ func TestFSDoSync(t *testing.T) {
 
 	total := 100
 	dur := [2]time.Duration{}
+	seq := uint64(1)
 
 	for i := 0; i < 2; i++ {
 		sOpts := DefaultFileStoreOptions
@@ -1326,7 +1329,8 @@ func TestFSDoSync(t *testing.T) {
 		// and would catch if bug in code where we always do fsync, regardless
 		// of option.
 		for j := 0; j < total+(i*total/10); j++ {
-			m := storeMsg(t, cs, "foo", msg)
+			m := storeMsg(t, cs, "foo", seq, msg)
+			seq++
 			cs.Msgs.Flush()
 			storeSubPending(t, cs, "foo", subID, m.Sequence)
 			cs.Subs.Flush()
@@ -1702,11 +1706,13 @@ func TestFSParallelRecovery(t *testing.T) {
 	numChannels := 100
 	numMsgsPerChannel := 1000
 	msg := []byte("msg")
+	seq := uint64(1)
 	for i := 0; i < numChannels; i++ {
 		chanName := fmt.Sprintf("foo.%v", i)
 		cs := storeCreateChannel(t, fs, chanName)
 		for j := 0; j < numMsgsPerChannel; j++ {
-			storeMsg(t, cs, chanName, msg)
+			storeMsg(t, cs, chanName, seq, msg)
+			seq++
 		}
 	}
 	fs.Close()
