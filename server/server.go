@@ -100,8 +100,6 @@ const (
 	// the default length of that channel.
 	defaultSubStartChanLen = 2048
 
-	// Length of the NATS Inbox prefix
-	natsInboxPrefixLen = len(nats.InboxPrefix)
 	// First character of a NATS Inbox.
 	natsInboxFirstChar = '_'
 	// Length of a NATS inbox
@@ -683,7 +681,6 @@ type StanServer struct {
 	subStartCh   chan *subStartInfo
 	subStartQuit chan struct{}
 
-	acksSubsIndex     int
 	acksSubsPrefix    string
 	acksSubsPrefixLen int
 
