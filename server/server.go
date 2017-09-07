@@ -51,11 +51,8 @@ const (
 	DefaultSubClosePrefix = "_STAN.subclose"
 	DefaultUnSubPrefix    = "_STAN.unsub"
 	DefaultClosePrefix    = "_STAN.close"
+	defaultAcksPrefix     = "_STAN.ack"
 	DefaultStoreType      = stores.TypeMemory
-
-	// The prefixes should not have been made public (since we do not expose ways
-	// to change them). Add the new ones as private.
-	acksSubsPoolPrefix = "_STAN.subacks"
 
 	// Prefix of subject active server is sending HBs to
 	ftHBPrefix = "_STAN.ft"
@@ -280,7 +277,7 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 		}
 	} else {
 		// If not clustered, subscribe to channel acks subject.
-		sub, err := s.nc.Subscribe(c.getAckSubject(), s.processAckMsg)
+		sub, err := s.nc.Subscribe(fmt.Sprintf("%s.>", c.getAckSubject()), s.processAckMsg)
 		if err != nil {
 			return nil, err
 		}
@@ -541,7 +538,7 @@ func (c *channel) leadershipAcquired() (error, bool) {
 	barrier := c.raft.Barrier(30 * time.Second)
 
 	// Subscribe to channel acks subject.
-	sub, err := c.stan.nc.Subscribe(c.getAckSubject(), c.stan.processAckMsg)
+	sub, err := c.stan.nc.Subscribe(fmt.Sprintf("%s.>", c.getAckSubject()), c.stan.processAckMsg)
 	if err != nil {
 		return err, false
 	}
@@ -580,7 +577,7 @@ func (c *channel) leadershipLost() {
 }
 
 func (c *channel) getAckSubject() string {
-	return fmt.Sprintf("_STAN.%s.acks.%s", c.stan.opts.ID, c.name)
+	return fmt.Sprintf("%s.%s", c.stan.info.AcksSubs, c.name)
 }
 
 // Snapshot is used to support log compaction. This call should
@@ -1087,16 +1084,7 @@ func (ss *subStore) LookupByDurable(durableName string) *subState {
 
 // Lookup by ackInbox name.
 func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
-	aiLen := len(ackInbox)
 	ss.RLock()
-	if aiLen != natsInboxLen {
-		if aiLen <= ss.stan.acksSubsPrefixLen {
-			ss.RUnlock()
-			return nil
-		}
-		// Extract the actual AckInbox
-		ackInbox = ackInbox[ss.stan.acksSubsPrefixLen:]
-	}
 	sub := ss.acks[ackInbox]
 	ss.RUnlock()
 	return sub
@@ -1594,7 +1582,7 @@ func (s *StanServer) start(runningState State) error {
 		}
 		// Same for AcksSubs (use of pool of subscriptions for subscriptions' acks)
 		if s.info.AcksSubs == "" {
-			s.info.AcksSubs = fmt.Sprintf("%s.%s", acksSubsPoolPrefix, subjID)
+			s.info.AcksSubs = fmt.Sprintf("%s.%s", defaultAcksPrefix, subjID)
 			callStoreInit = true
 		}
 
@@ -1615,7 +1603,7 @@ func (s *StanServer) start(runningState State) error {
 		s.info.SubClose = fmt.Sprintf("%s.%s", DefaultSubClosePrefix, subjID)
 		s.info.Unsubscribe = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, subjID)
 		s.info.Close = fmt.Sprintf("%s.%s", DefaultClosePrefix, subjID)
-		s.info.AcksSubs = fmt.Sprintf("%s.%s", acksSubsPoolPrefix, subjID)
+		s.info.AcksSubs = fmt.Sprintf("%s.%s", defaultAcksPrefix, subjID)
 
 		callStoreInit = true
 	}
@@ -1648,9 +1636,7 @@ func (s *StanServer) start(runningState State) error {
 	if recoveredState != nil {
 		// Do some post recovery processing (create subs on AckInbox, setup
 		// some timers, etc...)
-		if err := s.postRecoveryProcessing(recoveredState.Clients); err != nil {
-			return fmt.Errorf("error during post recovery processing: %v", err)
-		}
+		s.postRecoveryProcessing(recoveredState.Clients, recoveredSubs)
 	}
 
 	// Flush to make sure all subscriptions are processed before
@@ -1908,7 +1894,16 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 
 // Do some final setup. Be minded of locking here since the server
 // has started communication with NATS server/clients.
-func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client) error {
+func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, recoveredSubs []*subState) {
+	for _, sub := range recoveredSubs {
+		sub.Lock()
+		// Consider this subscription initialized. Note that it may
+		// still have newOnHold == true, which would prevent incoming
+		// messages to be delivered before we attempt to redeliver
+		// unacknowledged messages in performRedeliveryOnStartup.
+		sub.initialized = true
+		sub.Unlock()
+	}
 	// Go through the list of clients and ensure their Hb timer is set.
 	for _, sc := range recoveredClients {
 		// Because of the loop, we need to make copy for the closure
@@ -1917,7 +1912,6 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client) e
 			s.checkClientHealth(cID)
 		})
 	}
-	return nil
 }
 
 // Redelivers unacknowledged messages and release the hold for new messages delivery
@@ -2326,9 +2320,9 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	for _, sub := range subs {
 		sub.Lock()
 		if !sub.removed {
-			// Don't use sub.AckInbox directly since it may
-			// need to be prefixed with s.acksSubsPrefix
-			ctrlNatsMsg.Subject = fmt.Sprintf("_STAN.%s.acks.%s", s.opts.ID, sub.subject)
+			// Server is listening to s.info.AcksSubs.channel + ".>", so use
+			// any dummy subject suffix.
+			ctrlNatsMsg.Subject = fmt.Sprintf("%s.%s.close", s.info.AcksSubs, sub.subject)
 			if s.ncs.PublishMsg(ctrlNatsMsg) == nil {
 				refs++
 			}
@@ -3246,9 +3240,7 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 		if !removed {
 			// We send a single message to a single handler, no need for ref count
 			_, ctrlNatsMsg := s.createCtrlMsg(reqType, false, m.Reply, m.Data)
-			// Don't use sub.AckInbox directly since it may
-			// need to be prefixed with s.acksSubsPrefix.
-			ctrlNatsMsg.Subject = fmt.Sprintf("_STAN.%s.acks.%s", s.opts.ID, sub.subject)
+			ctrlNatsMsg.Subject = sub.AckInbox
 			// In case of error, process the request in place.
 			if s.ncs.PublishMsg(ctrlNatsMsg) != nil {
 				processInPlace = true
@@ -3551,7 +3543,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		sub.Lock()
 		// Set ClientID and new AckInbox but leave LastSent to the
 		// remembered value.
-		sub.AckInbox = c.getAckSubject()
+		sub.AckInbox = fmt.Sprintf("%s.%s", c.getAckSubject(), nuid.Next())
 		sub.ClientID = sr.ClientID
 		sub.Inbox = sr.Inbox
 		sub.IsDurable = true
@@ -3581,7 +3573,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 				ClientID:      sr.ClientID,
 				QGroup:        sr.QGroup,
 				Inbox:         sr.Inbox,
-				AckInbox:      c.getAckSubject(),
+				AckInbox:      fmt.Sprintf("%s.%s", c.getAckSubject(), nuid.Next()),
 				MaxInFlight:   sr.MaxInFlight,
 				AckWaitInSecs: sr.AckWaitInSecs,
 				DurableName:   sr.DurableName,
@@ -3625,7 +3617,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	sub.Lock()
 
 	// Create a non-error response
-	resp := &pb.SubscriptionResponse{AckInbox: c.getAckSubject()}
+	resp := &pb.SubscriptionResponse{AckInbox: sub.AckInbox}
 	b, _ := resp.Marshal()
 	s.ncs.Publish(m.Reply, b)
 

@@ -417,8 +417,8 @@ func checkDurableNoPendingAck(t *testing.T, s *StanServer, isSame bool,
 		if durAckInbox == ackInbox {
 			stackFatalf(t, "Expected different ackInbox'es")
 		}
-		if durAckSub == ackSub {
-			stackFatalf(t, "Expected different ackSub")
+		if durAckSub != ackSub {
+			stackFatalf(t, "Expected same ackSub")
 		}
 	}
 

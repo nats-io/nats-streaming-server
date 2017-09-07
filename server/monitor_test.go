@@ -224,7 +224,9 @@ func TestMonitorServerz(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	sub.Unsubscribe()
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
 	waitForNumSubs(t, s, clientName, 0)
 
 	resp, body = getBody(t, ServerPath, expectedJSON)
