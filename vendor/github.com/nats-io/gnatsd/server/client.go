@@ -87,14 +87,13 @@ func (cf *clientFlag) clear(c clientFlag) {
 type client struct {
 	// Here first because of use of atomics, and memory alignment.
 	stats
+	mpay  int64
 	mu    sync.Mutex
 	typ   int
 	cid   uint64
-	lang  string
 	opts  clientOpts
 	start time.Time
 	nc    net.Conn
-	mpay  int
 	ncs   string
 	bw    *bufio.Writer
 	srv   *Server
@@ -524,8 +523,8 @@ func (c *client) maxConnExceeded() {
 	c.closeConnection()
 }
 
-func (c *client) maxPayloadViolation(sz int) {
-	c.Errorf("%s: %d vs %d", ErrMaxPayload.Error(), sz, c.mpay)
+func (c *client) maxPayloadViolation(sz int, max int64) {
+	c.Errorf("%s: %d vs %d", ErrMaxPayload.Error(), sz, max)
 	c.sendErr("Maximum Payload Violation")
 	c.closeConnection()
 }
@@ -712,8 +711,9 @@ func (c *client) processPub(arg []byte) error {
 	if c.pa.size < 0 {
 		return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
 	}
-	if c.mpay > 0 && c.pa.size > c.mpay {
-		c.maxPayloadViolation(c.pa.size)
+	maxPayload := atomic.LoadInt64(&c.mpay)
+	if maxPayload > 0 && int64(c.pa.size) > maxPayload {
+		c.maxPayloadViolation(c.pa.size, maxPayload)
 		return ErrMaxPayload
 	}
 
@@ -1051,7 +1051,7 @@ func (c *client) processMsg(msg []byte) {
 				// Prune the permissions cache. Keeps us from unbounded growth.
 				r := 0
 				for subject := range c.perms.pcache {
-					delete(c.cache.results, subject)
+					delete(c.perms.pcache, subject)
 					r++
 					if r > pruneSize {
 						break
@@ -1316,18 +1316,21 @@ func (c *client) closeConnection() {
 	// Snapshot for use.
 	subs := make([]*subscription, 0, len(c.subs))
 	for _, sub := range c.subs {
+		// Auto-unsubscribe subscriptions must be unsubscribed forcibly.
+		sub.max = 0
 		subs = append(subs, sub)
 	}
 	srv := c.srv
 
-	retryImplicit := false
+	var (
+		routeClosed   bool
+		retryImplicit bool
+	)
 	if c.route != nil {
-		retryImplicit = c.route.retry
-	}
-
-	closed := false
-	if c.route != nil {
-		closed = c.route.closed
+		routeClosed = c.route.closed
+		if !routeClosed {
+			retryImplicit = c.route.retry
+		}
 	}
 
 	c.mu.Unlock()
@@ -1348,7 +1351,7 @@ func (c *client) closeConnection() {
 	}
 
 	// Don't reconnect routes that are being closed.
-	if c.route != nil && closed {
+	if routeClosed {
 		return
 	}
 
@@ -1384,6 +1387,16 @@ func (c *client) closeConnection() {
 			srv.startGoRoutine(func() { srv.reConnectToRoute(rurl, rtype) })
 		}
 	}
+}
+
+// If the client is a route connection, sets the `closed` flag to true
+// to prevent any reconnecting attempt when c.closeConnection() is called.
+func (c *client) setRouteNoReconnectOnClose() {
+	c.mu.Lock()
+	if c.route != nil {
+		c.route.closed = true
+	}
+	c.mu.Unlock()
 }
 
 // Logging functionality scoped to a client or route.

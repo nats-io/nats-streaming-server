@@ -320,13 +320,13 @@ func (s *Server) HandleRoutez(w http.ResponseWriter, r *http.Request) {
 			}
 			ri.Subs = castToSliceString(sublist)
 		}
-		r.mu.Unlock()
-
-		if ip, ok := r.nc.(*net.TCPConn); ok {
-			addr := ip.RemoteAddr().(*net.TCPAddr)
+		switch conn := r.nc.(type) {
+		case *net.TCPConn, *tls.Conn:
+			addr := conn.RemoteAddr().(*net.TCPAddr)
 			ri.Port = addr.Port
 			ri.IP = addr.IP.String()
 		}
+		r.mu.Unlock()
 		rs.Routes = append(rs.Routes, ri)
 	}
 	s.mu.Unlock()
@@ -399,6 +399,7 @@ type Varz struct {
 	SlowConsumers    int64             `json:"slow_consumers"`
 	Subscriptions    uint32            `json:"subscriptions"`
 	HTTPReqStats     map[string]uint64 `json:"http_req_stats"`
+	ConfigLoadTime   time.Time         `json:"config_load_time"`
 }
 
 func myUptime(d time.Duration) string {
@@ -478,6 +479,7 @@ func (s *Server) HandleVarz(w http.ResponseWriter, r *http.Request) {
 	v.OutBytes = atomic.LoadInt64(&s.outBytes)
 	v.SlowConsumers = atomic.LoadInt64(&s.slowConsumers)
 	v.Subscriptions = s.sl.Count()
+	v.ConfigLoadTime = s.configTime
 	s.httpReqStats[VarzPath]++
 	// Need a copy here since s.httpReqStas can change while doing
 	// the marshaling down below.
