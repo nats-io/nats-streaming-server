@@ -488,7 +488,7 @@ func TestPersistentStoreDurableCanReceiveAfterRestart(t *testing.T) {
 	}
 }
 
-func TestPersistentStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
+func TestPersistentStoreDontSendToOfflineDurablesAfterServerRestart(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
@@ -504,28 +504,86 @@ func TestPersistentStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
 
+	clientName2 := clientName + "2"
+	// Have another client connection that will stay opened while
+	// server is restarted
+	sc2, nc2 := createConnectionWithNatsOpts(t, clientName2, nats.ReconnectWait(50*time.Millisecond))
+	defer nc2.Close()
+	defer sc2.Close()
+
 	if err := sc.Publish("foo", []byte("hello")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
 	durName := "mydur"
+	gotFirstCh := make(chan bool, 4)
+	gotFirstCb := func(m *stan.Msg) {
+		if !m.Redelivered {
+			gotFirstCh <- true
+		}
+	}
 	// Create a durable with manual ack mode (don't ack the message)
-	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {},
+	if _, err := sc.Subscribe("foo", gotFirstCb,
 		stan.DurableName(durName),
 		stan.DeliverAllAvailable(),
-		stan.SetManualAckMode()); err != nil {
-		stackFatalf(t, "Unexpected error on subscribe: %v", err)
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(100))); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
-	// Make sure durable is created
-	subs := checkSubs(t, s, clientName, 1)
-	if len(subs) != 1 {
-		stackFatalf(t, "Should be only 1 durable, got %v", len(subs))
+	// Create a durable queue sub too.
+	if _, err := sc.QueueSubscribe("foo", "queue", gotFirstCb,
+		stan.DurableName(durName),
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(100))); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
-	dur := subs[0]
-	dur.RLock()
-	inbox := dur.Inbox
-	dur.RUnlock()
+	// Create a durable and durable queue sub (from sc2) that we will
+	// explicitly close
+	dur, err := sc2.Subscribe("foo", gotFirstCb,
+		stan.DurableName(durName+"2"),
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(100)))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	durqsub, err := sc2.QueueSubscribe("foo", "queue", gotFirstCb,
+		stan.DurableName(durName+"2"),
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(100)))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
 
+	inboxes := []string{}
+
+	// Make sure durables are created
+	getInboxes := func(cname string) {
+		waitForNumSubs(t, s, cname, 2)
+		subs := checkSubs(t, s, cname, 2)
+		if len(subs) != 2 {
+			stackFatalf(t, "Should be only 2 durables, got %v", len(subs))
+		}
+		for _, dur := range subs {
+			dur.RLock()
+			inboxes = append(inboxes, dur.Inbox)
+			dur.RUnlock()
+		}
+	}
+	getInboxes(clientName)
+	getInboxes(clientName2)
+
+	// Ensure original messages are received
+	for i := 0; i < 4; i++ {
+		if err := Wait(gotFirstCh); err != nil {
+			t.Fatal("Did not get our ")
+		}
+	}
+	// Close explicitly some of the durables/qsubs
+	dur.Close()
+	durqsub.Close()
 	// Close the client
 	sc.Close()
 
@@ -543,24 +601,40 @@ func TestPersistentStoreDontSendToOfflineDurablesOnRestart(t *testing.T) {
 	}
 	defer nc.Close()
 
-	failCh := make(chan bool, 10)
-	// Setup a consumer on the durable inbox
-	sub, err := nc.Subscribe(inbox, func(_ *nats.Msg) {
-		failCh <- true
-	})
-	if err != nil {
-		t.Fatalf("Error on subscribe: %v", err)
+	failCh := make(chan *pb.MsgProto, 10)
+	// Setup a consumer on the durable inboxes
+	for _, inbox := range inboxes {
+		sub, err := nc.Subscribe(inbox, func(m *nats.Msg) {
+			sm := &pb.MsgProto{}
+			sm.Unmarshal(m.Data)
+			failCh <- sm
+		})
+		if err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		defer sub.Unsubscribe()
 	}
-	defer sub.Unsubscribe()
+	nc.Flush()
 
 	// Stop the Streaming server
 	s.Shutdown()
+	// Wait a bit more than the redelivery wait time (30ms)
+	time.Sleep(110 * time.Millisecond)
 	// Restart the Streaming server
 	s = runServerWithOpts(t, opts, nil)
 
-	// We should not get any message, if we do, this is an error
-	if err := WaitTime(failCh, 250*time.Millisecond); err == nil {
-		t.Fatal("Consumer got a message")
+	newSender = NewDefaultConnection(t)
+	defer newSender.Close()
+	if err := newSender.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	newSender.Close()
+
+	select {
+	case m := <-failCh:
+		t.Fatalf("Server sent this message: %v", m)
+	case <-time.After(250 * time.Millisecond):
+		// Did not receive message, we are ok.
 	}
 }
 
@@ -775,4 +849,56 @@ func TestNewOnHoldSetOnDurableRestart(t *testing.T) {
 	if failed {
 		t.Fatal("Did not receive the redelivered messages first")
 	}
+}
+
+func TestPersistentStoreDurableClosedStatusOnRestart(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	opts := getTestDefaultOptsForPersistentStore()
+	s := runServerWithOpts(t, opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc, nc := createConnectionWithNatsOpts(t, clientName, nats.ReconnectWait(50*time.Millisecond))
+	defer nc.Close()
+	defer sc.Close()
+
+	dur, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	waitForNumSubs(t, s, clientName, 1)
+	// Close durable
+	dur.Close()
+	waitForNumSubs(t, s, clientName, 0)
+
+	// Function that restart a durable and checks that IsClosed is false
+	restartDurable := func() stan.Subscription {
+		dur, err = sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+		if err != nil {
+			stackFatalf(t, "Unexpected error on subscribe: %v", err)
+		}
+		waitForNumSubs(t, s, clientName, 1)
+		subs := checkSubs(t, s, clientName, 1)
+		dsub := subs[0]
+		dsub.RLock()
+		isClosed := dsub.IsClosed
+		dsub.RUnlock()
+		if isClosed {
+			t.Fatal("Durable's IsClosed should be false")
+		}
+		return dur
+	}
+	// Restart durable
+	dur = restartDurable()
+	// Close durable again
+	dur.Close()
+	waitForNumSubs(t, s, clientName, 0)
+	// Keep client connection opened, but restart server
+	s.Shutdown()
+	s = runServerWithOpts(t, opts, nil)
+	// THere should be no sub recovered for this client
+	checkSubs(t, s, clientName, 0)
+	// Restart one last time
+	dur = restartDurable()
 }

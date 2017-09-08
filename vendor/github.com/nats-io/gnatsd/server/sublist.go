@@ -102,29 +102,38 @@ func (s *Sublist) Insert(sub *subscription) error {
 	var n *node
 
 	for _, t := range tokens {
-		if len(t) == 0 || sfwc {
+		lt := len(t)
+		if lt == 0 || sfwc {
 			s.Unlock()
 			return ErrInvalidSubject
 		}
 
-		switch t[0] {
-		case pwc:
-			n = l.pwc
-		case fwc:
-			n = l.fwc
-			sfwc = true
-		default:
+		if lt > 1 {
 			n = l.nodes[t]
+		} else {
+			switch t[0] {
+			case pwc:
+				n = l.pwc
+			case fwc:
+				n = l.fwc
+				sfwc = true
+			default:
+				n = l.nodes[t]
+			}
 		}
 		if n == nil {
 			n = newNode()
-			switch t[0] {
-			case pwc:
-				l.pwc = n
-			case fwc:
-				l.fwc = n
-			default:
+			if lt > 1 {
 				l.nodes[t] = n
+			} else {
+				switch t[0] {
+				case pwc:
+					l.pwc = n
+				case fwc:
+					l.fwc = n
+				default:
+					l.nodes[t] = n
+				}
 			}
 		}
 		if n.next == nil {
@@ -334,20 +343,25 @@ func (s *Sublist) Remove(sub *subscription) error {
 	levels := lnts[:0]
 
 	for _, t := range tokens {
-		if len(t) == 0 || sfwc {
+		lt := len(t)
+		if lt == 0 || sfwc {
 			return ErrInvalidSubject
 		}
 		if l == nil {
 			return ErrNotFound
 		}
-		switch t[0] {
-		case pwc:
-			n = l.pwc
-		case fwc:
-			n = l.fwc
-			sfwc = true
-		default:
+		if lt > 1 {
 			n = l.nodes[t]
+		} else {
+			switch t[0] {
+			case pwc:
+				n = l.pwc
+			case fwc:
+				n = l.fwc
+				sfwc = true
+			default:
+				n = l.nodes[t]
+			}
 		}
 		if n != nil {
 			levels = append(levels, lnt{l, n, t})
@@ -610,28 +624,65 @@ func IsValidLiteralSubject(subject string) bool {
 func matchLiteral(literal, subject string) bool {
 	li := 0
 	ll := len(literal)
-	for i := 0; i < len(subject); i++ {
+	ls := len(subject)
+	for i := 0; i < ls; i++ {
 		if li >= ll {
 			return false
 		}
-		b := subject[i]
-		switch b {
+		// This function has been optimized for speed.
+		// For instance, do not set b:=subject[i] here since
+		// we may bump `i` in this loop to avoid `continue` or
+		// skiping common test in a particular test.
+		// Run Benchmark_SublistMatchLiteral before making any change.
+		switch subject[i] {
 		case pwc:
-			// Skip token in literal
-			ll := len(literal)
-			for {
-				if li >= ll || literal[li] == btsep {
-					li--
-					break
+			// NOTE: This is not testing validity of a subject, instead ensures
+			// that wildcards are treated as such if they follow some basic rules,
+			// namely that they are a token on their own.
+			if i == 0 || subject[i-1] == btsep {
+				if i == ls-1 {
+					// There is no more token in the subject after this wildcard.
+					// Skip token in literal and expect to not find a separator.
+					for {
+						// End of literal, this is a match.
+						if li >= ll {
+							return true
+						}
+						// Presence of separator, this can't be a match.
+						if literal[li] == btsep {
+							return false
+						}
+						li++
+					}
+				} else if subject[i+1] == btsep {
+					// There is another token in the subject after this wildcard.
+					// Skip token in literal and expect to get a separator.
+					for {
+						// We found the end of the literal before finding a separator,
+						// this can't be a match.
+						if li >= ll {
+							return false
+						}
+						if literal[li] == btsep {
+							break
+						}
+						li++
+					}
+					// Bump `i` since we know there is a `.` following, we are
+					// safe. The common test below is going to check `.` with `.`
+					// which is good. A `continue` here is too costly.
+					i++
 				}
-				li++
 			}
 		case fwc:
-			return true
-		default:
-			if b != literal[li] {
-				return false
+			// For `>` to be a wildcard, it means being the only or last character
+			// in the string preceded by a `.`
+			if (i == 0 || subject[i-1] == btsep) && i == ls-1 {
+				return true
 			}
+		}
+		if subject[i] != literal[li] {
+			return false
 		}
 		li++
 	}

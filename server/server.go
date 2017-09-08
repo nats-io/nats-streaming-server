@@ -308,7 +308,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	}
 
 	config := raft.DefaultConfig()
-	config.TrailingLogs = s.opts.TrailingLogs
+	config.TrailingLogs = uint64(s.opts.TrailingLogs)
 
 	// FIXME: Send output of Raft logger
 	// Raft expects a *log.Logger so can not swap that with another one,
@@ -849,9 +849,6 @@ func (ss *subStore) Store(sub *subState) error {
 // The subStore is locked on entry (or does not need, as during server restart).
 // However, `sub` does not need locking since it has just been created.
 func (ss *subStore) updateState(sub *subState) {
-	// First store by ackInbox for ack direct lookup
-	ss.acks[sub.AckInbox] = sub
-
 	// Store by type
 	if sub.isQueueSubscriber() {
 		// Queue subscriber.
@@ -876,6 +873,9 @@ func (ss *subStore) updateState(sub *subState) {
 				qs.shadow = sub
 			}
 		} else {
+			// Store by ackInbox for ack direct lookup
+			ss.acks[sub.AckInbox] = sub
+
 			qs.subs = append(qs.subs, sub)
 		}
 		// Needed in the case of server restart, where
@@ -897,13 +897,16 @@ func (ss *subStore) updateState(sub *subState) {
 		qs.Unlock()
 		sub.qstate = qs
 	} else {
+		// First store by ackInbox for ack direct lookup
+		ss.acks[sub.AckInbox] = sub
+
 		// Plain subscriber.
 		ss.psubs = append(ss.psubs, sub)
-	}
 
-	// Hold onto durables in special lookup.
-	if sub.isDurableSubscriber() {
-		ss.durables[sub.durableKey()] = sub
+		// Hold onto durables in special lookup.
+		if sub.isDurableSubscriber() {
+			ss.durables[sub.durableKey()] = sub
+		}
 	}
 }
 
@@ -1091,6 +1094,23 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 		qs.Unlock()
 	} else {
 		ss.psubs, _ = sub.deleteFromList(ss.psubs)
+		// When closing a durable subscription (calling sub.Close(), not sub.Unsubscribe()),
+		// we need to update the record on store to prevent the server from adding
+		// this durable to the list of active subscriptions. This is especially important
+		// if the client closing this durable is itself not closed when the server is
+		// restarted. The server would have no way to detect if the durable subscription
+		// is offline or not.
+		if isDurable && !unsubscribe {
+			sub.Lock()
+			// ClientID is required on store because this is used on recovery to
+			// "compute" the durable key (clientID+subject+durable name).
+			sub.ClientID = clientID
+			sub.IsClosed = true
+			store.UpdateSub(&sub.SubState)
+			// After storage, clear the ClientID.
+			sub.ClientID = ""
+			sub.Unlock()
+		}
 	}
 	ss.Unlock()
 
@@ -1155,7 +1175,7 @@ type Options struct {
 	RaftLogPath   string   // Path to Raft log store directory.
 	LogCacheSize  int      // Number of Raft log entries to cache in memory to reduce disk IO.
 	LogSnapshots  int      // Number of Raft log snapshots to retain.
-	TrailingLogs  uint64   // Number of logs left after a snapshot.
+	TrailingLogs  int64    // Number of logs left after a snapshot.
 }
 
 // Clone returns a deep copy of the Options object.
@@ -1862,6 +1882,15 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 	// We will return the recovered subscriptions
 	allSubs := make([]*subState, 0, 16)
 
+	// Offline durable subscribers need to be added to the durables
+	// map, but nowhere else.
+	processOfflineSub := func(channel *channel, sub *subState) {
+		channel.ss.durables[sub.durableKey()] = sub
+		// Now that the key is computed, clear ClientID otherwise
+		// durable would not be able to be restarted.
+		sub.ClientID = ""
+	}
+
 	for channelName, recoveredChannel := range channels {
 		channel, err := s.channels.create(s, channelName, recoveredChannel.Channel)
 		if err != nil {
@@ -1895,6 +1924,17 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 			durableSub := sub.isDurableSubscriber() // not a durable queue sub!
 			if durableSub {
 				sub.IsDurable = true
+				// Special handling if this is an offline durable subscriber.
+				// Note that durable subscribers have always ClientID on store.
+				// This is because we use ClientID+subject+durableName to construct
+				// the durable key used in the subStore's durables map.
+				// Note that even if the client connection is recovered, we should
+				// not attempt to add the offline durable back to the clients and
+				// regular state. We need to wait for the durable to be restarted.
+				if sub.IsClosed {
+					processOfflineSub(channel, sub)
+					continue
+				}
 			}
 			// Add the subscription to the corresponding client
 			added := s.clients.addSub(sub.ClientID, sub)
@@ -1906,21 +1946,21 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 					s.log.Noticef("WARN: Not recovering ghost durable queue subscriber: [%s]:[%s] subject=%s inbox=%s", sub.ClientID, sub.QGroup, sub.subject, sub.Inbox)
 					continue
 				}
-				// Add this subscription to subStore.
-				channel.ss.updateState(sub)
-				// If this is a durable and the client was not recovered
-				// (was offline), we need to clear the ClientID otherwise
-				// it won't be able to reconnect
+				// Fix for older offline durable subscribers. Newer offline durable
+				// subscribers have IsClosed set to true and therefore are handled aboved.
 				if durableSub && !added {
-					sub.ClientID = ""
-				}
-				// Add to the array, unless this is the shadow durable queue sub that
-				// was left in the store in order to maintain the group's state.
-				if !sub.isShadowQueueDurable() {
-					allSubs = append(allSubs, sub)
-					s.monMu.Lock()
-					s.numSubs++
-					s.monMu.Unlock()
+					processOfflineSub(channel, sub)
+				} else {
+					// Add this subscription to subStore.
+					channel.ss.updateState(sub)
+					// Add to the array, unless this is the shadow durable queue sub that
+					// was left in the store in order to maintain the group's state.
+					if !sub.isShadowQueueDurable() {
+						allSubs = append(allSubs, sub)
+						s.monMu.Lock()
+						s.numSubs++
+						s.monMu.Unlock()
+					}
 				}
 			}
 		}
@@ -3619,8 +3659,9 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			sub.newOnHold = true
 			s.setupAckTimer(sub, sub.ackWait)
 		}
-		// Clear the removed flag that was set during a Close()
+		// Clear the removed and IsClosed flags that were set during a Close()
 		sub.removed = false
+		sub.IsClosed = false
 		sub.Unlock()
 
 		// Case of restarted durable subscriber, or first durable queue

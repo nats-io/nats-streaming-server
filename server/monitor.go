@@ -346,6 +346,11 @@ func getMonitorChannelSubs(ss *subStore) []*Subscriptionz {
 		for _, sub := range qsub.subs {
 			subsz = append(subsz, createSubscriptionz(sub))
 		}
+		// If this is a durable queue subscription and all members
+		// are offline, qsub.shadow will be not nil. Report this one.
+		if qsub.shadow != nil {
+			subsz = append(subsz, createSubscriptionz(qsub.shadow))
+		}
 		qsub.RUnlock()
 	}
 	return subsz

@@ -3,6 +3,8 @@
 package server
 
 import (
+	"bytes"
+	"flag"
 	"io/ioutil"
 	"os"
 	"reflect"
@@ -336,19 +338,82 @@ func expectFailureFor(t *testing.T, content, errorMatch string) {
 	}
 }
 
-func TestParseProcessConfigFiles(t *testing.T) {
-	// Calling ProcessConfigFiles with no file should return default stan options
-	// and empty nats options.
-	sopts, nopts, err := ProcessConfigFiles("", "")
-	if err != nil {
-		t.Fatalf("Error processing config files: %v", err)
+func TestParseConfigureOptions(t *testing.T) {
+	// We are not testing some of the flags that are handled directly by NATS.
+	// Provide a no-op print version/help/help tls function.
+	noPrint := func() {}
+	// Helper function that expect parsing with given args to not produce an error.
+	mustNotFail := func(args []string) (*Options, *natsd.Options) {
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		sopts, nopts, err := ConfigureOptions(fs, args, noPrint, noPrint, noPrint)
+		if err != nil {
+			stackFatalf(t, "Error on configure: %v", err)
+		}
+		return sopts, nopts
 	}
-	if !reflect.DeepEqual(sopts, GetDefaultOptions()) {
-		t.Fatalf("Did not get default options: %v", sopts)
+
+	// Helper function that expect configuration to fail.
+	expectToFail := func(args []string, errContent ...string) {
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		// Silence the flagSet so that on failure nothing is printed.
+		// (flag.FlagSet internally would print error message about unknown flags, etc..)
+		silenceOuput := &bytes.Buffer{}
+		fs.SetOutput(silenceOuput)
+		sopts, nopts, err := ConfigureOptions(fs, args, noPrint, noPrint, noPrint)
+		if sopts != nil || nopts != nil || err == nil {
+			stackFatalf(t, "Expected no option and an error, got sopts=%v and nopts=%v and err=%v", sopts, nopts, err)
+		}
+		for _, testErr := range errContent {
+			if strings.Contains(err.Error(), testErr) {
+				// We got the error we wanted.
+				return
+			}
+		}
+		stackFatalf(t, "Expected errors containing any of those %v, got %v", errContent, err)
 	}
-	if !reflect.DeepEqual(nopts, &natsd.Options{Logtime: true}) {
-		t.Fatalf("Did not get empty NATS options: %v", nopts)
+
+	// Basic test with cluster id
+	sopts, _ := mustNotFail([]string{"-cid", "me"})
+	if sopts.ID != "me" {
+		t.Fatalf("Expected cid to be me, got %v", sopts.ID)
 	}
+
+	// Should fail because flag is not defined
+	expectToFail([]string{"-xxx", "foo"}, "flag")
+
+	// Should fail because of config files missing
+	expectToFail([]string{"-sc", "xxx.conf", "-c", "../test/configs/test_parse.conf"}, "file")
+	expectToFail([]string{"-sc", "../test/configs/test_parse.conf", "-c", "xxx.conf"}, "file")
+	expectToFail([]string{"-sc", "xxx.conf"}, "file")
+	expectToFail([]string{"-c", "xxx.conf"}, "file")
+
+	// The config set both debug and trace to true
+	sopts, _ = mustNotFail([]string{"-sc", "../test/configs/test_parse.conf"})
+	if !sopts.Debug || !sopts.Trace {
+		t.Fatal("Debug and Trace should have been set to true")
+	}
+	// The config set both debug and trace to true, override with -SDV=false
+	sopts, _ = mustNotFail([]string{"-sc", "../test/configs/test_parse.conf", "-SDV=false"})
+	if sopts.Debug || sopts.Trace {
+		t.Fatal("Debug and Trace should have been set to false")
+	}
+
+	// Test bytes values
+	sopts, _ = mustNotFail([]string{"-max_bytes", "100KB", "-mb", "100KB", "-file_compact_min_size", "200KB", "-file_buffer_size", "300KB"})
+	if sopts.MaxBytes != 100*1024 {
+		t.Fatalf("Expected max_bytes to be 100KB, got %v", sopts.MaxBytes)
+	}
+	if sopts.FileStoreOpts.CompactMinFileSize != 200*1024 {
+		t.Fatalf("Expected file_compact_min_size to be 200KB, got %v", sopts.FileStoreOpts.CompactMinFileSize)
+	}
+	if sopts.FileStoreOpts.BufferSize != 300*1024 {
+		t.Fatalf("Expected file_buffer_size to be 300KB, got %v", sopts.FileStoreOpts.BufferSize)
+	}
+
+	// Failures with bytes
+	expectToFail([]string{"-max_bytes", "12abc"}, "error")
+	expectToFail([]string{"-max_bytes", "x1x"}, "size")
+	expectToFail([]string{"-max_bytes", "100a", "-mb", "100a", "-file_compact_min_size", "200a", "-file_buffer_size", "300a"}, "error")
 
 	sconf := "s.conf"
 	nconf := "n.conf"
@@ -359,25 +424,22 @@ func TestParseProcessConfigFiles(t *testing.T) {
 	// files, each having configuration elements for the other module
 	// that should be ignored since they will be processed individually.
 	scontent := []byte(`
-	port: 4223
-	streaming: {
-		cluster_id: my_cluster
-	}`)
+		port: 4223
+		streaming: {
+			cluster_id: my_cluster
+		}`)
 	if err := ioutil.WriteFile(sconf, scontent, 0660); err != nil {
 		t.Fatalf("Error creating conf file: %v", err)
 	}
 	ncontent := []byte(`
-	port: 5223
-	streaming: {
-		cluster_id: my_cluster_2
-	}`)
+		port: 5223
+		streaming: {
+			cluster_id: my_cluster_2
+		}`)
 	if err := ioutil.WriteFile(nconf, ncontent, 0660); err != nil {
 		t.Fatalf("Error creating conf file: %v", err)
 	}
-	sopts, nopts, err = ProcessConfigFiles(sconf, nconf)
-	if err != nil {
-		t.Fatalf("Error processing config files: %v", err)
-	}
+	sopts, nopts := mustNotFail([]string{"-sc", sconf, "-c", nconf})
 	// Check that streaming and NATS options have been correctly loaded
 	if sopts.ID != "my_cluster" {
 		t.Fatalf("Unexpected cluster id: %v", sopts.ID)
@@ -392,50 +454,36 @@ func TestParseProcessConfigFiles(t *testing.T) {
 
 	// Now pass only one file, and verify that the single file is used
 	// for both streaming and nats.
-	for i := 0; i < 2; i++ {
-		if i == 0 {
-			sopts, nopts, err = ProcessConfigFiles(sconf, "")
-		} else {
-			sopts, nopts, err = ProcessConfigFiles("", sconf)
-		}
-		if err != nil {
-			t.Fatalf("Error processing config files: %v", err)
-		}
-		if sopts.ID != "my_cluster" {
-			t.Fatalf("Unexpected cluster id: %v", sopts.ID)
-		}
-		// This should be the port defined in scontent
-		if nopts.Port != 4223 {
-			t.Fatalf("Unexpected listen port: %v", nopts.Port)
-		}
-		// Since logtime is not defined, it should default to `true`
-		if !nopts.Logtime {
-			t.Fatalf("Unexpected logtime value: %v", nopts.Logtime)
-		}
+	sopts, nopts = mustNotFail([]string{"-sc", sconf})
+	if sopts.ID != "my_cluster" {
+		t.Fatalf("Unexpected cluster id: %v", sopts.ID)
+	}
+	// This should be the port defined in scontent
+	if nopts.Port != 4223 {
+		t.Fatalf("Unexpected listen port: %v", nopts.Port)
+	}
+	// Since logtime is not defined, it should default to `true`
+	if !nopts.Logtime {
+		t.Fatalf("Unexpected logtime value: %v", nopts.Logtime)
 	}
 	// Same with other conf file
-	for i := 0; i < 2; i++ {
-		if i == 0 {
-			sopts, nopts, err = ProcessConfigFiles(nconf, "")
-		} else {
-			sopts, nopts, err = ProcessConfigFiles("", nconf)
-		}
-		if err != nil {
-			t.Fatalf("Error processing config files: %v", err)
-		}
-		if sopts.ID != "my_cluster_2" {
-			t.Fatalf("Unexpected cluster id: %v", sopts.ID)
-		}
-		// This should be the port defined in scontent
-		if nopts.Port != 5223 {
-			t.Fatalf("Unexpected listen port: %v", nopts.Port)
-		}
-		// Since logtime is not defined, it should default to `true`
-		if !nopts.Logtime {
-			t.Fatalf("Unexpected logtime value: %v", nopts.Logtime)
-		}
+	sopts, nopts = mustNotFail([]string{"-c", nconf})
+	if sopts.ID != "my_cluster_2" {
+		t.Fatalf("Unexpected cluster id: %v", sopts.ID)
+	}
+	// This should be the port defined in scontent
+	if nopts.Port != 5223 {
+		t.Fatalf("Unexpected listen port: %v", nopts.Port)
+	}
+	// Since logtime is not defined, it should default to `true`
+	if !nopts.Logtime {
+		t.Fatalf("Unexpected logtime value: %v", nopts.Logtime)
 	}
 	// Ensure that if logtime is present in the config file, its value is used.
+	// This test belongs more in NATS, but this is an issue that surfaced
+	// in previous attempts to solve flags override. So keeping it here so
+	// that we catch such issue if we were to change the flag override code
+	// and break it.
 	for i := 0; i < 2; i++ {
 		os.Remove(nconf)
 		if i == 0 {
@@ -446,10 +494,7 @@ func TestParseProcessConfigFiles(t *testing.T) {
 		if err := ioutil.WriteFile(nconf, ncontent, 0660); err != nil {
 			t.Fatalf("Error creating conf file: %v", err)
 		}
-		_, nopts, err = ProcessConfigFiles(sconf, nconf)
-		if err != nil {
-			t.Fatalf("Error processing config files: %v", err)
-		}
+		_, nopts = mustNotFail([]string{"-c", nconf})
 		// Logtime is specified in the log, so it should be the value that is in
 		// the file.
 		if i == 0 && nopts.Logtime || i == 1 && !nopts.Logtime {
