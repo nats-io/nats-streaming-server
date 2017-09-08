@@ -26,6 +26,7 @@ message SubState {
   string        durableName    = 8;  // Optional durable name which survives client restarts
   uint64        lastSent       = 9;  // Start position
   bool          isDurable      =10;  // Indicate durability for this subscriber
+  bool          isClosed       =11;  // Indicate that the durable subscriber is closed
 }
 
 // SubStateDelete marks a Subscription as deleted

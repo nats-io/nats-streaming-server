@@ -47,7 +47,6 @@ type Info struct {
 // Server is our main struct.
 type Server struct {
 	gcid uint64
-	grid uint64
 	stats
 	mu            sync.Mutex
 	info          Info
@@ -79,6 +78,7 @@ type Server struct {
 	grRunning     bool
 	grWG          sync.WaitGroup // to wait on various go routines
 	cproto        int64          // number of clients supporting async INFO
+	configTime    time.Time      // last time config was loaded
 	logging       struct {
 		sync.RWMutex
 		logger Logger
@@ -118,13 +118,15 @@ func New(opts *Options) *Server {
 		clientConnectURLs: make(map[string]struct{}),
 	}
 
+	now := time.Now()
 	s := &Server{
 		configFile: opts.ConfigFile,
 		info:       info,
 		sl:         NewSublist(),
 		opts:       opts,
 		done:       make(chan bool, 1),
-		start:      time.Now(),
+		start:      now,
+		configTime: now,
 	}
 
 	s.mu.Lock()
@@ -210,7 +212,7 @@ func ProcessCommandLineArgs(cmd *flag.FlagSet) (showVersion bool, showHelp bool,
 		case "help":
 			return false, true, nil
 		default:
-			return false, false, fmt.Errorf("Unrecognized command: %q\n", arg)
+			return false, false, fmt.Errorf("unrecognized command: %q", arg)
 		}
 	}
 
@@ -224,12 +226,9 @@ func (s *Server) isRunning() bool {
 	return s.running
 }
 
-func (s *Server) logPid() {
+func (s *Server) logPid() error {
 	pidStr := strconv.Itoa(os.Getpid())
-	err := ioutil.WriteFile(s.getOpts().PidFile, []byte(pidStr), 0660)
-	if err != nil {
-		PrintAndDie(fmt.Sprintf("Could not write pidfile: %v\n", err))
-	}
+	return ioutil.WriteFile(s.getOpts().PidFile, []byte(pidStr), 0660)
 }
 
 // Start up the server, this will block.
@@ -252,7 +251,9 @@ func (s *Server) Start() {
 
 	// Log the pid to a file
 	if opts.PidFile != _EMPTY_ {
-		s.logPid()
+		if err := s.logPid(); err != nil {
+			PrintAndDie(fmt.Sprintf("Could not write pidfile: %v\n", err))
+		}
 	}
 
 	// Start monitoring if needed
@@ -312,6 +313,7 @@ func (s *Server) Shutdown() {
 	s.grMu.Unlock()
 	// Copy off the routes
 	for i, r := range s.routes {
+		r.setRouteNoReconnectOnClose()
 		conns[i] = r
 	}
 
@@ -638,7 +640,10 @@ func (s *Server) HTTPHandler() http.Handler {
 }
 
 func (s *Server) createClient(conn net.Conn) *client {
-	c := &client{srv: s, nc: conn, opts: defaultOpts, mpay: s.info.MaxPayload, start: time.Now()}
+	// Snapshot server options.
+	opts := s.getOpts()
+
+	c := &client{srv: s, nc: conn, opts: defaultOpts, mpay: int64(opts.MaxPayload), start: time.Now()}
 
 	// Grab JSON info string
 	s.mu.Lock()
@@ -672,9 +677,6 @@ func (s *Server) createClient(conn net.Conn) *client {
 		s.mu.Unlock()
 		return c
 	}
-
-	// Snapshot server options.
-	opts := s.getOpts()
 
 	// If there is a max connections specified, check that adding
 	// this new client would not push us over the max
@@ -916,6 +918,13 @@ func (s *Server) NumSubscriptions() uint32 {
 	subs := s.sl.Count()
 	s.mu.Unlock()
 	return subs
+}
+
+// ConfigTime will report the last time the server configuration was loaded.
+func (s *Server) ConfigTime() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.configTime
 }
 
 // Addr will return the net.Addr object for the current listener.
