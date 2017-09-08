@@ -81,14 +81,24 @@ message CtrlMsg {
 // RaftOperation is a Raft log message.
 message RaftOperation {
   enum Type {
-    Publish = 0; // Message publish.
+    Publish            = 0; // Message publish.
+    AddSubscription    = 1; // Create client subscription.
+    UpdateSubscription = 2; // Update durable client subscription.
   }
-  Type   OpType       = 1; // Log message type.
-  string Leader       = 2; // The node that proposed the operation.
-  Batch  PublishBatch = 3; // Publish operation data.
+  Type                  OpType       = 1; // Log message type.
+  string                Leader       = 2; // The node that proposed the operation.
+  Batch                 PublishBatch = 3; // Publish operation data.
+  ReplicateSubscription Sub          = 4; // Add/Update Subscription operation data.
 }
 
 // Batch is a batch of messages for replication.
 message Batch {
   repeated pb.MsgProto Messages = 1; // Serialized MsgProtos to replicate.
+}
+
+// ReplicateSubscription is used to replicate new or updated client
+// subscription.
+message ReplicateSubscription {
+  string   Subject = 1; // Subscription subject.
+  SubState State   = 2; // Subscription state.
 }

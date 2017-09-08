@@ -107,6 +107,9 @@ const (
 
 	// Name of the file to store Raft log.
 	raftLogFile = "raft.log"
+
+	// Time to wait on starting a Raft operation.
+	raftApplyTimeout = 5 * time.Second
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -499,6 +502,30 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 					msg.Sequence, c.name, err))
 			}
 		}
+	case spb.RaftOperation_AddSubscription:
+		sub := &subState{
+			SubState:    *op.Sub.State,
+			subject:     op.Sub.Subject,
+			ackWait:     computeAckWait(op.Sub.State.AckWaitInSecs),
+			acksPending: make(map[uint64]int64),
+			store:       c.store.Subs,
+		}
+		if err := c.stan.addSubscription(c.ss, sub); err != nil {
+			panic(fmt.Errorf("failed to store replicated subscription on channel %s for client %s: %v",
+				op.Sub.Subject, op.Sub.State.ClientID, err))
+		}
+	case spb.RaftOperation_UpdateSubscription:
+		sub := &subState{
+			SubState:    *op.Sub.State,
+			subject:     op.Sub.Subject,
+			ackWait:     computeAckWait(op.Sub.State.AckWaitInSecs),
+			acksPending: make(map[uint64]int64),
+			store:       c.store.Subs,
+		}
+		if err := c.stan.updateDurable(c.ss, sub); err != nil {
+			panic(fmt.Errorf("failed to store replicated subscription on channel %s for client %s: %v",
+				op.Sub.Subject, op.Sub.State.ClientID, err))
+		}
 	default:
 		panic(fmt.Sprintf("unknown op type %s", op.OpType))
 	}
@@ -529,7 +556,10 @@ func (c *channel) isLeader() bool {
 
 // leadershipAcquired should be called when this node is elected leader for the
 // channel. This should only be called when the server is running in clustered
-// mode.
+// mode. This performs a barrier on Raft to ensure all preceding operations are
+// applied before stepping up as leader, sets up an ack subscription, updates
+// the next sequence to assign, and attempts to redeliver any outstanding
+// messages that have expired.
 func (c *channel) leadershipAcquired() (error, bool) {
 	// Use a barrier to ensure all preceding operations are
 	// applied to the FSM, then update nextSequence.
@@ -553,19 +583,25 @@ func (c *channel) leadershipAcquired() (error, bool) {
 		}
 		panic(err)
 	}
+
+	// Update next sequence to assign.
 	lastSequence, err := c.store.Msgs.LastSequence()
 	if err != nil {
 		// TODO: probably step down as leader?
 		panic(err)
 	}
 	atomic.StoreUint64(&c.nextSequence, lastSequence+1)
+
+	// Attempt to redeliver outstanding messages that have expired.
+
+	// Finally step up as leader.
 	atomic.StoreUint32(&c.leader, 1)
 	return nil, true
 }
 
 // leadershipLost should be called when this node loses leadership for the
 // channel. This should only be called when the server is running in
-// clustered mode.
+// clustered mode. This removes the ack subscription.
 func (c *channel) leadershipLost() {
 	if c.acksSub != nil {
 		c.acksSub.Unsubscribe()
@@ -1649,9 +1685,12 @@ func (s *StanServer) start(runningState State) error {
 	}
 
 	// Execute (in a go routine) redelivery of unacknowledged messages,
-	// and release newOnHold
-	s.wg.Add(1)
-	go s.performRedeliveryOnStartup(recoveredSubs)
+	// and release newOnHold. We only do this if not clustered. If
+	// clustered, the leader will handle redelivery upon election.
+	if !s.isClustered() {
+		s.wg.Add(1)
+		go s.performRedeliveryOnStartup(recoveredSubs)
+	}
 	return nil
 }
 
@@ -3096,7 +3135,7 @@ func (s *StanServer) replicate(iopms []*ioPendingMsg) (map[*channel]raft.Future,
 		if err != nil {
 			panic(err)
 		}
-		futures[c] = c.raft.Apply(data, 5*time.Second)
+		futures[c] = c.raft.Apply(data, raftApplyTimeout)
 	}
 	return futures, nil
 }
@@ -3362,6 +3401,31 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 	return fmt.Sprintf("%s-%s-%s", sr.ClientID, sr.Subject, sr.DurableName)
 }
 
+func (s *StanServer) replicateAddSubscription(c *channel, sub *spb.SubState, subject string) error {
+	return s.replicateSubscription(c, sub, subject, spb.RaftOperation_AddSubscription)
+}
+
+func (s *StanServer) replicateUpdateSubscription(c *channel, sub *spb.SubState, subject string) error {
+	return s.replicateSubscription(c, sub, subject, spb.RaftOperation_UpdateSubscription)
+}
+
+func (s *StanServer) replicateSubscription(c *channel, sub *spb.SubState, subject string, opType spb.RaftOperation_Type) error {
+	op := &spb.RaftOperation{
+		OpType: opType,
+		Leader: s.opts.ClusterNodeID,
+		Sub: &spb.ReplicateSubscription{
+			Subject: subject,
+			State:   sub,
+		},
+	}
+	data, err := op.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	// Replicate operation and wait on result.
+	return c.raft.Apply(data, raftApplyTimeout).Error()
+}
+
 // addSubscription adds `sub` to the client and store.
 func (s *StanServer) addSubscription(ss *subStore, sub *subState) error {
 	// Store in client
@@ -3561,7 +3625,12 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 		// Case of restarted durable subscriber, or first durable queue
 		// subscriber re-joining a group that was left with pending messages.
-		err = s.updateDurable(ss, sub)
+		if s.isClustered() {
+			// If clustered, thread update through Raft.
+			err = s.replicateUpdateSubscription(c, &sub.SubState, sr.Subject)
+		} else {
+			err = s.updateDurable(ss, sub)
+		}
 	} else {
 		subIsNew = true
 		// Create sub here (can be plain, durable or queue subscriber)
@@ -3589,7 +3658,12 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 		if err == nil {
 			// add the subscription to stan
-			err = s.addSubscription(ss, sub)
+			if s.isClustered() {
+				// If clustered, thread the subscription through Raft.
+				err = s.replicateAddSubscription(c, &sub.SubState, sr.Subject)
+			} else {
+				err = s.addSubscription(ss, sub)
+			}
 		}
 	}
 	if err != nil {
