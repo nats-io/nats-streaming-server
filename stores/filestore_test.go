@@ -773,8 +773,8 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 	channelOne := rc.Channel
 	sub := &spb.SubState{
 		ClientID:      "me",
-		Inbox:         nuidGen.Next(),
-		AckInbox:      nuidGen.Next(),
+		Inbox:         "inbox",
+		AckInbox:      "ackinbox",
 		AckWaitInSecs: 10,
 	}
 	if err := channelOne.Subs.CreateSub(sub); err == nil {

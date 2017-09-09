@@ -219,8 +219,8 @@ func TestCSRecoverSubUpdateForDeleteSubOK(t *testing.T) {
 			// recovered one, we should fail creating a new one.
 			sub := &spb.SubState{
 				ClientID:      "me",
-				Inbox:         nuidGen.Next(),
-				AckInbox:      nuidGen.Next(),
+				Inbox:         "inbox",
+				AckInbox:      "ackinbox",
 				AckWaitInSecs: 10,
 			}
 			if err := cs.Subs.CreateSub(sub); err == nil || err != ErrTooManySubs {
@@ -363,7 +363,7 @@ func TestCSUpdatedSub(t *testing.T) {
 			updatedSub := &spb.SubState{
 				ID:            subID,
 				ClientID:      "me",
-				Inbox:         nuidGen.Next(),
+				Inbox:         "inbox",
 				AckInbox:      "newAckInbox",
 				AckWaitInSecs: 10,
 			}
@@ -377,8 +377,8 @@ func TestCSUpdatedSub(t *testing.T) {
 			subWithoutNew := &spb.SubState{
 				ID:            subID + 1,
 				ClientID:      "me",
-				Inbox:         nuidGen.Next(),
-				AckInbox:      nuidGen.Next(),
+				Inbox:         "inbox",
+				AckInbox:      "ackinbox",
 				AckWaitInSecs: 10,
 			}
 			if err := ss.UpdateSub(subWithoutNew); err != nil {

@@ -491,8 +491,8 @@ func TestFSNoReferenceToCallerSubState(t *testing.T) {
 	ss := cs.Subs
 	sub := &spb.SubState{
 		ClientID:      "me",
-		Inbox:         nuidGen.Next(),
-		AckInbox:      nuidGen.Next(),
+		Inbox:         "inbox",
+		AckInbox:      "ackinbox",
 		AckWaitInSecs: 10,
 	}
 	if err := ss.CreateSub(sub); err != nil {

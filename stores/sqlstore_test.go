@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,14 +15,25 @@ import (
 	"github.com/nats-io/nats-streaming-server/spb"
 )
 
+// The SourceAdmin is used by the test setup to have access
+// to the database server and create the test streaming database.
+// The Source contains the URL that the Store needs to actually
+// connect to the server and use the database.
+const (
+	testDefaultDatabaseName = "test_nats_streaming"
+
+	testDefaultMySQLSource      = "nss:password@/" + testDefaultDatabaseName
+	testDefaultMySQLSourceAdmin = "nss:password@/"
+
+	testDefaultPostgresSource      = "dbname=" + testDefaultDatabaseName + " sslmode=disable"
+	testDefaultPostgresSourceAdmin = "sslmode=disable"
+)
+
 var (
-	testSQLDriver = "mysql"
-	testSQLSource = "root@/test_nats_streaming"
-	// These 2 are used in order to connect to the database daemon and create
-	// the test streaming database, tables, etc.. The source here should not
-	// contain the database name
-	testSQLSourceAdmin  = "root@/"
-	testSQLDatabaseName = "test_nats_streaming"
+	testSQLDriver       = driverMySQL
+	testSQLDatabaseName = testDefaultDatabaseName
+	testSQLSource       = testDefaultMySQLSource
+	testSQLSourceAdmin  = testDefaultMySQLSourceAdmin
 )
 
 func newSQLStore(t *testing.T, driver, source string, limits *StoreLimits) (*SQLStore, *RecoveredState, error) {
@@ -46,6 +58,7 @@ func createDefaultSQLStore(t *testing.T) *SQLStore {
 	if state == nil {
 		info := testDefaultServerInfo
 		if err := ss.Init(&info); err != nil {
+			ss.Close()
 			stackFatalf(t, "Error on Init: %v", err)
 		}
 	}
@@ -73,14 +86,15 @@ func cleanupSQLDatastore(t *testing.T) {
 	if _, err := db.Exec("DROP DATABASE IF EXISTS " + testSQLDatabaseName); err != nil {
 		stackFatalf(t, "Error dropping database: %v", err)
 	}
-	if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS " + testSQLDatabaseName); err != nil {
-		stackFatalf(t, "Error creating database: %v", err)
-	}
-	if _, err = db.Exec("USE " + testSQLDatabaseName); err != nil {
-		stackFatalf(t, "Error using database %q: %v", testSQLDatabaseName, err)
-	}
 	var sqlCreateDatabase []string
-	if testSQLDriver == "mysql" {
+	switch testSQLDriver {
+	case driverMySQL:
+		if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS " + testSQLDatabaseName); err != nil {
+			stackFatalf(t, "Error creating database: %v", err)
+		}
+		if _, err = db.Exec("USE " + testSQLDatabaseName); err != nil {
+			stackFatalf(t, "Error using database %q: %v", testSQLDatabaseName, err)
+		}
 		sqlCreateDatabase = []string{
 			"CREATE TABLE IF NOT EXISTS ServerInfo (uniquerow INT DEFAULT 1, id VARCHAR(1024) PRIMARY KEY, proto BLOB, version INTEGER)",
 			"CREATE TABLE IF NOT EXISTS Clients (id VARCHAR(1024) PRIMARY KEY, hbinbox TEXT)",
@@ -89,6 +103,30 @@ func cleanupSQLDatastore(t *testing.T) {
 			"CREATE TABLE IF NOT EXISTS Subscriptions (id INTEGER, subid BIGINT UNSIGNED, proto BLOB, deleted BOOL DEFAULT FALSE, CONSTRAINT PK_SubKey PRIMARY KEY(id, subid))",
 			"CREATE TABLE IF NOT EXISTS SubsPending (subid BIGINT UNSIGNED, seq BIGINT UNSIGNED, CONSTRAINT PK_MsgPendingKey PRIMARY KEY(subid, seq))",
 		}
+	case driverPostgres:
+		if _, err := db.Exec("CREATE DATABASE " + testSQLDatabaseName); err != nil {
+			stackFatalf(t, "Error creating database: %v", err)
+		}
+		db.Close()
+		db, err = sql.Open(testSQLDriver, testSQLSource)
+		if err != nil {
+			stackFatalf(t, "Error connecting to database: %v", err)
+		}
+		defer db.Close()
+		// Note: there is no unsigned types in Postgres
+		sqlCreateDatabase = []string{
+			"CREATE TABLE IF NOT EXISTS ServerInfo (uniquerow INT DEFAULT 1, id VARCHAR(1024) PRIMARY KEY, proto BYTEA, version INTEGER)",
+			"CREATE TABLE IF NOT EXISTS Clients (id VARCHAR(1024) PRIMARY KEY, hbinbox TEXT)",
+			"CREATE TABLE IF NOT EXISTS Channels (id INTEGER PRIMARY KEY, name VARCHAR(1024) NOT NULL, maxseq BIGINT DEFAULT 0, deleted BOOL DEFAULT FALSE)",
+			"CREATE INDEX Idx_ChannelsName ON Channels (name)",
+			"CREATE TABLE IF NOT EXISTS Messages (id INTEGER, seq BIGINT, timestamp BIGINT, expiration BIGINT, size INTEGER, data BYTEA, CONSTRAINT PK_MsgKey PRIMARY KEY(id, seq))",
+			"CREATE INDEX Idx_MsgsTimestamp ON Messages (timestamp)",
+			"CREATE INDEX Idx_MsgsExpiration ON Messages (expiration)",
+			"CREATE TABLE IF NOT EXISTS Subscriptions (id INTEGER, subid BIGINT, proto BYTEA, deleted BOOL DEFAULT FALSE, CONSTRAINT PK_SubKey PRIMARY KEY(id, subid))",
+			"CREATE TABLE IF NOT EXISTS SubsPending (subid BIGINT, seq BIGINT, CONSTRAINT PK_MsgPendingKey PRIMARY KEY(subid, seq))",
+		}
+	default:
+		panic(fmt.Sprintf("Unsupported driver %v", testSQLDriver))
 	}
 	for _, stmt := range sqlCreateDatabase {
 		if _, err := db.Exec(stmt); err != nil {
@@ -144,6 +182,29 @@ func mustExecute(t *testing.T, db *sql.DB, query string, args ...interface{}) sq
 		stackFatalf(t, "Error executing query %q: %v", query, err)
 	}
 	return r
+}
+
+func TestSQLPostgresDriverInit(t *testing.T) {
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	var realStmts []string
+	realStmts = append(realStmts, sqlStmts...)
+	defer func() {
+		sqlStmts = nil
+		sqlStmts = append(sqlStmts, realStmts...)
+	}()
+
+	// Make sure sqlStms table is set...
+	initSQLStmtsTable(driverPostgres)
+
+	// Make sure there is not ? but $ in the statements
+	reg := regexp.MustCompile(`\?`)
+	for _, stmt := range sqlStmts {
+		if reg.FindString(stmt) != "" {
+			t.Fatalf("Statement %q incorrect for Postgres driver", stmt)
+		}
+	}
 }
 
 func TestSQLErrorOnNewStore(t *testing.T) {
@@ -470,6 +531,7 @@ func TestSQLRecoverBadVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
+	defer s.Close()
 	state, err := s.Recover()
 	if state != nil || err == nil {
 		t.Fatalf("Expected no state and error about version, got %v - %v", state, err)
@@ -479,6 +541,9 @@ func TestSQLRecoverBadVersion(t *testing.T) {
 func TestSQLRecoverVariousErrors(t *testing.T) {
 	defer cleanupSQLDatastore(t)
 
+	// Make sure sqlStms table is set...
+	initSQLStmtsTable(testSQLDriver)
+
 	var realStmts []string
 	realStmts = append(realStmts, sqlStmts...)
 
@@ -487,24 +552,48 @@ func TestSQLRecoverVariousErrors(t *testing.T) {
 		subID uint64
 	)
 
-	errs := []func(){
-		func() { mustExecute(t, db, "UPDATE ServerInfo SET id=? WHERE uniquerow=1", "not-same-than-proto") },
-		func() { mustExecute(t, db, "UPDATE ServerInfo SET proto=? WHERE uniquerow=1", "unmarshal_failure") },
-		func() {
-			mustExecute(t, db, "UPDATE Subscriptions SET proto=? WHERE subid=?", "unmarshal_failure", subID)
-		},
-		func() { sqlStmts[sqlRecoverServerInfo] = "SELECT x FROM ServerInfo" },
-		func() { sqlStmts[sqlRecoverClients] = "SELECT x FROM Clients" },
-		func() { sqlStmts[sqlRecoverClients] = "SELECT id FROM Clients" },
-		func() { sqlStmts[sqlRecoverMaxChannelID] = "SELECT x FROM Channels" },
-		func() { sqlStmts[sqlRecoverMaxSubID] = "SELECT x FROM Subscriptions" },
-		func() { sqlStmts[sqlRecoverChannelsList] = "SELECT x FROM Channels" },
-		func() { sqlStmts[sqlRecoverChannelsList] = "SELECT id FROM Channels" },
-		func() { sqlStmts[sqlRecoverChannelMsgs] = "SELECT x FROM Messages WHERE id=?" },
-		func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT x FROM Subscriptions WHERE id=?" },
-		func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT id, proto FROM Subscriptions WHERE id=?" },
-		func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT x FROM SubsPending WHERE subid=?" },
-		func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT subid, seq FROM SubsPending WHERE subid=?" },
+	var errs = []func(){}
+	switch testSQLDriver {
+	case driverMySQL:
+		errs = []func(){
+			func() { mustExecute(t, db, "UPDATE ServerInfo SET id=? WHERE uniquerow=1", "not-same-than-proto") },
+			func() { mustExecute(t, db, "UPDATE ServerInfo SET proto=? WHERE uniquerow=1", "unmarshal_failure") },
+			func() {
+				mustExecute(t, db, "UPDATE Subscriptions SET proto=? WHERE subid=?", "unmarshal_failure", subID)
+			},
+			func() { sqlStmts[sqlRecoverServerInfo] = "SELECT x FROM ServerInfo" },
+			func() { sqlStmts[sqlRecoverClients] = "SELECT x FROM Clients" },
+			func() { sqlStmts[sqlRecoverClients] = "SELECT id FROM Clients" },
+			func() { sqlStmts[sqlRecoverMaxChannelID] = "SELECT x FROM Channels" },
+			func() { sqlStmts[sqlRecoverMaxSubID] = "SELECT x FROM Subscriptions" },
+			func() { sqlStmts[sqlRecoverChannelsList] = "SELECT x FROM Channels" },
+			func() { sqlStmts[sqlRecoverChannelsList] = "SELECT id FROM Channels" },
+			func() { sqlStmts[sqlRecoverChannelMsgs] = "SELECT x FROM Messages WHERE id=?" },
+			func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT x FROM Subscriptions WHERE id=?" },
+			func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT id, proto FROM Subscriptions WHERE id=?" },
+			func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT x FROM SubsPending WHERE subid=?" },
+			func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT subid, seq FROM SubsPending WHERE subid=?" },
+		}
+	case driverPostgres:
+		errs = []func(){
+			func() { mustExecute(t, db, "UPDATE ServerInfo SET id=$1 WHERE uniquerow=1", "not-same-than-proto") },
+			func() { mustExecute(t, db, "UPDATE ServerInfo SET proto=$1 WHERE uniquerow=1", "unmarshal_failure") },
+			func() {
+				mustExecute(t, db, "UPDATE Subscriptions SET proto=$1 WHERE subid=$2", "unmarshal_failure", subID)
+			},
+			func() { sqlStmts[sqlRecoverServerInfo] = "SELECT x FROM ServerInfo" },
+			func() { sqlStmts[sqlRecoverClients] = "SELECT x FROM Clients" },
+			func() { sqlStmts[sqlRecoverClients] = "SELECT id FROM Clients" },
+			func() { sqlStmts[sqlRecoverMaxChannelID] = "SELECT x FROM Channels" },
+			func() { sqlStmts[sqlRecoverMaxSubID] = "SELECT x FROM Subscriptions" },
+			func() { sqlStmts[sqlRecoverChannelsList] = "SELECT x FROM Channels" },
+			func() { sqlStmts[sqlRecoverChannelsList] = "SELECT id FROM Channels" },
+			func() { sqlStmts[sqlRecoverChannelMsgs] = "SELECT x FROM Messages WHERE id=$1" },
+			func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT x FROM Subscriptions WHERE id=$1" },
+			func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT id, proto FROM Subscriptions WHERE id=$1" },
+			func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT x FROM SubsPending WHERE subid=$1" },
+			func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT subid, seq FROM SubsPending WHERE subid=$1" },
+		}
 	}
 
 	for _, produceError := range errs {

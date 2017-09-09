@@ -47,7 +47,6 @@ type testStore struct {
 }
 
 var (
-	nuidGen    *nuid.NUID
 	testLogger logger.Logger
 	testStores = []*testStore{
 		&testStore{TypeMemory, false},
@@ -57,7 +56,6 @@ var (
 )
 
 func init() {
-	nuidGen = nuid.New()
 	// Create an empty logger (no actual logger is set without calling SetLogger())
 	testLogger = logger.NewStanLogger()
 }
@@ -189,11 +187,12 @@ func storeMsg(t *testing.T, cs *Channel, channel string, data []byte) *pb.MsgPro
 }
 
 func storeSub(t *testing.T, cs *Channel, channel string) uint64 {
+	nid := nuid.New()
 	ss := cs.Subs
 	sub := &spb.SubState{
 		ClientID:      "me",
-		Inbox:         nuidGen.Next(),
-		AckInbox:      nuidGen.Next(),
+		Inbox:         nid.Next(),
+		AckInbox:      nid.Next(),
 		AckWaitInSecs: 10,
 	}
 	if err := ss.CreateSub(sub); err != nil {
@@ -297,10 +296,34 @@ func TestMain(m *testing.M) {
 	flag.BoolVar(&testFSDisableBufferWriters, "fs_no_buffer", false, "Disable use of buffer writers")
 	flag.BoolVar(&testFSSetFDsLimit, "fs_set_fds_limit", false, "Set some FDs limit")
 	flag.StringVar(&testSQLDriver, "sql_driver", testSQLDriver, "SQL Driver to use")
-	flag.StringVar(&testSQLSource, "sql_source", testSQLSource, "SQL data source")
-	flag.StringVar(&testSQLSourceAdmin, "sql_source_admin", testSQLSource, "SQL data source to create the database")
+	flag.StringVar(&testSQLSource, "sql_source", "", "SQL data source")
+	flag.StringVar(&testSQLSourceAdmin, "sql_source_admin", "", "SQL data source to create the database")
 	flag.StringVar(&testSQLDatabaseName, "sql_db_name", testSQLDatabaseName, "SQL database name")
 	flag.Parse()
+
+	// This allows to just specify the driver on the command line and
+	// use corresponding driver defaults, while still allowing full customization
+	// of each param.
+	switch testSQLDriver {
+	case driverMySQL:
+		if testSQLSource == "" {
+			testSQLSource = testDefaultMySQLSource
+		}
+		if testSQLSourceAdmin == "" {
+			testSQLSourceAdmin = testDefaultMySQLSourceAdmin
+		}
+	case driverPostgres:
+		if testSQLSource == "" {
+			testSQLSource = testDefaultPostgresSource
+		}
+		if testSQLSourceAdmin == "" {
+			testSQLSourceAdmin = testDefaultPostgresSourceAdmin
+		}
+	default:
+		fmt.Printf("Unsupported SQL driver: %v\n", testSQLDriver)
+		os.Exit(2)
+	}
+
 	os.Exit(m.Run())
 }
 
