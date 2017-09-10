@@ -514,6 +514,7 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 			panic(fmt.Errorf("failed to store replicated subscription on channel %s for client %s: %v",
 				op.Sub.Subject, op.Sub.State.ClientID, err))
 		}
+		return sub
 	case spb.RaftOperation_UpdateSubscription:
 		sub := &subState{
 			SubState:    *op.Sub.State,
@@ -592,7 +593,36 @@ func (c *channel) leadershipAcquired() (error, bool) {
 	}
 	atomic.StoreUint64(&c.nextSequence, lastSequence+1)
 
+	// Initialize subscriptions.
+	for _, sub := range c.ss.psubs {
+		sub.Lock()
+		sub.initialized = true
+		sub.Unlock()
+	}
+	for _, qsub := range c.ss.qsubs {
+		for _, sub := range qsub.subs {
+			sub.Lock()
+			sub.initialized = true
+			sub.Unlock()
+		}
+	}
+
 	// Attempt to redeliver outstanding messages that have expired.
+	go func() {
+		c.ss.RLock()
+		for _, sub := range c.ss.psubs {
+			sub.Lock()
+			sub.initialized = true
+			sub.Unlock()
+			c.stan.performAckExpirationRedelivery(sub, true)
+		}
+		for _, qsub := range c.ss.qsubs {
+			for _, sub := range qsub.subs {
+				c.stan.performAckExpirationRedelivery(sub, true)
+			}
+		}
+		c.ss.RUnlock()
+	}()
 
 	// Finally step up as leader.
 	atomic.StoreUint32(&c.leader, 1)
@@ -3294,6 +3324,12 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 		return
 	}
 
+	// In clustered mode, drop the request if we are not the channel leader.
+	// Another server will handle it.
+	if s.isClustered() && !c.isLeader() {
+		return
+	}
+
 	// Get the subStore
 	ss := c.ss
 
@@ -3441,15 +3477,15 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 	return fmt.Sprintf("%s-%s-%s", sr.ClientID, sr.Subject, sr.DurableName)
 }
 
-func (s *StanServer) replicateAddSubscription(c *channel, sub *spb.SubState, subject string) error {
+func (s *StanServer) replicateAddSubscription(c *channel, sub *spb.SubState, subject string) (*subState, error) {
 	return s.replicateSubscription(c, sub, subject, spb.RaftOperation_AddSubscription)
 }
 
-func (s *StanServer) replicateUpdateSubscription(c *channel, sub *spb.SubState, subject string) error {
+func (s *StanServer) replicateUpdateSubscription(c *channel, sub *spb.SubState, subject string) (*subState, error) {
 	return s.replicateSubscription(c, sub, subject, spb.RaftOperation_UpdateSubscription)
 }
 
-func (s *StanServer) replicateSubscription(c *channel, sub *spb.SubState, subject string, opType spb.RaftOperation_Type) error {
+func (s *StanServer) replicateSubscription(c *channel, sub *spb.SubState, subject string, opType spb.RaftOperation_Type) (*subState, error) {
 	op := &spb.RaftOperation{
 		OpType: opType,
 		Leader: s.opts.ClusterNodeID,
@@ -3463,7 +3499,11 @@ func (s *StanServer) replicateSubscription(c *channel, sub *spb.SubState, subjec
 		panic(err)
 	}
 	// Replicate operation and wait on result.
-	return c.raft.Apply(data, raftApplyTimeout).Error()
+	future := c.raft.Apply(data, raftApplyTimeout)
+	if err := future.Error(); err != nil {
+		return nil, err
+	}
+	return future.Response().(*subState), nil
 }
 
 // addSubscription adds `sub` to the client and store.
@@ -3668,7 +3708,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		// subscriber re-joining a group that was left with pending messages.
 		if s.isClustered() {
 			// If clustered, thread update through Raft.
-			err = s.replicateUpdateSubscription(c, &sub.SubState, sr.Subject)
+			sub, err = s.replicateUpdateSubscription(c, &sub.SubState, sr.Subject)
 		} else {
 			err = s.updateDurable(ss, sub)
 		}
@@ -3701,7 +3741,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			// add the subscription to stan
 			if s.isClustered() {
 				// If clustered, thread the subscription through Raft.
-				err = s.replicateAddSubscription(c, &sub.SubState, sr.Subject)
+				sub, err = s.replicateAddSubscription(c, &sub.SubState, sr.Subject)
 			} else {
 				err = s.addSubscription(ss, sub)
 			}
