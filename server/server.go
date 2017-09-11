@@ -513,8 +513,7 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 			store:       c.store.Subs,
 		}
 		if err := c.stan.addSubscription(c.ss, sub); err != nil {
-			panic(fmt.Errorf("failed to store replicated subscription on channel %s for client %s: %v",
-				op.Sub.Subject, op.Sub.State.ClientID, err))
+			return err
 		}
 		return sub
 	case spb.RaftOperation_UpdateSubscription:
@@ -527,8 +526,7 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 			store:       c.store.Subs,
 		}
 		if err := c.stan.updateDurable(c.ss, sub); err != nil {
-			panic(fmt.Errorf("failed to store replicated subscription on channel %s for client %s: %v",
-				op.Sub.Subject, op.Sub.State.ClientID, err))
+			return err
 		}
 		return sub
 	case spb.RaftOperation_RemoveSubscription:
@@ -3578,7 +3576,12 @@ func (s *StanServer) replicateSubscription(c *channel, sub *spb.SubState, subjec
 	if err := future.Error(); err != nil {
 		return nil, err
 	}
-	return future.Response().(*subState), nil
+	resp := future.Response()
+	err, ok := resp.(error)
+	if ok {
+		return nil, err
+	}
+	return resp.(*subState), nil
 }
 
 // addSubscription adds `sub` to the client and store.
