@@ -496,6 +496,7 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 	}
 	switch op.OpType {
 	case spb.RaftOperation_Publish:
+		// Message replication.
 		for _, msg := range op.PublishBatch.Messages {
 			if _, err := c.store.Msgs.Store(msg); err != nil {
 				panic(fmt.Errorf("failed to store replicated message %d on channel %s: %v",
@@ -503,6 +504,7 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 			}
 		}
 	case spb.RaftOperation_AddSubscription:
+		// Subscription replication.
 		sub := &subState{
 			SubState:    *op.Sub.State,
 			subject:     op.Sub.Subject,
@@ -516,6 +518,7 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 		}
 		return sub
 	case spb.RaftOperation_UpdateSubscription:
+		// Durable subscription update replication.
 		sub := &subState{
 			SubState:    *op.Sub.State,
 			subject:     op.Sub.Subject,
@@ -527,6 +530,31 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 			panic(fmt.Errorf("failed to store replicated subscription on channel %s for client %s: %v",
 				op.Sub.Subject, op.Sub.State.ClientID, err))
 		}
+		return sub
+	case spb.RaftOperation_RemoveSubscription:
+		// Unsubscribe replication.
+		sub := c.ss.LookupByAckInbox(op.Unsub.AckInbox)
+		// QUESTION: what to do in case where leader is replicating unsub to
+		// follower who doesn't have the sub?
+		if sub == nil {
+			return ErrInvalidSub
+		}
+		c.stan.closeMu.Lock()
+		err := c.stan.unsubscribe(c, op.Unsub.ClientID, sub, false)
+		c.stan.closeMu.Unlock()
+		return err
+	case spb.RaftOperation_CloseSubscription:
+		// Close subscription replication.
+		sub := c.ss.LookupByAckInbox(op.Unsub.AckInbox)
+		// QUESTION: what to do in case where leader is replicating unsub to
+		// follower who doesn't have the sub?
+		if sub == nil {
+			return ErrInvalidSub
+		}
+		c.stan.closeMu.Lock()
+		err := c.stan.unsubscribe(c, op.Unsub.ClientID, sub, true)
+		c.stan.closeMu.Unlock()
+		return err
 	default:
 		panic(fmt.Sprintf("unknown op type %s", op.OpType))
 	}
@@ -3341,10 +3369,6 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 		return
 	}
 
-	// Lock for the remainder of the function
-	s.closeMu.Lock()
-	defer s.closeMu.Unlock()
-
 	if schedule {
 		processInPlace := false
 		sub.Lock()
@@ -3364,24 +3388,75 @@ func (s *StanServer) performSubUnsubOrClose(reqType spb.CtrlMsg_Type, schedule b
 		}
 	}
 
-	// Remove from Client
-	if !s.clients.removeSub(req.ClientID, sub) {
-		s.log.Errorf("[Client:%s] %s request for missing client", req.ClientID, action)
-		s.sendSubscriptionResponseErr(m.Reply, ErrUnknownClient)
-		return
-	}
+	if s.isClustered() {
+		// If clustered, replicate unsubscribe operation.
+		var err error
+		if isSubClose {
+			err = s.replicateCloseSubscription(c, req.ClientID, req.Inbox)
+		} else {
+			err = s.replicateRemoveSubscription(c, req.ClientID, req.Inbox)
+		}
+		if err != nil {
+			s.log.Errorf("[Client:%s] %s request replication failed: %v", req.ClientID, action, err)
+			s.sendSubscriptionResponseErr(m.Reply, err)
+			return
+		}
+	} else {
+		// Lock for the remainder of the function
+		s.closeMu.Lock()
+		defer s.closeMu.Unlock()
 
-	// Remove the subscription
-	unsubscribe := !isSubClose
-	ss.Remove(c, sub, unsubscribe)
-	s.monMu.Lock()
-	s.numSubs--
-	s.monMu.Unlock()
+		if err := s.unsubscribe(c, req.ClientID, sub, isSubClose); err != nil {
+			s.log.Errorf("[Client:%s] %s request failed: %v", req.ClientID, action, err)
+			s.sendSubscriptionResponseErr(m.Reply, err)
+			return
+		}
+	}
 
 	// Create a non-error response
 	resp := &pb.SubscriptionResponse{AckInbox: req.Inbox}
 	b, _ := resp.Marshal()
 	s.ncs.Publish(m.Reply, b)
+}
+
+func (s *StanServer) unsubscribe(c *channel, clientID string, sub *subState, isSubClose bool) error {
+	// Remove from Client
+	if !s.clients.removeSub(clientID, sub) {
+		return ErrUnknownClient
+	}
+
+	// Remove the subscription
+	unsubscribe := !isSubClose
+	c.ss.Remove(c, sub, unsubscribe)
+	s.monMu.Lock()
+	s.numSubs--
+	s.monMu.Unlock()
+	return nil
+}
+
+func (s *StanServer) replicateRemoveSubscription(c *channel, clientID, ackInbox string) error {
+	return s.replicateUnsubscribe(c, clientID, ackInbox, spb.RaftOperation_RemoveSubscription)
+}
+
+func (s *StanServer) replicateCloseSubscription(c *channel, clientID, ackInbox string) error {
+	return s.replicateUnsubscribe(c, clientID, ackInbox, spb.RaftOperation_CloseSubscription)
+}
+
+func (s *StanServer) replicateUnsubscribe(c *channel, clientID, ackInbox string, opType spb.RaftOperation_Type) error {
+	op := &spb.RaftOperation{
+		OpType: opType,
+		Leader: s.opts.ClusterNodeID,
+		Unsub: &spb.RemoveSubscription{
+			AckInbox: ackInbox,
+			ClientID: clientID,
+		},
+	}
+	data, err := op.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	// Wait on result of replication.
+	return c.raft.Apply(data, raftApplyTimeout).Error()
 }
 
 func (s *StanServer) sendSubscriptionResponseErr(reply string, err error) {
