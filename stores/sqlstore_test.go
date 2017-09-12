@@ -36,7 +36,7 @@ var (
 	testSQLSourceAdmin  = testDefaultMySQLSourceAdmin
 )
 
-func newSQLStore(t *testing.T, driver, source string, limits *StoreLimits) (*SQLStore, *RecoveredState, error) {
+func newSQLStore(t tLogger, driver, source string, limits *StoreLimits) (*SQLStore, *RecoveredState, error) {
 	ss, err := NewSQLStore(testLogger, driver, source, limits)
 	if err != nil {
 		return nil, nil, err
@@ -49,7 +49,7 @@ func newSQLStore(t *testing.T, driver, source string, limits *StoreLimits) (*SQL
 	return ss, state, nil
 }
 
-func createDefaultSQLStore(t *testing.T) *SQLStore {
+func createDefaultSQLStore(t tLogger) *SQLStore {
 	limits := testDefaultStoreLimits
 	ss, state, err := newSQLStore(t, testSQLDriver, testSQLSource, &limits)
 	if err != nil {
@@ -65,7 +65,7 @@ func createDefaultSQLStore(t *testing.T) *SQLStore {
 	return ss
 }
 
-func openDefaultSQLStoreWithLimits(t *testing.T, limits *StoreLimits) (*SQLStore, *RecoveredState) {
+func openDefaultSQLStoreWithLimits(t tLogger, limits *StoreLimits) (*SQLStore, *RecoveredState) {
 	if limits == nil {
 		l := testDefaultStoreLimits
 		limits = &l
@@ -77,7 +77,7 @@ func openDefaultSQLStoreWithLimits(t *testing.T, limits *StoreLimits) (*SQLStore
 	return ss, state
 }
 
-func cleanupSQLDatastore(t *testing.T) {
+func cleanupSQLDatastore(t tLogger) {
 	db, err := sql.Open(testSQLDriver, testSQLSourceAdmin)
 	if err != nil {
 		stackFatalf(t, "Error cleaning up SQL datastore", err)

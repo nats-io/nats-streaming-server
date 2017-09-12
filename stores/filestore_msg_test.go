@@ -935,10 +935,7 @@ func TestFSMsgRemovedWhileBuffered(t *testing.T) {
 
 	fs.Close()
 
-	fs, state, err := newFileStore(t, testFSDefaultDatastore, &limits)
-	if err != nil {
-		t.Fatalf("Unexpected error opening store: %v", err)
-	}
+	fs, state := newFileStore(t, testFSDefaultDatastore, &limits)
 	defer fs.Close()
 	if state == nil {
 		t.Fatal("Expected to recover a state")
@@ -1287,10 +1284,7 @@ func TestFSPanicOnStoreCloseWhileMsgsExpire(t *testing.T) {
 	limits := testDefaultStoreLimits
 	limits.MaxAge = 30 * time.Millisecond
 
-	fs, _, err := newFileStore(t, testFSDefaultDatastore, &limits)
-	if err != nil {
-		t.Fatalf("Unable to create store: %v", err)
-	}
+	fs, _ := newFileStore(t, testFSDefaultDatastore, &limits)
 	defer fs.Close()
 
 	cs := storeCreateChannel(t, fs, "foo")

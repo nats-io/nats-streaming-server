@@ -177,7 +177,7 @@ func storeDeleteClient(t tLogger, s Store, clientID string) {
 	}
 }
 
-func storeMsg(t *testing.T, cs *Channel, channel string, data []byte) *pb.MsgProto {
+func storeMsg(t tLogger, cs *Channel, channel string, data []byte) *pb.MsgProto {
 	ms := cs.Msgs
 	seq, err := ms.Store(data)
 	if err != nil {
@@ -186,7 +186,7 @@ func storeMsg(t *testing.T, cs *Channel, channel string, data []byte) *pb.MsgPro
 	return msgStoreLookup(t, ms, seq)
 }
 
-func storeSub(t *testing.T, cs *Channel, channel string) uint64 {
+func storeSub(t tLogger, cs *Channel, channel string) uint64 {
 	nid := nuid.New()
 	ss := cs.Subs
 	sub := &spb.SubState{
@@ -201,7 +201,7 @@ func storeSub(t *testing.T, cs *Channel, channel string) uint64 {
 	return sub.ID
 }
 
-func storeSubPending(t *testing.T, cs *Channel, channel string, subID uint64, seqs ...uint64) {
+func storeSubPending(t tLogger, cs *Channel, channel string, subID uint64, seqs ...uint64) {
 	ss := cs.Subs
 	for _, s := range seqs {
 		if err := ss.AddSeqPending(subID, s); err != nil {
@@ -210,7 +210,7 @@ func storeSubPending(t *testing.T, cs *Channel, channel string, subID uint64, se
 	}
 }
 
-func storeSubAck(t *testing.T, cs *Channel, channel string, subID uint64, seqs ...uint64) {
+func storeSubAck(t tLogger, cs *Channel, channel string, subID uint64, seqs ...uint64) {
 	ss := cs.Subs
 	for _, s := range seqs {
 		if err := ss.AckSeqPending(subID, s); err != nil {
@@ -219,7 +219,7 @@ func storeSubAck(t *testing.T, cs *Channel, channel string, subID uint64, seqs .
 	}
 }
 
-func storeSubDelete(t *testing.T, cs *Channel, channel string, subID ...uint64) {
+func storeSubDelete(t tLogger, cs *Channel, channel string, subID ...uint64) {
 	ss := cs.Subs
 	for _, s := range subID {
 		subStoreDeleteSub(t, ss, s)
@@ -252,7 +252,7 @@ func getRecoveredSubs(t tLogger, state *RecoveredState, name string, expected in
 	return subs
 }
 
-func startTest(t *testing.T, ts *testStore) Store {
+func startTest(t tLogger, ts *testStore) Store {
 	switch ts.name {
 	case TypeMemory:
 		return createDefaultMemStore(t)
@@ -268,7 +268,7 @@ func startTest(t *testing.T, ts *testStore) Store {
 	return nil
 }
 
-func endTest(t *testing.T, ts *testStore) {
+func endTest(t tLogger, ts *testStore) {
 	switch ts.name {
 	case TypeFile:
 		cleanupFSDatastore(t)
@@ -277,7 +277,7 @@ func endTest(t *testing.T, ts *testStore) {
 	}
 }
 
-func testReOpenStore(t *testing.T, ts *testStore, limits *StoreLimits) (Store, *RecoveredState) {
+func testReOpenStore(t tLogger, ts *testStore, limits *StoreLimits) (Store, *RecoveredState) {
 	if !ts.recoverable {
 		stackFatalf(t, "Cannot reopen a store (%v) that is not recoverable", ts.name)
 	}
@@ -290,6 +290,18 @@ func testReOpenStore(t *testing.T, ts *testStore, limits *StoreLimits) (Store, *
 		stackFatalf(t, "Store type %q is recoverable, add to the switch!", ts.name)
 	}
 	return nil, nil
+}
+
+type cleanupLogger struct{}
+
+func (t *cleanupLogger) Fatalf(format string, args ...interface{}) {
+	fmt.Printf(format, args...)
+	os.Exit(2)
+}
+
+func (t *cleanupLogger) Errorf(format string, args ...interface{}) {
+	fmt.Printf(format, args...)
+	os.Exit(2)
 }
 
 func TestMain(m *testing.M) {
@@ -324,7 +336,18 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	}
 
-	os.Exit(m.Run())
+	doBenchCleanup := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "test.bench" {
+			doBenchCleanup = true
+		}
+	})
+	ret := m.Run()
+	if doBenchCleanup {
+		cl := &cleanupLogger{}
+		benchCleanup(cl)
+	}
+	os.Exit(ret)
 }
 
 func TestGSNoOps(t *testing.T) {

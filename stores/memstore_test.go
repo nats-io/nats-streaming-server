@@ -10,7 +10,7 @@ import (
 	"github.com/nats-io/nats-streaming-server/util"
 )
 
-func createDefaultMemStore(t *testing.T) *MemoryStore {
+func createDefaultMemStore(t tLogger) *MemoryStore {
 	limits := testDefaultStoreLimits
 	ms, err := NewMemoryStore(testLogger, &limits)
 	if err != nil {

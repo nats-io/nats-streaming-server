@@ -43,13 +43,13 @@ func init() {
 	testFSDefaultDatastore = tmpDir
 }
 
-func cleanupFSDatastore(t *testing.T) {
+func cleanupFSDatastore(t tLogger) {
 	if err := os.RemoveAll(testFSDefaultDatastore); err != nil {
 		stackFatalf(t, "Error cleaning up datastore: %v", err)
 	}
 }
 
-func newFileStore(t *testing.T, dataStore string, limits *StoreLimits, options ...FileStoreOption) (*FileStore, *RecoveredState, error) {
+func newFileStore(t tLogger, dataStore string, limits *StoreLimits, options ...FileStoreOption) (*FileStore, *RecoveredState) {
 	opts := DefaultFileStoreOptions
 	// Set those options based on command line parameters.
 	// Each test may override those.
@@ -62,27 +62,24 @@ func newFileStore(t *testing.T, dataStore string, limits *StoreLimits, options .
 	// Apply the provided options
 	for _, opt := range options {
 		if err := opt(&opts); err != nil {
-			return nil, nil, err
+			stackFatalf(t, "Error creating file store: %v", err)
 		}
 	}
 	fs, err := NewFileStore(testLogger, dataStore, limits, AllOptions(&opts))
 	if err != nil {
-		return nil, nil, err
+		stackFatalf(t, "Error creating file store: %v", err)
 	}
 	state, err := fs.Recover()
 	if err != nil {
 		fs.Close()
-		return nil, nil, err
+		stackFatalf(t, "Error recovering file store: %v", err)
 	}
-	return fs, state, nil
+	return fs, state
 }
 
-func createDefaultFileStore(t *testing.T, options ...FileStoreOption) *FileStore {
+func createDefaultFileStore(t tLogger, options ...FileStoreOption) *FileStore {
 	limits := testDefaultStoreLimits
-	fs, state, err := newFileStore(t, testFSDefaultDatastore, &limits, options...)
-	if err != nil {
-		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
-	}
+	fs, state := newFileStore(t, testFSDefaultDatastore, &limits, options...)
 	if state == nil {
 		info := testDefaultServerInfo
 
@@ -97,23 +94,22 @@ func openDefaultFileStore(t *testing.T, options ...FileStoreOption) (*FileStore,
 	return openDefaultFileStoreWithLimits(t, nil, options...)
 }
 
-func openDefaultFileStoreWithLimits(t *testing.T, limits *StoreLimits, options ...FileStoreOption) (*FileStore, *RecoveredState) {
+func openDefaultFileStoreWithLimits(t tLogger, limits *StoreLimits, options ...FileStoreOption) (*FileStore, *RecoveredState) {
 	if limits == nil {
 		l := testDefaultStoreLimits
 		limits = &l
 	}
-	fs, state, err := newFileStore(t, testFSDefaultDatastore, limits, options...)
-	if err != nil {
-		stackFatalf(t, "Unable to create a FileStore instance: %v", err)
-	}
-	return fs, state
+	return newFileStore(t, testFSDefaultDatastore, limits, options...)
 }
 
 func expectedErrorOpeningDefaultFileStore(t *testing.T) error {
 	limits := testDefaultStoreLimits
-	fs, _, err := newFileStore(t, testFSDefaultDatastore, &limits)
+	fs, err := NewFileStore(testLogger, testFSDefaultDatastore, &limits)
 	if err == nil {
+		_, err = fs.Recover()
 		fs.Close()
+	}
+	if err == nil {
 		stackFatalf(t, "Expected an error opening the FileStore, got none")
 	}
 	return err
@@ -453,10 +449,7 @@ func TestFSNoDirectoryError(t *testing.T) {
 func TestFSUseDefaultLimits(t *testing.T) {
 	cleanupFSDatastore(t)
 	defer cleanupFSDatastore(t)
-	fs, _, err := newFileStore(t, testFSDefaultDatastore, nil)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs, _ := newFileStore(t, testFSDefaultDatastore, nil)
 	defer fs.Close()
 	if !reflect.DeepEqual(*fs.limits, DefaultStoreLimits) {
 		t.Fatalf("Default limits are not used: %v\n", *fs.limits)
@@ -726,10 +719,7 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 	limit.MaxChannels = 1
 	limit.MaxMsgs = maxMsgsAfterRecovery
 	limit.MaxSubscriptions = 1
-	fs, state, err := newFileStore(t, testFSDefaultDatastore, &limit, SliceConfig(1, int64(maxMsgsAfterRecovery), 0, ""))
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs, state := newFileStore(t, testFSDefaultDatastore, &limit, SliceConfig(1, int64(maxMsgsAfterRecovery), 0, ""))
 	defer fs.Close()
 
 	if state == nil {
@@ -832,10 +822,7 @@ func TestFSLimitsOnRecovery(t *testing.T) {
 	limit = testDefaultStoreLimits
 	limit.MaxMsgs = maxMsgsAfterRecovery
 	limit.MaxAge = time.Millisecond
-	fs, state, err = newFileStore(t, testFSDefaultDatastore, &limit)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
+	fs, state = newFileStore(t, testFSDefaultDatastore, &limit)
 	defer fs.Close()
 	for _, rc := range state.Channels {
 		recMsg, recBytes = msgStoreState(t, rc.Channel.Msgs)
@@ -1315,10 +1302,7 @@ func TestFSDoSync(t *testing.T) {
 		if i == 1 {
 			sOpts.DoSync = false
 		}
-		fs, _, err := newFileStore(t, testFSDefaultDatastore, &testDefaultStoreLimits, AllOptions(&sOpts))
-		if err != nil {
-			stackFatalf(t, "Unable to create a FileStore instance: %v", err)
-		}
+		fs, _ := newFileStore(t, testFSDefaultDatastore, &testDefaultStoreLimits, AllOptions(&sOpts))
 		defer fs.Close()
 
 		cs := storeCreateChannel(t, fs, "foo")
@@ -1735,7 +1719,12 @@ func TestFSParallelRecovery(t *testing.T) {
 	fname := fmt.Sprintf("%s.1.%s", msgFilesPrefix, datSuffix)
 	ioutil.WriteFile(filepath.Join(testFSDefaultDatastore, "foo.50", fname), []byte("dummy"), 0666)
 	ioutil.WriteFile(filepath.Join(testFSDefaultDatastore, "foo.51", fname), []byte("dummy"), 0666)
-	if _, _, err := newFileStore(t, testFSDefaultDatastore, &testDefaultStoreLimits, ParallelRecovery(10)); err == nil {
+	s, err := NewFileStore(testLogger, testFSDefaultDatastore, &testDefaultStoreLimits, ParallelRecovery(10))
+	if err == nil {
+		_, err = s.Recover()
+		s.Close()
+	}
+	if err == nil {
 		t.Fatalf("Recovery should have failed")
 	}
 	numRoutinesAfter := runtime.NumGoroutine()
