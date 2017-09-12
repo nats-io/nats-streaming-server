@@ -691,13 +691,8 @@ func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 	} else {
 		expiration = sqlNoExpiration
 	}
-	tx, err := ms.db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
 	dataLen := uint64(len(msgBytes))
-	if _, err := tx.Exec(sqlStmts[sqlStoreMsg], ms.channelID, seq, msg.Timestamp, expiration, dataLen, msgBytes); err != nil {
+	if _, err := ms.db.Exec(sqlStmts[sqlStoreMsg], ms.channelID, seq, msg.Timestamp, expiration, dataLen, msgBytes); err != nil {
 		return 0, sqlStmtError(sqlStoreMsg, err)
 	}
 	if ms.first == 0 {
@@ -715,13 +710,13 @@ func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 			((maxMsgs > 0 && ms.totalCount > maxMsgs) ||
 				(maxBytes > 0 && (ms.totalBytes > uint64(maxBytes)))) {
 
-			r := tx.QueryRow(sqlStmts[sqlGetSizeOfMessage], ms.channelID, ms.first)
+			r := ms.db.QueryRow(sqlStmts[sqlGetSizeOfMessage], ms.channelID, ms.first)
 			delBytes := uint64(0)
 			if err := r.Scan(&delBytes); err != nil && err != sql.ErrNoRows {
 				return 0, sqlStmtError(sqlGetSizeOfMessage, err)
 			}
 			if delBytes > 0 {
-				if _, err := tx.Exec(sqlStmts[sqlDeleteMessage], ms.channelID, ms.first); err != nil {
+				if _, err := ms.db.Exec(sqlStmts[sqlDeleteMessage], ms.channelID, ms.first); err != nil {
 					return 0, sqlStmtError(sqlDeleteMessage, err)
 				}
 				ms.totalCount--
@@ -734,10 +729,6 @@ func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 					util.FriendlyBytes(int64(ms.totalBytes)), util.FriendlyBytes(ms.limits.MaxBytes))
 			}
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, err
 	}
 
 	if maxAge > 0 && atomic.CompareAndSwapInt64(&ms.sqlStore.noMsgToExpire, 1, 0) {
@@ -835,27 +826,13 @@ func (ms *SQLMsgStore) expireMsgsLocked() error {
 	if count == 0 {
 		return nil
 	}
-	var (
-		tx  *sql.Tx
-		err error
-	)
-	if maxSeq == ms.last {
-		tx, err = ms.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-	}
-	if _, err := ms.db.Exec(sqlStmts[sqlDeletedMsgsWithSeqLowerThan], ms.channelID, maxSeq); err != nil {
-		return sqlStmtError(sqlDeletedMsgsWithSeqLowerThan, err)
-	}
 	if maxSeq == ms.last {
 		if _, err := ms.db.Exec(sqlStmts[sqlUpdateChannelMaxSeq], maxSeq, ms.channelID); err != nil {
 			return sqlStmtError(sqlUpdateChannelMaxSeq, err)
 		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
+	}
+	if _, err := ms.db.Exec(sqlStmts[sqlDeletedMsgsWithSeqLowerThan], ms.channelID, maxSeq); err != nil {
+		return sqlStmtError(sqlDeletedMsgsWithSeqLowerThan, err)
 	}
 	ms.first = maxSeq + 1
 	ms.totalCount -= count
@@ -884,17 +861,6 @@ func (ss *SQLSubStore) CreateSub(sub *spb.SubState) error {
 	}
 	sub.ID = atomic.AddUint64(ss.maxSubID, 1)
 	subBytes, _ := sub.Marshal()
-	var (
-		tx  *sql.Tx
-		err error
-	)
-	if ss.hasMarkedAsDel {
-		tx, err = ss.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-	}
 	if _, err := ss.db.Exec(sqlStmts[sqlCreateSub], ss.channelID, sub.ID, subBytes); err != nil {
 		sub.ID = 0
 		return sqlStmtError(sqlCreateSub, err)
@@ -902,9 +868,6 @@ func (ss *SQLSubStore) CreateSub(sub *spb.SubState) error {
 	if ss.hasMarkedAsDel {
 		if _, err := ss.db.Exec(sqlStmts[sqlDeleteSubMarkedAsDeleted], ss.channelID); err != nil {
 			return sqlStmtError(sqlDeleteSubMarkedAsDeleted, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return err
 		}
 		ss.hasMarkedAsDel = false
 	}
