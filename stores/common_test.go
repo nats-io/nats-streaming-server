@@ -777,8 +777,8 @@ func TestCSFlush(t *testing.T) {
 				s, state := openDefaultFileStore(t, DoSync(true))
 				defer s.Close()
 
-				// Check that Flush() is still doing Sync even if
-				// buf writer is empty
+				// Since files are closed after recovery, Flush() is now
+				// not expected to fail.
 				cs = getRecoveredChannel(t, state, "foo")
 				// Close the underlying file
 				ms = cs.Msgs.(*FileMsgStore)
@@ -786,8 +786,8 @@ func TestCSFlush(t *testing.T) {
 				ms.writeSlice.file.handle.Close()
 				ms.Unlock()
 				// Expect Flush to fail
-				if err := cs.Msgs.Flush(); err == nil {
-					t.Fatal("Expected Flush to fail, did not")
+				if err := cs.Msgs.Flush(); err != nil {
+					t.Fatalf("Error on flush: %v", err)
 				}
 				// Close the underlying file
 				ss = cs.Subs.(*FileSubStore)
@@ -798,9 +798,8 @@ func TestCSFlush(t *testing.T) {
 				// being written so that buffer writer is by-passed).
 				ss.activity = true
 				ss.Unlock()
-				// Expect Flush to fail
-				if err := cs.Subs.Flush(); err == nil {
-					t.Fatal("Expected Flush to fail, did not")
+				if err := cs.Subs.Flush(); err != nil {
+					t.Fatalf("Error on flush: %v", err)
 				}
 			}
 		})

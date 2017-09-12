@@ -1793,11 +1793,18 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, limits *Msg
 		// in the go routine we are about to start.
 		ms.timeTick = time.Now().UnixNano()
 		// On recovery, if there is age limit set and at least one message...
-		if doRecover && ms.limits.MaxAge > 0 && ms.totalCount > 0 {
-			// Force the execution of the expireMsgs method.
-			// This will take care of expiring messages that should have
-			// expired while the server was stopped.
-			ms.expireMsgs(ms.timeTick, int64(ms.limits.MaxAge))
+		if doRecover {
+			if ms.limits.MaxAge > 0 && ms.totalCount > 0 {
+				// Force the execution of the expireMsgs method.
+				// This will take care of expiring messages that should have
+				// expired while the server was stopped.
+				ms.expireMsgs(ms.timeTick, int64(ms.limits.MaxAge))
+			}
+			// Now that we are done with recovery, close the write slice
+			if ms.writeSlice != nil {
+				ms.fm.closeFileIfOpened(ms.writeSlice.file)
+				ms.fm.closeFileIfOpened(ms.writeSlice.idxFile)
+			}
 		}
 		// Start the background tasks go routine
 		go ms.backgroundTasks()
@@ -3088,7 +3095,7 @@ func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doR
 		if err := ss.recoverSubscriptions(ss.file.handle); err != nil {
 			fs.fm.unlockFile(ss.file)
 			ss.Close()
-			return nil, fmt.Errorf("unable to create subscription store for [%s]: %v", channel, err)
+			return nil, fmt.Errorf("unable to recover subscription store for [%s]: %v", channel, err)
 		}
 	}
 	// Do not attempt to shrink unless the option is greater than the
@@ -3103,7 +3110,11 @@ func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doR
 		})
 		ss.Unlock()
 	}
-	fs.fm.unlockFile(ss.file)
+	if doRecover {
+		fs.fm.closeLockedFile(ss.file)
+	} else {
+		fs.fm.unlockFile(ss.file)
+	}
 	return ss, nil
 }
 

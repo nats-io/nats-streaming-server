@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1742,4 +1743,46 @@ func TestFSParallelRecovery(t *testing.T) {
 	if left := numRoutinesAfter - numRoutines; left > 10 {
 		t.Fatalf("Too many go routines left: %v", left)
 	}
+}
+
+func TestFSFilesClosedOnRecovery(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	s := createDefaultFileStore(t, SliceConfig(1, 0, 0, ""))
+	defer s.Close()
+
+	limits := testDefaultStoreLimits
+	limits.MaxAge = 15 * time.Millisecond
+	if err := s.SetLimits(&limits); err != nil {
+		t.Fatalf("Error setting limits: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		cname := fmt.Sprintf("foo_%d", (i + 1))
+		cs := storeCreateChannel(t, s, cname)
+		m1 := storeMsg(t, cs, cname, []byte("hello"))
+		m2 := storeMsg(t, cs, cname, []byte("hello"))
+		subid := storeSub(t, cs, "foo")
+		storeSubPending(t, cs, cname, subid, m1.Sequence, m2.Sequence)
+	}
+	s.Close()
+
+	// Wait more than expiration time
+	time.Sleep(50 * time.Millisecond)
+
+	s, _ = openDefaultFileStoreWithLimits(t, &limits)
+	defer s.Close()
+	s.fm.Lock()
+	for _, f := range s.fm.files {
+		// Server and clients file are expected to be opened, others not.
+		if strings.HasSuffix(f.name, serverFileName) || strings.HasSuffix(f.name, clientsFileName) {
+			continue
+		}
+		if state := atomic.LoadInt32(&f.state); state != fileClosed {
+			s.fm.Unlock()
+			t.Fatalf("Expected file %q state to be %v, it was %v", f.name, fileClosed, state)
+		}
+	}
+	s.fm.Unlock()
 }
