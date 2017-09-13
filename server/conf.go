@@ -58,11 +58,10 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 			if err := checkType(k, reflect.String, v); err != nil {
 				return err
 			}
-			switch strings.ToUpper(v.(string)) {
-			case stores.TypeFile:
-				opts.StoreType = stores.TypeFile
-			case stores.TypeMemory:
-				opts.StoreType = stores.TypeMemory
+			st := strings.ToUpper(v.(string))
+			switch st {
+			case stores.TypeFile, stores.TypeMemory, stores.TypeSQL:
+				opts.StoreType = st
 			default:
 				return fmt.Errorf("unknown store type: %v", v.(string))
 			}
@@ -435,6 +434,8 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&sopts.IOBatchSize, "io_batch_size", DefaultIOBatchSize, "stan.IOBatchSize")
 	fs.Int64Var(&sopts.IOSleepTime, "io_sleep_time", DefaultIOSleepTime, "stan.IOSleepTime")
 	fs.StringVar(&sopts.FTGroupName, "ft_group", "", "stan.FTGroupName")
+	fs.StringVar(&sopts.SQLDriver, "sql_driver", "", "SQL Driver")
+	fs.StringVar(&sopts.SQLSource, "sql_source", "", "SQL Data Source")
 
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
 	// It will be augmented with NATS specific flags and call fs.Parse(args) for us.

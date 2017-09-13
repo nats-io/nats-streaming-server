@@ -238,6 +238,27 @@ func TestParseStoreType(t *testing.T) {
 	if err := ProcessConfigFile(confFile, &opts); err == nil {
 		t.Fatal("Expected failure due to unknown store type, got none")
 	}
+	os.Remove(confFile)
+
+	goodStores := []string{
+		stores.TypeMemory,
+		stores.TypeFile,
+		stores.TypeSQL,
+	}
+	for _, gs := range goodStores {
+		if err := ioutil.WriteFile(confFile, []byte("store="+gs), 0660); err != nil {
+			t.Fatalf("Unexpected error creating conf file: %v", err)
+		}
+		defer os.Remove(confFile)
+		opts = Options{}
+		if err := ProcessConfigFile(confFile, &opts); err != nil {
+			t.Fatalf("Error processing config file: %v", err)
+		}
+		os.Remove(confFile)
+		if opts.StoreType != gs {
+			t.Fatalf("Expected store type to be %q, got %q", gs, opts.StoreType)
+		}
+	}
 }
 
 func TestParsePerChannelLimitsSetToZero(t *testing.T) {

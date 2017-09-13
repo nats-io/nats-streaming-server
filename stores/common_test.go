@@ -263,9 +263,10 @@ func startTest(t tLogger, ts *testStore) Store {
 		cleanupSQLDatastore(t)
 		return createDefaultSQLStore(t)
 	default:
-		stackFatalf(t, "Cannot start test for store type: ", ts.name)
+		// This is used with testStores table. If a store type has been
+		// added there, it needs to be added here.
+		panic(fmt.Sprintf("Add new store type %q in startTest", ts.name))
 	}
-	return nil
 }
 
 func endTest(t tLogger, ts *testStore) {
@@ -287,9 +288,10 @@ func testReOpenStore(t tLogger, ts *testStore, limits *StoreLimits) (Store, *Rec
 	case TypeSQL:
 		return openDefaultSQLStoreWithLimits(t, limits)
 	default:
-		stackFatalf(t, "Store type %q is recoverable, add to the switch!", ts.name)
+		// This is used with testStores table. If a recoverable
+		// store type has been added there, it needs to be added here.
+		panic(fmt.Sprintf("Add new store type %q in testReopenStore", ts.name))
 	}
-	return nil, nil
 }
 
 type cleanupLogger struct{}

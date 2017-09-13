@@ -53,16 +53,13 @@ func TestMain(m *testing.M) {
 	flag.StringVar(&bst, "bench_store", "", "store type for bench tests (mem, file)")
 	flag.StringVar(&pst, "persistent_store", "", "store type for server recovery related tests (file)")
 	flag.Parse()
-	bst = strings.ToLower(bst)
-	pst = strings.ToLower(pst)
-	// Will add DB store and others when avail
+	bst = strings.ToUpper(bst)
+	pst = strings.ToUpper(pst)
 	switch bst {
 	case "":
 		// use default
-	case "mem":
-		benchStoreType = stores.TypeMemory
-	case "file":
-		benchStoreType = stores.TypeFile
+	case stores.TypeMemory, stores.TypeFile, stores.TypeSQL:
+		benchStoreType = bst
 	default:
 		fmt.Printf("Unknown store %q for bench tests\n", bst)
 		os.Exit(2)
@@ -70,7 +67,9 @@ func TestMain(m *testing.M) {
 	// Will add DB store and others when avail
 	switch pst {
 	case "":
-		// use default
+	// use default
+	case stores.TypeFile, stores.TypeSQL:
+		persistentStoreType = pst
 	default:
 		fmt.Printf("Unknown or unsupported store %q for persistent store server tests\n", pst)
 		os.Exit(2)
@@ -290,7 +289,8 @@ func NewDefaultConnection(t tLogger) stan.Conn {
 }
 
 func cleanupDatastore(t *testing.T) {
-	if persistentStoreType == stores.TypeFile {
+	switch persistentStoreType {
+	case stores.TypeFile:
 		if err := os.RemoveAll(defaultDataStore); err != nil {
 			stackFatalf(t, "Error cleaning up datastore: %v", err)
 		}
@@ -300,9 +300,12 @@ func cleanupDatastore(t *testing.T) {
 func getTestDefaultOptsForPersistentStore() *Options {
 	opts := GetDefaultOptions()
 	opts.StoreType = persistentStoreType
-	if persistentStoreType == stores.TypeFile {
+	switch persistentStoreType {
+	case stores.TypeFile:
 		opts.FilestoreDir = defaultDataStore
 		opts.FileStoreOpts.BufferSize = 1024
+	default:
+		panic(fmt.Sprintf("Need to specify configuration for store: %q", persistentStoreType))
 	}
 	return opts
 }

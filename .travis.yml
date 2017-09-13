@@ -1,8 +1,8 @@
 language: go
 sudo: false
 go:
-- 1.8.4
-- 1.9.1
+- 1.8.5
+- 1.9.2
 install:
 - go get -t ./...
 - go get github.com/nats-io/gnatsd
@@ -10,6 +10,9 @@ install:
 - go get github.com/wadey/gocovmerge
 - go get -u honnef.co/go/tools/cmd/megacheck
 - go get -u github.com/client9/misspell/cmd/misspell
+- go get -u github.com/go-sql-driver/mysql
+services:
+- mysql
 before_script:
 - EXCLUDE_VENDOR=$(go list ./... | grep -v "/vendor/")
 - go build
@@ -18,6 +21,7 @@ before_script:
 - $(exit $(misspell -locale US . | grep -v "vendor/" | wc -l))
 - megacheck -ignore "$(cat staticcheck.ignore)" $EXCLUDE_VENDOR
 script:
+- mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;"
 - go test -i -race $EXCLUDE_VENDOR
 - if [[ "$TRAVIS_GO_VERSION" == 1.9.* ]]; then ./scripts/cov.sh TRAVIS; else go test -race $EXCLUDE_VENDOR; fi
 after_success:

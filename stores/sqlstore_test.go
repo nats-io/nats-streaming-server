@@ -3,9 +3,11 @@
 package stores
 
 import (
+	"bufio"
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"os"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -86,7 +88,6 @@ func cleanupSQLDatastore(t tLogger) {
 	if _, err := db.Exec("DROP DATABASE IF EXISTS " + testSQLDatabaseName); err != nil {
 		stackFatalf(t, "Error dropping database: %v", err)
 	}
-	var sqlCreateDatabase []string
 	switch testSQLDriver {
 	case driverMySQL:
 		if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS " + testSQLDatabaseName); err != nil {
@@ -94,14 +95,6 @@ func cleanupSQLDatastore(t tLogger) {
 		}
 		if _, err = db.Exec("USE " + testSQLDatabaseName); err != nil {
 			stackFatalf(t, "Error using database %q: %v", testSQLDatabaseName, err)
-		}
-		sqlCreateDatabase = []string{
-			"CREATE TABLE IF NOT EXISTS ServerInfo (uniquerow INT DEFAULT 1, id VARCHAR(1024) PRIMARY KEY, proto BLOB, version INTEGER)",
-			"CREATE TABLE IF NOT EXISTS Clients (id VARCHAR(1024) PRIMARY KEY, hbinbox TEXT)",
-			"CREATE TABLE IF NOT EXISTS Channels (id INTEGER PRIMARY KEY, name VARCHAR(1024) NOT NULL, maxseq BIGINT UNSIGNED DEFAULT 0, deleted BOOL DEFAULT FALSE, INDEX Idx_ChannelsName (name))",
-			"CREATE TABLE IF NOT EXISTS Messages (id INTEGER, seq BIGINT UNSIGNED, timestamp BIGINT, expiration BIGINT, size INTEGER, data BLOB, INDEX Idx_MsgsTimestamp (timestamp), INDEX Idx_MsgsExpiration (expiration), CONSTRAINT PK_MsgKey PRIMARY KEY(id, seq))",
-			"CREATE TABLE IF NOT EXISTS Subscriptions (id INTEGER, subid BIGINT UNSIGNED, proto BLOB, deleted BOOL DEFAULT FALSE, CONSTRAINT PK_SubKey PRIMARY KEY(id, subid))",
-			"CREATE TABLE IF NOT EXISTS SubsPending (subid BIGINT UNSIGNED, seq BIGINT UNSIGNED, CONSTRAINT PK_MsgPendingKey PRIMARY KEY(subid, seq))",
 		}
 	case driverPostgres:
 		if _, err := db.Exec("CREATE DATABASE " + testSQLDatabaseName); err != nil {
@@ -113,26 +106,38 @@ func cleanupSQLDatastore(t tLogger) {
 			stackFatalf(t, "Error connecting to database: %v", err)
 		}
 		defer db.Close()
-		// Note: there is no unsigned types in Postgres
-		sqlCreateDatabase = []string{
-			"CREATE TABLE IF NOT EXISTS ServerInfo (uniquerow INT DEFAULT 1, id VARCHAR(1024) PRIMARY KEY, proto BYTEA, version INTEGER)",
-			"CREATE TABLE IF NOT EXISTS Clients (id VARCHAR(1024) PRIMARY KEY, hbinbox TEXT)",
-			"CREATE TABLE IF NOT EXISTS Channels (id INTEGER PRIMARY KEY, name VARCHAR(1024) NOT NULL, maxseq BIGINT DEFAULT 0, deleted BOOL DEFAULT FALSE)",
-			"CREATE INDEX Idx_ChannelsName ON Channels (name)",
-			"CREATE TABLE IF NOT EXISTS Messages (id INTEGER, seq BIGINT, timestamp BIGINT, expiration BIGINT, size INTEGER, data BYTEA, CONSTRAINT PK_MsgKey PRIMARY KEY(id, seq))",
-			"CREATE INDEX Idx_MsgsTimestamp ON Messages (timestamp)",
-			"CREATE INDEX Idx_MsgsExpiration ON Messages (expiration)",
-			"CREATE TABLE IF NOT EXISTS Subscriptions (id INTEGER, subid BIGINT, proto BYTEA, deleted BOOL DEFAULT FALSE, CONSTRAINT PK_SubKey PRIMARY KEY(id, subid))",
-			"CREATE TABLE IF NOT EXISTS SubsPending (subid BIGINT, seq BIGINT, CONSTRAINT PK_MsgPendingKey PRIMARY KEY(subid, seq))",
-		}
 	default:
 		panic(fmt.Sprintf("Unsupported driver %v", testSQLDriver))
 	}
+	sqlCreateDatabase := loadCreateDatabaseStmts(t)
 	for _, stmt := range sqlCreateDatabase {
 		if _, err := db.Exec(stmt); err != nil {
 			stackFatalf(t, "Error executing statement (%s): %v", stmt, err)
 		}
 	}
+}
+
+func loadCreateDatabaseStmts(t tLogger) []string {
+	fileName := "../" + testSQLDriver + ".db.sql"
+	file, err := os.Open(fileName)
+	if err != nil {
+		stackFatalf(t, "Error opening file: %v", err)
+	}
+	defer file.Close()
+	stmts := []string{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		line = strings.TrimLeft(line, " ")
+		if len(line) == 0 || line[0] == '#' {
+			continue
+		}
+		stmts = append(stmts, line)
+	}
+	if err := scanner.Err(); err != nil {
+		stackFatalf(t, "Error scanning file: %v", err)
+	}
+	return stmts
 }
 
 func failDBConnection(t *testing.T, s Store) {

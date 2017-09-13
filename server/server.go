@@ -828,6 +828,8 @@ type Options struct {
 	AckSubsPoolSize    int           // Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription).
 	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
+	SQLDriver          string
+	SQLSource          string
 }
 
 // Clone returns a deep copy of the Options object.
@@ -1119,6 +1121,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	case stores.TypeFile:
 		store, err = stores.NewFileStore(s.log, sOpts.FilestoreDir, storeLimits,
 			stores.AllOptions(&sOpts.FileStoreOpts))
+	case stores.TypeSQL:
+		store, err = stores.NewSQLStore(s.log, sOpts.SQLDriver, sOpts.SQLSource,
+			storeLimits)
 	case stores.TypeMemory:
 		store, err = stores.NewMemoryStore(s.log, storeLimits)
 	default:
@@ -1247,9 +1252,15 @@ func (s *StanServer) start(runningState State) error {
 	)
 
 	// Recover the state.
+	s.log.Noticef("Recovering the state...")
 	recoveredState, err = s.store.Recover()
 	if err != nil {
 		return err
+	}
+	if recoveredState != nil {
+		s.log.Noticef("Recovered %v channel(s)", len(recoveredState.Channels))
+	} else {
+		s.log.Noticef("No recovered state")
 	}
 	subjID := s.opts.ID
 	// In FT or with static channels (aka partitioning), we use the cluster ID
