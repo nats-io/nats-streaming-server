@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
+	"github.com/nats-io/nats-streaming-server/test"
 	"github.com/nats-io/nuid"
 )
 
@@ -306,36 +307,57 @@ func (t *cleanupLogger) Errorf(format string, args ...interface{}) {
 	os.Exit(2)
 }
 
+var doSQL bool
+
 func TestMain(m *testing.M) {
 	flag.BoolVar(&testFSDisableBufferWriters, "fs_no_buffer", false, "Disable use of buffer writers")
 	flag.BoolVar(&testFSSetFDsLimit, "fs_set_fds_limit", false, "Set some FDs limit")
+	flag.BoolVar(&doSQL, "sql", true, "Set this to false if you don't want SQL to be tested")
 	flag.StringVar(&testSQLDriver, "sql_driver", testSQLDriver, "SQL Driver to use")
 	flag.StringVar(&testSQLSource, "sql_source", "", "SQL data source")
 	flag.StringVar(&testSQLSourceAdmin, "sql_source_admin", "", "SQL data source to create the database")
 	flag.StringVar(&testSQLDatabaseName, "sql_db_name", testSQLDatabaseName, "SQL database name")
 	flag.Parse()
 
-	// This allows to just specify the driver on the command line and
-	// use corresponding driver defaults, while still allowing full customization
-	// of each param.
-	switch testSQLDriver {
-	case driverMySQL:
-		if testSQLSource == "" {
-			testSQLSource = testDefaultMySQLSource
+	if doSQL {
+		// This allows to just specify the driver on the command line and
+		// use corresponding driver defaults, while still allowing full customization
+		// of each param.
+		switch testSQLDriver {
+		case driverMySQL:
+			if testSQLSource == "" {
+				testSQLSource = testDefaultMySQLSource
+			}
+			if testSQLSourceAdmin == "" {
+				testSQLSourceAdmin = testDefaultMySQLSourceAdmin
+			}
+		case driverPostgres:
+			if testSQLSource == "" {
+				testSQLSource = testDefaultPostgresSource
+			}
+			if testSQLSourceAdmin == "" {
+				testSQLSourceAdmin = testDefaultPostgresSourceAdmin
+			}
+		default:
+			fmt.Printf("Unsupported SQL driver: %v\n", testSQLDriver)
+			os.Exit(2)
 		}
-		if testSQLSourceAdmin == "" {
-			testSQLSourceAdmin = testDefaultMySQLSourceAdmin
+		// Create the SQL Database once, the cleanup is simply deleting
+		// content from tables (so we don't have to recreate them).
+		if err := test.InitSQLDatabase(testSQLDriver, testSQLSourceAdmin,
+			testSQLSource, testSQLDatabaseName); err != nil {
+			fmt.Printf("Error initializing SQL Datastore: %v", err)
+			os.Exit(2)
 		}
-	case driverPostgres:
-		if testSQLSource == "" {
-			testSQLSource = testDefaultPostgresSource
+	} else {
+		// Remove SQL Store from the testStores array
+		newArray := []*testStore{}
+		for _, st := range testStores {
+			if st.name != TypeSQL {
+				newArray = append(newArray, st)
+			}
 		}
-		if testSQLSourceAdmin == "" {
-			testSQLSourceAdmin = testDefaultPostgresSourceAdmin
-		}
-	default:
-		fmt.Printf("Unsupported SQL driver: %v\n", testSQLDriver)
-		os.Exit(2)
+		testStores = newArray
 	}
 
 	doBenchCleanup := false

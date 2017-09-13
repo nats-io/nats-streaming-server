@@ -3,11 +3,9 @@
 package stores
 
 import (
-	"bufio"
 	"database/sql"
 	"fmt"
 	"math/rand"
-	"os"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -15,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats-streaming-server/spb"
+	"github.com/nats-io/nats-streaming-server/test"
 )
 
 // The SourceAdmin is used by the test setup to have access
@@ -37,6 +36,10 @@ var (
 	testSQLSource       = testDefaultMySQLSource
 	testSQLSourceAdmin  = testDefaultMySQLSourceAdmin
 )
+
+func cleanupSQLDatastore(t tLogger) {
+	test.CleanupSQLDatastore(t, testSQLDriver, testSQLSource)
+}
 
 func newSQLStore(t tLogger, driver, source string, limits *StoreLimits) (*SQLStore, *RecoveredState, error) {
 	ss, err := NewSQLStore(testLogger, driver, source, limits)
@@ -77,67 +80,6 @@ func openDefaultSQLStoreWithLimits(t tLogger, limits *StoreLimits) (*SQLStore, *
 		stackFatalf(t, "unable to open SqlStore instance: %v", err)
 	}
 	return ss, state
-}
-
-func cleanupSQLDatastore(t tLogger) {
-	db, err := sql.Open(testSQLDriver, testSQLSourceAdmin)
-	if err != nil {
-		stackFatalf(t, "Error cleaning up SQL datastore", err)
-	}
-	defer db.Close()
-	if _, err := db.Exec("DROP DATABASE IF EXISTS " + testSQLDatabaseName); err != nil {
-		stackFatalf(t, "Error dropping database: %v", err)
-	}
-	switch testSQLDriver {
-	case driverMySQL:
-		if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS " + testSQLDatabaseName); err != nil {
-			stackFatalf(t, "Error creating database: %v", err)
-		}
-		if _, err = db.Exec("USE " + testSQLDatabaseName); err != nil {
-			stackFatalf(t, "Error using database %q: %v", testSQLDatabaseName, err)
-		}
-	case driverPostgres:
-		if _, err := db.Exec("CREATE DATABASE " + testSQLDatabaseName); err != nil {
-			stackFatalf(t, "Error creating database: %v", err)
-		}
-		db.Close()
-		db, err = sql.Open(testSQLDriver, testSQLSource)
-		if err != nil {
-			stackFatalf(t, "Error connecting to database: %v", err)
-		}
-		defer db.Close()
-	default:
-		panic(fmt.Sprintf("Unsupported driver %v", testSQLDriver))
-	}
-	sqlCreateDatabase := loadCreateDatabaseStmts(t)
-	for _, stmt := range sqlCreateDatabase {
-		if _, err := db.Exec(stmt); err != nil {
-			stackFatalf(t, "Error executing statement (%s): %v", stmt, err)
-		}
-	}
-}
-
-func loadCreateDatabaseStmts(t tLogger) []string {
-	fileName := "../" + testSQLDriver + ".db.sql"
-	file, err := os.Open(fileName)
-	if err != nil {
-		stackFatalf(t, "Error opening file: %v", err)
-	}
-	defer file.Close()
-	stmts := []string{}
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		line = strings.TrimLeft(line, " ")
-		if len(line) == 0 || line[0] == '#' {
-			continue
-		}
-		stmts = append(stmts, line)
-	}
-	if err := scanner.Err(); err != nil {
-		stackFatalf(t, "Error scanning file: %v", err)
-	}
-	return stmts
 }
 
 func failDBConnection(t *testing.T, s Store) {
@@ -181,15 +123,10 @@ func getDBConnection(t *testing.T) *sql.DB {
 	return db
 }
 
-func mustExecute(t *testing.T, db *sql.DB, query string, args ...interface{}) sql.Result {
-	r, err := db.Exec(query, args...)
-	if err != nil {
-		stackFatalf(t, "Error executing query %q: %v", query, err)
-	}
-	return r
-}
-
 func TestSQLPostgresDriverInit(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 
@@ -213,6 +150,9 @@ func TestSQLPostgresDriverInit(t *testing.T) {
 }
 
 func TestSQLErrorOnNewStore(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 
@@ -247,6 +187,9 @@ func TestSQLErrorOnNewStore(t *testing.T) {
 }
 
 func TestSQLInitUniqueRow(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 	s := createDefaultSQLStore(t)
@@ -275,6 +218,9 @@ func TestSQLInitUniqueRow(t *testing.T) {
 }
 
 func TestSQLErrorsDueToFailDBConnection(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 	s := createDefaultSQLStore(t)
@@ -339,6 +285,9 @@ func TestSQLErrorsDueToFailDBConnection(t *testing.T) {
 }
 
 func TestSQLErrorOnMsgExpiration(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 	s := createDefaultSQLStore(t)
@@ -374,6 +323,9 @@ func TestSQLErrorOnMsgExpiration(t *testing.T) {
 }
 
 func TestSQLRandomFailureDuringStore(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 
@@ -402,6 +354,9 @@ func TestSQLRandomFailureDuringStore(t *testing.T) {
 }
 
 func TestSQLUpdateNow(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 
@@ -419,6 +374,9 @@ func TestSQLUpdateNow(t *testing.T) {
 }
 
 func TestSQLCloseOnMsgExpiration(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 
@@ -450,6 +408,9 @@ func TestSQLCloseOnMsgExpiration(t *testing.T) {
 }
 
 func TestSQLExpiredMsgsOnLookup(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 
@@ -488,6 +449,9 @@ func TestSQLExpiredMsgsOnLookup(t *testing.T) {
 }
 
 func TestSQLDeleteLastSubKeepRecord(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 
@@ -520,6 +484,9 @@ func TestSQLDeleteLastSubKeepRecord(t *testing.T) {
 }
 
 func TestSQLRecoverBadVersion(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 
@@ -529,7 +496,7 @@ func TestSQLRecoverBadVersion(t *testing.T) {
 	db := getDBConnection(t)
 	defer db.Close()
 	// Change version
-	mustExecute(t, db, "UPDATE ServerInfo SET version=2 WHERE uniquerow=1")
+	test.MustExecuteSQL(t, db, "UPDATE ServerInfo SET version=2 WHERE uniquerow=1")
 	db.Close()
 
 	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil)
@@ -544,6 +511,9 @@ func TestSQLRecoverBadVersion(t *testing.T) {
 }
 
 func TestSQLRecoverVariousErrors(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	defer cleanupSQLDatastore(t)
 
 	// Make sure sqlStms table is set...
@@ -561,10 +531,14 @@ func TestSQLRecoverVariousErrors(t *testing.T) {
 	switch testSQLDriver {
 	case driverMySQL:
 		errs = []func(){
-			func() { mustExecute(t, db, "UPDATE ServerInfo SET id=? WHERE uniquerow=1", "not-same-than-proto") },
-			func() { mustExecute(t, db, "UPDATE ServerInfo SET proto=? WHERE uniquerow=1", "unmarshal_failure") },
 			func() {
-				mustExecute(t, db, "UPDATE Subscriptions SET proto=? WHERE subid=?", "unmarshal_failure", subID)
+				test.MustExecuteSQL(t, db, "UPDATE ServerInfo SET id=? WHERE uniquerow=1", "not-same-than-proto")
+			},
+			func() {
+				test.MustExecuteSQL(t, db, "UPDATE ServerInfo SET proto=? WHERE uniquerow=1", "unmarshal_failure")
+			},
+			func() {
+				test.MustExecuteSQL(t, db, "UPDATE Subscriptions SET proto=? WHERE subid=?", "unmarshal_failure", subID)
 			},
 			func() { sqlStmts[sqlRecoverServerInfo] = "SELECT x FROM ServerInfo" },
 			func() { sqlStmts[sqlRecoverClients] = "SELECT x FROM Clients" },
@@ -581,10 +555,14 @@ func TestSQLRecoverVariousErrors(t *testing.T) {
 		}
 	case driverPostgres:
 		errs = []func(){
-			func() { mustExecute(t, db, "UPDATE ServerInfo SET id=$1 WHERE uniquerow=1", "not-same-than-proto") },
-			func() { mustExecute(t, db, "UPDATE ServerInfo SET proto=$1 WHERE uniquerow=1", "unmarshal_failure") },
 			func() {
-				mustExecute(t, db, "UPDATE Subscriptions SET proto=$1 WHERE subid=$2", "unmarshal_failure", subID)
+				test.MustExecuteSQL(t, db, "UPDATE ServerInfo SET id=$1 WHERE uniquerow=1", "not-same-than-proto")
+			},
+			func() {
+				test.MustExecuteSQL(t, db, "UPDATE ServerInfo SET proto=$1 WHERE uniquerow=1", "unmarshal_failure")
+			},
+			func() {
+				test.MustExecuteSQL(t, db, "UPDATE Subscriptions SET proto=$1 WHERE subid=$2", "unmarshal_failure", subID)
 			},
 			func() { sqlStmts[sqlRecoverServerInfo] = "SELECT x FROM ServerInfo" },
 			func() { sqlStmts[sqlRecoverClients] = "SELECT x FROM Clients" },
