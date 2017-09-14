@@ -739,8 +739,11 @@ func TestPersistentStoreNonDurableSubRemovedOnConnClose(t *testing.T) {
 		store stores.Store
 		err   error
 	)
-	if persistentStoreType == stores.TypeFile {
+	switch persistentStoreType {
+	case stores.TypeFile:
 		store, err = stores.NewFileStore(testLogger, defaultDataStore, &limits)
+	case stores.TypeSQL:
+		store, err = stores.NewSQLStore(testLogger, testSQLDriver, testSQLSource, &limits)
 	}
 	if err != nil {
 		t.Fatalf("Error opening file: %v", err)

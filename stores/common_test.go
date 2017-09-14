@@ -295,56 +295,26 @@ func testReOpenStore(t tLogger, ts *testStore, limits *StoreLimits) (Store, *Rec
 	}
 }
 
-type cleanupLogger struct{}
-
-func (t *cleanupLogger) Fatalf(format string, args ...interface{}) {
-	fmt.Printf(format, args...)
-	os.Exit(2)
-}
-
-func (t *cleanupLogger) Errorf(format string, args ...interface{}) {
-	fmt.Printf(format, args...)
-	os.Exit(2)
-}
-
 var doSQL bool
 
 func TestMain(m *testing.M) {
 	flag.BoolVar(&testFSDisableBufferWriters, "fs_no_buffer", false, "Disable use of buffer writers")
 	flag.BoolVar(&testFSSetFDsLimit, "fs_set_fds_limit", false, "Set some FDs limit")
 	flag.BoolVar(&doSQL, "sql", true, "Set this to false if you don't want SQL to be tested")
-	flag.StringVar(&testSQLDriver, "sql_driver", testSQLDriver, "SQL Driver to use")
-	flag.StringVar(&testSQLSource, "sql_source", "", "SQL data source")
-	flag.StringVar(&testSQLSourceAdmin, "sql_source_admin", "", "SQL data source to create the database")
-	flag.StringVar(&testSQLDatabaseName, "sql_db_name", testSQLDatabaseName, "SQL database name")
+	test.AddSQLFlags(flag.CommandLine, &testSQLDriver, &testSQLSource, &testSQLSourceAdmin, &testSQLDatabaseName)
 	flag.Parse()
 
 	if doSQL {
-		// This allows to just specify the driver on the command line and
-		// use corresponding driver defaults, while still allowing full customization
-		// of each param.
-		switch testSQLDriver {
-		case driverMySQL:
-			if testSQLSource == "" {
-				testSQLSource = testDefaultMySQLSource
-			}
-			if testSQLSourceAdmin == "" {
-				testSQLSourceAdmin = testDefaultMySQLSourceAdmin
-			}
-		case driverPostgres:
-			if testSQLSource == "" {
-				testSQLSource = testDefaultPostgresSource
-			}
-			if testSQLSourceAdmin == "" {
-				testSQLSourceAdmin = testDefaultPostgresSourceAdmin
-			}
-		default:
-			fmt.Printf("Unsupported SQL driver: %v\n", testSQLDriver)
+		defaultSources := make(map[string][]string)
+		defaultSources[test.DriverMySQL] = []string{testDefaultMySQLSource, testDefaultMySQLSourceAdmin}
+		defaultSources[test.DriverPostgres] = []string{testDefaultPostgresSource, testDefaultPostgresSourceAdmin}
+		if err := test.ProcessSQLFlags(flag.CommandLine, defaultSources); err != nil {
+			fmt.Println(err.Error())
 			os.Exit(2)
 		}
 		// Create the SQL Database once, the cleanup is simply deleting
 		// content from tables (so we don't have to recreate them).
-		if err := test.InitSQLDatabase(testSQLDriver, testSQLSourceAdmin,
+		if err := test.CreateSQLDatabase(testSQLDriver, testSQLSourceAdmin,
 			testSQLSource, testSQLDatabaseName); err != nil {
 			fmt.Printf("Error initializing SQL Datastore: %v", err)
 			os.Exit(2)
@@ -359,17 +329,10 @@ func TestMain(m *testing.M) {
 		}
 		testStores = newArray
 	}
-
-	doBenchCleanup := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "test.bench" {
-			doBenchCleanup = true
-		}
-	})
 	ret := m.Run()
-	if doBenchCleanup {
-		cl := &cleanupLogger{}
-		benchCleanup(cl)
+	if doSQL {
+		// Now that the tests/bench have all run, delete the database.
+		test.DeleteSQLDatabase(testSQLDriver, testSQLSourceAdmin, testSQLDatabaseName)
 	}
 	os.Exit(ret)
 }

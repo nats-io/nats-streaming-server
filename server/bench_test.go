@@ -10,13 +10,17 @@ import (
 
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/nats-io/nats-streaming-server/test"
 )
 
 func benchCleanupDatastore(b *testing.B, dir string) {
-	if benchStoreType == stores.TypeFile {
+	switch benchStoreType {
+	case stores.TypeFile:
 		if err := os.RemoveAll(dir); err != nil {
 			stackFatalf(b, "Error cleaning up datastore: %v", err)
 		}
+	case stores.TypeSQL:
+		test.CleanupSQLDatastore(b, testSQLDriver, testSQLSource)
 	}
 }
 
@@ -25,8 +29,12 @@ func benchRunServer(b *testing.B) *StanServer {
 	opts.Debug = false
 	opts.Trace = false
 	opts.StoreType = benchStoreType
-	if benchStoreType == stores.TypeFile {
+	switch benchStoreType {
+	case stores.TypeFile:
 		opts.FilestoreDir = defaultDataStore
+	case stores.TypeSQL:
+		opts.SQLDriver = testSQLDriver
+		opts.SQLSource = testSQLSource
 	}
 	s, err := RunServerWithOpts(opts, nil)
 	if err != nil {

@@ -518,7 +518,7 @@ func TestMonitorStorez(t *testing.T) {
 	defer cleanupDatastore(t)
 	opts := getTestDefaultOptsForPersistentStore()
 	s = runMonitorServer(t, opts)
-	testStore(s, stores.TypeFile)
+	testStore(s, persistentStoreType)
 }
 
 func TestMonitorClientsz(t *testing.T) {

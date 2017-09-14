@@ -5,6 +5,7 @@ package test
 import (
 	"bufio"
 	"database/sql"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -16,8 +17,8 @@ const (
 	DriverPostgres = "postgres"
 )
 
-// InitSQLDatabase initializes a SQL Database for NATS Streaming testing.
-func InitSQLDatabase(driver, sourceAdmin, source, dbName string) error {
+// CreateSQLDatabase initializes a SQL Database for NATS Streaming testing.
+func CreateSQLDatabase(driver, sourceAdmin, source, dbName string) error {
 	db, err := sql.Open(driver, sourceAdmin)
 	if err != nil {
 		return fmt.Errorf("Error opening connection to SQL datastore %q: %v", sourceAdmin, err)
@@ -97,6 +98,17 @@ func CleanupSQLDatastore(t TLogger, driver, source string) {
 	MustExecuteSQL(t, db, "DELETE FROM SubsPending")
 }
 
+// DeleteSQLDatabase drops the given database.
+func DeleteSQLDatabase(driver, sourceAdmin, dbName string) error {
+	db, err := sql.Open(driver, sourceAdmin)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	_, err = db.Exec("DROP DATABASE " + dbName)
+	return err
+}
+
 // MustExecuteSQL excutes the given SQL query and is not expecting an error.
 // If it does, it calls t.Fatalf().
 func MustExecuteSQL(t TLogger, db *sql.DB, query string, args ...interface{}) sql.Result {
@@ -105,4 +117,34 @@ func MustExecuteSQL(t TLogger, db *sql.DB, query string, args ...interface{}) sq
 		StackFatalf(t, "Error executing query %q: %v", query, err)
 	}
 	return r
+}
+
+// AddSQLFlags adds some SQL options to the given flag set.
+func AddSQLFlags(fs *flag.FlagSet, driver, source, sourceAdmin, dbName *string) {
+	flag.StringVar(driver, "sql_driver", *driver, "SQL Driver to use")
+	flag.StringVar(source, "sql_source", "", "SQL data source")
+	flag.StringVar(sourceAdmin, "sql_source_admin", "", "SQL data source to create the database")
+	flag.StringVar(dbName, "sql_db_name", *dbName, "SQL database name")
+}
+
+// ProcessSQLFlags allows to just specify the driver on the command line and
+// use corresponding driver defaults, while still allowing full customization
+// of each param.
+func ProcessSQLFlags(fs *flag.FlagSet, defaults map[string][]string) error {
+	driver := fs.Lookup("sql_driver").Value.String()
+	switch driver {
+	case DriverMySQL, DriverPostgres:
+	default:
+		return fmt.Errorf("Unsupported SQL driver %q", driver)
+	}
+	defaultsSources := defaults[driver]
+	source := fs.Lookup("sql_source")
+	if source.Value.String() == "" {
+		source.Value.Set(defaultsSources[0])
+	}
+	sourceAdmin := fs.Lookup("sql_source_admin")
+	if sourceAdmin.Value.String() == "" {
+		sourceAdmin.Value.Set(defaultsSources[1])
+	}
+	return nil
 }

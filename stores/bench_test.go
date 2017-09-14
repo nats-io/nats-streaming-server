@@ -21,12 +21,6 @@ var (
 	benchInitRecoverSubs = true
 )
 
-func benchCleanup(t tLogger) {
-	for _, st := range testStores {
-		endTest(t, st)
-	}
-}
-
 func getUnlimitedStore() *StoreLimits {
 	limits := testDefaultStoreLimits
 	limits.MaxChannels = 0
