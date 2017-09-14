@@ -153,11 +153,11 @@ func removeServer(servers []*StanServer, s *StanServer) []*StanServer {
 }
 
 func assertMsg(t *testing.T, msg pb.MsgProto, expectedData []byte, expectedSeq uint64) {
-	if !bytes.Equal(msg.Data, expectedData) {
-		stackFatalf(t, "Msg data incorrect, expected: %s, got: %s", expectedData, msg.Data)
-	}
 	if msg.Sequence != expectedSeq {
 		stackFatalf(t, "Msg sequence incorrect, expected: %d, got: %d", expectedSeq, msg.Sequence)
+	}
+	if !bytes.Equal(msg.Data, expectedData) {
+		stackFatalf(t, "Msg data incorrect, expected: %s, got: %s", expectedData, msg.Data)
 	}
 }
 
@@ -229,8 +229,18 @@ func TestClusteringBasic(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	if err := sc.Publish(channel, []byte("hello")); err != nil {
-		t.Fatalf("Unexpected error on publish: %v", err)
+	// TODO: there is a race where connection might not be established on
+	// leader so publish can fail, so retry a few times if necessary. Remove
+	// this once connection replication is implemented.
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish(channel, []byte("hello")); err != nil {
+			if i == 9 {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		break
 	}
 
 	ch := make(chan *stan.Msg, 100)
@@ -451,8 +461,18 @@ func TestClusteringLeaderFlap(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	if err := sc.Publish(channel, []byte("hello")); err != nil {
-		t.Fatalf("Unexpected error on publish: %v", err)
+	// TODO: there is a race where connection might not be established on
+	// leader so publish can fail, so retry a few times if necessary. Remove
+	// this once connection replication is implemented.
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish(channel, []byte("hello")); err != nil {
+			if i == 9 {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		break
 	}
 
 	// Wait for leader to be elected.
@@ -520,8 +540,23 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	}
 	defer sc.Close()
 
-	// Publish some messages (this will create the channel and form the Raft group).
+	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
+	// TODO: there is a race where connection might not be established on
+	// leader so publish can fail, so retry a few times if necessary. Remove
+	// this once connection replication is implemented.
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish(channel, []byte("hello")); err != nil {
+			if i == 9 {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		break
+	}
+
+	// Publish some more messages.
 	for i := 0; i < 5; i++ {
 		if err := sc.Publish(channel, []byte(strconv.Itoa(i+1))); err != nil {
 			t.Fatalf("Unexpected error on publish: %v", err)
@@ -572,8 +607,9 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	}
 
 	// Verify the server stores are consistent.
-	expected := make([]msg, 11)
-	for i := 1; i < 12; i++ {
+	expected := make([]msg, 12)
+	expected[0] = msg{sequence: 1, data: []byte("hello")}
+	for i := 2; i < 13; i++ {
 		expected[i-1] = msg{sequence: uint64(i), data: []byte(strconv.Itoa(i))}
 	}
 	verifyChannelConsistency(t, channel, 10*time.Second, 1, 11, expected, servers...)
@@ -620,8 +656,18 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	if err := sc.Publish(channel, []byte("hello")); err != nil {
-		t.Fatalf("Unexpected error on publish: %v", err)
+	// TODO: there is a race where connection might not be established on
+	// leader so publish can fail, so retry a few times if necessary. Remove
+	// this once connection replication is implemented.
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish(channel, []byte("hello")); err != nil {
+			if i == 9 {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		break
 	}
 
 	ch := make(chan *stan.Msg, 100)
@@ -724,8 +770,18 @@ func TestClusteringQueueSubscriberFailover(t *testing.T) {
 		channel = "foo"
 		queue   = "queue"
 	)
-	if err := sc1.Publish(channel, []byte("hello")); err != nil {
-		t.Fatalf("Unexpected error on publish: %v", err)
+	// TODO: there is a race where connection might not be established on
+	// leader so publish can fail, so retry a few times if necessary. Remove
+	// this once connection replication is implemented.
+	for i := 0; i < 10; i++ {
+		if err := sc1.Publish(channel, []byte("hello")); err != nil {
+			if i == 9 {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		break
 	}
 
 	ch := make(chan *stan.Msg, 100)
@@ -834,8 +890,18 @@ func TestClusteringDurableSubscriberFailover(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	if err := sc.Publish(channel, []byte("hello")); err != nil {
-		t.Fatalf("Unexpected error on publish: %v", err)
+	// TODO: there is a race where connection might not be established on
+	// leader so publish can fail, so retry a few times if necessary. Remove
+	// this once connection replication is implemented.
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish(channel, []byte("hello")); err != nil {
+			if i == 9 {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		break
 	}
 
 	ch := make(chan *stan.Msg, 100)
@@ -930,8 +996,18 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	if err := sc.Publish(channel, []byte("hello")); err != nil {
-		t.Fatalf("Unexpected error on publish: %v", err)
+	// TODO: there is a race where connection might not be established on
+	// leader so publish can fail, so retry a few times if necessary. Remove
+	// this once connection replication is implemented.
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish(channel, []byte("hello")); err != nil {
+			if i == 9 {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		break
 	}
 
 	ch := make(chan *stan.Msg, 100)
@@ -1040,8 +1116,18 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	if err := sc.Publish(channel, []byte("hello")); err != nil {
-		t.Fatalf("Unexpected error on publish: %v", err)
+	// TODO: there is a race where connection might not be established on
+	// leader so publish can fail, so retry a few times if necessary. Remove
+	// this once connection replication is implemented.
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish(channel, []byte("hello")); err != nil {
+			if i == 9 {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		break
 	}
 
 	ch := make(chan *stan.Msg, 100)
