@@ -407,15 +407,21 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 			select {
 			case isLeader := <-raftNotifyCh:
 				if isLeader {
-					err, ok := c.leadershipAcquired()
+					err := c.leadershipAcquired()
 					leaderInit.Do(func() { close(leaderWait) })
 					if err != nil {
 						c.stan.log.Errorf("Error on leadership acquired for channel %s: %v", c.name, err)
-						if !ok {
+						switch {
+						case err == raft.ErrRaftShutdown:
+							// Node shutdown, just return.
 							return
+						case err == raft.ErrLeadershipLost:
+							// Node lost leadership, continue loop.
+							continue
+						default:
+							// TODO: probably step down as leader?
+							panic(err)
 						}
-						// TODO: probably step down as leader?
-						panic(err)
 					}
 				} else {
 					c.leadershipLost()
@@ -587,7 +593,7 @@ func (c *channel) isLeader() bool {
 // applied before stepping up as leader, sets up an ack subscription, updates
 // the next sequence to assign, and attempts to redeliver any outstanding
 // messages that have expired.
-func (c *channel) leadershipAcquired() (error, bool) {
+func (c *channel) leadershipAcquired() error {
 	// Use a barrier to ensure all preceding operations are
 	// applied to the FSM, then update nextSequence.
 	barrier := c.raft.Barrier(30 * time.Second)
@@ -595,27 +601,20 @@ func (c *channel) leadershipAcquired() (error, bool) {
 	// Subscribe to channel acks subject.
 	sub, err := c.stan.nc.Subscribe(fmt.Sprintf("%s.>", c.getAckSubject()), c.stan.processAckMsg)
 	if err != nil {
-		return err, false
+		return err
 	}
 	c.acksSub = sub
 	c.acksSub.SetPendingLimits(-1, -1)
 
 	// Wait for barrier to complete.
 	if err := barrier.Error(); err != nil {
-		if err == raft.ErrRaftShutdown {
-			return err, false
-		}
-		if err == raft.ErrLeadershipLost {
-			return err, true
-		}
-		panic(err)
+		return err
 	}
 
 	// Update next sequence to assign.
 	lastSequence, err := c.store.Msgs.LastSequence()
 	if err != nil {
-		// TODO: probably step down as leader?
-		panic(err)
+		return err
 	}
 	atomic.StoreUint64(&c.nextSequence, lastSequence+1)
 
@@ -652,7 +651,7 @@ func (c *channel) leadershipAcquired() (error, bool) {
 
 	// Finally step up as leader.
 	atomic.StoreUint32(&c.leader, 1)
-	return nil, true
+	return nil
 }
 
 // leadershipLost should be called when this node loses leadership for the
