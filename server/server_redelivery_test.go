@@ -1125,18 +1125,20 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 			}
 		}
 	}
+	// To reduce Travis test flapping, use a not too small AckWait for
+	// these 2 queue subs.
 	if _, err := sc.QueueSubscribe("foo", "queue",
 		newCb(1),
 		stan.MaxInflight(int(totalMsgs/2)),
 		stan.SetManualAckMode(),
-		stan.AckWait(ackWaitInMs(250))); err != nil {
+		stan.AckWait(ackWaitInMs(500))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	if _, err := sc.QueueSubscribe("foo", "queue",
 		newCb(2),
 		stan.MaxInflight(int(totalMsgs/2)),
 		stan.SetManualAckMode(),
-		stan.AckWait(ackWaitInMs(250))); err != nil {
+		stan.AckWait(ackWaitInMs(500))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	// Send more messages that can be accepted, both member should stall
@@ -1151,7 +1153,7 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 	}
 	// Now stop server and wait more than AckWait before resarting
 	s.Shutdown()
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(600 * time.Millisecond)
 	atomic.StoreInt32(&restarted, 1)
 	l := &trackDeliveredMsgs{newSeq: int(totalMsgs + 1), errCh: make(chan error, 1)}
 	opts.Trace = true
