@@ -263,13 +263,13 @@ func TestClusteringBasic(t *testing.T) {
 	stopped := []*StanServer{}
 
 	// Take down the leader.
-	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
+	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 	leader.Shutdown()
 	stopped = append(stopped, leader)
 	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	leader = getChannelLeader(t, channel, 5*time.Second, servers...)
+	leader = getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -333,7 +333,7 @@ func TestClusteringBasic(t *testing.T) {
 	defer s.Shutdown()
 
 	// Wait for the new leader to be elected.
-	getChannelLeader(t, channel, 5*time.Second, servers...)
+	getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -349,7 +349,7 @@ func TestClusteringBasic(t *testing.T) {
 	defer s.Shutdown()
 
 	// Ensure there is still a leader.
-	getChannelLeader(t, channel, 5*time.Second, servers...)
+	getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish one more message.
 	if err := sc.Publish(channel, []byte("goodbye")); err != nil {
@@ -402,7 +402,7 @@ func TestClusteringNoPanicOnShutdown(t *testing.T) {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 
-	leader := getChannelLeader(t, "foo", 5*time.Second, servers...)
+	leader := getChannelLeader(t, "foo", 10*time.Second, servers...)
 
 	// Unsubscribe since this is not about that
 	sub.Unsubscribe()
@@ -476,7 +476,7 @@ func TestClusteringLeaderFlap(t *testing.T) {
 	}
 
 	// Wait for leader to be elected.
-	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
+	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Kill the follower.
 	var follower *StanServer
@@ -497,7 +497,7 @@ func TestClusteringLeaderFlap(t *testing.T) {
 	defer follower.Shutdown()
 
 	// Ensure there is a new leader.
-	getChannelLeader(t, channel, 5*time.Second, servers...)
+	getChannelLeader(t, channel, 10*time.Second, servers...)
 }
 
 func TestClusteringLogSnapshotCatchup(t *testing.T) {
@@ -564,7 +564,7 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	}
 
 	// Wait for leader to be elected.
-	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
+	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Kill a follower.
 	var follower *StanServer
@@ -599,7 +599,7 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	}
 
 	// Ensure there is a leader before publishing.
-	getChannelLeader(t, channel, 5*time.Second, servers...)
+	getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish a message to force a timely catch up.
 	if err := sc.Publish(channel, []byte("11")); err != nil {
@@ -687,7 +687,7 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 	}
 
 	// Take down the leader.
-	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
+	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
 
@@ -808,12 +808,12 @@ func TestClusteringQueueSubscriberFailover(t *testing.T) {
 	}
 
 	// Take down the leader.
-	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
+	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	getChannelLeader(t, channel, 5*time.Second, servers...)
+	getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -921,12 +921,12 @@ func TestClusteringDurableSubscriberFailover(t *testing.T) {
 	}
 
 	// Take down the leader.
-	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
+	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	getChannelLeader(t, channel, 5*time.Second, servers...)
+	getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -1032,12 +1032,12 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 	}
 
 	// Take down the leader.
-	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
+	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	getChannelLeader(t, channel, 5*time.Second, servers...)
+	getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -1152,12 +1152,12 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 	}
 
 	// Take down the leader.
-	leader := getChannelLeader(t, channel, 5*time.Second, servers...)
+	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	getChannelLeader(t, channel, 5*time.Second, servers...)
+	getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
