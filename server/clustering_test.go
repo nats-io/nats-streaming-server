@@ -646,7 +646,7 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	getChannelLeader(t, channel, 5*time.Second, servers...)
+	getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
