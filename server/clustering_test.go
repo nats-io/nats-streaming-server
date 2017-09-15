@@ -673,7 +673,7 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 	ch := make(chan *stan.Msg, 100)
 	sub, err := sc.Subscribe(channel, func(msg *stan.Msg) {
 		ch <- msg
-	}, stan.DeliverAllAvailable())
+	}, stan.DeliverAllAvailable(), stan.MaxInflight(1), stan.AckWait(2*time.Second))
 	if err != nil {
 		t.Fatalf("Error subscribing: %v", err)
 	}
@@ -907,7 +907,7 @@ func TestClusteringDurableSubscriberFailover(t *testing.T) {
 	ch := make(chan *stan.Msg, 100)
 	sub, err := sc.Subscribe(channel, func(msg *stan.Msg) {
 		ch <- msg
-	}, stan.DeliverAllAvailable(), stan.DurableName("durable"))
+	}, stan.DeliverAllAvailable(), stan.DurableName("durable"), stan.MaxInflight(1), stan.AckWait(2*time.Second))
 	if err != nil {
 		t.Fatalf("Error subscribing: %v", err)
 	}
@@ -1013,7 +1013,7 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 	ch := make(chan *stan.Msg, 100)
 	sub, err := sc.Subscribe(channel, func(msg *stan.Msg) {
 		ch <- msg
-	}, stan.DeliverAllAvailable(), stan.DurableName("durable"))
+	}, stan.DeliverAllAvailable(), stan.DurableName("durable"), stan.MaxInflight(1), stan.AckWait(2*time.Second))
 	if err != nil {
 		t.Fatalf("Error subscribing: %v", err)
 	}
@@ -1049,7 +1049,7 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 	// Reopen subscription.
 	sub, err = sc.Subscribe(channel, func(msg *stan.Msg) {
 		ch <- msg
-	}, stan.DurableName("durable"))
+	}, stan.DurableName("durable"), stan.MaxInflight(1), stan.AckWait(2*time.Second))
 	if err != nil {
 		t.Fatalf("Error subscribing: %v", err)
 	}
