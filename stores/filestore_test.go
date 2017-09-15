@@ -1764,11 +1764,14 @@ func TestFSFilesClosedOnRecovery(t *testing.T) {
 		t.Fatalf("Error setting limits: %v", err)
 	}
 
+	seq := uint64(1)
 	for i := 0; i < 5; i++ {
 		cname := fmt.Sprintf("foo_%d", (i + 1))
 		cs := storeCreateChannel(t, s, cname)
-		m1 := storeMsg(t, cs, cname, []byte("hello"))
-		m2 := storeMsg(t, cs, cname, []byte("hello"))
+		m1 := storeMsg(t, cs, cname, seq, []byte("hello"))
+		seq++
+		m2 := storeMsg(t, cs, cname, seq, []byte("hello"))
+		seq++
 		subid := storeSub(t, cs, "foo")
 		storeSubPending(t, cs, cname, subid, m1.Sequence, m2.Sequence)
 	}
