@@ -1009,7 +1009,10 @@ func TestIgnoreFailedHBInAckRedeliveryForQGroup(t *testing.T) {
 
 	count := 0
 	ch := make(chan bool)
+	var mu sync.Mutex
 	cb := func(m *stan.Msg) {
+		mu.Lock()
+		defer mu.Unlock()
 		count++
 		if count == 4 {
 			ch <- true
