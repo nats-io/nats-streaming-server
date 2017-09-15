@@ -2643,15 +2643,17 @@ func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force b
 		return nil, false, false
 	}
 	sub.Lock()
+	wasStalled := sub.stalled
 	didSend, sendMore := s.sendMsgToSub(sub, m, force)
-	lastSent := sub.LastSent
-	sub.Unlock()
-	if didSend && lastSent > qs.lastSent {
-		qs.lastSent = lastSent
-	}
-	if !sendMore {
+	// If this is not a redelivery and the sub was not stalled, but now is,
+	// bump the number of stalled members.
+	if !force && !wasStalled && sub.stalled {
 		qs.stalledSubCount++
 	}
+	if didSend && sub.LastSent > qs.lastSent {
+		qs.lastSent = sub.LastSent
+	}
+	sub.Unlock()
 	return sub, didSend, sendMore
 }
 
@@ -3973,6 +3975,14 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 
 	var stalled bool
 
+	// This is immutable, so can grab outside of sub's lock.
+	// If we have a queue group, we want to grab queue's lock before
+	// sub's lock.
+	qs := sub.qstate
+	if qs != nil {
+		qs.Lock()
+	}
+
 	sub.Lock()
 
 	if s.trace {
@@ -3984,39 +3994,33 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 		s.log.Errorf("[Client:%s] Unable to persist ack for subid=%d, subject=%s, seq=%d, err=%v",
 			sub.ClientID, sub.ID, sub.subject, sequence, err)
 		sub.Unlock()
+		if qs != nil {
+			qs.Unlock()
+		}
 		return
 	}
 
-	qs := sub.qstate
-	if qs == nil {
-		delete(sub.acksPending, sequence)
-		stalled = sub.stalled
-		if int32(len(sub.acksPending)) < sub.MaxInFlight {
-			sub.stalled = false
-		}
-		sub.Unlock()
-	} else {
-		// In the case of a queue member, we should grab the lock in the following
-		// order: qs.Lock() -> sub.Lock().
-		// So release the sub's lock now, will grab it after under the qs' lock.
-		sub.Unlock()
+	delete(sub.acksPending, sequence)
+	if sub.stalled && int32(len(sub.acksPending)) < sub.MaxInFlight {
+		// For queue, we must not check the queue stalled count here. The queue
+		// as a whole may not be stalled, yet, if this sub was stalled, it is
+		// not now since the pending acks is below MaxInflight. The server should
+		// try to send available messages.
+		// It works also if the queue *was* stalled (all members were stalled),
+		// then this member is no longer stalled, which release the queue.
 
-		qs.Lock()
-		stalled = qs.stalledSubCount == len(qs.subs)
-		sub.Lock()
-		delete(sub.acksPending, sequence)
-		if int32(len(sub.acksPending)) < sub.MaxInFlight {
-			if sub.stalled {
-				// Member was stalled and now below the MaxInflight,
-				// so it is no longer stalled, which means that the
-				// queue itself is no longer stalled.
-				sub.stalled = false
-				if qs.stalledSubCount > 0 {
-					qs.stalledSubCount--
-				}
-			}
+		// Trigger send of available messages by setting this to true.
+		stalled = true
+
+		// Clear the stalled flag from this sub
+		sub.stalled = false
+		// .. and update the queue's stalled members count if this is a queue sub.
+		if qs != nil && qs.stalledSubCount > 0 {
+			qs.stalledSubCount--
 		}
-		sub.Unlock()
+	}
+	sub.Unlock()
+	if qs != nil {
 		qs.Unlock()
 	}
 

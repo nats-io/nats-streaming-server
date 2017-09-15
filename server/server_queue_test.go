@@ -2,6 +2,7 @@
 package server
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -860,4 +861,50 @@ func TestQueueGroupStalledSemantics(t *testing.T) {
 	c = s.channels.channels["foo"]
 	c.store.Msgs = orgMS
 	s.channels.Unlock()
+}
+
+func TestQueueGroupUnStalledOnAcks(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Produce messages to a channel
+	msgCount := 10000
+	msg := []byte("hello")
+	for i := 0; i < msgCount; i++ {
+		if i == msgCount-1 {
+			if err := sc.Publish("foo", msg); err != nil {
+				t.Fatalf("Error on publish: %v", err)
+			}
+		} else {
+			if _, err := sc.PublishAsync("foo", msg, func(guid string, puberr error) {
+				if puberr != nil {
+					t.Fatalf("Error on publish %q: %v", guid, puberr)
+				}
+			}); err != nil {
+				t.Fatalf("Error on publish: %v", err)
+			}
+		}
+	}
+
+	count := int32(0)
+	doneCh := make(chan bool)
+	mcb := func(m *stan.Msg) {
+		if c := atomic.AddInt32(&count, 1); c == int32(msgCount) {
+			doneCh <- true
+		}
+	}
+
+	// Create multiple queue subs
+	for i := 0; i < 4; i++ {
+		if _, err := sc.QueueSubscribe("foo", "bar", mcb, stan.DeliverAllAvailable()); err != nil {
+			t.Fatalf("Unexpected error on subscribe: %v", err)
+		}
+	}
+	// Wait for all messages to be received
+	if err := Wait(doneCh); err != nil {
+		t.Fatal("Did not get our messages")
+	}
 }
