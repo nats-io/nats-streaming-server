@@ -1,3 +1,5 @@
+// Copyright 2017 Apcera Inc. All rights reserved.
+
 package main
 
 import (
@@ -84,19 +86,15 @@ func main() {
 	}
 
 	go func() {
-		leaderCh := node.LeaderCh()
-		for {
-			select {
-			case isLeader := <-leaderCh:
-				if isLeader {
-					fmt.Println("*** LEADERSHIP ACQUIRED ***")
-					bar := node.Barrier(0)
-					if err := bar.Error(); err != nil {
-						fmt.Printf("Failed applying barrier when becoming leader: %s\n", err)
-					}
-				} else {
-					fmt.Println("*** LEADERSHIP LOST ***")
+		for isLeader := range node.LeaderCh() {
+			if isLeader {
+				fmt.Println("*** LEADERSHIP ACQUIRED ***")
+				bar := node.Barrier(0)
+				if err := bar.Error(); err != nil {
+					fmt.Printf("Failed applying barrier when becoming leader: %s\n", err)
 				}
+			} else {
+				fmt.Println("*** LEADERSHIP LOST ***")
 			}
 		}
 	}()

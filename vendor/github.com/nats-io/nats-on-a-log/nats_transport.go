@@ -1,3 +1,7 @@
+// Copyright 2017 Apcera Inc. All rights reserved.
+
+// Package natslog provides an implementation of the Transport interface for
+// the HashiCorp Raft library using NATS.
 package natslog
 
 import (
@@ -19,8 +23,6 @@ import (
 const (
 	natsConnectInbox = "raft.%s.accept"
 	natsRequestInbox = "raft.%s.request.%s"
-
-	defaultBufferSize = 32 * 1024
 )
 
 // natsAddr implements the net.Addr interface. An address for the NATS
@@ -57,18 +59,7 @@ type natsConn struct {
 	closed     bool
 	reader     *timeoutReader
 	writer     io.WriteCloser
-}
-
-func newNATSConn(n *natsStreamLayer, address string) *natsConn {
-	// TODO: probably want a buffered pipe.
-	reader, writer := io.Pipe()
-	return &natsConn{
-		conn:       n.conn,
-		localAddr:  n.localAddr,
-		remoteAddr: natsAddr(address),
-		reader:     newTimeoutReader(reader),
-		writer:     writer,
-	}
+	parent     *natsStreamLayer
 }
 
 func (n *natsConn) Read(b []byte) (int, error) {
@@ -129,8 +120,10 @@ func (n *natsConn) close(signalRemote bool) error {
 	}
 
 	n.closed = true
+	n.parent.mu.Lock()
+	delete(n.parent.conns, n)
+	n.parent.mu.Unlock()
 	n.writer.Close()
-	n.reader.Close()
 
 	return nil
 }
@@ -175,16 +168,36 @@ type natsStreamLayer struct {
 	localAddr natsAddr
 	sub       *nats.Subscription
 	logger    *log.Logger
+	conns     map[*natsConn]struct{}
+	mu        sync.Mutex
 }
 
 func newNATSStreamLayer(id string, conn *nats.Conn, logger *log.Logger) (*natsStreamLayer, error) {
 	var (
-		n        = &natsStreamLayer{localAddr: natsAddr(id), conn: conn, logger: logger}
+		n = &natsStreamLayer{
+			localAddr: natsAddr(id),
+			conn:      conn,
+			logger:    logger,
+			conns:     map[*natsConn]struct{}{},
+		}
 		sub, err = conn.SubscribeSync(fmt.Sprintf(natsConnectInbox, id))
 	)
 	n.sub = sub
 	conn.Flush()
 	return n, err
+}
+
+func (n *natsStreamLayer) newNATSConn(address string) *natsConn {
+	// TODO: probably want a buffered pipe.
+	reader, writer := io.Pipe()
+	return &natsConn{
+		conn:       n.conn,
+		localAddr:  n.localAddr,
+		remoteAddr: natsAddr(address),
+		reader:     newTimeoutReader(reader),
+		writer:     writer,
+		parent:     n,
+	}
 }
 
 // Dial creates a new net.Conn with the remote address. This is implemented by
@@ -206,7 +219,7 @@ func (n *natsStreamLayer) Dial(address string, timeout time.Duration) (net.Conn,
 		panic(err)
 	}
 
-	peerConn := newNATSConn(n, address)
+	peerConn := n.newNATSConn(address)
 
 	// Setup inbox.
 	sub, err := n.conn.Subscribe(connect.Inbox, peerConn.msgHandler)
@@ -229,6 +242,9 @@ func (n *natsStreamLayer) Dial(address string, timeout time.Duration) (net.Conn,
 	}
 
 	peerConn.outbox = resp.Inbox
+	n.mu.Lock()
+	n.conns[peerConn] = struct{}{}
+	n.mu.Unlock()
 	return peerConn, nil
 }
 
@@ -250,7 +266,7 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 			continue
 		}
 
-		peerConn := newNATSConn(n, connect.ID)
+		peerConn := n.newNATSConn(connect.ID)
 		peerConn.outbox = connect.Inbox
 
 		// Setup inbox for peer.
@@ -275,11 +291,23 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 		}
 		n.conn.Flush()
 
+		n.mu.Lock()
+		n.conns[peerConn] = struct{}{}
+		n.mu.Unlock()
 		return peerConn, nil
 	}
 }
 
 func (n *natsStreamLayer) Close() error {
+	n.mu.Lock()
+	conns := make(map[*natsConn]struct{}, len(n.conns))
+	for conn, s := range n.conns {
+		conns[conn] = s
+	}
+	n.mu.Unlock()
+	for c, _ := range conns {
+		c.Close()
+	}
 	return n.sub.Unsubscribe()
 }
 

@@ -315,14 +315,17 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	// but we can modify the outputs to which the Raft logger is writing.
 	//config.Logger = s.log
 	logReader, logWriter := io.Pipe()
+	c.raftLogInput = logWriter
 	config.LogOutput = logWriter
 	bufr := bufio.NewReader(logReader)
 	go func() {
 		for {
 			line, _, err := bufr.ReadLine()
 			if err != nil {
-				s.log.Errorf("error while reading piped output from Raft log: %s", err)
-				break
+				if err != io.EOF {
+					s.log.Errorf("error while reading piped output from Raft log: %s", err)
+				}
+				return
 			}
 
 			fields := bytes.Fields(line)
@@ -358,6 +361,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 		store.Close()
 		return err
 	}
+	c.raftTransport = transport
 
 	peers := make([]string, len(s.opts.ClusterPeers))
 	for i, p := range s.opts.ClusterPeers {
@@ -479,16 +483,18 @@ func (cs *channelStore) count() int {
 }
 
 type channel struct {
-	nextSequence uint64
-	leader       uint32
-	name         string
-	store        *stores.Channel
-	ss           *subStore
-	raft         *raft.Raft
-	raftStore    *raftboltdb.BoltStore
-	lTimestamp   int64
-	acksSub      *nats.Subscription
-	stan         *StanServer
+	nextSequence  uint64
+	leader        uint32
+	name          string
+	store         *stores.Channel
+	ss            *subStore
+	raft          *raft.Raft
+	raftStore     *raftboltdb.BoltStore
+	raftLogInput  io.WriteCloser
+	raftTransport *raft.NetworkTransport
+	lTimestamp    int64
+	acksSub       *nats.Subscription
+	stan          *StanServer
 }
 
 // Apply log is invoked once a log entry is committed.
@@ -4305,6 +4311,16 @@ func (s *StanServer) Shutdown() {
 			if channel.raftStore != nil {
 				if err := channel.raftStore.Close(); err != nil {
 					s.log.Errorf("Failed to close Raft log store for channel %s: %v", channel.name, err)
+				}
+			}
+			if channel.raftLogInput != nil {
+				if err := channel.raftLogInput.Close(); err != nil {
+					s.log.Errorf("Failed to close Raft log input for channel %s: %v", channel.name, err)
+				}
+			}
+			if channel.raftTransport != nil {
+				if err := channel.raftTransport.Close(); err != nil {
+					s.log.Errorf("Failed to close Raft transport for channel %s: %v", channel.name, err)
 				}
 			}
 		}
