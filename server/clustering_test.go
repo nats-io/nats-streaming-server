@@ -787,14 +787,14 @@ func TestClusteringQueueSubscriberFailover(t *testing.T) {
 	ch := make(chan *stan.Msg, 100)
 	sub1, err := sc1.QueueSubscribe(channel, queue, func(msg *stan.Msg) {
 		ch <- msg
-	}, stan.DeliverAllAvailable())
+	}, stan.DeliverAllAvailable(), stan.MaxInflight(1), stan.AckWait(2*time.Second))
 	if err != nil {
 		t.Fatalf("Error subscribing: %v", err)
 	}
 	defer sub1.Unsubscribe()
 	sub2, err := sc2.QueueSubscribe(channel, queue, func(msg *stan.Msg) {
 		ch <- msg
-	}, stan.DeliverAllAvailable())
+	}, stan.DeliverAllAvailable(), stan.MaxInflight(1), stan.AckWait(2*time.Second))
 	if err != nil {
 		t.Fatalf("Error subscribing: %v", err)
 	}
