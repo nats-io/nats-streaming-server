@@ -482,7 +482,7 @@ func TestOptionsClone(t *testing.T) {
 }
 
 func TestGetSubStoreRace(t *testing.T) {
-	numChans := 10000
+	numChans := 8000
 
 	opts := GetDefaultOptions()
 	opts.MaxChannels = numChans + 1
