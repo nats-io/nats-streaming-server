@@ -567,3 +567,74 @@ func TestCSFirstAndLastMsg(t *testing.T) {
 		})
 	}
 }
+
+func TestCSLimitsOnRecovery(t *testing.T) {
+	for _, st := range testStores {
+		st := st
+		t.Run(st.name, func(t *testing.T) {
+			if !st.recoverable {
+				return
+			}
+			t.Parallel()
+			defer endTest(t, st)
+
+			storeMsgs := func(cs *Channel, count, size int) {
+				msg := make([]byte, size)
+				for i := 0; i < count; i++ {
+					storeMsg(t, cs, "foo", msg)
+				}
+			}
+
+			// First run store with no limit.
+			s := startTest(t, st)
+			defer s.Close()
+			cs := storeCreateChannel(t, s, "foo")
+			storeMsgs(cs, 1, 10)
+			s.Close()
+
+			// Add limit of MaxAge
+			limits := testDefaultStoreLimits
+			limits.MaxAge = 15 * time.Millisecond
+			// Wait more than max age
+			time.Sleep(30 * time.Millisecond)
+			// Reopen store
+			s, state := testReOpenStore(t, st, &limits)
+			cs = state.Channels["foo"].Channel
+			// Message should be gone.
+			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
+				t.Fatalf("Expected no message, got %v", n)
+			}
+			s.Close()
+
+			// Remove MaxAge
+			limits.MaxAge = time.Duration(0)
+			s, state = testReOpenStore(t, st, &limits)
+			cs = state.Channels["foo"].Channel
+			// Store 3 messages. We will set the limit to 2 on restart.
+			storeMsgs(cs, 3, 10)
+			s.Close()
+			limits.MaxMsgs = 2
+			s, state = testReOpenStore(t, st, &limits)
+			cs = state.Channels["foo"].Channel
+			if n, _ := msgStoreState(t, cs.Msgs); n != limits.MaxMsgs {
+				t.Fatalf("Expected %d messages, got %v", limits.MaxMsgs, n)
+			}
+			s.Close()
+
+			// Remove MaxMsgs
+			limits.MaxMsgs = 0
+			s, state = testReOpenStore(t, st, &limits)
+			cs = state.Channels["foo"].Channel
+			// Send more about 1000 bytes, we will set the limit to 500
+			storeMsgs(cs, 10, 100)
+			s.Close()
+			limits.MaxBytes = 500
+			s, state = testReOpenStore(t, st, &limits)
+			cs = state.Channels["foo"].Channel
+			if _, n := msgStoreState(t, cs.Msgs); n > uint64(limits.MaxBytes) {
+				t.Fatalf("Expected bytes less than %v, got %v", limits.MaxBytes, n)
+			}
+			s.Close()
+		})
+	}
+}

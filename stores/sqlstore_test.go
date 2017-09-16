@@ -95,6 +95,7 @@ func failDBConnection(t *testing.T, s Store) {
 func restoreDBConnection(t *testing.T, s Store) {
 	ss := s.(*SQLStore)
 	ss.Lock()
+	ss.expireMu.Lock()
 	db, err := sql.Open(testSQLDriver, testSQLSource)
 	if err == nil {
 		ss.db = db
@@ -109,6 +110,7 @@ func restoreDBConnection(t *testing.T, s Store) {
 			subs.Unlock()
 		}
 	}
+	ss.expireMu.Unlock()
 	ss.Unlock()
 	if err != nil {
 		stackFatalf(t, "Error failing db connection: %v", err)
@@ -407,6 +409,82 @@ func TestSQLCloseOnMsgExpiration(t *testing.T) {
 	}
 }
 
+func TestSQLExpireMsgsForChannelsWithDifferentMaxAge(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	s := createDefaultSQLStore(t)
+	defer s.Close()
+
+	limits := testDefaultStoreLimits
+	limits.AddPerChannel("foo", &ChannelLimits{MsgStoreLimits: MsgStoreLimits{MaxAge: 500 * time.Millisecond}})
+	limits.AddPerChannel("bar", &ChannelLimits{MsgStoreLimits: MsgStoreLimits{MaxAge: 15 * time.Millisecond}})
+	if err := s.SetLimits(&limits); err != nil {
+		t.Fatalf("Error setting limits: %v", err)
+	}
+
+	fooCS := storeCreateChannel(t, s, "foo")
+	barCS := storeCreateChannel(t, s, "bar")
+
+	// First, store message in the channel with the highest max age
+	storeMsg(t, fooCS, "foo", []byte("foo"))
+	// Then in the store with the loweest
+	storeMsg(t, barCS, "bar", []byte("bar"))
+
+	// Wait for message in bar to expire
+	time.Sleep(30 * time.Millisecond)
+	// It should have expired
+	if n, _ := msgStoreState(t, barCS.Msgs); n != 0 {
+		t.Fatalf("Should have no message, got %v", n)
+	}
+	// And still be a message in foo
+	if n, _ := msgStoreState(t, fooCS.Msgs); n != 1 {
+		t.Fatalf("Should have 1 message, got %v", n)
+	}
+	// Wait for message on bar to expire
+	time.Sleep(600 * time.Millisecond)
+	if n, _ := msgStoreState(t, fooCS.Msgs); n != 0 {
+		t.Fatalf("Should have no message, got %v", n)
+	}
+}
+
+func TestSQLExpireMsgsOnRecovery(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	s := createDefaultSQLStore(t)
+	defer s.Close()
+
+	limits := testDefaultStoreLimits
+	limits.MaxAge = 250 * time.Millisecond
+	if err := s.SetLimits(&limits); err != nil {
+		t.Fatalf("Error setting limits: %v", err)
+	}
+	cs := storeCreateChannel(t, s, "foo")
+	storeMsg(t, cs, "foo", []byte("hello"))
+	// Close the store before msg expires.
+	s.Close()
+	// Sleep for longer than the max age
+	time.Sleep(300 * time.Millisecond)
+	// Re-open the store
+	s, state := openDefaultSQLStoreWithLimits(t, &limits)
+	defer s.Close()
+	if len(state.Channels) != 1 {
+		t.Fatalf("1 channel should have been recovered, got %v", len(state.Channels))
+	}
+	rc := state.Channels["foo"]
+	// Message should have expired right away
+	if n, _ := msgStoreState(t, rc.Channel.Msgs); n != 0 {
+		t.Fatalf("Messages hould have expired on recovery")
+	}
+}
+
 func TestSQLExpiredMsgsOnLookup(t *testing.T) {
 	if !doSQL {
 		t.SkipNow()
@@ -483,7 +561,7 @@ func TestSQLDeleteLastSubKeepRecord(t *testing.T) {
 	}
 }
 
-func TestSQLRecoverBadVersion(t *testing.T) {
+func TestSQLRecoverErrors(t *testing.T) {
 	if !doSQL {
 		t.SkipNow()
 	}
@@ -497,120 +575,66 @@ func TestSQLRecoverBadVersion(t *testing.T) {
 	defer db.Close()
 	// Change version
 	test.MustExecuteSQL(t, db, "UPDATE ServerInfo SET version=2 WHERE uniquerow=1")
-	db.Close()
 
 	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
 	defer s.Close()
-	state, err := s.Recover()
-	if state != nil || err == nil {
-		t.Fatalf("Expected no state and error about version, got %v - %v", state, err)
+
+	expectRecoverFailure := func(errTxt string) {
+		state, err := s.Recover()
+		if state != nil || err == nil || !strings.Contains(err.Error(), errTxt) {
+			t.Fatalf("Expected no state and error about %q, got %v - %v", errTxt, state, err)
+		}
 	}
+	expectRecoverFailure("version")
+
+	// Reset to proper version but change name of cluster
+	test.MustExecuteSQL(t, db,
+		fmt.Sprintf("UPDATE ServerInfo SET id='%s', version=%d WHERE uniquerow=1",
+			"not-same-than-proto", sqlVersion))
+	expectRecoverFailure("match")
 }
 
-func TestSQLRecoverVariousErrors(t *testing.T) {
+func TestSQLPurgeSubsPending(t *testing.T) {
 	if !doSQL {
 		t.SkipNow()
 	}
+	cleanupSQLDatastore(t)
 	defer cleanupSQLDatastore(t)
 
-	// Make sure sqlStms table is set...
-	initSQLStmtsTable(testSQLDriver)
+	s := createDefaultSQLStore(t)
+	defer s.Close()
 
-	var realStmts []string
-	realStmts = append(realStmts, sqlStmts...)
-
-	var (
-		db    *sql.DB
-		subID uint64
-	)
-
-	var errs = []func(){}
-	switch testSQLDriver {
-	case driverMySQL:
-		errs = []func(){
-			func() {
-				test.MustExecuteSQL(t, db, "UPDATE ServerInfo SET id=? WHERE uniquerow=1", "not-same-than-proto")
-			},
-			func() {
-				test.MustExecuteSQL(t, db, "UPDATE ServerInfo SET proto=? WHERE uniquerow=1", "unmarshal_failure")
-			},
-			func() {
-				test.MustExecuteSQL(t, db, "UPDATE Subscriptions SET proto=? WHERE subid=?", "unmarshal_failure", subID)
-			},
-			func() { sqlStmts[sqlRecoverServerInfo] = "SELECT x FROM ServerInfo" },
-			func() { sqlStmts[sqlRecoverClients] = "SELECT x FROM Clients" },
-			func() { sqlStmts[sqlRecoverClients] = "SELECT id FROM Clients" },
-			func() { sqlStmts[sqlRecoverMaxChannelID] = "SELECT x FROM Channels" },
-			func() { sqlStmts[sqlRecoverMaxSubID] = "SELECT x FROM Subscriptions" },
-			func() { sqlStmts[sqlRecoverChannelsList] = "SELECT x FROM Channels" },
-			func() { sqlStmts[sqlRecoverChannelsList] = "SELECT id FROM Channels" },
-			func() { sqlStmts[sqlRecoverChannelMsgs] = "SELECT x FROM Messages WHERE id=?" },
-			func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT x FROM Subscriptions WHERE id=?" },
-			func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT id, proto FROM Subscriptions WHERE id=?" },
-			func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT x FROM SubsPending WHERE subid=?" },
-			func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT subid, seq FROM SubsPending WHERE subid=?" },
+	cs := storeCreateChannel(t, s, "foo")
+	subID := storeSub(t, cs, "foo")
+	smallestThatShouldBeRecovered := uint64(0)
+	for i := 0; i < 15; i++ {
+		m := storeMsg(t, cs, "foo", []byte("msg"))
+		if i == 10 {
+			smallestThatShouldBeRecovered = m.Sequence
 		}
-	case driverPostgres:
-		errs = []func(){
-			func() {
-				test.MustExecuteSQL(t, db, "UPDATE ServerInfo SET id=$1 WHERE uniquerow=1", "not-same-than-proto")
-			},
-			func() {
-				test.MustExecuteSQL(t, db, "UPDATE ServerInfo SET proto=$1 WHERE uniquerow=1", "unmarshal_failure")
-			},
-			func() {
-				test.MustExecuteSQL(t, db, "UPDATE Subscriptions SET proto=$1 WHERE subid=$2", "unmarshal_failure", subID)
-			},
-			func() { sqlStmts[sqlRecoverServerInfo] = "SELECT x FROM ServerInfo" },
-			func() { sqlStmts[sqlRecoverClients] = "SELECT x FROM Clients" },
-			func() { sqlStmts[sqlRecoverClients] = "SELECT id FROM Clients" },
-			func() { sqlStmts[sqlRecoverMaxChannelID] = "SELECT x FROM Channels" },
-			func() { sqlStmts[sqlRecoverMaxSubID] = "SELECT x FROM Subscriptions" },
-			func() { sqlStmts[sqlRecoverChannelsList] = "SELECT x FROM Channels" },
-			func() { sqlStmts[sqlRecoverChannelsList] = "SELECT id FROM Channels" },
-			func() { sqlStmts[sqlRecoverChannelMsgs] = "SELECT x FROM Messages WHERE id=$1" },
-			func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT x FROM Subscriptions WHERE id=$1" },
-			func() { sqlStmts[sqlRecoverChannelSubs] = "SELECT id, proto FROM Subscriptions WHERE id=$1" },
-			func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT x FROM SubsPending WHERE subid=$1" },
-			func() { sqlStmts[sqlRecoverSubPendingSeqs] = "SELECT subid, seq FROM SubsPending WHERE subid=$1" },
+		storeSubPending(t, cs, "foo", subID, m.Sequence)
+	}
+	s.Close()
+	// Set some limit to discard 10 out of the 15 messages
+	limits := testDefaultStoreLimits
+	limits.MaxMsgs = 5
+	s, state := openDefaultSQLStoreWithLimits(t, &limits)
+	defer s.Close()
+	rsubs := getRecoveredSubs(t, state, "foo", 1)
+	rs := rsubs[0]
+	if len(rs.Pending) != 5 {
+		t.Fatalf("Expected only 5 pending messages, got %v", len(rs.Pending))
+	}
+	smallest := uint64(0x7FFFFFFFFFFFFFFF)
+	for seq := range rs.Pending {
+		if seq < smallest {
+			smallest = seq
 		}
 	}
-
-	for _, produceError := range errs {
-		func() {
-			defer func() {
-				sqlStmts = nil
-				sqlStmts = append(sqlStmts, realStmts...)
-			}()
-			cleanupSQLDatastore(t)
-			s := createDefaultSQLStore(t)
-			defer s.Close()
-
-			storeAddClient(t, s, "me", "myinbox")
-			cs := storeCreateChannel(t, s, "foo")
-			msg := storeMsg(t, cs, "foo", []byte("msg"))
-			subID = storeSub(t, cs, "foo")
-			storeSubPending(t, cs, "foo", subID, msg.Sequence)
-
-			s.Close()
-
-			db = getDBConnection(t)
-			defer db.Close()
-
-			produceError()
-
-			rs, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil)
-			if err != nil {
-				t.Fatalf("Error on create: %v", err)
-			}
-			defer rs.Close()
-			state, err := rs.Recover()
-			if state != nil || err == nil {
-				t.Fatalf("Expected no state and error on recovery, got %v - %v", state, err)
-			}
-		}()
+	if smallest != smallestThatShouldBeRecovered {
+		t.Fatalf("Expected %v to be first, got %v", smallestThatShouldBeRecovered, smallest)
 	}
 }
