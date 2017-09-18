@@ -246,7 +246,7 @@ func TestClusteringBasic(t *testing.T) {
 	ch := make(chan *stan.Msg, 100)
 	sub, err := sc.Subscribe(channel, func(msg *stan.Msg) {
 		ch <- msg
-	}, stan.DeliverAllAvailable())
+	}, stan.DeliverAllAvailable(), stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Error subscribing: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestClusteringBasic(t *testing.T) {
 	// Read everything back from the channel.
 	sub, err = sc.Subscribe(channel, func(msg *stan.Msg) {
 		ch <- msg
-	}, stan.DeliverAllAvailable())
+	}, stan.DeliverAllAvailable(), stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Error subscribing: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestClusteringBasic(t *testing.T) {
 	defer sc2.Close()
 
 	// New subscriptions should be rejected since no leader can be established.
-	_, err = sc2.Subscribe(channel, func(msg *stan.Msg) {}, stan.DeliverAllAvailable())
+	_, err = sc2.Subscribe(channel, func(msg *stan.Msg) {}, stan.DeliverAllAvailable(), stan.MaxInflight(1))
 	if err == nil {
 		t.Fatal("Expected error on subscribe")
 	}
@@ -1133,7 +1133,7 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 	ch := make(chan *stan.Msg, 100)
 	sub, err := sc.Subscribe(channel, func(msg *stan.Msg) {
 		ch <- msg
-	}, stan.DeliverAllAvailable())
+	}, stan.DeliverAllAvailable(), stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Error subscribing: %v", err)
 	}
