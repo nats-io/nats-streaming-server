@@ -625,6 +625,7 @@ func (c *channel) leadershipAcquired() error {
 	atomic.StoreUint64(&c.nextSequence, lastSequence+1)
 
 	// Initialize subscriptions.
+	c.ss.RLock()
 	for _, sub := range c.ss.psubs {
 		sub.Lock()
 		sub.initialized = true
@@ -637,14 +638,12 @@ func (c *channel) leadershipAcquired() error {
 			sub.Unlock()
 		}
 	}
+	c.ss.RUnlock()
 
 	// Attempt to redeliver outstanding messages that have expired.
 	go func() {
 		c.ss.RLock()
 		for _, sub := range c.ss.psubs {
-			sub.Lock()
-			sub.initialized = true
-			sub.Unlock()
 			c.stan.performAckExpirationRedelivery(sub, true)
 		}
 		for _, qsub := range c.ss.qsubs {
