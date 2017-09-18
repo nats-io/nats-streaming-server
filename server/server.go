@@ -100,11 +100,6 @@ const (
 	// the default length of that channel.
 	defaultSubStartChanLen = 2048
 
-	// First character of a NATS Inbox.
-	natsInboxFirstChar = '_'
-	// Length of a NATS inbox
-	natsInboxLen = 29 // _INBOX.<nuid: 22 characters>
-
 	// Name of the file to store Raft log.
 	raftLogFile = "raft.log"
 
@@ -398,12 +393,12 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 		return errors.New("channel leader was not elected in time")
 	}
 
-	var (
-		leaderWait = make(chan struct{})
-		leaderInit sync.Once
-	)
+	leaderWait := make(chan struct{}, 1)
 	if node.State() != raft.Leader {
-		leaderInit.Do(func() { close(leaderWait) })
+		select {
+		case leaderWait <- struct{}{}:
+		default:
+		}
 	}
 
 	go func() {
@@ -412,7 +407,10 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 			case isLeader := <-raftNotifyCh:
 				if isLeader {
 					err := c.leadershipAcquired()
-					leaderInit.Do(func() { close(leaderWait) })
+					select {
+					case leaderWait <- struct{}{}:
+					default:
+					}
 					if err != nil {
 						c.stan.log.Errorf("Error on leadership acquired for channel %s: %v", c.name, err)
 						switch {
@@ -431,6 +429,12 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 					c.leadershipLost()
 				}
 			case <-s.shutdownCh:
+				// Signal channel here to handle edge case where we might
+				// otherwise block forever on the channel when shutdown.
+				select {
+				case leaderWait <- struct{}{}:
+				default:
+				}
 				return
 			}
 		}
@@ -544,10 +548,8 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 	case spb.RaftOperation_RemoveSubscription:
 		// Unsubscribe replication.
 		sub := c.ss.LookupByAckInbox(op.Unsub.AckInbox)
-		// QUESTION: what to do in case where leader is replicating unsub to
-		// follower who doesn't have the sub?
 		if sub == nil {
-			return ErrInvalidSub
+			return nil
 		}
 		c.stan.closeMu.Lock()
 		err := c.stan.unsubscribe(c, op.Unsub.ClientID, sub, false)
@@ -556,8 +558,6 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 	case spb.RaftOperation_CloseSubscription:
 		// Close subscription replication.
 		sub := c.ss.LookupByAckInbox(op.Unsub.AckInbox)
-		// QUESTION: what to do in case where leader is replicating unsub to
-		// follower who doesn't have the sub?
 		if sub == nil {
 			return ErrInvalidSub
 		}
@@ -1481,15 +1481,6 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 
 	s.log.Noticef("Starting nats-streaming-server[%s] version %s", sOpts.ID, VERSION)
 
-	testInbox := nats.NewInbox()
-	// We rely heavily on the format of a NATS inbox.
-	// Since we vendor nats and nuid, it should not change without our knowledge.
-	if testInbox[0] != natsInboxFirstChar || len(testInbox) != natsInboxLen {
-		err := fmt.Errorf("invalid inbox format: %v", testInbox)
-		s.log.Errorf("%v", err)
-		return nil, err
-	}
-
 	// ServerID is used to check that a brodcast protocol is not ours,
 	// for instance with FT. Some err/warn messages may be printed
 	// regarding other instance's ID, so print it on startup.
@@ -1692,11 +1683,6 @@ func (s *StanServer) start(runningState State) error {
 		if s.info.SubClose == "" {
 			s.info.SubClose = fmt.Sprintf("%s.%s", DefaultSubClosePrefix, subjID)
 			// Update the store with the server info
-			callStoreInit = true
-		}
-		// Same for AcksSubs (use of pool of subscriptions for subscriptions' acks)
-		if s.info.AcksSubs == "" {
-			s.info.AcksSubs = fmt.Sprintf("%s.%s", defaultAcksPrefix, subjID)
 			callStoreInit = true
 		}
 

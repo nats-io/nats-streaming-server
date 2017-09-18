@@ -410,16 +410,13 @@ func checkDurableNoPendingAck(t *testing.T, s *StanServer, isSame bool,
 		if durAckInbox != ackInbox {
 			stackFatalf(t, "Expected ackInbox %v, got %v", ackInbox, durAckInbox)
 		}
-		if durAckSub != ackSub {
-			stackFatalf(t, "Expected subscriber on ack to be %p, got %p", ackSub, durAckSub)
-		}
 	} else {
 		if durAckInbox == ackInbox {
 			stackFatalf(t, "Expected different ackInbox'es")
 		}
-		if durAckSub != ackSub {
-			stackFatalf(t, "Expected same ackSub")
-		}
+	}
+	if durAckSub != ackSub {
+		stackFatalf(t, "Expected subscriber on ack to be %p, got %p", ackSub, durAckSub)
 	}
 
 	limit := time.Now().Add(5 * time.Second)
