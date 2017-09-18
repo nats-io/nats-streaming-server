@@ -96,7 +96,7 @@ func TestMultipleRedeliveries(t *testing.T) {
 	ch := make(chan bool)
 	ackWait := int64(15 * time.Millisecond)
 	lowBound := int64(float64(ackWait) * 0.5)
-	highBound := int64(float64(ackWait) * 1.5)
+	highBound := int64(float64(ackWait) * 1.7)
 	errCh := make(chan error)
 	cb := func(m *stan.Msg) {
 		now := time.Now().UnixNano()
