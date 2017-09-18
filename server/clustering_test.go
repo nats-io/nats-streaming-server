@@ -391,7 +391,7 @@ func TestClusteringNoPanicOnShutdown(t *testing.T) {
 
 	servers := []*StanServer{s1, s2}
 
-	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(time.Second))
+	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(time.Second), stan.ConnectWait(10*time.Second))
 	if err != nil {
 		t.Fatalf("Error on connect: %v", err)
 	}
