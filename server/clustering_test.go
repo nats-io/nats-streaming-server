@@ -598,27 +598,54 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 // Ensures subscriptions are replicated such that when a leader fails over, the
 // subscription continues to deliver messages.
 func TestClusteringSubscriberFailover(t *testing.T) {
+	var (
+		channel  = "foo"
+		queue    = "queue"
+		sc1, sc2 stan.Conn
+		err      error
+		ch       = make(chan *stan.Msg, 100)
+		cb       = func(msg *stan.Msg) { ch <- msg }
+	)
 	testCases := []struct {
 		name      string
-		createSub func(sc stan.Conn, channel string, cb stan.MsgHandler) (stan.Subscription, error)
+		subscribe func() error
 	}{
 		{
 			"normal",
-			func(sc stan.Conn, channel string, cb stan.MsgHandler) (stan.Subscription, error) {
-				return sc.Subscribe(channel, cb,
+			func() error {
+				_, err := sc1.Subscribe(channel, cb,
 					stan.DeliverAllAvailable(),
 					stan.MaxInflight(1),
 					stan.AckWait(2*time.Second))
+				return err
 			},
 		},
 		{
 			"durable",
-			func(sc stan.Conn, channel string, cb stan.MsgHandler) (stan.Subscription, error) {
-				return sc.Subscribe(channel, cb,
+			func() error {
+				_, err := sc1.Subscribe(channel, cb,
 					stan.DeliverAllAvailable(),
 					stan.DurableName("durable"),
 					stan.MaxInflight(1),
 					stan.AckWait(2*time.Second))
+				return err
+			},
+		},
+		{
+			"queue",
+			func() error {
+				_, err := sc1.QueueSubscribe(channel, queue, cb,
+					stan.DeliverAllAvailable(),
+					stan.MaxInflight(1),
+					stan.AckWait(2*time.Second))
+				if err != nil {
+					return err
+				}
+				_, err = sc2.QueueSubscribe(channel, queue, cb,
+					stan.DeliverAllAvailable(),
+					stan.MaxInflight(1),
+					stan.AckWait(2*time.Second))
+				return err
 			},
 		},
 	}
@@ -654,25 +681,24 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 				checkState(t, s, Clustered)
 			}
 
-			// Create a client connection.
-			sc, err := stan.Connect(clusterName, clientName)
+			// Create client connections.
+			sc1, err = stan.Connect(clusterName, clientName)
 			if err != nil {
 				t.Fatalf("Expected to connect correctly, got err %v", err)
 			}
-			defer sc.Close()
+			defer sc1.Close()
+			sc2, err = stan.Connect(clusterName, clientName+"-2")
+			if err != nil {
+				t.Fatalf("Expected to connect correctly, got err %v", err)
+			}
+			defer sc2.Close()
 
 			// Publish a message (this will create the channel and form the Raft group).
-			channel := "foo"
-			publishWithRetry(t, sc, channel, []byte("hello"))
+			publishWithRetry(t, sc1, channel, []byte("hello"))
 
-			ch := make(chan *stan.Msg, 100)
-			sub, err := tc.createSub(sc, channel, func(msg *stan.Msg) {
-				ch <- msg
-			})
-			if err != nil {
+			if err := tc.subscribe(); err != nil {
 				t.Fatalf("Error subscribing: %v", err)
 			}
-			defer sub.Unsubscribe()
 
 			select {
 			case msg := <-ch:
@@ -691,7 +717,7 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 
 			// Publish some more messages.
 			for i := 0; i < 5; i++ {
-				if err := sc.Publish(channel, []byte(strconv.Itoa(i))); err != nil {
+				if err := sc1.Publish(channel, []byte(strconv.Itoa(i))); err != nil {
 					t.Fatalf("Unexpected error on publish %d: %v", i, err)
 				}
 			}
@@ -715,122 +741,6 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// Ensures subscription queue groups are replicated such that when a leader
-// fails over, the subscription continues to deliver messages.
-func TestClusteringQueueSubscriberFailover(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-	cleanupRaftLog(t)
-	defer cleanupRaftLog(t)
-
-	// For this test, use a central NATS server.
-	ns := natsdTest.RunDefaultServer()
-	defer ns.Shutdown()
-
-	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
-	s1 := runServerWithOpts(t, s1sOpts, nil)
-	defer s1.Shutdown()
-
-	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
-	s2 := runServerWithOpts(t, s2sOpts, nil)
-	defer s2.Shutdown()
-
-	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
-	s3 := runServerWithOpts(t, s3sOpts, nil)
-	defer s3.Shutdown()
-
-	servers := []*StanServer{s1, s2, s3}
-	for _, s := range servers {
-		checkState(t, s, Clustered)
-	}
-
-	// Create a client connection.
-	sc1, err := stan.Connect(clusterName, clientName+"-1")
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v", err)
-	}
-	defer sc1.Close()
-	sc2, err := stan.Connect(clusterName, clientName+"-2")
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v", err)
-	}
-	defer sc2.Close()
-
-	// Publish a message (this will create the channel and form the Raft group).
-	var (
-		channel = "foo"
-		queue   = "queue"
-	)
-	publishWithRetry(t, sc1, channel, []byte("hello"))
-
-	ch := make(chan *stan.Msg, 100)
-	sub1, err := sc1.QueueSubscribe(channel, queue, func(msg *stan.Msg) {
-		ch <- msg
-	}, stan.DeliverAllAvailable(), stan.MaxInflight(1), stan.AckWait(2*time.Second))
-	if err != nil {
-		t.Fatalf("Error subscribing: %v", err)
-	}
-	defer sub1.Unsubscribe()
-	sub2, err := sc2.QueueSubscribe(channel, queue, func(msg *stan.Msg) {
-		ch <- msg
-	}, stan.DeliverAllAvailable(), stan.MaxInflight(1), stan.AckWait(2*time.Second))
-	if err != nil {
-		t.Fatalf("Error subscribing: %v", err)
-	}
-	defer sub2.Unsubscribe()
-
-	select {
-	case msg := <-ch:
-		assertMsg(t, msg.MsgProto, []byte("hello"), 1)
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected msg")
-	}
-
-	// Take down the leader.
-	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
-	leader.Shutdown()
-	servers = removeServer(servers, leader)
-
-	// Wait for the new leader to be elected.
-	getChannelLeader(t, channel, 10*time.Second, servers...)
-
-	// Publish some more messages.
-	for i := 0; i < 5; i++ {
-		if err := sc1.Publish(channel, []byte(strconv.Itoa(i))); err != nil {
-			t.Fatalf("Unexpected error on publish %d: %v", i, err)
-		}
-	}
-
-	// We will receive the first message again because acks are not being
-	// replicated yet. TODO: remove this once acks are replicated.
-	select {
-	case msg := <-ch:
-		assertMsg(t, msg.MsgProto, []byte("hello"), 1)
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected msg")
-	}
-
-	// Ensure we received the new messages.
-	for i := 0; i < 5; i++ {
-		select {
-		case msg := <-ch:
-			assertMsg(t, msg.MsgProto, []byte(strconv.Itoa(i)), uint64(i+2))
-		case <-time.After(2 * time.Second):
-			t.Fatal("expected msg")
-		}
-	}
-
-	// Ensure there are no more messages.
-	select {
-	case <-ch:
-		t.Fatal("Unexpected msg")
-	default:
 	}
 }
 
