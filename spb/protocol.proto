@@ -87,16 +87,22 @@ message RaftOperation {
     RemoveSubscription = 2; // Remove client subscription.
     CloseSubscription  = 3; // Close durable client subscription.
   }
-  Type                   OpType       = 1; // Log message type.
-  string                 Leader       = 2; // The node that proposed the operation.
-  Batch                  PublishBatch = 3; // Publish operation data.
-  pb.SubscriptionRequest Sub          = 4; // Subscribe operation data.
-  RemoveSubscription     Unsub        = 5; // Close/Remove Subscription operation data.
+  Type               OpType       = 1; // Log message type.
+  string             Leader       = 2; // The node that proposed the operation.
+  Batch              PublishBatch = 3; // Publish operation data.
+  AddSubscription    Sub          = 4; // Subscribe operation data.
+  RemoveSubscription Unsub        = 5; // Close/Remove Subscription operation data.
 }
 
 // Batch is a batch of messages for replication.
 message Batch {
   repeated pb.MsgProto Messages = 1; // Serialized MsgProtos to replicate.
+}
+
+// AddSubscription is used to replicate a new client subscription.
+message AddSubscription {
+  pb.SubscriptionRequest Request  = 1; // Subscription request to replicate.
+  string                 AckInbox = 2; // Ack inbox for the subscription.
 }
 
 // RemoveSubscription is used to remove or close a client subscription.

@@ -521,7 +521,7 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 		}
 	case spb.RaftOperation_Subscribe:
 		// Subscription replication.
-		sub, err := c.stan.processSub(op.Sub, c)
+		sub, err := c.stan.processSub(op.Sub.Request, op.Sub.AckInbox, c)
 		if err != nil {
 			return err
 		}
@@ -3525,11 +3525,14 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 
 // replicateSub replicates the SubscriptionRequest to nodes in the cluster via
 // Raft.
-func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, c *channel) (*subState, error) {
+func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string, c *channel) (*subState, error) {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Subscribe,
 		Leader: s.opts.ClusterNodeID,
-		Sub:    sr,
+		Sub: &spb.AddSubscription{
+			Request:  sr,
+			AckInbox: ackInbox,
+		},
 	}
 	data, err := op.Marshal()
 	if err != nil {
@@ -3585,7 +3588,8 @@ func (s *StanServer) updateDurable(ss *subStore, sub *subState) error {
 	return nil
 }
 
-func (s *StanServer) processSub(sr *pb.SubscriptionRequest, c *channel) (*subState, error) {
+// processSub adds the subscription to the server.
+func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string, c *channel) (*subState, error) {
 	var (
 		sub *subState
 		err error
@@ -3651,7 +3655,7 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, c *channel) (*subSta
 		sub.Lock()
 		// Set ClientID and new AckInbox but leave LastSent to the
 		// remembered value.
-		sub.AckInbox = fmt.Sprintf("%s.%s", c.getAckSubject(), nuid.Next())
+		sub.AckInbox = ackInbox
 		sub.ClientID = sr.ClientID
 		sub.Inbox = sr.Inbox
 		sub.IsDurable = true
@@ -3798,13 +3802,16 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		return
 	}
 
-	var sub *subState
+	var (
+		sub      *subState
+		ackInbox = fmt.Sprintf("%s.%s", c.getAckSubject(), nuid.Next())
+	)
 
 	// If clustered, thread operations through Raft.
 	if s.isClustered() {
-		sub, err = s.replicateSub(sr, c)
+		sub, err = s.replicateSub(sr, ackInbox, c)
 	} else {
-		sub, err = s.processSub(sr, c)
+		sub, err = s.processSub(sr, ackInbox, c)
 	}
 
 	if err != nil {
