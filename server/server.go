@@ -519,29 +519,10 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 					msg.Sequence, c.name, err))
 			}
 		}
-	case spb.RaftOperation_AddSubscription:
+	case spb.RaftOperation_Subscribe:
 		// Subscription replication.
-		sub := &subState{
-			SubState:    *op.Sub.State,
-			subject:     op.Sub.Subject,
-			ackWait:     computeAckWait(op.Sub.State.AckWaitInSecs),
-			acksPending: make(map[uint64]int64),
-			store:       c.store.Subs,
-		}
-		if err := c.stan.addSubscription(c.ss, sub); err != nil {
-			return err
-		}
-		return sub
-	case spb.RaftOperation_UpdateSubscription:
-		// Durable subscription update replication.
-		sub := &subState{
-			SubState:    *op.Sub.State,
-			subject:     op.Sub.Subject,
-			ackWait:     computeAckWait(op.Sub.State.AckWaitInSecs),
-			acksPending: make(map[uint64]int64),
-			store:       c.store.Subs,
-		}
-		if err := c.stan.updateDurable(c.ss, sub); err != nil {
+		sub, err := c.stan.processSub(op.Sub, c)
+		if err != nil {
 			return err
 		}
 		return sub
@@ -3542,22 +3523,13 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 	return fmt.Sprintf("%s-%s-%s", sr.ClientID, sr.Subject, sr.DurableName)
 }
 
-func (s *StanServer) replicateAddSubscription(c *channel, sub *spb.SubState, subject string) (*subState, error) {
-	return s.replicateSubscription(c, sub, subject, spb.RaftOperation_AddSubscription)
-}
-
-func (s *StanServer) replicateUpdateSubscription(c *channel, sub *spb.SubState, subject string) (*subState, error) {
-	return s.replicateSubscription(c, sub, subject, spb.RaftOperation_UpdateSubscription)
-}
-
-func (s *StanServer) replicateSubscription(c *channel, sub *spb.SubState, subject string, opType spb.RaftOperation_Type) (*subState, error) {
+// replicateSub replicates the SubscriptionRequest to nodes in the cluster via
+// Raft.
+func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, c *channel) (*subState, error) {
 	op := &spb.RaftOperation{
-		OpType: opType,
+		OpType: spb.RaftOperation_Subscribe,
 		Leader: s.opts.ClusterNodeID,
-		Sub: &spb.ReplicateSubscription{
-			Subject: subject,
-			State:   sub,
-		},
+		Sub:    sr,
 	}
 	data, err := op.Marshal()
 	if err != nil {
@@ -3611,6 +3583,145 @@ func (s *StanServer) updateDurable(ss *subStore, sub *subState) error {
 	ss.Unlock()
 
 	return nil
+}
+
+func (s *StanServer) processSub(sr *pb.SubscriptionRequest, c *channel) (*subState, error) {
+	var (
+		sub *subState
+		err error
+		ss  = c.ss
+	)
+
+	// Will be true for durable queue subscribers and durable subscribers alike.
+	isDurable := false
+	// Will be set to false for en existing durable subscriber or existing
+	// queue group (durable or not).
+	setStartPos := true
+	// Check for durable queue subscribers
+	if sr.QGroup != "" {
+		if sr.DurableName != "" {
+			// For queue subscribers, we prevent DurableName to contain
+			// the ':' character, since we use it for the compound name.
+			if strings.Contains(sr.DurableName, ":") {
+				s.log.Errorf("[Client:%s] Invalid DurableName (%q) for queue subscriber from %s",
+					sr.ClientID, sr.DurableName, sr.Subject)
+				return nil, ErrInvalidDurName
+			}
+			isDurable = true
+			// Make the queue group a compound name between durable name and q group.
+			sr.QGroup = fmt.Sprintf("%s:%s", sr.DurableName, sr.QGroup)
+			// Clear DurableName from this subscriber.
+			sr.DurableName = ""
+		}
+		// Lookup for an existing group. Only interested in situation where
+		// the group exist, but is empty and had a shadow subscriber.
+		ss.RLock()
+		qs := ss.qsubs[sr.QGroup]
+		if qs != nil {
+			qs.Lock()
+			if qs.shadow != nil {
+				sub = qs.shadow
+				qs.shadow = nil
+				qs.subs = append(qs.subs, sub)
+			}
+			qs.Unlock()
+			setStartPos = false
+		}
+		ss.RUnlock()
+	} else if sr.DurableName != "" {
+		// Check for DurableSubscriber status
+		if sub = ss.LookupByDurable(durableKey(sr)); sub != nil {
+			sub.RLock()
+			clientID := sub.ClientID
+			sub.RUnlock()
+			if clientID != "" {
+				s.log.Errorf("[Client:%s] Duplicate durable subscription registration", sr.ClientID)
+				return nil, ErrDupDurable
+			}
+			setStartPos = false
+		}
+		isDurable = true
+	}
+	var (
+		subStartTrace string
+		subIsNew      bool
+	)
+	if sub != nil {
+		// ok we have a remembered subscription
+		sub.Lock()
+		// Set ClientID and new AckInbox but leave LastSent to the
+		// remembered value.
+		sub.AckInbox = fmt.Sprintf("%s.%s", c.getAckSubject(), nuid.Next())
+		sub.ClientID = sr.ClientID
+		sub.Inbox = sr.Inbox
+		sub.IsDurable = true
+		// Use some of the new options, but ignore the ones regarding start position
+		sub.MaxInFlight = sr.MaxInFlight
+		sub.AckWaitInSecs = sr.AckWaitInSecs
+		sub.ackWait = computeAckWait(sr.AckWaitInSecs)
+		sub.stalled = false
+		if len(sub.acksPending) > 0 {
+			// We have a durable with pending messages, set newOnHold
+			// until we have performed the initial redelivery.
+			sub.newOnHold = true
+			s.setupAckTimer(sub, sub.ackWait)
+		}
+		// Clear the removed and IsClosed flags that were set during a Close()
+		sub.removed = false
+		sub.IsClosed = false
+		sub.Unlock()
+
+		// Case of restarted durable subscriber, or first durable queue
+		// subscriber re-joining a group that was left with pending messages.
+		err = s.updateDurable(ss, sub)
+	} else {
+		subIsNew = true
+		// Create sub here (can be plain, durable or queue subscriber)
+		sub = &subState{
+			SubState: spb.SubState{
+				ClientID:      sr.ClientID,
+				QGroup:        sr.QGroup,
+				Inbox:         sr.Inbox,
+				AckInbox:      fmt.Sprintf("%s.%s", c.getAckSubject(), nuid.Next()),
+				MaxInFlight:   sr.MaxInFlight,
+				AckWaitInSecs: sr.AckWaitInSecs,
+				DurableName:   sr.DurableName,
+				IsDurable:     isDurable,
+			},
+			subject:     sr.Subject,
+			ackWait:     computeAckWait(sr.AckWaitInSecs),
+			acksPending: make(map[uint64]int64),
+			store:       c.store.Subs,
+		}
+
+		if setStartPos {
+			// set the start sequence of the subscriber.
+			subStartTrace, err = s.setSubStartSequence(c, sub, sr)
+		}
+
+		if err == nil {
+			// add the subscription to stan
+			err = s.addSubscription(ss, sub)
+		}
+	}
+	if err != nil {
+		// Try to undo what has been done.
+		s.closeMu.Lock()
+		ss.Remove(c, sub, false)
+		s.closeMu.Unlock()
+		s.log.Errorf("Unable to add subscription for %s: %v", sr.Subject, err)
+		return nil, err
+	}
+	if s.debug {
+		traceCtx := subStateTraceCtx{clientID: sr.ClientID, isNew: subIsNew, startTrace: subStartTrace}
+		traceSubState(s.log, sub, &traceCtx)
+	}
+
+	s.monMu.Lock()
+	s.numSubs++
+	s.monMu.Unlock()
+
+	return sub, nil
 }
 
 // processSubscriptionRequest will process a subscription request.
@@ -3687,153 +3798,19 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		return
 	}
 
-	// Get the subStore
-	ss := c.ss
-
 	var sub *subState
 
-	// Will be true for durable queue subscribers and durable subscribers alike.
-	isDurable := false
-	// Will be set to false for en existing durable subscriber or existing
-	// queue group (durable or not).
-	setStartPos := true
-	// Check for durable queue subscribers
-	if sr.QGroup != "" {
-		if sr.DurableName != "" {
-			// For queue subscribers, we prevent DurableName to contain
-			// the ':' character, since we use it for the compound name.
-			if strings.Contains(sr.DurableName, ":") {
-				s.log.Errorf("[Client:%s] Invalid DurableName (%q) for queue subscriber from %s",
-					sr.ClientID, sr.DurableName, sr.Subject)
-				s.sendSubscriptionResponseErr(m.Reply, ErrInvalidDurName)
-				return
-			}
-			isDurable = true
-			// Make the queue group a compound name between durable name and q group.
-			sr.QGroup = fmt.Sprintf("%s:%s", sr.DurableName, sr.QGroup)
-			// Clear DurableName from this subscriber.
-			sr.DurableName = ""
-		}
-		// Lookup for an existing group. Only interested in situation where
-		// the group exist, but is empty and had a shadow subscriber.
-		ss.RLock()
-		qs := ss.qsubs[sr.QGroup]
-		if qs != nil {
-			qs.Lock()
-			if qs.shadow != nil {
-				sub = qs.shadow
-				qs.shadow = nil
-				qs.subs = append(qs.subs, sub)
-			}
-			qs.Unlock()
-			setStartPos = false
-		}
-		ss.RUnlock()
-	} else if sr.DurableName != "" {
-		// Check for DurableSubscriber status
-		if sub = ss.LookupByDurable(durableKey(sr)); sub != nil {
-			sub.RLock()
-			clientID := sub.ClientID
-			sub.RUnlock()
-			if clientID != "" {
-				s.log.Errorf("[Client:%s] Invalid ClientID in subscription request from %s",
-					sr.ClientID, m.Subject)
-				s.sendSubscriptionResponseErr(m.Reply, ErrDupDurable)
-				return
-			}
-			setStartPos = false
-		}
-		isDurable = true
-	}
-	var (
-		subStartTrace string
-		subIsNew      bool
-	)
-	if sub != nil {
-		// ok we have a remembered subscription
-		sub.Lock()
-		// Set ClientID and new AckInbox but leave LastSent to the
-		// remembered value.
-		sub.AckInbox = fmt.Sprintf("%s.%s", c.getAckSubject(), nuid.Next())
-		sub.ClientID = sr.ClientID
-		sub.Inbox = sr.Inbox
-		sub.IsDurable = true
-		// Use some of the new options, but ignore the ones regarding start position
-		sub.MaxInFlight = sr.MaxInFlight
-		sub.AckWaitInSecs = sr.AckWaitInSecs
-		sub.ackWait = computeAckWait(sr.AckWaitInSecs)
-		sub.stalled = false
-		if len(sub.acksPending) > 0 {
-			// We have a durable with pending messages, set newOnHold
-			// until we have performed the initial redelivery.
-			sub.newOnHold = true
-			s.setupAckTimer(sub, sub.ackWait)
-		}
-		// Clear the removed and IsClosed flags that were set during a Close()
-		sub.removed = false
-		sub.IsClosed = false
-		sub.Unlock()
-
-		// Case of restarted durable subscriber, or first durable queue
-		// subscriber re-joining a group that was left with pending messages.
-		if s.isClustered() {
-			// If clustered, thread update through Raft.
-			sub, err = s.replicateUpdateSubscription(c, &sub.SubState, sr.Subject)
-		} else {
-			err = s.updateDurable(ss, sub)
-		}
+	// If clustered, thread operations through Raft.
+	if s.isClustered() {
+		sub, err = s.replicateSub(sr, c)
 	} else {
-		subIsNew = true
-		// Create sub here (can be plain, durable or queue subscriber)
-		sub = &subState{
-			SubState: spb.SubState{
-				ClientID:      sr.ClientID,
-				QGroup:        sr.QGroup,
-				Inbox:         sr.Inbox,
-				AckInbox:      fmt.Sprintf("%s.%s", c.getAckSubject(), nuid.Next()),
-				MaxInFlight:   sr.MaxInFlight,
-				AckWaitInSecs: sr.AckWaitInSecs,
-				DurableName:   sr.DurableName,
-				IsDurable:     isDurable,
-			},
-			subject:     sr.Subject,
-			ackWait:     computeAckWait(sr.AckWaitInSecs),
-			acksPending: make(map[uint64]int64),
-			store:       c.store.Subs,
-		}
-
-		if setStartPos {
-			// set the start sequence of the subscriber.
-			subStartTrace, err = s.setSubStartSequence(c, sub, sr)
-		}
-
-		if err == nil {
-			// add the subscription to stan
-			if s.isClustered() {
-				// If clustered, thread the subscription through Raft.
-				sub, err = s.replicateAddSubscription(c, &sub.SubState, sr.Subject)
-			} else {
-				err = s.addSubscription(ss, sub)
-			}
-		}
+		sub, err = s.processSub(sr, c)
 	}
+
 	if err != nil {
-		// Try to undo what has been done.
-		s.closeMu.Lock()
-		ss.Remove(c, sub, false)
-		s.closeMu.Unlock()
-		s.log.Errorf("Unable to add subscription for %s: %v", sr.Subject, err)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
 	}
-	if s.debug {
-		traceCtx := subStateTraceCtx{clientID: sr.ClientID, isNew: subIsNew, startTrace: subStartTrace}
-		traceSubState(s.log, sub, &traceCtx)
-	}
-
-	s.monMu.Lock()
-	s.numSubs++
-	s.monMu.Unlock()
 
 	// In case this is a durable, sub already exists so we need to protect access
 	sub.Lock()
@@ -3852,7 +3829,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	sub.initialized = true
 	sub.Unlock()
 
-	s.subStartCh <- &subStartInfo{c: c, sub: sub, qs: qs, isDurable: isDurable}
+	s.subStartCh <- &subStartInfo{c: c, sub: sub, qs: qs, isDurable: sub.IsDurable}
 }
 
 type subStateTraceCtx struct {
