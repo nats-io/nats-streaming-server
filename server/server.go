@@ -3686,7 +3686,7 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string, c *
 				ClientID:      sr.ClientID,
 				QGroup:        sr.QGroup,
 				Inbox:         sr.Inbox,
-				AckInbox:      fmt.Sprintf("%s.%s", c.getAckSubject(), nuid.Next()),
+				AckInbox:      ackInbox,
 				MaxInFlight:   sr.MaxInFlight,
 				AckWaitInSecs: sr.AckWaitInSecs,
 				DurableName:   sr.DurableName,
