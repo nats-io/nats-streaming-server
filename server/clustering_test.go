@@ -175,7 +175,7 @@ func publishWithRetry(t *testing.T, sc stan.Conn, channel string, payload []byte
 	for i := 0; i < 10; i++ {
 		if err := sc.Publish(channel, payload); err != nil {
 			if i == 9 {
-				t.Fatalf("Unexpected error on publish: %v", err)
+				stackFatalf(t, "Unexpected error on publish: %v", err)
 			}
 			time.Sleep(time.Millisecond)
 			continue
