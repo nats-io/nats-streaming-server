@@ -1089,6 +1089,7 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 
 	ch := make(chan bool, 1)
 	errCh := make(chan error, 4)
+	skipCh := make(chan bool, 1)
 	restarted := int32(0)
 	totalMsgs := int32(10)
 	delivered := int32(0)
@@ -1123,6 +1124,12 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 						ch <- true
 					}
 				}
+			} else {
+				select {
+				case skipCh <- true:
+				default:
+				}
+				m.Sub.Unsubscribe()
 			}
 		}
 	}
@@ -1130,14 +1137,14 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 		newCb(1),
 		stan.MaxInflight(int(totalMsgs/2)),
 		stan.SetManualAckMode(),
-		stan.AckWait(ackWaitInMs(50))); err != nil {
+		stan.AckWait(ackWaitInMs(500))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	if _, err := sc.QueueSubscribe("foo", "queue",
 		newCb(2),
 		stan.MaxInflight(int(totalMsgs/2)),
 		stan.SetManualAckMode(),
-		stan.AckWait(ackWaitInMs(50))); err != nil {
+		stan.AckWait(ackWaitInMs(500))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	// Send more messages that can be accepted, both member should stall
@@ -1150,12 +1157,20 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our messages")
 	}
+	select {
+	case <-skipCh:
+		// If we have a redelivery before the server restart
+		// (can happen on Travis because of timing), no point
+		// in continuing this test.
+		return
+	default:
+	}
 	// Now stop server and wait more than AckWait before resarting.
 	s.Shutdown()
 	// We need to  make sure that the first redelivery on startup will
 	// actually send messages to original qsub. This happens only if
 	// the AckWait has elapsed. So make sure that we wait long enough.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(800 * time.Millisecond)
 	l := &trackDeliveredMsgs{newSeq: int(totalMsgs + 1), errCh: make(chan error, 1)}
 	opts.Trace = true
 	opts.CustomLogger = l
@@ -1167,7 +1182,12 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 	case e := <-errCh:
 		t.Fatalf(e.Error())
 	case <-ch:
-	// All messages were redelivered
+	// All messages were redelivered, we are ok
+	case <-skipCh:
+		// If we have a redelivery before the server restart
+		// (can happen on Travis because of timing), no point
+		// in continuing this test.
+		return
 	case <-time.After(time.Second):
 		t.Fatal("Did not get all redelivered messages")
 	}
