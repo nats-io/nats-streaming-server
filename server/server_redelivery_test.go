@@ -707,8 +707,11 @@ func TestPersistentStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
-	var err error
-	var sub2 stan.Subscription
+	var (
+		err    error
+		sub2   stan.Subscription
+		sub2Mu sync.Mutex
+	)
 
 	errs := make(chan error, 10)
 	sub2Recv := make(chan bool)
@@ -716,12 +719,16 @@ func TestPersistentStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 	trackDelivered := int32(0)
 	cb := func(m *stan.Msg) {
 		if m.Redelivered {
-			if m.Sub != sub2 {
-				errs <- fmt.Errorf("Expected redelivered msg to be sent to sub2")
-				return
-			}
 			if atomic.AddInt32(&redelivered, 1) != 1 {
 				errs <- fmt.Errorf("Message redelivered after restart")
+				return
+			}
+			sub2Mu.Lock()
+			isSub2 := m.Sub == sub2
+			sub2Mu.Unlock()
+			if !isSub2 {
+				// We want the message to be redelivered to sub2, so wait
+				// for that to happen
 				return
 			}
 			sub2Recv <- true
@@ -740,21 +747,25 @@ func TestPersistentStoreAckMsgRedeliveredToDifferentQueueSub(t *testing.T) {
 
 	// Create a queue subscriber with manual ackMode that will
 	// not ack the message.
-	if _, err := sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(ackWaitInMs(15)),
+	if _, err := sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(ackWaitInMs(100)),
 		stan.SetManualAckMode()); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
+	waitForNumSubs(t, s, clientName, 1)
+	// Send a message that we know is going to go to the first (and only)
+	// queue sub that will not ack this message
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	sub2Mu.Lock()
 	// Create this subscriber that will receive and ack the message
-	sub2, err = sc.QueueSubscribe("foo", "g1", cb, stan.AckWait(ackWaitInMs(15)))
+	sub2, err = sc.QueueSubscribe("foo", "g1", cb)
+	sub2Mu.Unlock()
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	// Make sure these are registered.
 	waitForNumSubs(t, s, clientName, 2)
-	// Send a message
-	if err := sc.Publish("foo", []byte("msg")); err != nil {
-		t.Fatalf("Unexpected error on publish: %v", err)
-	}
 	// Wait for sub2 to receive the message.
 	select {
 	case <-sub2Recv:
@@ -1089,6 +1100,7 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 
 	ch := make(chan bool, 1)
 	errCh := make(chan error, 4)
+	skipCh := make(chan bool, 1)
 	restarted := int32(0)
 	totalMsgs := int32(10)
 	delivered := int32(0)
@@ -1123,6 +1135,12 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 						ch <- true
 					}
 				}
+			} else {
+				select {
+				case skipCh <- true:
+				default:
+				}
+				m.Sub.Unsubscribe()
 			}
 		}
 	}
@@ -1130,14 +1148,14 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 		newCb(1),
 		stan.MaxInflight(int(totalMsgs/2)),
 		stan.SetManualAckMode(),
-		stan.AckWait(ackWaitInMs(50))); err != nil {
+		stan.AckWait(ackWaitInMs(500))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	if _, err := sc.QueueSubscribe("foo", "queue",
 		newCb(2),
 		stan.MaxInflight(int(totalMsgs/2)),
 		stan.SetManualAckMode(),
-		stan.AckWait(ackWaitInMs(50))); err != nil {
+		stan.AckWait(ackWaitInMs(500))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	// Send more messages that can be accepted, both member should stall
@@ -1150,12 +1168,20 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our messages")
 	}
+	select {
+	case <-skipCh:
+		// If we have a redelivery before the server restart
+		// (can happen on Travis because of timing), no point
+		// in continuing this test.
+		return
+	default:
+	}
 	// Now stop server and wait more than AckWait before resarting.
 	s.Shutdown()
 	// We need to  make sure that the first redelivery on startup will
 	// actually send messages to original qsub. This happens only if
 	// the AckWait has elapsed. So make sure that we wait long enough.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(800 * time.Millisecond)
 	l := &trackDeliveredMsgs{newSeq: int(totalMsgs + 1), errCh: make(chan error, 1)}
 	opts.Trace = true
 	opts.CustomLogger = l
@@ -1167,7 +1193,12 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 	case e := <-errCh:
 		t.Fatalf(e.Error())
 	case <-ch:
-	// All messages were redelivered
+	// All messages were redelivered, we are ok
+	case <-skipCh:
+		// If we have a redelivery before the server restart
+		// (can happen on Travis because of timing), no point
+		// in continuing this test.
+		return
 	case <-time.After(time.Second):
 		t.Fatal("Did not get all redelivered messages")
 	}
