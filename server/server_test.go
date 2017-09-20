@@ -1036,11 +1036,16 @@ func TestAckForUnknownChannel(t *testing.T) {
 		t.Fatalf("Error during marshaling: %v", err)
 	}
 	sc.NatsConn().Publish(sub.AckInbox, ackBytes)
-	time.Sleep(100 * time.Millisecond)
-	logger.Lock()
-	gotIt := logger.gotError
-	logger.Unlock()
-	if !gotIt {
-		t.Fatalf("Server did not log error about not finding channel")
+	timeout := time.Now().Add(3 * time.Second)
+	for time.Now().Before(timeout) {
+		logger.Lock()
+		gotIt := logger.gotError
+		logger.Unlock()
+		if gotIt {
+			// We are done!
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	t.Fatalf("Server did not log error about not finding channel")
 }

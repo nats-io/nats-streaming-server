@@ -1115,7 +1115,8 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 						errCh <- fmt.Errorf("Unexpected new message %v into sub %d before getting all undelivered first", m.Sequence, id)
 					}
 				}
-			} else {
+			} else if atomic.LoadInt32(&restarted) == 1 {
+				// This is a redelivered message after server restart
 				if _, present := q.msgs[m.Sequence]; !present {
 					errCh <- fmt.Errorf("Unexpected message %v into sub %d", m.Sequence, id)
 				} else {
@@ -1128,20 +1129,18 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 			}
 		}
 	}
-	// To reduce Travis test flapping, use a not too small AckWait for
-	// these 2 queue subs.
 	if _, err := sc.QueueSubscribe("foo", "queue",
 		newCb(1),
 		stan.MaxInflight(int(totalMsgs/2)),
 		stan.SetManualAckMode(),
-		stan.AckWait(ackWaitInMs(500))); err != nil {
+		stan.AckWait(ackWaitInMs(50))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	if _, err := sc.QueueSubscribe("foo", "queue",
 		newCb(2),
 		stan.MaxInflight(int(totalMsgs/2)),
 		stan.SetManualAckMode(),
-		stan.AckWait(ackWaitInMs(500))); err != nil {
+		stan.AckWait(ackWaitInMs(50))); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	// Send more messages that can be accepted, both member should stall
@@ -1154,13 +1153,16 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our messages")
 	}
-	// Now stop server and wait more than AckWait before resarting
+	// Now stop server and wait more than AckWait before resarting.
 	s.Shutdown()
-	time.Sleep(600 * time.Millisecond)
-	atomic.StoreInt32(&restarted, 1)
+	// We need to  make sure that the first redelivery on startup will
+	// actually send messages to original qsub. This happens only if
+	// the AckWait has elapsed. So make sure that we wait long enough.
+	time.Sleep(500 * time.Millisecond)
 	l := &trackDeliveredMsgs{newSeq: int(totalMsgs + 1), errCh: make(chan error, 1)}
 	opts.Trace = true
 	opts.CustomLogger = l
+	atomic.StoreInt32(&restarted, 1)
 	s = runServerWithOpts(t, opts, nil)
 	// Check that messages are delivered to members that
 	// originally got them. Wait for all messages to be redelivered
@@ -1168,6 +1170,7 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 	case e := <-errCh:
 		t.Fatalf(e.Error())
 	case <-ch:
+	// All messages were redelivered
 	case <-time.After(time.Second):
 		t.Fatal("Did not get all redelivered messages")
 	}
