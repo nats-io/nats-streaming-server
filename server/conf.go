@@ -102,6 +102,10 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 			if err := parseFileOptions(v, opts); err != nil {
 				return err
 			}
+		case "sql", "sql_options":
+			if err := parseSQLOptions(v, opts); err != nil {
+				return err
+			}
 		case "hbi", "hb_interval", "server_to_client_hb_interval":
 			if err := checkType(k, reflect.String, v); err != nil {
 				return err
@@ -369,6 +373,29 @@ func parseFileOptions(itf interface{}, opts *Options) error {
 	return nil
 }
 
+func parseSQLOptions(itf interface{}, opts *Options) error {
+	m, ok := itf.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("expected SQL options to be a map/struct, got %v", itf)
+	}
+	for k, v := range m {
+		name := strings.ToLower(k)
+		switch name {
+		case "driver":
+			if err := checkType(name, reflect.String, v); err != nil {
+				return err
+			}
+			opts.SQLStoreOpts.Driver = v.(string)
+		case "source":
+			if err := checkType(name, reflect.String, v); err != nil {
+				return err
+			}
+			opts.SQLStoreOpts.Source = v.(string)
+		}
+	}
+	return nil
+}
+
 // ConfigureOptions accepts a flag set and augment it with NATS Streaming Server
 // specific flags. It then invokes the corresponding function from NATS Server.
 // On success, Streaming and NATS options structures are returned configured
@@ -434,8 +461,8 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&sopts.IOBatchSize, "io_batch_size", DefaultIOBatchSize, "stan.IOBatchSize")
 	fs.Int64Var(&sopts.IOSleepTime, "io_sleep_time", DefaultIOSleepTime, "stan.IOSleepTime")
 	fs.StringVar(&sopts.FTGroupName, "ft_group", "", "stan.FTGroupName")
-	fs.StringVar(&sopts.SQLDriver, "sql_driver", "", "SQL Driver")
-	fs.StringVar(&sopts.SQLSource, "sql_source", "", "SQL Data Source")
+	fs.StringVar(&sopts.SQLStoreOpts.Driver, "sql_driver", "", "SQL Driver")
+	fs.StringVar(&sopts.SQLStoreOpts.Source, "sql_source", "", "SQL Data Source")
 
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
 	// It will be augmented with NATS specific flags and call fs.Parse(args) for us.

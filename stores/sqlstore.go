@@ -143,6 +143,12 @@ var (
 	sqlTimeTickInterval          = sqlDefaultTimeTickInterval
 )
 
+// SQLStoreOptions are used to configure the SQL Store.
+type SQLStoreOptions struct {
+	Driver string
+	Source string
+}
+
 // SQLStore is a factory for message and subscription stores backed by
 // a SQL Database.
 type SQLStore struct {

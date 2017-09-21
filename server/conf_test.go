@@ -174,6 +174,12 @@ func TestParseConfig(t *testing.T) {
 	if !opts.Partitioning {
 		t.Fatalf("Expected Partitioning to be true, got false")
 	}
+	if opts.SQLStoreOpts.Driver != "mysql" {
+		t.Fatalf("Expected SQL Driver to my %q, got %q", "mysql", opts.SQLStoreOpts.Driver)
+	}
+	if opts.SQLStoreOpts.Source != "ivan:pwd@/nss_db" {
+		t.Fatalf("Expected SQL Source to my %q, got %q", "ivan:pwd@/nss_db", opts.SQLStoreOpts.Source)
+	}
 }
 
 func TestParsePermError(t *testing.T) {
@@ -295,6 +301,7 @@ func TestParseMapStruct(t *testing.T) {
 	expectFailureFor(t, "store_limits: {\nchannels: {\n\"foo\": xxx\n}\n}", mapStructErr)
 	expectFailureFor(t, "tls: xxx", mapStructErr)
 	expectFailureFor(t, "file: xxx", mapStructErr)
+	expectFailureFor(t, "sql: xxx", mapStructErr)
 }
 
 func TestParseWrongTypes(t *testing.T) {
@@ -348,6 +355,8 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "file:{slice_archive_script:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{fds_limit:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{parallel_recovery:false}", wrongTypeErr)
+	expectFailureFor(t, "sql:{driver:false}", wrongTypeErr)
+	expectFailureFor(t, "sql:{source:false}", wrongTypeErr)
 }
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {

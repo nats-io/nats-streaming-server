@@ -357,8 +357,8 @@ func getTestDefaultOptsForPersistentStore() *Options {
 		opts.FilestoreDir = defaultDataStore
 		opts.FileStoreOpts.BufferSize = 1024
 	case stores.TypeSQL:
-		opts.SQLDriver = testSQLDriver
-		opts.SQLSource = testSQLSource
+		opts.SQLStoreOpts.Driver = testSQLDriver
+		opts.SQLStoreOpts.Source = testSQLSource
 	default:
 		panic(fmt.Sprintf("Need to specify configuration for store: %q", persistentStoreType))
 	}

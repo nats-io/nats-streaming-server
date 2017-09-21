@@ -33,8 +33,8 @@ func benchRunServer(b *testing.B) *StanServer {
 	case stores.TypeFile:
 		opts.FilestoreDir = defaultDataStore
 	case stores.TypeSQL:
-		opts.SQLDriver = testSQLDriver
-		opts.SQLSource = testSQLSource
+		opts.SQLStoreOpts.Driver = testSQLDriver
+		opts.SQLStoreOpts.Source = testSQLSource
 	}
 	s, err := RunServerWithOpts(opts, nil)
 	if err != nil {

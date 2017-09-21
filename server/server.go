@@ -809,6 +809,7 @@ type Options struct {
 	StoreType          string
 	FilestoreDir       string
 	FileStoreOpts      stores.FileStoreOptions
+	SQLStoreOpts       stores.SQLStoreOptions
 	stores.StoreLimits               // Store limits (MaxChannels, etc..)
 	EnableLogging      bool          // Enables logging
 	CustomLogger       logger.Logger // Server will start with the provided logger
@@ -828,8 +829,6 @@ type Options struct {
 	AckSubsPoolSize    int           // Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription).
 	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
-	SQLDriver          string
-	SQLSource          string
 }
 
 // Clone returns a deep copy of the Options object.
@@ -1122,7 +1121,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		store, err = stores.NewFileStore(s.log, sOpts.FilestoreDir, storeLimits,
 			stores.AllOptions(&sOpts.FileStoreOpts))
 	case stores.TypeSQL:
-		store, err = stores.NewSQLStore(s.log, sOpts.SQLDriver, sOpts.SQLSource,
+		store, err = stores.NewSQLStore(s.log, sOpts.SQLStoreOpts.Driver, sOpts.SQLStoreOpts.Source,
 			storeLimits)
 	case stores.TypeMemory:
 		store, err = stores.NewMemoryStore(s.log, storeLimits)
