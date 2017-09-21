@@ -546,6 +546,10 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 		err := c.stan.unsubscribe(c, op.Unsub.ClientID, sub, true)
 		c.stan.closeMu.Unlock()
 		return err
+	case spb.RaftOperation_Ack:
+		// Ack replication.
+		sub, stalled := c.stan.ackMsgByInbox(c, op.AckMsg.AckInbox, op.AckMsg.Sequence)
+		return &ackWrapper{sub: sub, stalled: stalled}
 	default:
 		panic(fmt.Sprintf("unknown op type %s", op.OpType))
 	}
@@ -2846,7 +2850,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 			// We do this only after confirmation that it was successfully added
 			// as pending on the other queue subscriber.
 			if pick != sub && sent {
-				s.processAck(c, sub, m.Sequence)
+				s.ackMsg(c, sub, m.Sequence)
 			}
 		} else {
 			sub.Lock()
@@ -2871,7 +2875,7 @@ func (s *StanServer) getMsgForRedelivery(c *channel, sub *subState, seq uint64) 
 				sub.ID, seq, err)
 		}
 		// Ack it so that it does not reincarnate on restart
-		s.processAck(c, sub, seq)
+		s.ackMsg(c, sub, seq)
 		return nil
 	}
 	// The store implementation does not return a copy, we need one
@@ -3933,15 +3937,13 @@ func (s *StanServer) processAckMsg(m *nats.Msg) {
 		s.log.Errorf("Unable to process ack seq=%d, channel %s not found", ack.Sequence, ack.Subject)
 		return
 	}
-	s.processAck(c, c.ss.LookupByAckInbox(m.Subject), ack.Sequence)
+	s.processAck(c, m.Subject, ack.Sequence)
 }
 
-// processAck processes an ack and if needed sends more messages.
-func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
-	if sub == nil {
-		return
-	}
-
+// ackMsg processes an ack and returns the subscription and a boolean
+// indicating if messages can start being delivered in the case of a stalled
+// subscription.
+func (s *StanServer) ackMsg(c *channel, sub *subState, sequence uint64) (*subState, bool) {
 	var stalled bool
 
 	// This is immutable, so can grab outside of sub's lock.
@@ -3966,7 +3968,7 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 		if qs != nil {
 			qs.Unlock()
 		}
-		return
+		return sub, false
 	}
 
 	delete(sub.acksPending, sequence)
@@ -3995,12 +3997,84 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 
 	// Leave the reset/cancel of the ackTimer to the redelivery cb.
 
-	if !stalled {
+	return sub, stalled
+}
+
+// ackMsgByInbox processes an ack and returns the subscription and a boolean
+// indicating if messages can start being delivered in the case of a stalled
+// subscription.
+func (s *StanServer) ackMsgByInbox(c *channel, ackInbox string, sequence uint64) (*subState, bool) {
+	sub := c.ss.LookupByAckInbox(ackInbox)
+	if sub == nil {
+		return sub, false
+	}
+
+	return s.ackMsg(c, sub, sequence)
+}
+
+// ackWrapper contains the sub and stalled flag and allows Raft to pass this
+// information back on replication.
+type ackWrapper struct {
+	sub     *subState
+	stalled bool
+}
+
+// replicateAck replicates an ack via Raft and returns the subscription and a
+// boolean indicating if messages can start being delivered in the case of a
+// stalled subscription.
+func (s *StanServer) replicateAck(c *channel, ackInbox string, sequence uint64) (*subState, bool) {
+	op := &spb.RaftOperation{
+		OpType: spb.RaftOperation_Ack,
+		Leader: s.opts.ClusterNodeID,
+		AckMsg: &spb.AckMessage{
+			AckInbox: ackInbox,
+			Sequence: sequence,
+		},
+	}
+	data, err := op.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	// Wait on the result of replication.
+	future := c.raft.Apply(data, raftApplyTimeout)
+	if err := future.Error(); err != nil {
+		return nil, false
+	}
+	resp := future.Response()
+	if err, ok := resp.(error); ok {
+		s.log.Errorf("Failed to replicate ack seq=%d on channel %s: %v", sequence, c.name, err)
+		return nil, false
+	}
+	wrapper := resp.(*ackWrapper)
+	return wrapper.sub, wrapper.stalled
+}
+
+// processAck processes an ack and if needed sends more messages.
+func (s *StanServer) processAck(c *channel, ackInbox string, sequence uint64) {
+	// If clustered and we're not the leader, drop the ack. It will be handled
+	// by another server.
+	if s.isClustered() && !c.isLeader() {
 		return
 	}
 
-	if qs != nil {
-		s.sendAvailableMessagesToQueue(c, qs)
+	var (
+		sub     *subState
+		stalled bool
+	)
+
+	// If clustered, thread acks through Raft.
+	if s.isClustered() {
+		sub, stalled = s.replicateAck(c, ackInbox, sequence)
+	} else {
+		sub, stalled = s.ackMsgByInbox(c, ackInbox, sequence)
+	}
+
+	if sub == nil || !stalled {
+		return
+	}
+
+	if sub.qstate != nil {
+		s.sendAvailableMessagesToQueue(c, sub.qstate)
 	} else {
 		s.sendAvailableMessages(c, sub)
 	}
