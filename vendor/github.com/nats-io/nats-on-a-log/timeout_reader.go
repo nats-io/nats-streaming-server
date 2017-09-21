@@ -1,3 +1,5 @@
+// Copyright 2017 Apcera Inc. All rights reserved.
+
 package natslog
 
 import (
@@ -8,9 +10,9 @@ import (
 	"time"
 )
 
-const BufferSize = 4096
+const bufferSize = 4096
 
-var ErrTimeout = errors.New("timeout")
+var ErrTimeout = errors.New("natslog: read timeout")
 
 type timeoutReader struct {
 	b         *bufio.Reader
@@ -20,7 +22,10 @@ type timeoutReader struct {
 }
 
 func newTimeoutReader(r io.ReadCloser) *timeoutReader {
-	return &timeoutReader{b: bufio.NewReaderSize(r, BufferSize), closeFunc: func() error { return r.Close() }}
+	return &timeoutReader{
+		b:         bufio.NewReaderSize(r, bufferSize),
+		closeFunc: func() error { return r.Close() },
+	}
 }
 
 // SetDeadline sets the deadline for all future Read calls.

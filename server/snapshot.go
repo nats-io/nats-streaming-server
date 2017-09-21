@@ -26,6 +26,8 @@ func (c *channelSnapshot) Persist(sink raft.SnapshotSink) (err error) {
 	// constantly being truncated. Is there a way we can optimize this, e.g.
 	// handling Restore() out-of-band from Raft?
 
+	// TODO: this needs to also snapshot subscription state.
+
 	defer func() {
 		if err != nil {
 			sink.Cancel()

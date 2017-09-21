@@ -127,11 +127,6 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.ClientHBFailCount = int(v.(int64))
-		case "ack_subs_pool_size", "ack_subscriptions_pool_size":
-			if err := checkType(k, reflect.Int64, v); err != nil {
-				return err
-			}
-			opts.AckSubsPoolSize = int(v.(int64))
 		case "ft_group", "ft_group_name":
 			if err := checkType(k, reflect.String, v); err != nil {
 				return err
@@ -419,7 +414,6 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.StringVar(&sopts.NATSServerURL, "ns", "", "stan.NATSServerURL")
 	fs.StringVar(&stanConfigFile, "sc", "", "")
 	fs.StringVar(&stanConfigFile, "stan_config", "", "")
-	fs.IntVar(&sopts.AckSubsPoolSize, "ack_subs", 0, "stan.AckSubsPoolSize")
 	fs.BoolVar(&sopts.FileStoreOpts.CompactEnabled, "file_compact_enabled", stores.DefaultFileStoreOptions.CompactEnabled, "stan.FileStoreOpts.CompactEnabled")
 	fs.IntVar(&sopts.FileStoreOpts.CompactFragmentation, "file_compact_frag", stores.DefaultFileStoreOptions.CompactFragmentation, "stan.FileStoreOpts.CompactFragmentation")
 	fs.IntVar(&sopts.FileStoreOpts.CompactInterval, "file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "stan.FileStoreOpts.CompactInterval")
