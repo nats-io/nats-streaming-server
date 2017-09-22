@@ -915,7 +915,7 @@ func TestDontSendEmptyMsgProto(t *testing.T) {
 
 	m := &pb.MsgProto{}
 	sub.Lock()
-	s.sendMsgToSub(sub, m, false)
+	s.sendMsgToSub(nil, sub, m, false)
 	sub.Unlock()
 }
 

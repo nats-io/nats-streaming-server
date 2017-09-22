@@ -722,15 +722,6 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 				}
 			}
 
-			// We will receive the first message again because acks are not being
-			// replicated yet. TODO: remove this once acks are replicated.
-			select {
-			case msg := <-ch:
-				assertMsg(t, msg.MsgProto, []byte("hello"), 1)
-			case <-time.After(2 * time.Second):
-				t.Fatal("expected msg")
-			}
-
 			// Ensure we received the new messages.
 			for i := 0; i < 5; i++ {
 				select {
