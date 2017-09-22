@@ -35,10 +35,9 @@ const (
 	sqlStoreMsg
 	sqlLookupMsg
 	sqlGetSequenceFromTimestamp
-	sqlGetFirstMsgToExpire
-	sqlGetChannelNamesWithExpiredMessages
 	sqlUpdateChannelMaxSeq
-	sqlGetExpiredMessagesForChannel
+	sqlGetExpiredMessages
+	sqlGetFirstMsgTimestamp
 	sqlDeletedMsgsWithSeqLowerThan
 	sqlGetSizeOfMessage
 	sqlDeleteMessage
@@ -62,8 +61,6 @@ const (
 	sqlRecoverSubPendingSeqs
 	sqlRecoverGetChannelLimits
 	sqlRecoverDoExpireMsgs
-	sqlRecoverSetNoMsgExpiration
-	sqlRecoverUpdateMsgExpiration
 	sqlRecoverGetMessagesCount
 	sqlRecoverGetSeqFloorForMaxMsgs
 	sqlRecoverGetChannelTotalSize
@@ -78,13 +75,12 @@ var sqlStmts = []string{
 	"INSERT INTO Clients (id, hbinbox) VALUES (?, ?)",                                                                                                                                // sqlAddClient
 	"DELETE FROM Clients WHERE id=?",                                                                                                                                                 // sqlDeleteClient
 	"INSERT INTO Channels (id, name, maxmsgs, maxbytes, maxage) VALUES (?, ?, ?, ?, ?)",                                                                                              // sqlAddChannel
-	"INSERT INTO Messages VALUES (?, ?, ?, ?, ?, ?)",                                                                                                                                 // sqlStoreMsg
-	"SELECT expiration, data FROM Messages WHERE id=? AND seq=?",                                                                                                                     // sqlLookupMsg
+	"INSERT INTO Messages VALUES (?, ?, ?, ?, ?)",                                                                                                                                    // sqlStoreMsg
+	"SELECT timestamp, data FROM Messages WHERE id=? AND seq=?",                                                                                                                      // sqlLookupMsg
 	"SELECT seq FROM Messages WHERE id=? AND timestamp>=? LIMIT 1",                                                                                                                   // sqlGetSequenceFromTimestamp
-	"SELECT expiration FROM Messages WHERE expiration < ? ORDER BY expiration LIMIT 1",                                                                                               // sqlGetFirstMsgToExpire
-	"SELECT Channels.name FROM Channels INNER JOIN Messages WHERE Channels.id = Messages.id AND expiration <= ? GROUP BY Channels.name",                                              // sqlGetChannelNamesWithExpiredMessages
 	"UPDATE Channels SET maxseq=? WHERE id=?",                                                                                                                                        // sqlUpdateChannelMaxSeq
-	"SELECT COUNT(seq), COALESCE(MAX(seq), 0), COALESCE(SUM(size), 0) FROM Messages WHERE id=? AND expiration<=?",                                                                    // sqlGetExpiredMessagesForChannel
+	"SELECT COUNT(seq), COALESCE(MAX(seq), 0), COALESCE(SUM(size), 0) FROM Messages WHERE id=? AND timestamp<=?",                                                                     // sqlGetExpiredMessages
+	"SELECT timestamp FROM Messages WHERE id=? AND seq>=? LIMIT 1",                                                                                                                   // sqlGetFirstMsgTimestamp
 	"DELETE FROM Messages WHERE id=? AND seq<=?",                                                                                                                                     // sqlDeletedMsgsWithSeqLowerThan
 	"SELECT size FROM Messages WHERE id=? AND seq=?",                                                                                                                                 // sqlGetSizeOfMessage
 	"DELETE FROM Messages WHERE id=? AND seq=?",                                                                                                                                      // sqlDeleteMessage
@@ -108,8 +104,6 @@ var sqlStmts = []string{
 	"SELECT seq FROM SubsPending WHERE subid=?",                                                                                                                                      // sqlRecoverSubPendingSeqs
 	"SELECT maxmsgs, maxbytes, maxage FROM Channels WHERE id=?",                                                                                                                      // sqlRecoverGetChannelLimits
 	"DELETE FROM Messages WHERE id=? AND timestamp<=?",                                                                                                                               // sqlRecoverDoExpireMsgs
-	"UPDATE Messages SET expiration=? WHERE id=?",                                                                                                                                    // sqlRecoverSetNoMsgExpiration
-	"UPDATE Messages SET expiration=timestamp+? WHERE id=?",                                                                                                                          // sqlRecoverUpdateMsgExpiration
 	"SELECT COUNT(seq) FROM Messages WHERE id=?",                                                                                                                                     // sqlRecoverGetMessagesCount
 	"SELECT MIN(t.seq) FROM (SELECT seq FROM Messages WHERE id=? ORDER BY seq DESC LIMIT ?)t",                                                                                        // sqlRecoverGetSeqFloorForMaxMsgs
 	"SELECT COALESCE(SUM(size), 0) FROM Messages WHERE id=?",                                                                                                                         // sqlRecoverGetChannelTotalSize
@@ -123,13 +117,9 @@ const (
 	// This is to detect changes in the tables, etc...
 	sqlVersion = 1
 
-	// This is the max int64 value, which we use to say that a message has no expiration set.
-	sqlNoExpiration = 0x7FFFFFFFFFFFFFFF
-
-	// When finding out what is the first message to expire, if the SQL query fails,
-	// this is the default amount of time the background go routine will wait before
-	// attempting to expire messages.
-	sqlDefaultExpirationWaitTimeOnError = time.Second
+	// If any of the SQL queries fail when finding out messages that
+	// need to be expired, use this as the default retry interval
+	sqlDefaultExpirationIntervalOnError = time.Second
 
 	// Interval at which time is captured.
 	sqlDefaultTimeTickInterval = time.Second
@@ -139,7 +129,7 @@ const (
 // But for tests, it is often interesting to be able to lower values to
 // make tests finish faster.
 var (
-	sqlExpirationWaitTimeOnError = sqlDefaultExpirationWaitTimeOnError
+	sqlExpirationIntervalOnError = sqlDefaultExpirationIntervalOnError
 	sqlTimeTickInterval          = sqlDefaultTimeTickInterval
 )
 
@@ -154,15 +144,12 @@ type SQLStoreOptions struct {
 type SQLStore struct {
 	// These are used with atomic operations and need to be 64-bit aligned.
 	// Position them at the beginning of the structure.
-	maxSubID       uint64
-	nextExpiration int64
-	nowInNano      int64
+	maxSubID  uint64
+	nowInNano int64
 
 	genericStore
 	db           *sql.DB
 	maxChannelID int64
-	expireTimer  *time.Timer
-	expireMu     sync.Mutex
 	doneCh       chan struct{}
 	wg           sync.WaitGroup
 }
@@ -180,9 +167,11 @@ type SQLSubStore struct {
 // SQLMsgStore is a per channel message store backed by an SQL Database
 type SQLMsgStore struct {
 	genericMsgStore
-	channelID int64
-	db        *sql.DB
-	sqlStore  *SQLStore // Reference to "parent" store
+	channelID   int64
+	db          *sql.DB
+	sqlStore    *SQLStore // Reference to "parent" store
+	expireTimer *time.Timer
+	wg          sync.WaitGroup
 }
 
 // sqlStmtError returns an error including the text of the offending SQL statement.
@@ -208,18 +197,15 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits) 
 		return nil, err
 	}
 	s := &SQLStore{
-		db:             db,
-		doneCh:         make(chan struct{}),
-		nextExpiration: sqlNoExpiration,
-		expireTimer:    time.NewTimer(sqlNoExpiration),
+		db:     db,
+		doneCh: make(chan struct{}),
 	}
 	if err := s.init(TypeSQL, log, limits); err != nil {
 		s.Close()
 		return nil, err
 	}
-	s.wg.Add(2)
+	s.wg.Add(1)
 	go s.timeTick()
-	go s.backgroundTasks()
 	return s, nil
 }
 
@@ -231,8 +217,6 @@ func initSQLStmtsTable(driver string) {
 	case driverPostgres:
 		// Support for INSERT IGNORE is for Postgres 9.5+
 		sqlStmts[sqlSubAddPending] = "INSERT INTO SubsPending (subid, seq) SELECT $1, $2 FROM Subscriptions WHERE subid=$3 AND NOT EXISTS (SELECT 1 FROM SubsPending WHERE subid=$1 AND seq=$2)"
-		// INNER JOIN <table name> ON (and not WHERE)
-		sqlStmts[sqlGetChannelNamesWithExpiredMessages] = "SELECT Channels.name FROM Channels INNER JOIN Messages ON Channels.id = Messages.id AND expiration <= $1 GROUP BY Channels.name"
 		// Replace ? with $1, $2, etc...
 		reg := regexp.MustCompile(`\?`)
 		for i, stmt := range sqlStmts {
@@ -487,27 +471,11 @@ func (s *SQLStore) applyLimitsOnRecovery(ms *SQLMsgStore) error {
 	needUpdate := storedMsgsLimit != limits.MaxMsgs || storedBytesLimit != limits.MaxBytes || storedAgeLimit != maxAge
 
 	// Let's reduce the number of messages if there is an age limit and messages
-	// should have expired. Use Messages' timestamp here instead of expiration
-	// since this column may not be valid (see update below)
+	// should have expired.
 	if maxAge > 0 {
 		expiredTimestamp := time.Now().UnixNano() - int64(limits.MaxAge)
 		if _, err := s.db.Exec(sqlStmts[sqlRecoverDoExpireMsgs], ms.channelID, expiredTimestamp); err != nil {
 			return sqlStmtError(sqlRecoverDoExpireMsgs, err)
-		}
-	}
-	// The age limit of this channel has changed. We need to update
-	// the Messages table's expiration field. This may be painful....
-	if maxAge != storedAgeLimit {
-		// Case where it is now unlimited
-		if limits.MaxAge == 0 {
-			if _, err := s.db.Exec(sqlStmts[sqlRecoverSetNoMsgExpiration], sqlNoExpiration, ms.channelID); err != nil {
-				return sqlStmtError(sqlRecoverSetNoMsgExpiration, err)
-			}
-		} else {
-			// We need to recompute expiration column based on message's timestamp
-			if _, err := s.db.Exec(sqlStmts[sqlRecoverUpdateMsgExpiration], maxAge, ms.channelID); err != nil {
-				return sqlStmtError(sqlRecoverUpdateMsgExpiration, err)
-			}
 		}
 	}
 	// For MaxMsgs and MaxBytes we are interested only the new limit is
@@ -658,110 +626,6 @@ func (s *SQLStore) timeTick() {
 	}
 }
 
-// backgroundTasks performs some background tasks such as expiration
-// and getting time.Now() every second.
-func (s *SQLStore) backgroundTasks() {
-	defer s.wg.Done()
-
-	for {
-		select {
-		case <-s.doneCh:
-			return
-		case <-s.expireTimer.C:
-			s.expireMsgs()
-			s.resetTimerForNextExpiration()
-		}
-	}
-}
-
-// getWaitTimeBeforeFirstExpiration returns the amount of time before
-// the first message of any message is set to expire.
-// Returns 0 if there is no message set to expire, and an arbitrary
-// duration if there was an error executing the SQL query.
-func (s *SQLStore) resetTimerForNextExpiration() {
-	s.expireMu.Lock()
-	defer s.expireMu.Unlock()
-	if s.closed {
-		return
-	}
-	var (
-		expiration int64
-		waitTime   time.Duration
-	)
-	defer func() {
-		atomic.StoreInt64(&s.nextExpiration, int64(waitTime))
-		s.expireTimer.Reset(waitTime)
-	}()
-	r := s.db.QueryRow(sqlStmts[sqlGetFirstMsgToExpire], sqlNoExpiration)
-	if err := r.Scan(&expiration); err != nil {
-		if err == sql.ErrNoRows {
-			waitTime = time.Hour
-			return
-		}
-		waitTime = sqlExpirationWaitTimeOnError
-		return
-	}
-	// If there is no stored message or no messages is set to expire,
-	// return 0, otherwise...
-	if expiration > 0 {
-		nowInNano := time.Now().UnixNano()
-		// Compute wait time.
-		if expiration <= nowInNano {
-			// Expire asap
-			waitTime = time.Nanosecond
-		} else {
-			// This is the amount of time before some messages are no longer valid
-			waitTime = time.Duration(expiration - nowInNano)
-		}
-	}
-}
-
-// expireMsgs ensures that messages don't stay in the log longer than the
-// limit's MaxAge.
-func (s *SQLStore) expireMsgs() {
-	s.RLock()
-	// Refresh view of now
-	nowInNano := time.Now().UnixNano()
-	// Get all channels that have messages that have expired
-	rows, err := s.db.Query(sqlStmts[sqlGetChannelNamesWithExpiredMessages], nowInNano)
-	if err != nil {
-		s.log.Errorf("Unable get list of channles for message expiration: %v", err)
-		s.RUnlock()
-		return
-	}
-	defer rows.Close()
-	s.RUnlock()
-
-	var (
-		channel string
-		ms      *SQLMsgStore
-	)
-
-	// Go over all channels
-	for rows.Next() {
-		channel = ""
-		ms = nil
-		rows.Scan(&channel)
-		s.RLock()
-		if s.closed {
-			s.RUnlock()
-			return
-		}
-		c := s.channels[channel]
-		if c != nil {
-			ms = c.Msgs.(*SQLMsgStore)
-			ms.Lock()
-		}
-		s.RUnlock()
-		if ms != nil {
-			if err := ms.expireMsgsLocked(); err != nil {
-				ms.log.Errorf("Error performing message expiration for channel %q: %v", ms.subject, err)
-			}
-			ms.Unlock()
-		}
-	}
-}
-
 // Close implements the Store interface
 func (s *SQLStore) Close() error {
 	s.Lock()
@@ -769,11 +633,8 @@ func (s *SQLStore) Close() error {
 		s.Unlock()
 		return nil
 	}
-	// Set close flag under expireMu lock too so that it can safely
-	// be checked in resetTimerForNextExpiration()
-	s.expireMu.Lock()
 	s.closed = true
-	s.expireMu.Unlock()
+	// This will cause MsgStore's and SubStore's to be closed.
 	err := s.close()
 	db := s.db
 	wg := &s.wg
@@ -806,18 +667,8 @@ func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 	msg := ms.createMsg(seq, data)
 	msgBytes, _ := msg.Marshal()
 
-	var (
-		maxAge     int64
-		expiration int64
-	)
-	maxAge = int64(ms.limits.MaxAge)
-	if maxAge > 0 {
-		expiration = msg.Timestamp + maxAge
-	} else {
-		expiration = sqlNoExpiration
-	}
 	dataLen := uint64(len(msgBytes))
-	if _, err := ms.db.Exec(sqlStmts[sqlStoreMsg], ms.channelID, seq, msg.Timestamp, expiration, dataLen, msgBytes); err != nil {
+	if _, err := ms.db.Exec(sqlStmts[sqlStoreMsg], ms.channelID, seq, msg.Timestamp, dataLen, msgBytes); err != nil {
 		return 0, sqlStmtError(sqlStoreMsg, err)
 	}
 	if ms.first == 0 {
@@ -856,19 +707,9 @@ func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 		}
 	}
 
-	if maxAge > 0 && maxAge < atomic.LoadInt64(&ms.sqlStore.nextExpiration) {
-		// We need to grab the expire mutex lock since multiple MsgStore
-		// could end-up here (say channel foo and channel bar).
-		ms.sqlStore.expireMu.Lock()
-		// Now under lock verify again. We don't need the atomic
-		// operation to read here when under lock.
-		if maxAge < ms.sqlStore.nextExpiration {
-			// However, we do need atomic op to store since other
-			// MsgStore may be atomically reading that value.
-			atomic.StoreInt64(&ms.sqlStore.nextExpiration, maxAge)
-			ms.sqlStore.expireTimer.Reset(time.Duration(maxAge))
-		}
-		ms.sqlStore.expireMu.Unlock()
+	if ms.limits.MaxAge > 0 && ms.expireTimer == nil {
+		ms.wg.Add(1)
+		ms.expireTimer = time.AfterFunc(ms.limits.MaxAge, ms.expireMsgs)
 	}
 
 	return seq, nil
@@ -884,18 +725,18 @@ func (ms *SQLMsgStore) Lookup(seq uint64) (*pb.MsgProto, error) {
 
 func (ms *SQLMsgStore) lookupLocked(seq uint64) (*pb.MsgProto, error) {
 	var (
-		expiration int64
-		data       []byte
+		timestamp int64
+		data      []byte
 	)
 	r := ms.db.QueryRow(sqlStmts[sqlLookupMsg], ms.channelID, seq)
-	err := r.Scan(&expiration, &data)
+	err := r.Scan(&timestamp, &data)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, sqlStmtError(sqlLookupMsg, err)
 	}
-	if expiration != sqlNoExpiration && atomic.LoadInt64(&ms.sqlStore.nowInNano) > expiration {
+	if maxAge := int64(ms.limits.MaxAge); maxAge > 0 && atomic.LoadInt64(&ms.sqlStore.nowInNano) > timestamp+maxAge {
 		return nil, nil
 	}
 	msg := &pb.MsgProto{}
@@ -945,34 +786,93 @@ func (ms *SQLMsgStore) LastMsg() (*pb.MsgProto, error) {
 
 // expireMsgsLocked removes all messages that have expired in this channel.
 // Store lock is assumed held on entry
-func (ms *SQLMsgStore) expireMsgsLocked() error {
+func (ms *SQLMsgStore) expireMsgs() {
+	ms.Lock()
+	defer ms.Unlock()
+
+	if ms.closed {
+		ms.wg.Done()
+		return
+	}
+
 	var (
 		count     int
 		maxSeq    uint64
 		totalSize uint64
+		timestamp int64
 	)
-	r := ms.db.QueryRow(sqlStmts[sqlGetExpiredMessagesForChannel], ms.channelID, time.Now().UnixNano())
-	if err := r.Scan(&count, &maxSeq, &totalSize); err != nil {
-		return sqlStmtError(sqlGetExpiredMessagesForChannel, err)
+	processErr := func(errCode int, err error) {
+		ms.log.Errorf("Unable to perform expiration for channel %q: %v", ms.subject, sqlStmtError(errCode, err))
+		ms.expireTimer.Reset(sqlExpirationIntervalOnError)
 	}
-	// It is possible that target message has been removed due to
-	// other limits. So if count is 0, we need to look for the
-	// first message to expire. This will be done in the defer
-	// function.
-	if count == 0 {
-		return nil
-	}
-	if maxSeq == ms.last {
-		if _, err := ms.db.Exec(sqlStmts[sqlUpdateChannelMaxSeq], maxSeq, ms.channelID); err != nil {
-			return sqlStmtError(sqlUpdateChannelMaxSeq, err)
+	for {
+		expiredTimestamp := time.Now().UnixNano() - int64(ms.limits.MaxAge)
+		r := ms.db.QueryRow(sqlStmts[sqlGetExpiredMessages], ms.channelID, expiredTimestamp)
+		if err := r.Scan(&count, &maxSeq, &totalSize); err != nil {
+			processErr(sqlGetExpiredMessages, err)
+			return
+		}
+		// It could be that messages that should have expired have been
+		// removed due to count/size limit. We still need to adjust the
+		// expiration timer based on the first message that need to expire.
+		if count > 0 {
+			if maxSeq == ms.last {
+				if _, err := ms.db.Exec(sqlStmts[sqlUpdateChannelMaxSeq], maxSeq, ms.channelID); err != nil {
+					processErr(sqlUpdateChannelMaxSeq, err)
+					return
+				}
+			}
+			if _, err := ms.db.Exec(sqlStmts[sqlDeletedMsgsWithSeqLowerThan], ms.channelID, maxSeq); err != nil {
+				processErr(sqlDeletedMsgsWithSeqLowerThan, err)
+				return
+			}
+			ms.first = maxSeq + 1
+			ms.totalCount -= count
+			ms.totalBytes -= totalSize
+		}
+		// Reset since we are in a loop
+		timestamp = 0
+		// If there is any message left in the channel, find out what the expiration
+		// timer needs to be set to.
+		if ms.totalCount > 0 {
+			r = ms.db.QueryRow(sqlStmts[sqlGetFirstMsgTimestamp], ms.channelID, ms.first)
+			if err := r.Scan(&timestamp); err != nil {
+				processErr(sqlGetFirstMsgTimestamp, err)
+				return
+			}
+		}
+		// No message left or no message to expire. The timer will be recreated when
+		// a new message is added to the channel.
+		if timestamp == 0 {
+			ms.wg.Done()
+			ms.expireTimer = nil
+			return
+		}
+		elapsed := time.Duration(time.Now().UnixNano() - timestamp)
+		if elapsed < ms.limits.MaxAge {
+			ms.expireTimer.Reset(ms.limits.MaxAge - elapsed)
+			// Done with the for loop
+			return
 		}
 	}
-	if _, err := ms.db.Exec(sqlStmts[sqlDeletedMsgsWithSeqLowerThan], ms.channelID, maxSeq); err != nil {
-		return sqlStmtError(sqlDeletedMsgsWithSeqLowerThan, err)
+}
+
+// Close implements the MsgStore interface
+func (ms *SQLMsgStore) Close() error {
+	ms.Lock()
+	if ms.closed {
+		ms.Unlock()
+		return nil
 	}
-	ms.first = maxSeq + 1
-	ms.totalCount -= count
-	ms.totalBytes -= totalSize
+	ms.closed = true
+	if ms.expireTimer != nil {
+		if ms.expireTimer.Stop() {
+			ms.wg.Done()
+		}
+	}
+	ms.Unlock()
+
+	ms.wg.Wait()
 	return nil
 }
 

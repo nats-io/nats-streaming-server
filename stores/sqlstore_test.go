@@ -95,7 +95,6 @@ func failDBConnection(t *testing.T, s Store) {
 func restoreDBConnection(t *testing.T, s Store) {
 	ss := s.(*SQLStore)
 	ss.Lock()
-	ss.expireMu.Lock()
 	db, err := sql.Open(testSQLDriver, testSQLSource)
 	if err == nil {
 		ss.db = db
@@ -110,7 +109,6 @@ func restoreDBConnection(t *testing.T, s Store) {
 			subs.Unlock()
 		}
 	}
-	ss.expireMu.Unlock()
 	ss.Unlock()
 	if err != nil {
 		stackFatalf(t, "Error failing db connection: %v", err)
@@ -295,8 +293,8 @@ func TestSQLErrorOnMsgExpiration(t *testing.T) {
 	s := createDefaultSQLStore(t)
 	defer s.Close()
 
-	sqlExpirationWaitTimeOnError = 15 * time.Millisecond
-	defer func() { sqlExpirationWaitTimeOnError = sqlDefaultExpirationWaitTimeOnError }()
+	sqlExpirationIntervalOnError = 15 * time.Millisecond
+	defer func() { sqlExpirationIntervalOnError = sqlDefaultExpirationIntervalOnError }()
 
 	sl := testDefaultStoreLimits
 	sl.MaxAge = 100 * time.Millisecond
@@ -496,14 +494,14 @@ func TestSQLExpiredMsgsOnLookup(t *testing.T) {
 	// first message to expire to find nothing so that we verify that
 	// a message that is supposed to be expired is not returned by
 	// the Lookup
-	realStmt := sqlStmts[sqlGetFirstMsgToExpire]
+	realStmt := sqlStmts[sqlGetExpiredMessages]
 	defer func() {
-		sqlStmts[sqlGetFirstMsgToExpire] = realStmt
+		sqlStmts[sqlGetExpiredMessages] = realStmt
 		sqlTimeTickInterval = sqlDefaultTimeTickInterval
 	}()
 
-	// Dummy statement that will return no row
-	sqlStmts[sqlGetFirstMsgToExpire] = "SELECT expiration FROM Messages WHERE expiration = 1"
+	// Dummy statement that will return an error
+	sqlStmts[sqlGetExpiredMessages] = "SELECT x FROM Messages WHERE (id=? AND timestamp<=?)"
 	sqlTimeTickInterval = 15 * time.Millisecond
 
 	s := createDefaultSQLStore(t)
