@@ -548,12 +548,16 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 		c.stan.closeMu.Unlock()
 		return err
 	case spb.RaftOperation_Ack:
-		if c.isLeader() {
+		// If we proposed the ack, do nothing since we already processed it as
+		// leader.
+		if op.Leader == c.stan.opts.ClusterNodeID {
 			return nil
 		}
 		c.stan.processReplicatedAck(c, op.AckMsg.AckInbox, op.AckMsg.Sequence)
 	case spb.RaftOperation_Send:
-		if c.isLeader() {
+		// If we proposed the message sent update, do nothing since we already
+		// processed it as leader.
+		if op.Leader == c.stan.opts.ClusterNodeID {
 			return nil
 		}
 		c.stan.processReplicatedSentMsg(c, op.SendMsg.AckInbox, op.SendMsg.Sequence)
