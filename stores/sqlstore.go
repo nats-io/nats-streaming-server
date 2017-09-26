@@ -148,10 +148,11 @@ type SQLStore struct {
 	nowInNano int64
 
 	genericStore
-	db           *sql.DB
-	maxChannelID int64
-	doneCh       chan struct{}
-	wg           sync.WaitGroup
+	db            *sql.DB
+	maxChannelID  int64
+	doneCh        chan struct{}
+	wg            sync.WaitGroup
+	preparedStmts []*sql.Stmt
 }
 
 // SQLSubStore is a subscription store backed by an SQL Database
@@ -159,7 +160,7 @@ type SQLSubStore struct {
 	commonStore
 	maxSubID       *uint64 // Points to the uint64 stored in SQLStore and is used with atomic operations
 	channelID      int64
-	db             *sql.DB
+	sqlStore       *SQLStore // Reference to "parent" store
 	limits         SubStoreLimits
 	hasMarkedAsDel bool
 }
@@ -168,7 +169,6 @@ type SQLSubStore struct {
 type SQLMsgStore struct {
 	genericMsgStore
 	channelID   int64
-	db          *sql.DB
 	sqlStore    *SQLStore // Reference to "parent" store
 	expireTimer *time.Timer
 	wg          sync.WaitGroup
@@ -197,16 +197,33 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits) 
 		return nil, err
 	}
 	s := &SQLStore{
-		db:     db,
-		doneCh: make(chan struct{}),
+		db:            db,
+		doneCh:        make(chan struct{}),
+		preparedStmts: make([]*sql.Stmt, 0, len(sqlStmts)),
 	}
 	if err := s.init(TypeSQL, log, limits); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if err := s.createPreparedStmts(); err != nil {
 		s.Close()
 		return nil, err
 	}
 	s.wg.Add(1)
 	go s.timeTick()
 	return s, nil
+}
+
+func (s *SQLStore) createPreparedStmts() error {
+	s.preparedStmts = []*sql.Stmt{}
+	for _, stmt := range sqlStmts {
+		ps, err := s.db.Prepare(stmt)
+		if err != nil {
+			return err
+		}
+		s.preparedStmts = append(s.preparedStmts, ps)
+	}
+	return nil
 }
 
 // initialize the global sqlStmts table to driver's one.
@@ -342,14 +359,14 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 
 		channelLimits := s.genericStore.getChannelLimits(name)
 
-		msgStore := &SQLMsgStore{db: s.db, channelID: channelID, sqlStore: s}
+		msgStore := &SQLMsgStore{channelID: channelID, sqlStore: s}
 		msgStore.init(name, s.log, &channelLimits.MsgStoreLimits)
 
 		if err := s.applyLimitsOnRecovery(msgStore); err != nil {
 			return nil, err
 		}
 
-		r = s.db.QueryRow(sqlStmts[sqlRecoverChannelMsgs], channelID)
+		r = s.preparedStmts[sqlRecoverChannelMsgs].QueryRow(channelID)
 		var (
 			totalCount    int
 			first         uint64
@@ -373,13 +390,13 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 			msgStore.last = maxseq
 		}
 
-		subStore := &SQLSubStore{db: s.db, channelID: channelID, limits: channelLimits.SubStoreLimits}
+		subStore := &SQLSubStore{channelID: channelID, limits: channelLimits.SubStoreLimits, sqlStore: s}
 		subStore.log = s.log
 		subStore.maxSubID = &s.maxSubID
 
 		var subscriptions []*RecoveredSubscription
 
-		subRows, err := s.db.Query(sqlStmts[sqlRecoverChannelSubs], channelID)
+		subRows, err := s.preparedStmts[sqlRecoverChannelSubs].Query(channelID)
 		if err != nil {
 			return nil, sqlStmtError(sqlRecoverChannelSubs, err)
 		}
@@ -397,12 +414,12 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 
 				// We can remove entries for sequence that are below the smallest
 				// sequence that was found in Messages.
-				if _, err := s.db.Exec(sqlStmts[sqlRecoverDoPurgeSubsPending], sub.ID, msgStore.first); err != nil {
+				if _, err := s.preparedStmts[sqlRecoverDoPurgeSubsPending].Exec(sub.ID, msgStore.first); err != nil {
 					return nil, sqlStmtError(sqlRecoverDoPurgeSubsPending, err)
 				}
 
 				var pendingAcks PendingAcks
-				pendingSeqRows, err := s.db.Query(sqlStmts[sqlRecoverSubPendingSeqs], sub.ID)
+				pendingSeqRows, err := s.preparedStmts[sqlRecoverSubPendingSeqs].Query(sub.ID)
 				if err != nil {
 					return nil, sqlStmtError(sqlRecoverSubPendingSeqs, err)
 				}
@@ -462,7 +479,7 @@ func (s *SQLStore) applyLimitsOnRecovery(ms *SQLMsgStore) error {
 		storedBytesLimit int64
 		storedAgeLimit   int64
 	)
-	r := s.db.QueryRow(sqlStmts[sqlRecoverGetChannelLimits], ms.channelID)
+	r := s.preparedStmts[sqlRecoverGetChannelLimits].QueryRow(ms.channelID)
 	if err := r.Scan(&storedMsgsLimit, &storedBytesLimit, &storedAgeLimit); err != nil {
 		return sqlStmtError(sqlRecoverGetChannelLimits, err)
 	}
@@ -474,7 +491,7 @@ func (s *SQLStore) applyLimitsOnRecovery(ms *SQLMsgStore) error {
 	// should have expired.
 	if maxAge > 0 {
 		expiredTimestamp := time.Now().UnixNano() - int64(limits.MaxAge)
-		if _, err := s.db.Exec(sqlStmts[sqlRecoverDoExpireMsgs], ms.channelID, expiredTimestamp); err != nil {
+		if _, err := s.preparedStmts[sqlRecoverDoExpireMsgs].Exec(ms.channelID, expiredTimestamp); err != nil {
 			return sqlStmtError(sqlRecoverDoExpireMsgs, err)
 		}
 	}
@@ -483,25 +500,25 @@ func (s *SQLStore) applyLimitsOnRecovery(ms *SQLMsgStore) error {
 	// if the limit has not been lowered, we should be good).
 	if limits.MaxMsgs > 0 && limits.MaxMsgs < storedMsgsLimit {
 		count := 0
-		r := s.db.QueryRow(sqlStmts[sqlRecoverGetMessagesCount], ms.channelID)
+		r := s.preparedStmts[sqlRecoverGetMessagesCount].QueryRow(ms.channelID)
 		if err := r.Scan(&count); err != nil {
 			return sqlStmtError(sqlRecoverGetMessagesCount, err)
 		}
 		// We leave at least 1 message
 		if count > 1 && count > limits.MaxMsgs {
 			seq := uint64(0)
-			r = s.db.QueryRow(sqlStmts[sqlRecoverGetSeqFloorForMaxMsgs], ms.channelID, limits.MaxMsgs)
+			r = s.preparedStmts[sqlRecoverGetSeqFloorForMaxMsgs].QueryRow(ms.channelID, limits.MaxMsgs)
 			if err := r.Scan(&seq); err != nil {
 				return sqlStmtError(sqlRecoverGetSeqFloorForMaxMsgs, err)
 			}
-			if _, err := s.db.Exec(sqlStmts[sqlDeletedMsgsWithSeqLowerThan], ms.channelID, seq-1); err != nil {
+			if _, err := s.preparedStmts[sqlDeletedMsgsWithSeqLowerThan].Exec(ms.channelID, seq-1); err != nil {
 				return sqlStmtError(sqlDeletedMsgsWithSeqLowerThan, err)
 			}
 		}
 	}
 	if limits.MaxBytes > 0 && limits.MaxBytes < storedBytesLimit {
 		currentBytes := uint64(0)
-		r := s.db.QueryRow(sqlStmts[sqlRecoverGetChannelTotalSize], ms.channelID)
+		r := s.preparedStmts[sqlRecoverGetChannelTotalSize].QueryRow(ms.channelID)
 		if err := r.Scan(&currentBytes); err != nil {
 			return sqlStmtError(sqlRecoverGetChannelTotalSize, err)
 		}
@@ -509,13 +526,13 @@ func (s *SQLStore) applyLimitsOnRecovery(ms *SQLMsgStore) error {
 			// How much do we need to get rid off
 			removeBytes := currentBytes - uint64(limits.MaxBytes)
 			seq := 0
-			r := s.db.QueryRow(sqlStmts[sqlRecoverGetSeqFloorForMaxBytes], ms.channelID, ms.channelID, removeBytes)
+			r := s.preparedStmts[sqlRecoverGetSeqFloorForMaxBytes].QueryRow(ms.channelID, ms.channelID, removeBytes)
 			if err := r.Scan(&seq); err != nil {
 				return sqlStmtError(sqlRecoverGetSeqFloorForMaxBytes, err)
 			}
 			// Leave at least 1 record
 			if seq > 0 {
-				if _, err := s.db.Exec(sqlStmts[sqlDeletedMsgsWithSeqLowerThan], ms.channelID, seq); err != nil {
+				if _, err := s.preparedStmts[sqlDeletedMsgsWithSeqLowerThan].Exec(ms.channelID, seq); err != nil {
 					return sqlStmtError(sqlDeletedMsgsWithSeqLowerThan, err)
 				}
 			}
@@ -524,7 +541,7 @@ func (s *SQLStore) applyLimitsOnRecovery(ms *SQLMsgStore) error {
 	// If limits were changed compared to last run, we need to update the
 	// Channels table.
 	if needUpdate {
-		if _, err := s.db.Exec(sqlStmts[sqlRecoverUpdateChannelLimits],
+		if _, err := s.preparedStmts[sqlRecoverUpdateChannelLimits].Exec(
 			limits.MaxMsgs, limits.MaxBytes, maxAge, ms.channelID); err != nil {
 			return sqlStmtError(sqlRecoverUpdateChannelLimits, err)
 		}
@@ -545,16 +562,16 @@ func (s *SQLStore) CreateChannel(channel string) (*Channel, error) {
 	channelLimits := s.genericStore.getChannelLimits(channel)
 
 	cid := s.maxChannelID + 1
-	if _, err := s.db.Exec(sqlStmts[sqlAddChannel], cid, channel,
+	if _, err := s.preparedStmts[sqlAddChannel].Exec(cid, channel,
 		channelLimits.MaxMsgs, channelLimits.MaxBytes, int64(channelLimits.MaxAge)); err != nil {
 		return nil, sqlStmtError(sqlAddChannel, err)
 	}
 	s.maxChannelID = cid
 
-	msgStore := &SQLMsgStore{db: s.db, channelID: cid, sqlStore: s}
+	msgStore := &SQLMsgStore{channelID: cid, sqlStore: s}
 	msgStore.init(channel, s.log, &channelLimits.MsgStoreLimits)
 
-	subStore := &SQLSubStore{db: s.db, channelID: cid, limits: channelLimits.SubStoreLimits}
+	subStore := &SQLSubStore{channelID: cid, limits: channelLimits.SubStoreLimits, sqlStore: s}
 	subStore.log = s.log
 	subStore.maxSubID = &s.maxSubID
 
@@ -573,7 +590,7 @@ func (s *SQLStore) AddClient(clientID, hbInbox string) (*Client, error) {
 	defer s.Unlock()
 	var err error
 	for i := 0; i < 2; i++ {
-		_, err = s.db.Exec(sqlStmts[sqlAddClient], clientID, hbInbox)
+		_, err = s.preparedStmts[sqlAddClient].Exec(clientID, hbInbox)
 		if err == nil {
 			break
 		}
@@ -584,7 +601,7 @@ func (s *SQLStore) AddClient(clientID, hbInbox string) (*Client, error) {
 		}
 		// This is the first AddClient failed attempt. It could be because
 		// client was already in db, so delete now and try again.
-		_, err = s.db.Exec(sqlStmts[sqlDeleteClient], clientID)
+		_, err = s.preparedStmts[sqlDeleteClient].Exec(clientID)
 		if err != nil {
 			err = sqlStmtError(sqlDeleteClient, err)
 			break
@@ -599,7 +616,7 @@ func (s *SQLStore) AddClient(clientID, hbInbox string) (*Client, error) {
 // DeleteClient implements the Store interface
 func (s *SQLStore) DeleteClient(clientID string) error {
 	s.Lock()
-	_, err := s.db.Exec(sqlStmts[sqlDeleteClient], clientID)
+	_, err := s.preparedStmts[sqlDeleteClient].Exec(clientID)
 	if err != nil {
 		err = sqlStmtError(sqlDeleteClient, err)
 	}
@@ -647,11 +664,18 @@ func (s *SQLStore) Close() error {
 	// Wait for go routine(s) to finish
 	wg.Wait()
 
+	s.Lock()
+	for _, ps := range s.preparedStmts {
+		if lerr := ps.Close(); lerr != nil && err == nil {
+			err = lerr
+		}
+	}
 	if db != nil {
 		if lerr := db.Close(); lerr != nil && err == nil {
 			err = lerr
 		}
 	}
+	s.Unlock()
 	return err
 }
 
@@ -668,7 +692,7 @@ func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 	msgBytes, _ := msg.Marshal()
 
 	dataLen := uint64(len(msgBytes))
-	if _, err := ms.db.Exec(sqlStmts[sqlStoreMsg], ms.channelID, seq, msg.Timestamp, dataLen, msgBytes); err != nil {
+	if _, err := ms.sqlStore.preparedStmts[sqlStoreMsg].Exec(ms.channelID, seq, msg.Timestamp, dataLen, msgBytes); err != nil {
 		return 0, sqlStmtError(sqlStoreMsg, err)
 	}
 	if ms.first == 0 {
@@ -686,13 +710,13 @@ func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 			((maxMsgs > 0 && ms.totalCount > maxMsgs) ||
 				(maxBytes > 0 && (ms.totalBytes > uint64(maxBytes)))) {
 
-			r := ms.db.QueryRow(sqlStmts[sqlGetSizeOfMessage], ms.channelID, ms.first)
+			r := ms.sqlStore.preparedStmts[sqlGetSizeOfMessage].QueryRow(ms.channelID, ms.first)
 			delBytes := uint64(0)
 			if err := r.Scan(&delBytes); err != nil && err != sql.ErrNoRows {
 				return 0, sqlStmtError(sqlGetSizeOfMessage, err)
 			}
 			if delBytes > 0 {
-				if _, err := ms.db.Exec(sqlStmts[sqlDeleteMessage], ms.channelID, ms.first); err != nil {
+				if _, err := ms.sqlStore.preparedStmts[sqlDeleteMessage].Exec(ms.channelID, ms.first); err != nil {
 					return 0, sqlStmtError(sqlDeleteMessage, err)
 				}
 				ms.totalCount--
@@ -728,7 +752,7 @@ func (ms *SQLMsgStore) lookupLocked(seq uint64) (*pb.MsgProto, error) {
 		timestamp int64
 		data      []byte
 	)
-	r := ms.db.QueryRow(sqlStmts[sqlLookupMsg], ms.channelID, seq)
+	r := ms.sqlStore.preparedStmts[sqlLookupMsg].QueryRow(ms.channelID, seq)
 	err := r.Scan(&timestamp, &data)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -756,7 +780,7 @@ func (ms *SQLMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error)
 	if ms.first > ms.last {
 		return ms.last + 1, nil
 	}
-	r := ms.db.QueryRow(sqlStmts[sqlGetSequenceFromTimestamp], ms.channelID, timestamp)
+	r := ms.sqlStore.preparedStmts[sqlGetSequenceFromTimestamp].QueryRow(ms.channelID, timestamp)
 	seq := uint64(0)
 	err := r.Scan(&seq)
 	if err == sql.ErrNoRows {
@@ -807,7 +831,7 @@ func (ms *SQLMsgStore) expireMsgs() {
 	}
 	for {
 		expiredTimestamp := time.Now().UnixNano() - int64(ms.limits.MaxAge)
-		r := ms.db.QueryRow(sqlStmts[sqlGetExpiredMessages], ms.channelID, expiredTimestamp)
+		r := ms.sqlStore.preparedStmts[sqlGetExpiredMessages].QueryRow(ms.channelID, expiredTimestamp)
 		if err := r.Scan(&count, &maxSeq, &totalSize); err != nil {
 			processErr(sqlGetExpiredMessages, err)
 			return
@@ -817,12 +841,12 @@ func (ms *SQLMsgStore) expireMsgs() {
 		// expiration timer based on the first message that need to expire.
 		if count > 0 {
 			if maxSeq == ms.last {
-				if _, err := ms.db.Exec(sqlStmts[sqlUpdateChannelMaxSeq], maxSeq, ms.channelID); err != nil {
+				if _, err := ms.sqlStore.preparedStmts[sqlUpdateChannelMaxSeq].Exec(maxSeq, ms.channelID); err != nil {
 					processErr(sqlUpdateChannelMaxSeq, err)
 					return
 				}
 			}
-			if _, err := ms.db.Exec(sqlStmts[sqlDeletedMsgsWithSeqLowerThan], ms.channelID, maxSeq); err != nil {
+			if _, err := ms.sqlStore.preparedStmts[sqlDeletedMsgsWithSeqLowerThan].Exec(ms.channelID, maxSeq); err != nil {
 				processErr(sqlDeletedMsgsWithSeqLowerThan, err)
 				return
 			}
@@ -835,7 +859,7 @@ func (ms *SQLMsgStore) expireMsgs() {
 		// If there is any message left in the channel, find out what the expiration
 		// timer needs to be set to.
 		if ms.totalCount > 0 {
-			r = ms.db.QueryRow(sqlStmts[sqlGetFirstMsgTimestamp], ms.channelID, ms.first)
+			r = ms.sqlStore.preparedStmts[sqlGetFirstMsgTimestamp].QueryRow(ms.channelID, ms.first)
 			if err := r.Scan(&timestamp); err != nil {
 				processErr(sqlGetFirstMsgTimestamp, err)
 				return
@@ -886,7 +910,7 @@ func (ss *SQLSubStore) CreateSub(sub *spb.SubState) error {
 	defer ss.Unlock()
 	// Check limits only if needed
 	if ss.limits.MaxSubscriptions > 0 {
-		r := ss.db.QueryRow(sqlStmts[sqlCheckMaxSubs], ss.channelID)
+		r := ss.sqlStore.preparedStmts[sqlCheckMaxSubs].QueryRow(ss.channelID)
 		count := 0
 		if err := r.Scan(&count); err != nil {
 			return sqlStmtError(sqlCheckMaxSubs, err)
@@ -897,12 +921,12 @@ func (ss *SQLSubStore) CreateSub(sub *spb.SubState) error {
 	}
 	sub.ID = atomic.AddUint64(ss.maxSubID, 1)
 	subBytes, _ := sub.Marshal()
-	if _, err := ss.db.Exec(sqlStmts[sqlCreateSub], ss.channelID, sub.ID, subBytes); err != nil {
+	if _, err := ss.sqlStore.preparedStmts[sqlCreateSub].Exec(ss.channelID, sub.ID, subBytes); err != nil {
 		sub.ID = 0
 		return sqlStmtError(sqlCreateSub, err)
 	}
 	if ss.hasMarkedAsDel {
-		if _, err := ss.db.Exec(sqlStmts[sqlDeleteSubMarkedAsDeleted], ss.channelID); err != nil {
+		if _, err := ss.sqlStore.preparedStmts[sqlDeleteSubMarkedAsDeleted].Exec(ss.channelID); err != nil {
 			return sqlStmtError(sqlDeleteSubMarkedAsDeleted, err)
 		}
 		ss.hasMarkedAsDel = false
@@ -915,7 +939,7 @@ func (ss *SQLSubStore) UpdateSub(sub *spb.SubState) error {
 	ss.Lock()
 	defer ss.Unlock()
 	subBytes, _ := sub.Marshal()
-	r, err := ss.db.Exec(sqlStmts[sqlUpdateSub], subBytes, ss.channelID, sub.ID)
+	r, err := ss.sqlStore.preparedStmts[sqlUpdateSub].Exec(subBytes, ss.channelID, sub.ID)
 	if err != nil {
 		return sqlStmtError(sqlUpdateSub, err)
 	}
@@ -927,7 +951,7 @@ func (ss *SQLSubStore) UpdateSub(sub *spb.SubState) error {
 		return err
 	}
 	if c == 0 {
-		if _, err := ss.db.Exec(sqlStmts[sqlCreateSub], ss.channelID, sub.ID, subBytes); err != nil {
+		if _, err := ss.sqlStore.preparedStmts[sqlCreateSub].Exec(ss.channelID, sub.ID, subBytes); err != nil {
 			return sqlStmtError(sqlCreateSub, err)
 		}
 	}
@@ -939,25 +963,25 @@ func (ss *SQLSubStore) DeleteSub(subid uint64) error {
 	ss.Lock()
 	defer ss.Unlock()
 	if subid == atomic.LoadUint64(ss.maxSubID) {
-		if _, err := ss.db.Exec(sqlStmts[sqlMarkSubscriptionAsDeleted], ss.channelID, subid); err != nil {
+		if _, err := ss.sqlStore.preparedStmts[sqlMarkSubscriptionAsDeleted].Exec(ss.channelID, subid); err != nil {
 			return sqlStmtError(sqlMarkSubscriptionAsDeleted, err)
 		}
 		ss.hasMarkedAsDel = true
 	} else {
-		if _, err := ss.db.Exec(sqlStmts[sqlDeleteSubscription], ss.channelID, subid); err != nil {
+		if _, err := ss.sqlStore.preparedStmts[sqlDeleteSubscription].Exec(ss.channelID, subid); err != nil {
 			return sqlStmtError(sqlDeleteSubscription, err)
 		}
 	}
 	// Ignore error on this since subscription would not be recovered
 	// if above executed ok.
-	ss.db.Exec(sqlStmts[sqlDeleteSubPendingMessages], subid)
+	ss.sqlStore.preparedStmts[sqlDeleteSubPendingMessages].Exec(subid)
 	return nil
 }
 
 // AddSeqPending implements the SubStore interface
 func (ss *SQLSubStore) AddSeqPending(subid, seqno uint64) error {
 	ss.Lock()
-	_, err := ss.db.Exec(sqlStmts[sqlSubAddPending], subid, seqno, subid)
+	_, err := ss.sqlStore.preparedStmts[sqlSubAddPending].Exec(subid, seqno, subid)
 	if err != nil {
 		err = sqlStmtError(sqlSubAddPending, err)
 	}
@@ -968,7 +992,7 @@ func (ss *SQLSubStore) AddSeqPending(subid, seqno uint64) error {
 // AckSeqPending implements the SubStore interface
 func (ss *SQLSubStore) AckSeqPending(subid, seqno uint64) error {
 	ss.Lock()
-	_, err := ss.db.Exec(sqlStmts[sqlSubDeletePending], subid, seqno)
+	_, err := ss.sqlStore.preparedStmts[sqlSubDeletePending].Exec(subid, seqno)
 	if err != nil {
 		err = sqlStmtError(sqlSubDeletePending, err)
 	}

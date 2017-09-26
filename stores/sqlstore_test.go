@@ -101,11 +101,14 @@ func restoreDBConnection(t *testing.T, s Store) {
 		for _, c := range ss.channels {
 			ms := c.Msgs.(*SQLMsgStore)
 			ms.Lock()
-			ms.db = db
-			ms.Unlock()
 			subs := c.Subs.(*SQLSubStore)
 			subs.Lock()
-			subs.db = db
+		}
+		err = ss.createPreparedStmts()
+		for _, c := range ss.channels {
+			ms := c.Msgs.(*SQLMsgStore)
+			ms.Unlock()
+			subs := c.Subs.(*SQLSubStore)
 			subs.Unlock()
 		}
 	}
@@ -494,14 +497,18 @@ func TestSQLExpiredMsgsOnLookup(t *testing.T) {
 	// first message to expire to find nothing so that we verify that
 	// a message that is supposed to be expired is not returned by
 	// the Lookup
-	realStmt := sqlStmts[sqlGetExpiredMessages]
+	realStmt1 := sqlStmts[sqlGetExpiredMessages]
+	realStmt2 := sqlStmts[sqlGetFirstMsgTimestamp]
 	defer func() {
-		sqlStmts[sqlGetExpiredMessages] = realStmt
+		sqlStmts[sqlGetExpiredMessages] = realStmt1
+		sqlStmts[sqlGetFirstMsgTimestamp] = realStmt2
 		sqlTimeTickInterval = sqlDefaultTimeTickInterval
 	}()
 
 	// Dummy statement that will return an error
-	sqlStmts[sqlGetExpiredMessages] = "SELECT x FROM Messages WHERE (id=? AND timestamp<=?)"
+	sqlStmts[sqlGetExpiredMessages] = "SELECT 0, 0, 0 FROM Messages WHERE id=? AND timestamp<=?"
+	sqlStmts[sqlGetFirstMsgTimestamp] = "SELECT 0 FROM Messages WHERE id=? AND seq>=? LIMIT 1"
+	initSQLStmtsTable(testSQLDriver)
 	sqlTimeTickInterval = 15 * time.Millisecond
 
 	s := createDefaultSQLStore(t)
