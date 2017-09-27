@@ -1035,3 +1035,60 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 		t.Fatalf("Expected 0 pending msgs, got %v", acksPending)
 	}
 }
+
+func TestClusteringConnClose(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Create a client connection.
+	sc, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+	// Create a subscription
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for subscription to be registered in all 3 servers
+	for _, srv := range servers {
+		waitForNumSubs(t, srv, clientName, 1)
+	}
+
+	checkClientsInAllServers := func(expected int) {
+		for _, srv := range servers {
+			waitForNumClients(t, srv, expected)
+		}
+	}
+	checkClientsInAllServers(1)
+	// Close client connection
+	sc.Close()
+	// Now clients should be removed from all nodes
+	checkClientsInAllServers(0)
+}

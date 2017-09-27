@@ -2440,17 +2440,42 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	subs := s.clients.getSubs(req.ClientID)
 	// If there are subscribers, we will schedule the connection
 	// close request to subscriber's ackInbox subscribers.
+	// We now have a single ack subscriber per channel, not per
+	// subscription. So find the list of channels.
+	var (
+		channels    map[string]struct{} // created only if needed
+		isClustered = s.isClustered()
+	)
 	for _, sub := range subs {
 		sub.Lock()
 		if !sub.removed {
-			// Server is listening to s.info.AcksSubs.channel + ".>", so use
-			// any dummy subject suffix.
-			ctrlNatsMsg.Subject = fmt.Sprintf("%s.%s.close", s.info.AcksSubs, sub.subject)
-			if s.ncs.PublishMsg(ctrlNatsMsg) == nil {
-				refs++
+			addChannel := true
+			if isClustered {
+				// In clustered mode, use only channels if this node
+				// is the leader for that channel, because otherwise
+				// the node is not listening to the ack subject.
+				c := s.channels.get(sub.subject)
+				if !c.isLeader() {
+					addChannel = false
+				}
+			}
+			if addChannel {
+				// Lazy create the map
+				if channels == nil {
+					channels = make(map[string]struct{})
+				}
+				channels[sub.subject] = struct{}{}
 			}
 		}
 		sub.Unlock()
+	}
+	for cname := range channels {
+		// Server is listening to s.info.AcksSubs.channel + ".>", so use
+		// any dummy subject suffix.
+		ctrlNatsMsg.Subject = fmt.Sprintf("%s.%s.close", s.info.AcksSubs, cname)
+		if s.ncs.PublishMsg(ctrlNatsMsg) == nil {
+			refs++
+		}
 	}
 	if refs > 0 {
 		// Store our reference count and wait for performConnClose to
