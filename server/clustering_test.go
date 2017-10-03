@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -722,19 +723,15 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 				}
 			}
 
-			// We will receive the first message again because acks are not being
-			// replicated yet. TODO: remove this once acks are replicated.
-			select {
-			case msg := <-ch:
-				assertMsg(t, msg.MsgProto, []byte("hello"), 1)
-			case <-time.After(2 * time.Second):
-				t.Fatal("expected msg")
-			}
-
 			// Ensure we received the new messages.
 			for i := 0; i < 5; i++ {
 				select {
 				case msg := <-ch:
+					if i == 0 && msg.Sequence == 1 {
+						assertMsg(t, msg.MsgProto, []byte("hello"), 1)
+						i--
+						continue
+					}
 					assertMsg(t, msg.MsgProto, []byte(strconv.Itoa(i)), uint64(i+2))
 				case <-time.After(2 * time.Second):
 					t.Fatal("expected msg")
@@ -831,15 +828,6 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 		t.Fatalf("Error subscribing: %v", err)
 	}
 	defer sub.Unsubscribe()
-
-	// We will receive the first message again because acks are not being
-	// replicated yet. TODO: remove this once acks are replicated.
-	select {
-	case msg := <-ch:
-		assertMsg(t, msg.MsgProto, []byte("hello"), 1)
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected msg")
-	}
 
 	// Ensure we received the new messages.
 	for i := 0; i < 5; i++ {
@@ -938,4 +926,169 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 		t.Fatal("Unexpected msg")
 	default:
 	}
+}
+
+func TestClusteringRaftLogReplay(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Create a client connection.
+	sc, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Publish a message (this will create the channel and form the Raft group).
+	channel := "foo"
+	publishWithRetry(t, sc, channel, []byte("hello"))
+
+	ch := make(chan bool, 1)
+	doAckMsg := int32(0)
+	if _, err := sc.Subscribe(channel, func(m *stan.Msg) {
+		if atomic.LoadInt32(&doAckMsg) == 1 {
+			m.Ack()
+		}
+		if !m.Redelivered {
+			ch <- true
+		}
+	}, stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(),
+		stan.AckWait(2*time.Second)); err != nil {
+		t.Fatalf("Error subscribing: %v", err)
+	}
+	// Wait for message to be received
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// And for the ack to be replicated
+	time.Sleep(time.Second)
+	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
+	leader.Shutdown()
+	servers = removeServer(servers, leader)
+	getChannelLeader(t, channel, 10*time.Second, servers...)
+
+	atomic.StoreInt32(&doAckMsg, 1)
+	// Publish one more message and wait for message to be received
+	publishWithRetry(t, sc, channel, []byte("hello"))
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+
+	// Restart original leader
+	rs := runServerWithOpts(t, leader.opts, nil)
+	defer rs.Shutdown()
+	numSubs := 0
+	lastSent := uint64(0)
+	acksPending := 0
+	timeout := time.Now().Add(5 * time.Second)
+	for time.Now().Before(timeout) {
+		// There should be only 1 sub
+		subs := rs.clients.getSubs(clientName)
+		numSubs = len(subs)
+		if numSubs == 1 {
+			sub := subs[0]
+			sub.RLock()
+			lastSent = sub.LastSent
+			acksPending = len(sub.acksPending)
+			sub.RUnlock()
+			if lastSent == 2 && acksPending == 0 {
+				// All is as expected, we are done
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if numSubs != 1 {
+		t.Fatalf("Expected 1 sub, got %v", numSubs)
+	}
+	if lastSent != 2 {
+		t.Fatalf("Expected lastSent to be 2, got %v", lastSent)
+	}
+	if acksPending != 0 {
+		t.Fatalf("Expected 0 pending msgs, got %v", acksPending)
+	}
+}
+
+func TestClusteringConnClose(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Create a client connection.
+	sc, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+	// Create a subscription
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Wait for subscription to be registered in all 3 servers
+	for _, srv := range servers {
+		waitForNumSubs(t, srv, clientName, 1)
+	}
+
+	checkClientsInAllServers := func(expected int) {
+		for _, srv := range servers {
+			waitForNumClients(t, srv, expected)
+		}
+	}
+	checkClientsInAllServers(1)
+	// Close client connection
+	sc.Close()
+	// Now clients should be removed from all nodes
+	checkClientsInAllServers(0)
 }

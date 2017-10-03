@@ -86,12 +86,16 @@ message RaftOperation {
     Subscribe          = 1; // Create client subscription.
     RemoveSubscription = 2; // Remove client subscription.
     CloseSubscription  = 3; // Close durable client subscription.
+    Ack                = 4; // Ack a message.
+    Send               = 5; // Message send on a client subscription.
   }
   Type               OpType       = 1; // Log message type.
   string             Leader       = 2; // The node that proposed the operation.
   Batch              PublishBatch = 3; // Publish operation data.
   AddSubscription    Sub          = 4; // Subscribe operation data.
   RemoveSubscription Unsub        = 5; // Close/Remove Subscription operation data.
+  AckMessage         AckMsg       = 6; // Ack operation data.
+  AckMessage         SendMsg      = 7; // Send operation data.
 }
 
 // Batch is a batch of messages for replication.
@@ -109,4 +113,10 @@ message AddSubscription {
 message RemoveSubscription {
   string AckInbox = 1; // Subscription ack inbox.
   string ClientID = 2; // Client ID of subscriber.
+}
+
+// AckMessage is used to replicate a message ack.
+message AckMessage {
+  string AckInbox = 1; // Subscription ack inbox.
+  uint64 Sequence = 2; // Message sequence to ack.
 }
