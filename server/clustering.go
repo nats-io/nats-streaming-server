@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats-on-a-log"
 )
 
+// raftNode is a handle to a member in a Raft consensus group.
 type raftNode struct {
 	*raft.Raft
 	store     *raftboltdb.BoltStore
@@ -24,6 +25,7 @@ type raftNode struct {
 	notifyCh  <-chan bool
 }
 
+// shutdown attempts to stop the Raft node.
 func (r *raftNode) shutdown() error {
 	if err := r.Raft.Shutdown().Error(); err != nil {
 		return err
@@ -37,6 +39,7 @@ func (r *raftNode) shutdown() error {
 	return r.logInput.Close()
 }
 
+// createRaftNode creates and starts a new Raft node with the given name and FSM.
 func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error) {
 	path := filepath.Join(s.opts.RaftLogPath, name)
 	if _, err := os.Stat(path); os.IsNotExist(err) {

@@ -567,6 +567,8 @@ func (c *channel) getAckSubject() string {
 // the FSM should be implemented in a fashion that allows for concurrent
 // updates while a snapshot is happening.
 func (c *channel) Snapshot() (raft.FSMSnapshot, error) {
+	// TODO: this needs to be fully implemented to support snapshotting the
+	// entire Raft log, not just channel messages.
 	return newChannelSnapshot(c), nil
 }
 
@@ -574,6 +576,8 @@ func (c *channel) Snapshot() (raft.FSMSnapshot, error) {
 // concurrently with any other command. The FSM must discard all previous
 // state.
 func (c *channel) Restore(old io.ReadCloser) error {
+	// TODO: this needs to be fully implemented to support restoring the
+	// entire Raft log, not just channel messages.
 	defer old.Close()
 	sizeBuf := make([]byte, 4)
 	for {
@@ -695,7 +699,7 @@ type StanServer struct {
 	log   *logger.StanLogger
 
 	// Metadata Raft group.
-	raft *raft.Raft
+	raft *raftNode
 }
 
 func (s *StanServer) isClustered() bool {
@@ -1608,6 +1612,15 @@ func (s *StanServer) start(runningState State) error {
 		if err := s.ensureRunningStandAlone(); err != nil {
 			return err
 		}
+	}
+
+	// If clustered, start metadata Raft group.
+	if s.isClustered() {
+		node, err := s.createRaftNode("_metadata", s)
+		if err != nil {
+			return err
+		}
+		s.raft = node
 	}
 
 	// Start the go-routine responsible to start sending messages to newly
@@ -4192,6 +4205,13 @@ func (s *StanServer) Shutdown() {
 		}
 	}
 
+	// Close metadata Raft group.
+	if s.raft != nil {
+		if err := s.raft.shutdown(); err != nil {
+			s.log.Errorf("Failed to stop metadata Raft node: %v", err)
+		}
+	}
+
 	// Close/Shutdown resources. Note that unless one instantiates StanServer
 	// directly (instead of calling RunServer() and the like), these should
 	// not be nil.
@@ -4216,4 +4236,32 @@ func (s *StanServer) Shutdown() {
 
 	// Wait for go-routines to return
 	s.wg.Wait()
+}
+
+// Apply log is invoked once a log entry is committed.
+// It returns a value which will be made available in the
+// ApplyFuture returned by Raft.Apply method if that
+// method was called on the same Raft node as the FSM.
+func (s *StanServer) Apply(*raft.Log) interface{} {
+	// TODO
+	return nil
+}
+
+// Snapshot is used to support log compaction. This call should
+// return an FSMSnapshot which can be used to save a point-in-time
+// snapshot of the FSM. Apply and Snapshot are not called in multiple
+// threads, but Apply will be called concurrently with Persist. This means
+// the FSM should be implemented in a fashion that allows for concurrent
+// updates while a snapshot is happening.
+func (s *StanServer) Snapshot() (raft.FSMSnapshot, error) {
+	// TODO
+	return nil, nil
+}
+
+// Restore is used to restore an FSM from a snapshot. It is not called
+// concurrently with any other command. The FSM must discard all previous
+// state.
+func (s *StanServer) Restore(io.ReadCloser) error {
+	// TODO
+	return nil
 }
