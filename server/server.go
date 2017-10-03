@@ -3,8 +3,6 @@
 package server
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,7 +10,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -23,12 +20,10 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
-	"github.com/hashicorp/raft-boltdb"
 	natsdLogger "github.com/nats-io/gnatsd/logger"
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nats-on-a-log"
 	"github.com/nats-io/nuid"
 
 	"github.com/nats-io/nats-streaming-server/logger"
@@ -285,93 +280,8 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 }
 
 func assignChannelRaft(s *StanServer, c *channel) error {
-	path := filepath.Join(s.opts.RaftLogPath, c.name)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.MkdirAll(path, os.ModeDir+os.ModePerm); err != nil {
-			return err
-		}
-	}
-	store, err := raftboltdb.NewBoltStore(filepath.Join(path, raftLogFile))
+	node, err := s.createRaftNode(c.name, c)
 	if err != nil {
-		return err
-	}
-	c.raftStore = store
-	cacheStore, err := raft.NewLogCache(s.opts.LogCacheSize, store)
-	if err != nil {
-		store.Close()
-		return err
-	}
-
-	config := raft.DefaultConfig()
-	config.TrailingLogs = uint64(s.opts.TrailingLogs)
-
-	// FIXME: Send output of Raft logger
-	// Raft expects a *log.Logger so can not swap that with another one,
-	// but we can modify the outputs to which the Raft logger is writing.
-	//config.Logger = s.log
-	logReader, logWriter := io.Pipe()
-	c.raftLogInput = logWriter
-	config.LogOutput = logWriter
-	bufr := bufio.NewReader(logReader)
-	go func() {
-		for {
-			line, _, err := bufr.ReadLine()
-			if err != nil {
-				if err != io.EOF {
-					s.log.Errorf("error while reading piped output from Raft log: %s", err)
-				}
-				return
-			}
-
-			fields := bytes.Fields(line)
-			level := string(fields[2])
-			raftLogFields := fields[4:]
-			raftLog := string(bytes.Join(raftLogFields, []byte(" ")))
-
-			switch level {
-			case "[DEBUG]":
-				s.log.Tracef("%v", raftLog)
-			case "[INFO]":
-				s.log.Noticef("%v", raftLog)
-			case "[WARN]":
-				s.log.Noticef("%v", raftLog)
-			case "[ERROR]":
-				s.log.Fatalf("%v", raftLog)
-			default:
-				s.log.Noticef("%v", raftLog)
-			}
-		}
-	}()
-
-	snapshotStore, err := raft.NewFileSnapshotStore(path, s.opts.LogSnapshots, logWriter)
-	if err != nil {
-		store.Close()
-		return err
-	}
-
-	// TODO: using a single NATS conn for every channel might be a bottleneck. Maybe pool conns?
-	transport, err := natslog.NewNATSTransport(
-		fmt.Sprintf("%s.%s", s.opts.ClusterNodeID, c.name), s.ncr, 2*time.Second, logWriter)
-	if err != nil {
-		store.Close()
-		return err
-	}
-	c.raftTransport = transport
-
-	peers := make([]string, len(s.opts.ClusterPeers))
-	for i, p := range s.opts.ClusterPeers {
-		peers[i] = fmt.Sprintf("%s.%s", p, c.name)
-	}
-	peersStore := &raft.StaticPeers{StaticPeers: peers}
-
-	// Set up a channel for reliable leader notifications.
-	raftNotifyCh := make(chan bool, 1)
-	config.NotifyCh = raftNotifyCh
-
-	node, err := raft.NewRaft(config, c, cacheStore, store, snapshotStore, peersStore, transport)
-	if err != nil {
-		transport.Close()
-		store.Close()
 		return err
 	}
 	c.raft = node
@@ -387,9 +297,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if node.Leader() == "" {
-		node.Shutdown()
-		transport.Close()
-		store.Close()
+		node.shutdown()
 		return errors.New("channel leader was not elected in time")
 	}
 
@@ -404,7 +312,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	go func() {
 		for {
 			select {
-			case isLeader := <-raftNotifyCh:
+			case isLeader := <-node.notifyCh:
 				if isLeader {
 					err := c.leadershipAcquired()
 					select {
@@ -487,18 +395,15 @@ func (cs *channelStore) count() int {
 }
 
 type channel struct {
-	nextSequence  uint64
-	leader        uint32
-	name          string
-	store         *stores.Channel
-	ss            *subStore
-	raft          *raft.Raft
-	raftStore     *raftboltdb.BoltStore
-	raftLogInput  io.WriteCloser
-	raftTransport *raft.NetworkTransport
-	lTimestamp    int64
-	acksSub       *nats.Subscription
-	stan          *StanServer
+	nextSequence uint64
+	leader       uint32
+	name         string
+	store        *stores.Channel
+	ss           *subStore
+	raft         *raftNode
+	lTimestamp   int64
+	acksSub      *nats.Subscription
+	stan         *StanServer
 }
 
 // Apply log is invoked once a log entry is committed.
@@ -788,6 +693,9 @@ type StanServer struct {
 	trace bool
 	debug bool
 	log   *logger.StanLogger
+
+	// Metadata Raft group.
+	raft *raft.Raft
 }
 
 func (s *StanServer) isClustered() bool {
@@ -4277,23 +4185,8 @@ func (s *StanServer) Shutdown() {
 		channels := channelStore.getAll()
 		for _, channel := range channels {
 			if channel.raft != nil {
-				if err := channel.raft.Shutdown().Error(); err != nil {
+				if err := channel.raft.shutdown(); err != nil {
 					s.log.Errorf("Failed to stop Raft node for channel %s: %v", channel.name, err)
-				}
-			}
-			if channel.raftStore != nil {
-				if err := channel.raftStore.Close(); err != nil {
-					s.log.Errorf("Failed to close Raft log store for channel %s: %v", channel.name, err)
-				}
-			}
-			if channel.raftLogInput != nil {
-				if err := channel.raftLogInput.Close(); err != nil {
-					s.log.Errorf("Failed to close Raft log input for channel %s: %v", channel.name, err)
-				}
-			}
-			if channel.raftTransport != nil {
-				if err := channel.raftTransport.Close(); err != nil {
-					s.log.Errorf("Failed to close Raft transport for channel %s: %v", channel.name, err)
 				}
 			}
 		}
