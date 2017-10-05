@@ -486,6 +486,7 @@ func (c *channel) isLeader() bool {
 // the next sequence to assign, and attempts to redeliver any outstanding
 // messages that have expired.
 func (c *channel) leadershipAcquired() error {
+	c.stan.log.Debugf("server became leader for channel %s, performing leader promotion actions", c.name)
 	// Use a barrier to ensure all preceding operations are
 	// applied to the FSM, then update nextSequence.
 	barrier := c.raft.Barrier(30 * time.Second)
@@ -542,6 +543,7 @@ func (c *channel) leadershipAcquired() error {
 
 	// Finally step up as leader.
 	atomic.StoreUint32(&c.leader, 1)
+	c.stan.log.Debugf("finished leader promotion actions for channel %s", c.name)
 	return nil
 }
 
@@ -549,11 +551,13 @@ func (c *channel) leadershipAcquired() error {
 // channel. This should only be called when the server is running in
 // clustered mode. This removes the ack subscription.
 func (c *channel) leadershipLost() {
+	c.stan.log.Debugf("server lost leadership for channel %s, performing leader stepdown actions", c.name)
 	if c.acksSub != nil {
 		c.acksSub.Unsubscribe()
 		c.acksSub = nil
 	}
 	atomic.StoreUint32(&c.leader, 0)
+	c.stan.log.Debugf("finished leader stepdown actions for channel %s", c.name)
 }
 
 func (c *channel) getAckSubject() string {
