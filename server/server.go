@@ -2105,7 +2105,6 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 		s.sendConnectErr(m.Reply, err.Error())
 		return
 	}
-
 	// Handle duplicate IDs in a dedicated go-routine
 	if !isNew {
 		// Do we have a routine in progress for this client ID?
@@ -2117,6 +2116,7 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 		if inProgress {
 			s.log.Errorf("[Client:%s] Connect failed; already connected", req.ClientID)
 			s.sendConnectErr(m.Reply, ErrInvalidClient.Error())
+			return
 		}
 
 		// If server has started shutdown, we can't call wg.Add() so we need
@@ -2153,12 +2153,12 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 		if needToWait {
 			s.dupCIDwg.Wait()
 		}
+		// Start a go-routine to handle this connect request
+		go func() {
+			s.processConnectRequestWithDupID(client, req, m.Reply)
+		}()
+		return
 	}
-
-	// Start a go-routine to handle this connect request
-	go func() {
-		s.processConnectRequestWithDupID(client, req, m.Reply)
-	}()
 
 	// Here, we accept this client's incoming connect request.
 	s.finishConnectRequest(client, req, m.Reply)
