@@ -86,12 +86,16 @@ message RaftOperation {
     Subscribe          = 1; // Create client subscription.
     RemoveSubscription = 2; // Remove client subscription.
     CloseSubscription  = 3; // Close durable client subscription.
+    Connect            = 4; // Client connection.
+    Disconnect         = 5; // Client disconnect.
   }
-  Type               OpType       = 1; // Log message type.
-  string             Leader       = 2; // The node that proposed the operation.
-  Batch              PublishBatch = 3; // Publish operation data.
-  AddSubscription    Sub          = 4; // Subscribe operation data.
-  RemoveSubscription Unsub        = 5; // Close/Remove Subscription operation data.
+  Type               OpType           = 1; // Log message type.
+  string             Leader           = 2; // The node that proposed the operation.
+  Batch              PublishBatch     = 3; // Publish operation data.
+  AddSubscription    Sub              = 4; // Subscribe operation data.
+  RemoveSubscription Unsub            = 5; // Close/Remove Subscription operation data.
+  AddClient          ClientConnect    = 6; // Connect operation data.
+  RemoveClient       ClientDisconnect = 7; // Disconnect operation data.       
 }
 
 // Batch is a batch of messages for replication.
@@ -109,4 +113,14 @@ message AddSubscription {
 message RemoveSubscription {
   string AckInbox = 1; // Subscription ack inbox.
   string ClientID = 2; // Client ID of subscriber.
+}
+
+// AddClient is used to replicate a new client connection.
+message AddClient {
+  pb.ConnectRequest ConnectRequest = 1; // Client connection info.
+}
+
+// RemoveClient is used to close a client connection.
+message RemoveClient {
+  string ClientID = 1; // Client to close.
 }

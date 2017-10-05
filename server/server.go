@@ -1620,11 +1620,9 @@ func (s *StanServer) start(runningState State) error {
 
 	// If clustered, start metadata Raft group.
 	if s.isClustered() {
-		node, err := s.createRaftNode("_metadata", s)
-		if err != nil {
+		if err := s.startMetadataRaftNode(); err != nil {
 			return err
 		}
-		s.raft = node
 	}
 
 	// Start the go-routine responsible to start sending messages to newly
@@ -1663,6 +1661,18 @@ func (s *StanServer) start(runningState State) error {
 		s.wg.Add(1)
 		go s.performRedeliveryOnStartup(recoveredSubs)
 	}
+	return nil
+}
+
+// startMetadataRaftNode creates and starts the metadata Raft group. This is
+// used to handle replication of connection state and cluster metadata. This
+// should only be called if the server is running in clustered mode.
+func (s *StanServer) startMetadataRaftNode() error {
+	node, err := s.createRaftNode("_metadata", s)
+	if err != nil {
+		return err
+	}
+	s.raft = node
 	return nil
 }
 
@@ -2073,13 +2083,29 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 		return
 	}
 
-	// Try to register
-	client, isNew, err := s.clients.register(req.ClientID, req.HeartbeatInbox)
+	// In clustered mode, drop the request if we're not the metadata leader.
+	// Another server will handle it.
+	if s.isClustered() && s.raft.State() != raft.Leader {
+		return
+	}
+
+	var (
+		client *client
+		isNew  bool
+	)
+
+	// If clustered, thread operations through Raft.
+	if s.isClustered() {
+		client, isNew, err = s.replicateConnect(req)
+	} else {
+		client, isNew, err = s.processConnect(req)
+	}
+
 	if err != nil {
-		s.log.Errorf("[Client:%s] Error registering client: %v", req.ClientID, err)
 		s.sendConnectErr(m.Reply, err.Error())
 		return
 	}
+
 	// Handle duplicate IDs in a dedicated go-routine
 	if !isNew {
 		// Do we have a routine in progress for this client ID?
@@ -2091,7 +2117,6 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 		if inProgress {
 			s.log.Errorf("[Client:%s] Connect failed; already connected", req.ClientID)
 			s.sendConnectErr(m.Reply, ErrInvalidClient.Error())
-			return
 		}
 
 		// If server has started shutdown, we can't call wg.Add() so we need
@@ -2128,15 +2153,55 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 		if needToWait {
 			s.dupCIDwg.Wait()
 		}
-		// Start a go-routine to handle this connect request
-		go func() {
-			s.processConnectRequestWithDupID(client, req, m.Reply)
-		}()
-		return
 	}
+
+	// Start a go-routine to handle this connect request
+	go func() {
+		s.processConnectRequestWithDupID(client, req, m.Reply)
+	}()
 
 	// Here, we accept this client's incoming connect request.
 	s.finishConnectRequest(client, req, m.Reply)
+}
+
+func (s *StanServer) processConnect(req *pb.ConnectRequest) (*client, bool, error) {
+	// Try to register
+	client, isNew, err := s.clients.register(req.ClientID, req.HeartbeatInbox)
+	if err != nil {
+		s.log.Errorf("[Client:%s] Error registering client: %v", req.ClientID, err)
+		return nil, false, err
+	}
+	return client, isNew, nil
+}
+
+// connectReplicationWrapper contains the result of a connect as processed by
+// Raft.
+type connectReplicationWrapper struct {
+	client *client
+	isNew  bool
+}
+
+func (s *StanServer) replicateConnect(req *pb.ConnectRequest) (*client, bool, error) {
+	op := &spb.RaftOperation{
+		OpType:        spb.RaftOperation_Connect,
+		Leader:        s.opts.ClusterNodeID,
+		ClientConnect: &spb.AddClient{ConnectRequest: req},
+	}
+	data, err := op.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	future := s.raft.Apply(data, raftApplyTimeout)
+	// Wait on result of replication.
+	if err := future.Error(); err != nil {
+		return nil, false, err
+	}
+	resp := future.Response()
+	if err, ok := resp.(error); ok {
+		return nil, false, err
+	}
+	wrapper := resp.(*connectReplicationWrapper)
+	return wrapper.client, wrapper.isNew, nil
 }
 
 func (s *StanServer) finishConnectRequest(client *client, req *pb.ConnectRequest, replyInbox string) {
@@ -2323,6 +2388,12 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 		return
 	}
 
+	// In clustered mode, drop the request if we're not the metadata leader.
+	// Another server will handle it.
+	if s.isClustered() && s.raft.State() != raft.Leader {
+		return
+	}
+
 	// Create the control and corresponding NATS message
 	ctrlMsg, ctrlNatsMsg := s.createCtrlMsg(spb.CtrlMsg_ConnClose, true, m.Reply, []byte(req.ClientID))
 
@@ -2373,17 +2444,52 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 // performConnClose performs a connection close operation after all
 // client's pubMsg or client acks have been processed.
 func (s *StanServer) performConnClose(m *nats.Msg, clientID string) {
-	// The function or the caller is already locking, so do not use
-	// locking in that function.
-	if !s.closeClient(clientID) {
-		s.log.Errorf("Unknown client %q in close request", clientID)
-		s.sendCloseErr(m.Reply, ErrUnknownClient.Error())
+	var err error
+
+	// If clustered, thread operations through Raft.
+	if s.isClustered() {
+		err = s.replicateConnClose(clientID)
+	} else {
+		err = s.closeConn(clientID)
+	}
+	if err != nil {
+		s.sendCloseErr(m.Reply, err.Error())
 		return
 	}
 
 	resp := &pb.CloseResponse{}
 	b, _ := resp.Marshal()
 	s.nc.Publish(m.Reply, b)
+}
+
+func (s *StanServer) replicateConnClose(clientID string) error {
+	op := &spb.RaftOperation{
+		OpType:           spb.RaftOperation_Disconnect,
+		Leader:           s.opts.ClusterNodeID,
+		ClientDisconnect: &spb.RemoveClient{ClientID: clientID},
+	}
+	data, err := op.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	future := s.raft.Apply(data, raftApplyTimeout)
+	// Wait on result of replication.
+	if err := future.Error(); err != nil {
+		return err
+	}
+	resp := future.Response()
+	if resp == nil {
+		return nil
+	}
+	return resp.(error)
+}
+
+func (s *StanServer) closeConn(clientID string) error {
+	if !s.closeClient(clientID) {
+		s.log.Errorf("Unknown client %q in close request", clientID)
+		return ErrUnknownClient
+	}
+	return nil
 }
 
 func (s *StanServer) sendCloseErr(subj, err string) {
@@ -4246,9 +4352,25 @@ func (s *StanServer) Shutdown() {
 // It returns a value which will be made available in the
 // ApplyFuture returned by Raft.Apply method if that
 // method was called on the same Raft node as the FSM.
-func (s *StanServer) Apply(*raft.Log) interface{} {
-	// TODO
-	return nil
+func (s *StanServer) Apply(l *raft.Log) interface{} {
+	op := &spb.RaftOperation{}
+	if err := op.Unmarshal(l.Data); err != nil {
+		panic(err)
+	}
+	switch op.OpType {
+	case spb.RaftOperation_Connect:
+		// Client connection replication.
+		client, isNew, err := s.processConnect(op.ClientConnect.ConnectRequest)
+		if err != nil {
+			return err
+		}
+		return &connectReplicationWrapper{client: client, isNew: isNew}
+	case spb.RaftOperation_Disconnect:
+		// Client disconnect replication.
+		return s.closeConn(op.ClientDisconnect.ClientID)
+	default:
+		panic(fmt.Sprintf("unknown op type %s", op.OpType))
+	}
 }
 
 // Snapshot is used to support log compaction. This call should
