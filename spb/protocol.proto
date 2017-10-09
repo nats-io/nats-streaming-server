@@ -133,4 +133,5 @@ message AddClient {
 // RemoveClient is used to close a client connection.
 message RemoveClient {
   string ClientID = 1; // Client to close.
+  string Reply    = 2; // Inbox to send client response to.
 }

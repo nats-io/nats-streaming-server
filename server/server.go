@@ -2424,8 +2424,20 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 		return
 	}
 
+	// If clustered, thread operations through Raft.
+	if s.isClustered() {
+		if err := s.replicateConnClose(req.ClientID, m.Reply); err != nil {
+			s.log.Errorf("Failed to replicate close request: %v", err)
+			s.sendCloseErr(m.Reply, err.Error())
+		}
+	} else {
+		s.scheduleConnClose(req.ClientID, m.Reply)
+	}
+}
+
+func (s *StanServer) scheduleConnClose(clientID, reply string) {
 	// Create the control and corresponding NATS message
-	ctrlMsg, ctrlNatsMsg := s.createCtrlMsg(spb.CtrlMsg_ConnClose, true, m.Reply, []byte(req.ClientID))
+	ctrlMsg, ctrlNatsMsg := s.createCtrlMsg(spb.CtrlMsg_ConnClose, true, reply, []byte(clientID))
 
 	// Lock for the remainder of the function
 	s.ctrlMsgMu.Lock()
@@ -2443,7 +2455,7 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	if s.ncs.PublishMsg(ctrlNatsMsg) == nil {
 		refs++
 	}
-	subs := s.clients.getSubs(req.ClientID)
+	subs := s.clients.getSubs(clientID)
 	// If there are subscribers, we will schedule the connection
 	// close request to subscriber's ackInbox subscribers.
 	// We now have a single ack subscriber per channel, not per
@@ -2492,36 +2504,31 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	// If were unable to schedule a single proto, then execute
 	// performConnClose from here.
 	if refs == 0 {
-		s.performConnClose(m, req.ClientID)
+		s.performConnClose(clientID, reply)
 	}
 }
 
 // performConnClose performs a connection close operation after all
 // client's pubMsg or client acks have been processed.
-func (s *StanServer) performConnClose(m *nats.Msg, clientID string) {
-	var err error
-
-	// If clustered, thread operations through Raft.
-	if s.isClustered() {
-		err = s.replicateConnClose(clientID)
-	} else {
-		err = s.closeConn(clientID)
-	}
-	if err != nil {
-		s.sendCloseErr(m.Reply, err.Error())
+func (s *StanServer) performConnClose(clientID, reply string) {
+	// The function or the caller is already locking, so do not use
+	// locking in that function.
+	if !s.closeClient(clientID) {
+		s.log.Errorf("Unknown client %q in close request", clientID)
+		s.sendCloseErr(reply, ErrUnknownClient.Error())
 		return
 	}
 
 	resp := &pb.CloseResponse{}
 	b, _ := resp.Marshal()
-	s.nc.Publish(m.Reply, b)
+	s.nc.Publish(reply, b)
 }
 
-func (s *StanServer) replicateConnClose(clientID string) error {
+func (s *StanServer) replicateConnClose(clientID, reply string) error {
 	op := &spb.RaftOperation{
 		OpType:           spb.RaftOperation_Disconnect,
 		Leader:           s.opts.ClusterNodeID,
-		ClientDisconnect: &spb.RemoveClient{ClientID: clientID},
+		ClientDisconnect: &spb.RemoveClient{ClientID: clientID, Reply: reply},
 	}
 	data, err := op.Marshal()
 	if err != nil {
@@ -2529,22 +2536,7 @@ func (s *StanServer) replicateConnClose(clientID string) error {
 	}
 	future := s.raft.Apply(data, raftApplyTimeout)
 	// Wait on result of replication.
-	if err := future.Error(); err != nil {
-		return err
-	}
-	resp := future.Response()
-	if resp == nil {
-		return nil
-	}
-	return resp.(error)
-}
-
-func (s *StanServer) closeConn(clientID string) error {
-	if !s.closeClient(clientID) {
-		s.log.Errorf("Unknown client %q in close request", clientID)
-		return ErrUnknownClient
-	}
-	return nil
+	return future.Error()
 }
 
 func (s *StanServer) sendCloseErr(subj, err string) {
@@ -2637,7 +2629,7 @@ func (s *StanServer) processCtrlMsg(m *nats.Msg) bool {
 		s.performSubUnsubOrClose(cm.MsgType, processRequest, m, req)
 	case spb.CtrlMsg_ConnClose:
 		clientID := string(cm.Data)
-		s.performConnClose(m, clientID)
+		s.performConnClose(clientID, m.Reply)
 	default:
 		return false // Valid ctrl message, but unexpected type, return failure.
 	}
@@ -4540,7 +4532,8 @@ func (s *StanServer) Apply(l *raft.Log) interface{} {
 		return &connectReplicationWrapper{client: client, isNew: isNew}
 	case spb.RaftOperation_Disconnect:
 		// Client disconnect replication.
-		return s.closeConn(op.ClientDisconnect.ClientID)
+		s.scheduleConnClose(op.ClientDisconnect.ClientID, op.ClientDisconnect.Reply)
+		return nil
 	default:
 		panic(fmt.Sprintf("unknown op type %s", op.OpType))
 	}
