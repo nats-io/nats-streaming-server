@@ -59,8 +59,7 @@ func getChannelLeader(t *testing.T, channel string, timeout time.Duration, serve
 		deadline = time.Now().Add(timeout)
 	)
 	for time.Now().Before(deadline) {
-		for i := 0; i < len(servers); i++ {
-			s := servers[i]
+		for _, s := range servers {
 			if s.state == Shutdown {
 				continue
 			}
@@ -81,6 +80,33 @@ func getChannelLeader(t *testing.T, channel string, timeout time.Duration, serve
 	}
 	if leader == nil {
 		stackFatalf(t, "Unable to find the channel leader")
+	}
+	return leader
+}
+
+func getMetadataLeader(t *testing.T, timeout time.Duration, servers ...*StanServer) *StanServer {
+	var (
+		leader   *StanServer
+		deadline = time.Now().Add(timeout)
+	)
+	for time.Now().Before(deadline) {
+		for _, s := range servers {
+			if s.state == Shutdown || s.raft == nil {
+				continue
+			}
+			if s.isMetadataLeader() {
+				if leader != nil {
+					stackFatalf(t, "Found more than one metadata leader")
+				}
+				leader = s
+			}
+		}
+		if leader != nil {
+			break
+		}
+	}
+	if leader == nil {
+		stackFatalf(t, "Unable to find the metadata leader")
 	}
 	return leader
 }
@@ -236,6 +262,9 @@ func TestClusteringBasic(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
+
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
 	if err != nil {
@@ -311,22 +340,11 @@ func TestClusteringBasic(t *testing.T) {
 	stopped = append(stopped, leader)
 	servers = removeServer(servers, leader)
 
-	// Create a new connection with lower timeouts to test when we don't have a leader.
-	sc2, err := stan.Connect(clusterName, clientName+"-2", stan.PubAckWait(time.Second), stan.ConnectWait(time.Second))
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v", err)
-	}
-	defer sc2.Close()
-
-	// New subscriptions should be rejected since no leader can be established.
-	_, err = sc2.Subscribe(channel, func(msg *stan.Msg) {}, stan.DeliverAllAvailable(), stan.MaxInflight(1))
+	// Creating a new connection should fail since there should not be a
+	// metadata leader.
+	_, err = stan.Connect(clusterName, clientName+"-2", stan.PubAckWait(time.Second), stan.ConnectWait(time.Second))
 	if err == nil {
-		t.Fatal("Expected error on subscribe")
-	}
-
-	// Publishes should also fail.
-	if err := sc2.Publish(channel, []byte("foo")); err == nil {
-		t.Fatal("Expected error on publish")
+		t.Fatal("Expected error on connect")
 	}
 
 	// Bring one node back up.
@@ -395,6 +413,9 @@ func TestClusteringNoPanicOnShutdown(t *testing.T) {
 
 	servers := []*StanServer{s1, s2}
 
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
+
 	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(time.Second), stan.ConnectWait(10*time.Second))
 	if err != nil {
 		t.Fatalf("Error on connect: %v", err)
@@ -456,6 +477,9 @@ func TestClusteringLeaderFlap(t *testing.T) {
 	defer s2.Shutdown()
 
 	servers := []*StanServer{s1, s2}
+
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
 
 	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(2*time.Second))
 	if err != nil {
@@ -524,6 +548,9 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	for _, s := range servers {
 		checkState(t, s, Clustered)
 	}
+
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -681,6 +708,9 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 				checkState(t, s, Clustered)
 			}
 
+			// Wait for metadata leader to be elected.
+			getMetadataLeader(t, 10*time.Second, servers...)
+
 			// Create client connections.
 			sc1, err = stan.Connect(clusterName, clientName)
 			if err != nil {
@@ -775,6 +805,9 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 	for _, s := range servers {
 		checkState(t, s, Clustered)
 	}
+
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -883,6 +916,9 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 	for _, s := range servers {
 		checkState(t, s, Clustered)
 	}
+
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)

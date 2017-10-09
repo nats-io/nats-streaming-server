@@ -710,6 +710,10 @@ func (s *StanServer) isClustered() bool {
 	return len(s.opts.ClusterPeers) > 0
 }
 
+func (s *StanServer) isMetadataLeader() bool {
+	return s.raft.State() == raft.Leader
+}
+
 // subStore holds all known state for all subscriptions
 type subStore struct {
 	sync.RWMutex
@@ -2085,7 +2089,7 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 
 	// In clustered mode, drop the request if we're not the metadata leader.
 	// Another server will handle it.
-	if s.isClustered() && s.raft.State() != raft.Leader {
+	if s.isClustered() && !s.isMetadataLeader() {
 		return
 	}
 
@@ -2200,6 +2204,12 @@ func (s *StanServer) replicateConnect(req *pb.ConnectRequest) (*client, bool, er
 	if err, ok := resp.(error); ok {
 		return nil, false, err
 	}
+
+	// Perform a barrier to ensure the connect replication is applied before
+	// returning. This prevents a race where a client connects and then makes a
+	// request before the connect has been applied.
+	s.raft.Barrier(raftApplyTimeout).Error()
+
 	wrapper := resp.(*connectReplicationWrapper)
 	return wrapper.client, wrapper.isNew, nil
 }
@@ -2390,7 +2400,7 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 
 	// In clustered mode, drop the request if we're not the metadata leader.
 	// Another server will handle it.
-	if s.isClustered() && s.raft.State() != raft.Leader {
+	if s.isClustered() && !s.isMetadataLeader() {
 		return
 	}
 
