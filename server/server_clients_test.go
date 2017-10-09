@@ -84,6 +84,16 @@ func TestClientCrashAndReconnect(t *testing.T) {
 		t.Fatalf("Expected to connect correctly, got err %v", err)
 	}
 	defer sc.Close()
+	// Get the connected client's inbox
+	clients := s.clients.getClients()
+	if cc := len(clients); cc != 1 {
+		t.Fatalf("There should be 1 client, got %v", cc)
+	}
+	cli := clients[clientName]
+	if cli == nil {
+		t.Fatalf("Expected client %q to exist, did not", clientName)
+	}
+	hbInbox := cli.info.HbInbox
 
 	// should get a duplicate clientID error
 	if sc2, err := stan.Connect(clusterName, clientName); err == nil {
@@ -108,6 +118,20 @@ func TestClientCrashAndReconnect(t *testing.T) {
 	duration := time.Since(start)
 	if duration > 5*time.Second {
 		t.Fatalf("Took too long to be able to connect: %v", duration)
+	}
+
+	clients = s.clients.getClients()
+	if cc := len(clients); cc != 1 {
+		t.Fatalf("There should be 1 client, got %v", cc)
+	}
+	cli = clients[clientName]
+	if cli == nil {
+		t.Fatalf("Expected client %q to exist, did not", clientName)
+	}
+	// Check we have registered the "new" client which should have
+	// a different HbInbox
+	if hbInbox == cli.info.HbInbox {
+		t.Fatalf("Looks like restarted client was not properly registered")
 	}
 }
 

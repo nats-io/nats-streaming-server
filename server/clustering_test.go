@@ -16,6 +16,7 @@ import (
 	"time"
 
 	natsdTest "github.com/nats-io/gnatsd/test"
+	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/stores"
@@ -1133,4 +1134,107 @@ func TestClusteringConnClose(t *testing.T) {
 	sc.Close()
 	// Now clients should be removed from all nodes
 	checkClientsInAllServers(0)
+}
+
+func TestClusteringClientCrashAndReconnect(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Wait for metadata leader to be elected.
+	leader := getMetadataLeader(t, 10*time.Second, servers...)
+
+	// Create NATS connection so we can simulate client stopping
+	// responding to HBs.
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+	// Get the connected client's inbox
+	clients := leader.clients.getClients()
+	if cc := len(clients); cc != 1 {
+		t.Fatalf("There should be 1 client, got %v", cc)
+	}
+	cli := clients[clientName]
+	if cli == nil {
+		t.Fatalf("Expected client %q to exist, did not", clientName)
+	}
+	hbInbox := cli.info.HbInbox
+
+	// should get a duplicate clientID error
+	if sc2, err := stan.Connect(clusterName, clientName); err == nil {
+		sc2.Close()
+		t.Fatal("Expected to be unable to connect")
+	}
+
+	// kill the NATS conn
+	nc.Close()
+
+	// Since the original client won't respond to a ping, we should
+	// be able to connect, and it should not take too long.
+	start := time.Now()
+
+	// should succeed
+	if sc2, err := stan.Connect(clusterName, clientName); err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	} else {
+		defer sc2.Close()
+	}
+
+	duration := time.Since(start)
+	if duration > 5*time.Second {
+		t.Fatalf("Took too long to be able to connect: %v", duration)
+	}
+
+	// Now kill the metadata leader and ensure connection is known
+	// to the new leader.
+	leader.Shutdown()
+	servers = removeServer(servers, leader)
+	// Wait for new leader
+	leader = getMetadataLeader(t, 10*time.Second, servers...)
+	clients = leader.clients.getClients()
+	if cc := len(clients); cc != 1 {
+		t.Fatalf("There should be 1 client, got %v", cc)
+	}
+	cli = clients[clientName]
+	if cli == nil {
+		t.Fatalf("Expected client %q to exist, did not", clientName)
+	}
+	// Check we have registered the "new" client which should have
+	// a different HbInbox
+	if hbInbox == cli.info.HbInbox {
+		t.Fatalf("Looks like restarted client was not properly registered")
+	}
 }
