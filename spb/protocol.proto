@@ -127,7 +127,9 @@ message AckMessage {
 
 // AddClient is used to replicate a new client connection.
 message AddClient {
-  pb.ConnectRequest ConnectRequest = 1; // Client connection info.
+  string ClientID       = 1; // Client ID of connection.
+  string HeartbeatInbox = 2; // Inbox to send heartbeats to.
+  bool   Refresh        = 3; // Whether or not this is an existing client being refreshed.
 }
 
 // RemoveClient is used to close a client connection.
