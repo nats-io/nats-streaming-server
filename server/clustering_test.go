@@ -16,6 +16,7 @@ import (
 	"time"
 
 	natsdTest "github.com/nats-io/gnatsd/test"
+	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/stores"
@@ -60,8 +61,7 @@ func getChannelLeader(t *testing.T, channel string, timeout time.Duration, serve
 		deadline = time.Now().Add(timeout)
 	)
 	for time.Now().Before(deadline) {
-		for i := 0; i < len(servers); i++ {
-			s := servers[i]
+		for _, s := range servers {
 			if s.state == Shutdown {
 				continue
 			}
@@ -86,6 +86,33 @@ func getChannelLeader(t *testing.T, channel string, timeout time.Duration, serve
 	return leader
 }
 
+func getMetadataLeader(t *testing.T, timeout time.Duration, servers ...*StanServer) *StanServer {
+	var (
+		leader   *StanServer
+		deadline = time.Now().Add(timeout)
+	)
+	for time.Now().Before(deadline) {
+		for _, s := range servers {
+			if s.state == Shutdown || s.raft == nil {
+				continue
+			}
+			if s.isMetadataLeader() {
+				if leader != nil {
+					stackFatalf(t, "Found more than one metadata leader")
+				}
+				leader = s
+			}
+		}
+		if leader != nil {
+			break
+		}
+	}
+	if leader == nil {
+		stackFatalf(t, "Unable to find the metadata leader")
+	}
+	return leader
+}
+
 func verifyNoLeader(t *testing.T, channel string, timeout time.Duration, servers ...*StanServer) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -102,6 +129,12 @@ func verifyNoLeader(t *testing.T, channel string, timeout time.Duration, servers
 		return
 	}
 	stackFatalf(t, "Found unexpected leader for channel %s", channel)
+}
+
+func checkClientsInAllServers(t *testing.T, expected int, servers ...*StanServer) {
+	for _, srv := range servers {
+		waitForNumClients(t, srv, expected)
+	}
 }
 
 type msg struct {
@@ -237,6 +270,9 @@ func TestClusteringBasic(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
+
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
 	if err != nil {
@@ -312,22 +348,11 @@ func TestClusteringBasic(t *testing.T) {
 	stopped = append(stopped, leader)
 	servers = removeServer(servers, leader)
 
-	// Create a new connection with lower timeouts to test when we don't have a leader.
-	sc2, err := stan.Connect(clusterName, clientName+"-2", stan.PubAckWait(time.Second), stan.ConnectWait(time.Second))
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v", err)
-	}
-	defer sc2.Close()
-
-	// New subscriptions should be rejected since no leader can be established.
-	_, err = sc2.Subscribe(channel, func(msg *stan.Msg) {}, stan.DeliverAllAvailable(), stan.MaxInflight(1))
+	// Creating a new connection should fail since there should not be a
+	// metadata leader.
+	_, err = stan.Connect(clusterName, clientName+"-2", stan.PubAckWait(time.Second), stan.ConnectWait(time.Second))
 	if err == nil {
-		t.Fatal("Expected error on subscribe")
-	}
-
-	// Publishes should also fail.
-	if err := sc2.Publish(channel, []byte("foo")); err == nil {
-		t.Fatal("Expected error on publish")
+		t.Fatal("Expected error on connect")
 	}
 
 	// Bring one node back up.
@@ -396,6 +421,9 @@ func TestClusteringNoPanicOnShutdown(t *testing.T) {
 
 	servers := []*StanServer{s1, s2}
 
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
+
 	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(time.Second), stan.ConnectWait(10*time.Second))
 	if err != nil {
 		t.Fatalf("Error on connect: %v", err)
@@ -457,6 +485,9 @@ func TestClusteringLeaderFlap(t *testing.T) {
 	defer s2.Shutdown()
 
 	servers := []*StanServer{s1, s2}
+
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
 
 	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(2*time.Second))
 	if err != nil {
@@ -525,6 +556,9 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	for _, s := range servers {
 		checkState(t, s, Clustered)
 	}
+
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -682,6 +716,9 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 				checkState(t, s, Clustered)
 			}
 
+			// Wait for metadata leader to be elected.
+			getMetadataLeader(t, 10*time.Second, servers...)
+
 			// Create client connections.
 			sc1, err = stan.Connect(clusterName, clientName)
 			if err != nil {
@@ -772,6 +809,9 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 	for _, s := range servers {
 		checkState(t, s, Clustered)
 	}
+
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -872,6 +912,9 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
+
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
 	if err != nil {
@@ -957,6 +1000,9 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 	for _, s := range servers {
 		checkState(t, s, Clustered)
 	}
+
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -1066,6 +1112,9 @@ func TestClusteringConnClose(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
+
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
 	if err != nil {
@@ -1081,14 +1130,194 @@ func TestClusteringConnClose(t *testing.T) {
 		waitForNumSubs(t, srv, clientName, 1)
 	}
 
-	checkClientsInAllServers := func(expected int) {
-		for _, srv := range servers {
-			waitForNumClients(t, srv, expected)
-		}
-	}
-	checkClientsInAllServers(1)
+	checkClientsInAllServers(t, 1, servers...)
 	// Close client connection
 	sc.Close()
 	// Now clients should be removed from all nodes
-	checkClientsInAllServers(0)
+	checkClientsInAllServers(t, 0, servers...)
+}
+
+func TestClusteringClientCrashAndReconnect(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Wait for metadata leader to be elected.
+	leader := getMetadataLeader(t, 10*time.Second, servers...)
+
+	// Create NATS connection so we can simulate client stopping
+	// responding to HBs.
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+	// Get the connected client's inbox
+	clients := leader.clients.getClients()
+	if cc := len(clients); cc != 1 {
+		t.Fatalf("There should be 1 client, got %v", cc)
+	}
+	cli := clients[clientName]
+	if cli == nil {
+		t.Fatalf("Expected client %q to exist, did not", clientName)
+	}
+	hbInbox := cli.info.HbInbox
+
+	// should get a duplicate clientID error
+	if sc2, err := stan.Connect(clusterName, clientName); err == nil {
+		sc2.Close()
+		t.Fatal("Expected to be unable to connect")
+	}
+
+	// kill the NATS conn
+	nc.Close()
+
+	// Since the original client won't respond to a ping, we should
+	// be able to connect, and it should not take too long.
+	start := time.Now()
+
+	// should succeed
+	if sc2, err := stan.Connect(clusterName, clientName); err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	} else {
+		defer sc2.Close()
+	}
+
+	duration := time.Since(start)
+	if duration > 5*time.Second {
+		t.Fatalf("Took too long to be able to connect: %v", duration)
+	}
+
+	// Now kill the metadata leader and ensure connection is known
+	// to the new leader.
+	leader.Shutdown()
+	servers = removeServer(servers, leader)
+	// Wait for new leader
+	leader = getMetadataLeader(t, 10*time.Second, servers...)
+	clients = leader.clients.getClients()
+	if cc := len(clients); cc != 1 {
+		t.Fatalf("There should be 1 client, got %v", cc)
+	}
+	cli = clients[clientName]
+	if cli == nil {
+		t.Fatalf("Expected client %q to exist, did not", clientName)
+	}
+	// Check we have registered the "new" client which should have
+	// a different HbInbox
+	if hbInbox == cli.info.HbInbox {
+		t.Fatalf("Looks like restarted client was not properly registered")
+	}
+}
+
+func TestClusteringHeartbeatFailover(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts.ClientHBInterval = 50 * time.Millisecond
+	s1sOpts.ClientHBTimeout = 10 * time.Millisecond
+	s1sOpts.ClientHBFailCount = 5
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts.ClientHBInterval = 50 * time.Millisecond
+	s2sOpts.ClientHBTimeout = 10 * time.Millisecond
+	s2sOpts.ClientHBFailCount = 5
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts.ClientHBInterval = 50 * time.Millisecond
+	s3sOpts.ClientHBTimeout = 10 * time.Millisecond
+	s3sOpts.ClientHBFailCount = 5
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Wait for metadata leader to be elected.
+	leader := getMetadataLeader(t, 10*time.Second, servers...)
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Wait for client to be registered
+	checkClientsInAllServers(t, 1, servers...)
+
+	// Check that client is not incorrectly purged
+	dur := (leader.opts.ClientHBInterval + leader.opts.ClientHBTimeout)
+	dur *= time.Duration(leader.opts.ClientHBFailCount + 1)
+	dur += 100 * time.Millisecond
+	time.Sleep(dur)
+	// Client should still be there
+	checkClientsInAllServers(t, 1, servers...)
+
+	// Take down the leader.
+	leader.Shutdown()
+	servers = removeServer(servers, leader)
+
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
+
+	// Client should still be there
+	checkClientsInAllServers(t, 1, servers...)
+
+	// kill the NATS conn
+	nc.Close()
+
+	// Check that the server closes the connection
+	checkClientsInAllServers(t, 0, servers...)
 }

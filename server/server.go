@@ -3,8 +3,6 @@
 package server
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,7 +10,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -23,12 +20,10 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
-	"github.com/hashicorp/raft-boltdb"
 	natsdLogger "github.com/nats-io/gnatsd/logger"
 	"github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nats-on-a-log"
 	"github.com/nats-io/nuid"
 
 	"github.com/nats-io/nats-streaming-server/logger"
@@ -65,9 +60,6 @@ const (
 	// the client connection (total= (heartbeat interval + heartbeat timeout) * (fail count + 1)
 	DefaultMaxFailedHeartBeats = int((5 * time.Minute) / DefaultHeartBeatInterval)
 
-	// Max number of outstanding go-routines handling connect requests for
-	// duplicate client IDs.
-	defaultMaxDupCIDRoutines = 100
 	// Timeout used to ping the known client when processing a connection
 	// request for a duplicate client ID.
 	defaultCheckDupCIDTimeout = 500 * time.Millisecond
@@ -290,93 +282,8 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 }
 
 func assignChannelRaft(s *StanServer, c *channel) error {
-	path := filepath.Join(s.opts.RaftLogPath, c.name)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.MkdirAll(path, os.ModeDir+os.ModePerm); err != nil {
-			return err
-		}
-	}
-	store, err := raftboltdb.NewBoltStore(filepath.Join(path, raftLogFile))
+	node, err := s.createRaftNode(c.name, c)
 	if err != nil {
-		return err
-	}
-	c.raftStore = store
-	cacheStore, err := raft.NewLogCache(s.opts.LogCacheSize, store)
-	if err != nil {
-		store.Close()
-		return err
-	}
-
-	config := raft.DefaultConfig()
-	config.TrailingLogs = uint64(s.opts.TrailingLogs)
-
-	// FIXME: Send output of Raft logger
-	// Raft expects a *log.Logger so can not swap that with another one,
-	// but we can modify the outputs to which the Raft logger is writing.
-	//config.Logger = s.log
-	logReader, logWriter := io.Pipe()
-	c.raftLogInput = logWriter
-	config.LogOutput = logWriter
-	bufr := bufio.NewReader(logReader)
-	go func() {
-		for {
-			line, _, err := bufr.ReadLine()
-			if err != nil {
-				if err != io.EOF {
-					s.log.Errorf("error while reading piped output from Raft log: %s", err)
-				}
-				return
-			}
-
-			fields := bytes.Fields(line)
-			level := string(fields[2])
-			raftLogFields := fields[4:]
-			raftLog := string(bytes.Join(raftLogFields, []byte(" ")))
-
-			switch level {
-			case "[DEBUG]":
-				s.log.Tracef("%v", raftLog)
-			case "[INFO]":
-				s.log.Noticef("%v", raftLog)
-			case "[WARN]":
-				s.log.Noticef("%v", raftLog)
-			case "[ERROR]":
-				s.log.Fatalf("%v", raftLog)
-			default:
-				s.log.Noticef("%v", raftLog)
-			}
-		}
-	}()
-
-	snapshotStore, err := raft.NewFileSnapshotStore(path, s.opts.LogSnapshots, logWriter)
-	if err != nil {
-		store.Close()
-		return err
-	}
-
-	// TODO: using a single NATS conn for every channel might be a bottleneck. Maybe pool conns?
-	transport, err := natslog.NewNATSTransport(
-		fmt.Sprintf("%s.%s", s.opts.ClusterNodeID, c.name), s.ncr, 2*time.Second, logWriter)
-	if err != nil {
-		store.Close()
-		return err
-	}
-	c.raftTransport = transport
-
-	peers := make([]string, len(s.opts.ClusterPeers))
-	for i, p := range s.opts.ClusterPeers {
-		peers[i] = fmt.Sprintf("%s.%s", p, c.name)
-	}
-	peersStore := &raft.StaticPeers{StaticPeers: peers}
-
-	// Set up a channel for reliable leader notifications.
-	raftNotifyCh := make(chan bool, 1)
-	config.NotifyCh = raftNotifyCh
-
-	node, err := raft.NewRaft(config, c, cacheStore, store, snapshotStore, peersStore, transport)
-	if err != nil {
-		transport.Close()
-		store.Close()
 		return err
 	}
 	c.raft = node
@@ -392,9 +299,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if node.Leader() == "" {
-		node.Shutdown()
-		transport.Close()
-		store.Close()
+		node.shutdown()
 		return errors.New("channel leader was not elected in time")
 	}
 
@@ -411,7 +316,7 @@ func assignChannelRaft(s *StanServer, c *channel) error {
 	go func() {
 		for {
 			select {
-			case isLeader := <-raftNotifyCh:
+			case isLeader := <-node.notifyCh:
 				if isLeader {
 					err := c.leadershipAcquired()
 					leaderReady()
@@ -488,18 +393,15 @@ func (cs *channelStore) count() int {
 }
 
 type channel struct {
-	nextSequence  uint64
-	leader        uint32
-	name          string
-	store         *stores.Channel
-	ss            *subStore
-	raft          *raft.Raft
-	raftStore     *raftboltdb.BoltStore
-	raftLogInput  io.WriteCloser
-	raftTransport *raft.NetworkTransport
-	lTimestamp    int64
-	acksSub       *nats.Subscription
-	stan          *StanServer
+	nextSequence uint64
+	leader       uint32
+	name         string
+	store        *stores.Channel
+	ss           *subStore
+	raft         *raftNode
+	lTimestamp   int64
+	acksSub      *nats.Subscription
+	stan         *StanServer
 }
 
 // Apply log is invoked once a log entry is committed.
@@ -596,6 +498,7 @@ func (c *channel) isLeader() bool {
 // the next sequence to assign, and attempts to redeliver any outstanding
 // messages that have expired.
 func (c *channel) leadershipAcquired() error {
+	c.stan.log.Debugf("server became leader for channel %s, performing leader promotion actions", c.name)
 	// Use a barrier to ensure all preceding operations are
 	// applied to the FSM, then update nextSequence.
 	barrier := c.raft.Barrier(30 * time.Second)
@@ -631,6 +534,7 @@ func (c *channel) leadershipAcquired() error {
 
 	// Finally step up as leader.
 	atomic.StoreUint32(&c.leader, 1)
+	c.stan.log.Debugf("finished leader promotion actions for channel %s", c.name)
 	return nil
 }
 
@@ -638,11 +542,13 @@ func (c *channel) leadershipAcquired() error {
 // channel. This should only be called when the server is running in
 // clustered mode. This removes the ack subscription.
 func (c *channel) leadershipLost() {
+	c.stan.log.Debugf("server lost leadership for channel %s, performing leader stepdown actions", c.name)
 	if c.acksSub != nil {
 		c.acksSub.Unsubscribe()
 		c.acksSub = nil
 	}
 	atomic.StoreUint32(&c.leader, 0)
+	c.stan.log.Debugf("finished leader stepdown actions for channel %s", c.name)
 }
 
 func (c *channel) getAckSubject() string {
@@ -656,6 +562,8 @@ func (c *channel) getAckSubject() string {
 // the FSM should be implemented in a fashion that allows for concurrent
 // updates while a snapshot is happening.
 func (c *channel) Snapshot() (raft.FSMSnapshot, error) {
+	// TODO: this needs to be fully implemented to support snapshotting the
+	// entire Raft log, not just channel messages.
 	return newChannelSnapshot(c), nil
 }
 
@@ -663,6 +571,8 @@ func (c *channel) Snapshot() (raft.FSMSnapshot, error) {
 // concurrently with any other command. The FSM must discard all previous
 // state.
 func (c *channel) Restore(old io.ReadCloser) error {
+	// TODO: this needs to be fully implemented to support restoring the
+	// entire Raft log, not just channel messages.
 	defer old.Close()
 	sizeBuf := make([]byte, 4)
 	for {
@@ -714,12 +624,7 @@ type StanServer struct {
 	wg sync.WaitGroup // Wait on go routines during shutdown
 
 	// Used when processing connect requests for client ID already registered
-	dupCIDGuard       sync.RWMutex
-	dupCIDMap         map[string]struct{}
-	dupCIDwg          sync.WaitGroup // To wait for one routine to end when we have reached the max.
-	dupCIDswg         bool           // To instruct one go routine to decrement the wait group.
-	dupCIDTimeout     time.Duration
-	dupMaxCIDRoutines int
+	dupCIDTimeout time.Duration
 
 	// Clients
 	clients *clientStore
@@ -779,10 +684,17 @@ type StanServer struct {
 	trace bool
 	debug bool
 	log   *logger.StanLogger
+
+	// Metadata Raft group.
+	raft *raftNode
 }
 
 func (s *StanServer) isClustered() bool {
 	return len(s.opts.ClusterPeers) > 0
+}
+
+func (s *StanServer) isMetadataLeader() bool {
+	return s.raft.State() == raft.Leader
 }
 
 // subStore holds all known state for all subscriptions
@@ -1440,20 +1352,18 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	}
 
 	s := StanServer{
-		serverID:          nuid.Next(),
-		opts:              sOpts,
-		dupCIDMap:         make(map[string]struct{}),
-		dupMaxCIDRoutines: defaultMaxDupCIDRoutines,
-		dupCIDTimeout:     defaultCheckDupCIDTimeout,
-		ioChannelQuit:     make(chan struct{}, 1),
-		ctrlMsgRefIDs:     make(map[string]int),
-		trace:             sOpts.Trace,
-		debug:             sOpts.Debug,
-		subStartCh:        make(chan *subStartInfo, defaultSubStartChanLen),
-		subStartQuit:      make(chan struct{}, 1),
-		startTime:         time.Now(),
-		log:               logger.NewStanLogger(),
-		shutdownCh:        make(chan struct{}),
+		serverID:      nuid.Next(),
+		opts:          sOpts,
+		dupCIDTimeout: defaultCheckDupCIDTimeout,
+		ioChannelQuit: make(chan struct{}, 1),
+		ctrlMsgRefIDs: make(map[string]int),
+		trace:         sOpts.Trace,
+		debug:         sOpts.Debug,
+		subStartCh:    make(chan *subStartInfo, defaultSubStartChanLen),
+		subStartQuit:  make(chan struct{}, 1),
+		startTime:     time.Now(),
+		log:           logger.NewStanLogger(),
+		shutdownCh:    make(chan struct{}),
 	}
 
 	// If a custom logger is provided, use this one, otherwise, check
@@ -1707,6 +1617,13 @@ func (s *StanServer) start(runningState State) error {
 		}
 	}
 
+	// If clustered, start metadata Raft group.
+	if s.isClustered() {
+		if err := s.startMetadataRaftNode(); err != nil {
+			return err
+		}
+	}
+
 	// Start the go-routine responsible to start sending messages to newly
 	// started subscriptions. We do that before opening the gates in
 	// s.initSupscriptions() (which is where the internal subscriptions
@@ -1744,6 +1661,70 @@ func (s *StanServer) start(runningState State) error {
 		go s.performRedeliveryOnStartup(recoveredSubs)
 	}
 	return nil
+}
+
+// startMetadataRaftNode creates and starts the metadata Raft group. This is
+// used to handle replication of connection state and cluster metadata. This
+// should only be called if the server is running in clustered mode.
+func (s *StanServer) startMetadataRaftNode() error {
+	node, err := s.createRaftNode("_metadata", s)
+	if err != nil {
+		return err
+	}
+	s.raft = node
+
+	go func() {
+		for {
+			select {
+			case isLeader := <-node.notifyCh:
+				if isLeader {
+					s.leadershipAcquired()
+				} else {
+					s.leadershipLost()
+				}
+			case <-s.shutdownCh:
+				return
+			}
+		}
+	}()
+
+	return nil
+}
+
+// leadershipAcquired should be called when this node is elected leader for the
+// metadata group. This should only be called when the server is running in
+// clustered mode. This sets up client heartbeats.
+func (s *StanServer) leadershipAcquired() {
+	s.log.Debugf("server became metadata leader, performing leader promotion actions")
+
+	// Setup client heartbeats.
+	for _, client := range s.clients.getClients() {
+		client.RLock()
+		cID := client.info.ID
+		client.RUnlock()
+		s.clients.setClientHB(cID, s.opts.ClientHBTimeout, func() {
+			s.checkClientHealth(cID)
+		})
+	}
+
+	s.log.Debugf("finished metadata leader promotion actions")
+}
+
+// leadershipLost should be called when this node loses leadership for the
+// metadata group. This should only be called when the server is running in
+// clustered mode. This cancels all outstanding client heartbeats.
+func (s *StanServer) leadershipLost() {
+	s.log.Debugf("server lost metadata leadership, performing leader stepdown actions")
+
+	// Cancel outstanding client heartbeats. We aren't concerned about races
+	// where new clients might be connecting because at this point, the server
+	// will no longer accept new client connections, but even if it did, the
+	// heartbeat would be automatically removed when it fires.
+	for _, client := range s.clients.getClients() {
+		s.clients.removeClientHB(client)
+	}
+
+	s.log.Debugf("finished metadata leader stepdown actions")
 }
 
 // TODO:  Explore parameter passing in gnatsd.  Keep separate for now.
@@ -2019,13 +2000,17 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 		sub.initialized = true
 		sub.Unlock()
 	}
-	// Go through the list of clients and ensure their Hb timer is set.
-	for _, sc := range recoveredClients {
-		// Because of the loop, we need to make copy for the closure
-		cID := sc.ID
-		s.clients.setClientHB(cID, s.opts.ClientHBTimeout, func() {
-			s.checkClientHealth(cID)
-		})
+	// Go through the list of clients and ensure their Hb timer is set. Only do
+	// this for standalone mode. If clustered, timers will be setup on leader
+	// election.
+	if !s.isClustered() {
+		for _, sc := range recoveredClients {
+			// Because of the loop, we need to make copy for the closure
+			cID := sc.ID
+			s.clients.setClientHB(cID, s.opts.ClientHBTimeout, func() {
+				s.checkClientHealth(cID)
+			})
+		}
 	}
 }
 
@@ -2168,73 +2153,117 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 		return
 	}
 
-	// Try to register
-	client, isNew, err := s.clients.register(req.ClientID, req.HeartbeatInbox)
-	if err != nil {
-		s.log.Errorf("[Client:%s] Error registering client: %v", req.ClientID, err)
-		s.sendConnectErr(m.Reply, err.Error())
+	// In clustered mode, drop the request if we're not the metadata leader.
+	// Another server will handle it.
+	if s.isClustered() && !s.isMetadataLeader() {
 		return
 	}
-	// Handle duplicate IDs in a dedicated go-routine
-	if !isNew {
-		// Do we have a routine in progress for this client ID?
-		s.dupCIDGuard.RLock()
-		_, inProgress := s.dupCIDMap[req.ClientID]
-		s.dupCIDGuard.RUnlock()
 
-		// Yes, fail this request here.
-		if inProgress {
-			s.log.Errorf("[Client:%s] Connect failed; already connected", req.ClientID)
+	// If the client ID is already registered, check to see if it's the case
+	// that the client refreshed (e.g. it crashed and came back) or if the
+	// connection is a duplicate. If it refreshed, we will close the old
+	// client and open a new one.
+	refresh := false
+	client := s.clients.lookup(req.ClientID)
+	if client != nil {
+		if s.isDuplicateConnect(client) {
+			s.log.Debugf("[Client:%s] Connect failed; already connected", req.ClientID)
 			s.sendConnectErr(m.Reply, ErrInvalidClient.Error())
 			return
 		}
+		refresh = true
+	}
 
-		// If server has started shutdown, we can't call wg.Add() so we need
-		// to check on shutdown status. Note that s.wg is for all server's
-		// go routines, not specific to duplicate CID handling. Use server's
-		// lock here.
-		s.mu.Lock()
-		shutdown := s.shutdown
-		if !shutdown {
-			// Assume we are going to start a go routine.
-			s.wg.Add(1)
-		}
-		s.mu.Unlock()
+	// If clustered, thread operations through Raft.
+	if s.isClustered() {
+		err = s.replicateConnect(req.ClientID, req.HeartbeatInbox, refresh)
+	} else {
+		err = s.processConnect(req.ClientID, req.HeartbeatInbox, refresh)
+	}
 
-		if shutdown {
-			// The client will timeout on connect
-			return
-		}
-
-		// If we have exhausted the max number of go routines, we will have
-		// to wait that one finishes.
-		needToWait := false
-
-		s.dupCIDGuard.Lock()
-		s.dupCIDMap[req.ClientID] = struct{}{}
-		if len(s.dupCIDMap) > s.dupMaxCIDRoutines {
-			s.dupCIDswg = true
-			s.dupCIDwg.Add(1)
-			needToWait = true
-		}
-		s.dupCIDGuard.Unlock()
-
-		// If we need to wait for a go routine to return...
-		if needToWait {
-			s.dupCIDwg.Wait()
-		}
-		// Start a go-routine to handle this connect request
-		go func() {
-			s.processConnectRequestWithDupID(client, req, m.Reply)
-		}()
+	if err != nil {
+		s.log.Errorf("[Client:%s] Connect failed: %v", req.ClientID, err)
+		s.sendConnectErr(m.Reply, err.Error())
 		return
 	}
 
-	// Here, we accept this client's incoming connect request.
-	s.finishConnectRequest(client, req, m.Reply)
+	// Send connect response to client and start heartbeat timer.
+	s.finishConnectRequest(req, m.Reply)
 }
 
-func (s *StanServer) finishConnectRequest(client *client, req *pb.ConnectRequest, replyInbox string) {
+// isDuplicateConnect determines if the given client ID is a duplicate
+// connection by pinging the old client's heartbeat inbox and checking if it
+// responds. If it does, it's a duplicate connection.
+func (s *StanServer) isDuplicateConnect(client *client) bool {
+	client.RLock()
+	hbInbox := client.info.HbInbox
+	client.RUnlock()
+
+	// This is the HbInbox from the "old" client. See if it is up and
+	// running by sending a ping to that inbox.
+	_, err := s.nc.Request(hbInbox, nil, s.dupCIDTimeout)
+
+	// If err is nil, the currently registered client responded, so this is a
+	// duplicate.
+	return err == nil
+}
+
+func (s *StanServer) replicateConnect(clientID, heartbeatInbox string, refresh bool) error {
+	op := &spb.RaftOperation{
+		OpType: spb.RaftOperation_Connect,
+		Leader: s.opts.ClusterNodeID,
+		ClientConnect: &spb.AddClient{
+			ClientID:       clientID,
+			HeartbeatInbox: heartbeatInbox,
+			Refresh:        refresh,
+		},
+	}
+	data, err := op.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	future := s.raft.Apply(data, raftApplyTimeout)
+	// Wait on result of replication.
+	if err := future.Error(); err != nil {
+		return err
+	}
+
+	// Perform a barrier to ensure the connect replication is applied before
+	// returning. This prevents a race where a client connects and then makes a
+	// request before the connect has been applied.
+	s.raft.Barrier(raftApplyTimeout).Error()
+
+	resp := future.Response()
+	if resp == nil {
+		return nil
+	}
+	return resp.(error)
+}
+
+func (s *StanServer) processConnect(clientID, heartbeatInbox string, refresh bool) error {
+	// If the client refreshed, close the old one first.
+	if refresh {
+		s.closeClient(clientID)
+
+		// Because connections are processed on the same goroutine, it is not
+		// possible for a connection request for the same client ID to come in at
+		// the same time after unregistering the old client.
+	}
+
+	// Try to register
+	_, isNew, err := s.clients.register(clientID, heartbeatInbox)
+	if err != nil {
+		s.log.Errorf("[Client:%s] Error registering client: %v", clientID, err)
+		return err
+	}
+
+	if refresh && isNew {
+		s.log.Debugf("[Client:%s] Replaced old client (Inbox=%v)", clientID, heartbeatInbox)
+	}
+	return nil
+}
+
+func (s *StanServer) finishConnectRequest(req *pb.ConnectRequest, replyInbox string) {
 	cr := &pb.ConnectResponse{
 		PubPrefix:        s.info.Publish,
 		SubRequests:      s.info.Subscribe,
@@ -2253,57 +2282,6 @@ func (s *StanServer) finishConnectRequest(client *client, req *pb.ConnectRequest
 	s.log.Debugf("[Client:%s] Connected (Inbox=%v)", clientID, hbInbox)
 }
 
-func (s *StanServer) processConnectRequestWithDupID(c *client, req *pb.ConnectRequest, replyInbox string) {
-	sendErr := true
-
-	c.RLock()
-	hbInbox := c.info.HbInbox
-	clientID := c.info.ID
-	c.RUnlock()
-
-	defer func() {
-		s.dupCIDGuard.Lock()
-		delete(s.dupCIDMap, clientID)
-		if s.dupCIDswg {
-			s.dupCIDswg = false
-			s.dupCIDwg.Done()
-		}
-		s.dupCIDGuard.Unlock()
-		s.wg.Done()
-	}()
-
-	// This is the HbInbox from the "old" client. See if it is up and
-	// running by sending a ping to that inbox.
-	if _, err := s.nc.Request(hbInbox, nil, s.dupCIDTimeout); err != nil {
-		// The old client didn't reply, assume it is dead, close it and continue.
-		s.closeClient(clientID)
-
-		// Between the close and the new registration below, it is possible
-		// that a connection request came in (in connectCB) and since the
-		// client is now unregistered, the new connection was accepted there.
-		// The registration below will then fail, in which case we will fail
-		// this request.
-
-		// Need to re-register now based on the new request info.
-		var isNew bool
-		c, isNew, err = s.clients.register(req.ClientID, req.HeartbeatInbox)
-		if err == nil && isNew {
-			// We could register the new client.
-			s.log.Debugf("[Client:%s] Replaced old client (Inbox=%v)", req.ClientID, hbInbox)
-			sendErr = false
-		}
-	}
-	// The currently registered client is responding, or we failed to register,
-	// so fail the request of the incoming client connect request.
-	if sendErr {
-		s.log.Debugf("[Client:%s] Connect failed; already connected", clientID)
-		s.sendConnectErr(replyInbox, ErrInvalidClient.Error())
-		return
-	}
-	// We have replaced the old with the new.
-	s.finishConnectRequest(c, req, replyInbox)
-}
-
 func (s *StanServer) sendConnectErr(replyInbox, err string) {
 	cr := &pb.ConnectResponse{Error: err}
 	b, _ := cr.Marshal()
@@ -2314,6 +2292,13 @@ func (s *StanServer) sendConnectErr(replyInbox, err string) {
 func (s *StanServer) checkClientHealth(clientID string) {
 	client := s.clients.lookup(clientID)
 	if client == nil {
+		return
+	}
+
+	// If clustered and we lost metadata leadership, we should stop
+	// heartbeating as the new leader will take over.
+	if s.isClustered() && !s.isMetadataLeader() {
+		s.clients.removeClientHB(client)
 		return
 	}
 
@@ -2344,7 +2329,15 @@ func (s *StanServer) checkClientHealth(clientID string) {
 			// close the client (connection). This locks the
 			// client object internally so unlock here.
 			client.Unlock()
-			s.closeClient(clientID)
+			// If clustered, thread operations through Raft.
+			if s.isClustered() {
+				if err := s.replicateConnClose(clientID, "", false); err != nil {
+					s.log.Errorf("[Client:%s] Failed to replicate disconnect on heartbeat expiration: %v",
+						clientID, err)
+				}
+			} else {
+				s.closeClient(clientID)
+			}
 			return
 		}
 	} else {
@@ -2418,8 +2411,26 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 		return
 	}
 
+	// In clustered mode, drop the request if we're not the metadata leader.
+	// Another server will handle it.
+	if s.isClustered() && !s.isMetadataLeader() {
+		return
+	}
+
+	// If clustered, thread operations through Raft.
+	if s.isClustered() {
+		if err := s.replicateConnClose(req.ClientID, m.Reply, true); err != nil {
+			s.log.Errorf("Failed to replicate close request: %v", err)
+			s.sendCloseErr(m.Reply, err.Error())
+		}
+	} else {
+		s.scheduleConnClose(req.ClientID, m.Reply)
+	}
+}
+
+func (s *StanServer) scheduleConnClose(clientID, reply string) {
 	// Create the control and corresponding NATS message
-	ctrlMsg, ctrlNatsMsg := s.createCtrlMsg(spb.CtrlMsg_ConnClose, true, m.Reply, []byte(req.ClientID))
+	ctrlMsg, ctrlNatsMsg := s.createCtrlMsg(spb.CtrlMsg_ConnClose, true, reply, []byte(clientID))
 
 	// Lock for the remainder of the function
 	s.ctrlMsgMu.Lock()
@@ -2437,7 +2448,7 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	if s.ncs.PublishMsg(ctrlNatsMsg) == nil {
 		refs++
 	}
-	subs := s.clients.getSubs(req.ClientID)
+	subs := s.clients.getSubs(clientID)
 	// If there are subscribers, we will schedule the connection
 	// close request to subscriber's ackInbox subscribers.
 	// We now have a single ack subscriber per channel, not per
@@ -2486,27 +2497,47 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	// If were unable to schedule a single proto, then execute
 	// performConnClose from here.
 	if refs == 0 {
-		s.performConnClose(m, req.ClientID)
+		s.performConnClose(clientID, reply)
 	}
 }
 
 // performConnClose performs a connection close operation after all
 // client's pubMsg or client acks have been processed.
-func (s *StanServer) performConnClose(m *nats.Msg, clientID string) {
+func (s *StanServer) performConnClose(clientID, reply string) {
 	// The function or the caller is already locking, so do not use
 	// locking in that function.
 	if !s.closeClient(clientID) {
 		s.log.Errorf("Unknown client %q in close request", clientID)
-		s.sendCloseErr(m.Reply, ErrUnknownClient.Error())
+		s.sendCloseErr(reply, ErrUnknownClient.Error())
 		return
 	}
 
-	resp := &pb.CloseResponse{}
-	b, _ := resp.Marshal()
-	s.nc.Publish(m.Reply, b)
+	if reply != "" {
+		resp := &pb.CloseResponse{}
+		b, _ := resp.Marshal()
+		s.nc.Publish(reply, b)
+	}
+}
+
+func (s *StanServer) replicateConnClose(clientID, reply string, schedule bool) error {
+	op := &spb.RaftOperation{
+		OpType:           spb.RaftOperation_Disconnect,
+		Leader:           s.opts.ClusterNodeID,
+		ClientDisconnect: &spb.RemoveClient{ClientID: clientID, Reply: reply, Schedule: schedule},
+	}
+	data, err := op.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	future := s.raft.Apply(data, raftApplyTimeout)
+	// Wait on result of replication.
+	return future.Error()
 }
 
 func (s *StanServer) sendCloseErr(subj, err string) {
+	if subj == "" {
+		return
+	}
 	resp := &pb.CloseResponse{Error: err}
 	if b, err := resp.Marshal(); err == nil {
 		s.nc.Publish(subj, b)
@@ -2596,7 +2627,7 @@ func (s *StanServer) processCtrlMsg(m *nats.Msg) bool {
 		s.performSubUnsubOrClose(cm.MsgType, processRequest, m, req)
 	case spb.CtrlMsg_ConnClose:
 		clientID := string(cm.Data)
-		s.performConnClose(m, clientID)
+		s.performConnClose(clientID, m.Reply)
 	default:
 		return false // Valid ctrl message, but unexpected type, return failure.
 	}
@@ -4440,25 +4471,17 @@ func (s *StanServer) Shutdown() {
 		channels := channelStore.getAll()
 		for _, channel := range channels {
 			if channel.raft != nil {
-				if err := channel.raft.Shutdown().Error(); err != nil {
+				if err := channel.raft.shutdown(); err != nil {
 					s.log.Errorf("Failed to stop Raft node for channel %s: %v", channel.name, err)
 				}
 			}
-			if channel.raftStore != nil {
-				if err := channel.raftStore.Close(); err != nil {
-					s.log.Errorf("Failed to close Raft log store for channel %s: %v", channel.name, err)
-				}
-			}
-			if channel.raftLogInput != nil {
-				if err := channel.raftLogInput.Close(); err != nil {
-					s.log.Errorf("Failed to close Raft log input for channel %s: %v", channel.name, err)
-				}
-			}
-			if channel.raftTransport != nil {
-				if err := channel.raftTransport.Close(); err != nil {
-					s.log.Errorf("Failed to close Raft transport for channel %s: %v", channel.name, err)
-				}
-			}
+		}
+	}
+
+	// Close metadata Raft group.
+	if s.raft != nil {
+		if err := s.raft.shutdown(); err != nil {
+			s.log.Errorf("Failed to stop metadata Raft node: %v", err)
 		}
 	}
 
@@ -4486,4 +4509,55 @@ func (s *StanServer) Shutdown() {
 
 	// Wait for go-routines to return
 	s.wg.Wait()
+}
+
+// Apply log is invoked once a log entry is committed.
+// It returns a value which will be made available in the
+// ApplyFuture returned by Raft.Apply method if that
+// method was called on the same Raft node as the FSM.
+func (s *StanServer) Apply(l *raft.Log) interface{} {
+	op := &spb.RaftOperation{}
+	if err := op.Unmarshal(l.Data); err != nil {
+		panic(err)
+	}
+	switch op.OpType {
+	case spb.RaftOperation_Connect:
+		// Client connection replication.
+		return s.processConnect(op.ClientConnect.ClientID, op.ClientConnect.HeartbeatInbox, op.ClientConnect.Refresh)
+	case spb.RaftOperation_Disconnect:
+		// Client disconnect replication.
+		if op.ClientDisconnect.Schedule {
+			reply := op.ClientDisconnect.Reply
+			// Only send a reply if we are the server that proposed the
+			// disconnect.
+			if op.Leader != s.opts.ClusterNodeID {
+				reply = ""
+			}
+			s.scheduleConnClose(op.ClientDisconnect.ClientID, reply)
+		} else {
+			s.closeClient(op.ClientDisconnect.ClientID)
+		}
+		return nil
+	default:
+		panic(fmt.Sprintf("unknown op type %s", op.OpType))
+	}
+}
+
+// Snapshot is used to support log compaction. This call should
+// return an FSMSnapshot which can be used to save a point-in-time
+// snapshot of the FSM. Apply and Snapshot are not called in multiple
+// threads, but Apply will be called concurrently with Persist. This means
+// the FSM should be implemented in a fashion that allows for concurrent
+// updates while a snapshot is happening.
+func (s *StanServer) Snapshot() (raft.FSMSnapshot, error) {
+	// TODO
+	return nil, nil
+}
+
+// Restore is used to restore an FSM from a snapshot. It is not called
+// concurrently with any other command. The FSM must discard all previous
+// state.
+func (s *StanServer) Restore(io.ReadCloser) error {
+	// TODO
+	return nil
 }

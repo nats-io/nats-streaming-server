@@ -88,14 +88,18 @@ message RaftOperation {
     CloseSubscription  = 3; // Close durable client subscription.
     Ack                = 4; // Ack a message.
     Send               = 5; // Message send on a client subscription.
+    Connect            = 6; // Client connection.
+    Disconnect         = 7; // Client disconnect.
   }
-  Type               OpType       = 1; // Log message type.
-  string             Leader       = 2; // The node that proposed the operation.
-  Batch              PublishBatch = 3; // Publish operation data.
-  AddSubscription    Sub          = 4; // Subscribe operation data.
-  RemoveSubscription Unsub        = 5; // Close/Remove Subscription operation data.
-  AckMessage         AckMsg       = 6; // Ack operation data.
-  AckMessage         SendMsg      = 7; // Send operation data.
+  Type               OpType           = 1; // Log message type.
+  string             Leader           = 2; // The node that proposed the operation.
+  Batch              PublishBatch     = 3; // Publish operation data.
+  AddSubscription    Sub              = 4; // Subscribe operation data.
+  RemoveSubscription Unsub            = 5; // Close/Remove Subscription operation data.
+  AckMessage         AckMsg           = 6; // Ack operation data.
+  AckMessage         SendMsg          = 7; // Send operation data.
+  AddClient          ClientConnect    = 8; // Connect operation data.
+  RemoveClient       ClientDisconnect = 9; // Disconnect operation data.       
 }
 
 // Batch is a batch of messages for replication.
@@ -119,4 +123,18 @@ message RemoveSubscription {
 message AckMessage {
   string AckInbox = 1; // Subscription ack inbox.
   uint64 Sequence = 2; // Message sequence to ack.
+}
+
+// AddClient is used to replicate a new client connection.
+message AddClient {
+  string ClientID       = 1; // Client ID of connection.
+  string HeartbeatInbox = 2; // Inbox to send heartbeats to.
+  bool   Refresh        = 3; // Whether or not this is an existing client being refreshed.
+}
+
+// RemoveClient is used to close a client connection.
+message RemoveClient {
+  string ClientID = 1; // Client to close.
+  string Reply    = 2; // Inbox to send client response to.
+  bool   Schedule = 3; // Whether to schedule the disconnect or do it immediately.
 }
