@@ -47,7 +47,10 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 			return nil, err
 		}
 	}
-	store, err := raftboltdb.NewBoltStore(filepath.Join(path, raftLogFile))
+	store, err := raftboltdb.New(raftboltdb.Options{
+		Path:   filepath.Join(path, raftLogFile),
+		NoSync: !s.opts.FileStoreOpts.DoSync,
+	})
 	if err != nil {
 		return nil, err
 	}
