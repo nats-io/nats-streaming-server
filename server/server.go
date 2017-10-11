@@ -2512,9 +2512,11 @@ func (s *StanServer) performConnClose(clientID, reply string) {
 		return
 	}
 
-	resp := &pb.CloseResponse{}
-	b, _ := resp.Marshal()
-	s.nc.Publish(reply, b)
+	if reply != "" {
+		resp := &pb.CloseResponse{}
+		b, _ := resp.Marshal()
+		s.nc.Publish(reply, b)
+	}
 }
 
 func (s *StanServer) replicateConnClose(clientID, reply string, schedule bool) error {
@@ -2533,6 +2535,9 @@ func (s *StanServer) replicateConnClose(clientID, reply string, schedule bool) e
 }
 
 func (s *StanServer) sendCloseErr(subj, err string) {
+	if subj == "" {
+		return
+	}
 	resp := &pb.CloseResponse{Error: err}
 	if b, err := resp.Marshal(); err == nil {
 		s.nc.Publish(subj, b)
@@ -4522,7 +4527,13 @@ func (s *StanServer) Apply(l *raft.Log) interface{} {
 	case spb.RaftOperation_Disconnect:
 		// Client disconnect replication.
 		if op.ClientDisconnect.Schedule {
-			s.scheduleConnClose(op.ClientDisconnect.ClientID, op.ClientDisconnect.Reply)
+			reply := op.ClientDisconnect.Reply
+			// Only send a reply if we are the server that proposed the
+			// disconnect.
+			if op.Leader != s.opts.ClusterNodeID {
+				reply = ""
+			}
+			s.scheduleConnClose(op.ClientDisconnect.ClientID, reply)
 		} else {
 			s.closeClient(op.ClientDisconnect.ClientID)
 		}
