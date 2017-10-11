@@ -138,3 +138,12 @@ message RemoveClient {
   string Reply    = 2; // Inbox to send client response to.
   bool   Schedule = 3; // Whether to schedule the disconnect or do it immediately.
 }
+
+// RaftSnapshotFragment is a part of a snapshot of a Raft log.
+message RaftSnapshotFragment {
+  enum Type {
+    Messages = 0; // Channel messages.
+  }
+  Type  FragmentType = 1; // Snapshot fragment type.
+  Batch MessageBatch = 2; // Messages fragment data.
+}

@@ -5,9 +5,20 @@ package server
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
+	"sync"
 
 	"github.com/hashicorp/raft"
 	"github.com/nats-io/go-nats-streaming/pb"
+
+	"github.com/nats-io/nats-streaming-server/spb"
+)
+
+const batchSize = 200
+
+var (
+	fragmentPool = &sync.Pool{New: func() interface{} { return &spb.RaftSnapshotFragment{} }}
+	batchPool    = &sync.Pool{New: func() interface{} { return &spb.Batch{} }}
 )
 
 // channelSnapshot implements the raft.FSMSnapshot interface.
@@ -22,56 +33,158 @@ func newChannelSnapshot(c *channel) raft.FSMSnapshot {
 // Persist should dump all necessary state to the WriteCloser 'sink',
 // and call sink.Close() when finished or call sink.Cancel() on error.
 func (c *channelSnapshot) Persist(sink raft.SnapshotSink) (err error) {
-	// TODO: this is very expensive and might repeatedly fail if messages are
-	// constantly being truncated. Is there a way we can optimize this, e.g.
-	// handling Restore() out-of-band from Raft?
-
-	// TODO: this needs to also snapshot subscription state.
-
 	defer func() {
 		if err != nil {
 			sink.Cancel()
 		}
 	}()
 
-	var (
-		first uint64
-		last  uint64
-		msg   *pb.MsgProto
-		data  []byte
-	)
-	first, last, err = c.channel.store.Msgs.FirstAndLastSequence()
-	if err != nil {
+	if err := c.snapshotMessages(sink); err != nil {
 		return err
 	}
 
-	buf := make([]byte, 4)
-	for seq := first; seq <= last; seq++ {
-		msg, err = c.channel.store.Msgs.Lookup(seq)
-		if err != nil {
-			return
-		}
-		// If msg is nil, channel truncation has occurred while snapshotting.
-		if msg == nil {
-			// Channel truncation has occurred while snapshotting.
-			return fmt.Errorf("channel %q was truncated while snapshotting", c.channel.name)
-		}
-		data, err = msg.Marshal()
-		if err != nil {
-			return
-		}
-		binary.BigEndian.PutUint32(buf, uint32(len(data)))
-		_, err = sink.Write(buf)
-		if err != nil {
-			return
-		}
-		_, err = sink.Write(data)
-		if err != nil {
-			return
-		}
-	}
+	// TODO: snapshot acks
+	// TODO: snapshot sub positions
+
 	return sink.Close()
 }
 
 // Release is a no-op.
 func (c *channelSnapshot) Release() {}
+
+func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
+	// TODO: this is very expensive and might repeatedly fail if messages are
+	// constantly being truncated. Is there a way we can optimize this, e.g.
+	// handling Restore() out-of-band from Raft?
+
+	first, last, err := c.channel.store.Msgs.FirstAndLastSequence()
+	if err != nil {
+		return err
+	}
+
+	var (
+		buf   [4]byte
+		batch = batchPool.Get().(*spb.Batch)
+	)
+	batch.Messages = make([]*pb.MsgProto, 0, batchSize)
+
+	for seq := first; seq <= last; seq++ {
+		msg, err := c.channel.store.Msgs.Lookup(seq)
+		if err != nil {
+			batchPool.Put(batch)
+			return err
+		}
+		// If msg is nil, channel truncation has occurred while snapshotting.
+		if msg == nil {
+			// Channel truncation has occurred while snapshotting.
+			batchPool.Put(batch)
+			return fmt.Errorf("channel %q was truncated while snapshotting", c.channel.name)
+		}
+
+		// Previous batch is full, ship it.
+		if len(batch.Messages) == batchSize {
+			fragment := newFragment()
+			fragment.FragmentType = spb.RaftSnapshotFragment_Messages
+			fragment.MessageBatch = batch
+			if err := writeFragment(sink, fragment, buf); err != nil {
+				return err
+			}
+
+			// Create a new batch.
+			batch = batchPool.Get().(*spb.Batch)
+			batch.Messages = make([]*pb.MsgProto, 0, batchSize)
+		}
+
+		batch.Messages = append(batch.Messages, msg)
+	}
+
+	// Ship any partial batch.
+	if len(batch.Messages) > 0 {
+		fragment := newFragment()
+		fragment.FragmentType = spb.RaftSnapshotFragment_Messages
+		fragment.MessageBatch = batch
+		if err := writeFragment(sink, fragment, buf); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// writeFragment writes the marshalled RaftSnapshotFragment to the
+// SnapshotSink. The fragment should not be used after this is called.
+func writeFragment(sink raft.SnapshotSink, fragment *spb.RaftSnapshotFragment, sizeBuf [4]byte) error {
+	data, err := fragment.Marshal()
+	if fragment.MessageBatch != nil {
+		batchPool.Put(fragment.MessageBatch)
+	}
+	fragmentPool.Put(fragment)
+	if err != nil {
+		return err
+	}
+	binary.BigEndian.PutUint32(sizeBuf[:], uint32(len(data)))
+	_, err = sink.Write(sizeBuf[:])
+	if err != nil {
+		return err
+	}
+	_, err = sink.Write(data)
+	return err
+}
+
+func newFragment() *spb.RaftSnapshotFragment {
+	fragment := fragmentPool.Get().(*spb.RaftSnapshotFragment)
+	fragment.MessageBatch = nil
+	return fragment
+}
+
+// restoreFromSnapshot restores a channel from a snapshot.
+func (c *channel) restoreFromSnapshot(snapshot io.ReadCloser) error {
+	defer snapshot.Close()
+
+	// TODO: this needs to be fully implemented to support restoring the
+	// entire Raft log, not just channel messages.
+	// TODO: restore acks
+	// TODO: restore sub positions
+
+	sizeBuf := make([]byte, 4)
+	for {
+		// Read the fragment size.
+		if _, err := io.ReadFull(snapshot, sizeBuf); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		// Read the fragment.
+		size := binary.BigEndian.Uint32(sizeBuf)
+		buf := make([]byte, size)
+		if _, err := io.ReadFull(snapshot, buf); err != nil {
+			return err
+		}
+
+		// Unmarshal the fragment.
+		fragment := newFragment()
+		if err := fragment.Unmarshal(buf); err != nil {
+			return err
+		}
+
+		// Apply the fragment.
+		switch fragment.FragmentType {
+		case spb.RaftSnapshotFragment_Messages:
+			// Channel messages.
+			for _, msg := range fragment.MessageBatch.Messages {
+				if _, err := c.store.Msgs.Store(msg); err != nil {
+					batchPool.Put(fragment.MessageBatch)
+					fragmentPool.Put(fragment)
+					return err
+				}
+			}
+			batchPool.Put(fragment.MessageBatch)
+			fragmentPool.Put(fragment)
+		default:
+			panic(fmt.Sprintf("unknown snapshot fragment type %s", fragment.FragmentType))
+		}
+	}
+	return c.store.Msgs.Flush()
+}
