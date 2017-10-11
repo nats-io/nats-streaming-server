@@ -1672,7 +1672,59 @@ func (s *StanServer) startMetadataRaftNode() error {
 		return err
 	}
 	s.raft = node
+
+	go func() {
+		for {
+			select {
+			case isLeader := <-node.notifyCh:
+				if isLeader {
+					s.leadershipAcquired()
+				} else {
+					s.leadershipLost()
+				}
+			case <-s.shutdownCh:
+				return
+			}
+		}
+	}()
+
 	return nil
+}
+
+// leadershipAcquired should be called when this node is elected leader for the
+// metadata group. This should only be called when the server is running in
+// clustered mode. This sets up client heartbeats.
+func (s *StanServer) leadershipAcquired() {
+	s.log.Debugf("server became metadata leader, performing leader promotion actions")
+
+	// Setup client heartbeats.
+	for _, client := range s.clients.getClients() {
+		client.RLock()
+		cID := client.info.ID
+		client.RUnlock()
+		s.clients.setClientHB(cID, s.opts.ClientHBTimeout, func() {
+			s.checkClientHealth(cID)
+		})
+	}
+
+	s.log.Debugf("finished metadata leader promotion actions")
+}
+
+// leadershipLost should be called when this node loses leadership for the
+// metadata group. This should only be called when the server is running in
+// clustered mode. This cancels all outstanding client heartbeats.
+func (s *StanServer) leadershipLost() {
+	s.log.Debugf("server lost metadata leadership, performing leader stepdown actions")
+
+	// Cancel outstanding client heartbeats. We aren't concerned about races
+	// where new clients might be connecting because at this point, the server
+	// will no longer accept new client connections, but even if it did, the
+	// heartbeat would be automatically removed when it fires.
+	for _, client := range s.clients.getClients() {
+		s.clients.removeClientHB(client)
+	}
+
+	s.log.Debugf("finished metadata leader stepdown actions")
 }
 
 // TODO:  Explore parameter passing in gnatsd.  Keep separate for now.
@@ -1948,13 +2000,17 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 		sub.initialized = true
 		sub.Unlock()
 	}
-	// Go through the list of clients and ensure their Hb timer is set.
-	for _, sc := range recoveredClients {
-		// Because of the loop, we need to make copy for the closure
-		cID := sc.ID
-		s.clients.setClientHB(cID, s.opts.ClientHBTimeout, func() {
-			s.checkClientHealth(cID)
-		})
+	// Go through the list of clients and ensure their Hb timer is set. Only do
+	// this for standalone mode. If clustered, timers will be setup on leader
+	// election.
+	if !s.isClustered() {
+		for _, sc := range recoveredClients {
+			// Because of the loop, we need to make copy for the closure
+			cID := sc.ID
+			s.clients.setClientHB(cID, s.opts.ClientHBTimeout, func() {
+				s.checkClientHealth(cID)
+			})
+		}
 	}
 }
 
@@ -2131,7 +2187,7 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 		return
 	}
 
-	// Send connect response to client.
+	// Send connect response to client and start heartbeat timer.
 	s.finishConnectRequest(req, m.Reply)
 }
 
@@ -2239,6 +2295,13 @@ func (s *StanServer) checkClientHealth(clientID string) {
 		return
 	}
 
+	// If clustered and we lost metadata leadership, we should stop
+	// heartbeating as the new leader will take over.
+	if s.isClustered() && !s.isMetadataLeader() {
+		s.clients.removeClientHB(client)
+		return
+	}
+
 	client.RLock()
 	hbInbox := client.info.HbInbox
 	client.RUnlock()
@@ -2266,7 +2329,15 @@ func (s *StanServer) checkClientHealth(clientID string) {
 			// close the client (connection). This locks the
 			// client object internally so unlock here.
 			client.Unlock()
-			s.closeClient(clientID)
+			// If clustered, thread operations through Raft.
+			if s.isClustered() {
+				if err := s.replicateConnClose(clientID, "", false); err != nil {
+					s.log.Errorf("[Client:%s] Failed to replicate disconnect on heartbeat expiration: %v",
+						clientID, err)
+				}
+			} else {
+				s.closeClient(clientID)
+			}
 			return
 		}
 	} else {
@@ -2348,7 +2419,7 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 
 	// If clustered, thread operations through Raft.
 	if s.isClustered() {
-		if err := s.replicateConnClose(req.ClientID, m.Reply); err != nil {
+		if err := s.replicateConnClose(req.ClientID, m.Reply, true); err != nil {
 			s.log.Errorf("Failed to replicate close request: %v", err)
 			s.sendCloseErr(m.Reply, err.Error())
 		}
@@ -2446,11 +2517,11 @@ func (s *StanServer) performConnClose(clientID, reply string) {
 	s.nc.Publish(reply, b)
 }
 
-func (s *StanServer) replicateConnClose(clientID, reply string) error {
+func (s *StanServer) replicateConnClose(clientID, reply string, schedule bool) error {
 	op := &spb.RaftOperation{
 		OpType:           spb.RaftOperation_Disconnect,
 		Leader:           s.opts.ClusterNodeID,
-		ClientDisconnect: &spb.RemoveClient{ClientID: clientID, Reply: reply},
+		ClientDisconnect: &spb.RemoveClient{ClientID: clientID, Reply: reply, Schedule: schedule},
 	}
 	data, err := op.Marshal()
 	if err != nil {
@@ -4450,7 +4521,11 @@ func (s *StanServer) Apply(l *raft.Log) interface{} {
 		return s.processConnect(op.ClientConnect.ClientID, op.ClientConnect.HeartbeatInbox, op.ClientConnect.Refresh)
 	case spb.RaftOperation_Disconnect:
 		// Client disconnect replication.
-		s.scheduleConnClose(op.ClientDisconnect.ClientID, op.ClientDisconnect.Reply)
+		if op.ClientDisconnect.Schedule {
+			s.scheduleConnClose(op.ClientDisconnect.ClientID, op.ClientDisconnect.Reply)
+		} else {
+			s.closeClient(op.ClientDisconnect.ClientID)
+		}
 		return nil
 	default:
 		panic(fmt.Sprintf("unknown op type %s", op.OpType))

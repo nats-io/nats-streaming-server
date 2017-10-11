@@ -131,6 +131,12 @@ func verifyNoLeader(t *testing.T, channel string, timeout time.Duration, servers
 	stackFatalf(t, "Found unexpected leader for channel %s", channel)
 }
 
+func checkClientsInAllServers(t *testing.T, expected int, servers ...*StanServer) {
+	for _, srv := range servers {
+		waitForNumClients(t, srv, expected)
+	}
+}
+
 type msg struct {
 	sequence uint64
 	data     []byte
@@ -1124,16 +1130,11 @@ func TestClusteringConnClose(t *testing.T) {
 		waitForNumSubs(t, srv, clientName, 1)
 	}
 
-	checkClientsInAllServers := func(expected int) {
-		for _, srv := range servers {
-			waitForNumClients(t, srv, expected)
-		}
-	}
-	checkClientsInAllServers(1)
+	checkClientsInAllServers(t, 1, servers...)
 	// Close client connection
 	sc.Close()
 	// Now clients should be removed from all nodes
-	checkClientsInAllServers(0)
+	checkClientsInAllServers(t, 0, servers...)
 }
 
 func TestClusteringClientCrashAndReconnect(t *testing.T) {
@@ -1237,4 +1238,86 @@ func TestClusteringClientCrashAndReconnect(t *testing.T) {
 	if hbInbox == cli.info.HbInbox {
 		t.Fatalf("Looks like restarted client was not properly registered")
 	}
+}
+
+func TestClusteringHeartbeatFailover(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts.ClientHBInterval = 50 * time.Millisecond
+	s1sOpts.ClientHBTimeout = 10 * time.Millisecond
+	s1sOpts.ClientHBFailCount = 5
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts.ClientHBInterval = 50 * time.Millisecond
+	s2sOpts.ClientHBTimeout = 10 * time.Millisecond
+	s2sOpts.ClientHBFailCount = 5
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts.ClientHBInterval = 50 * time.Millisecond
+	s3sOpts.ClientHBTimeout = 10 * time.Millisecond
+	s3sOpts.ClientHBFailCount = 5
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Wait for metadata leader to be elected.
+	leader := getMetadataLeader(t, 10*time.Second, servers...)
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Wait for client to be registered
+	checkClientsInAllServers(t, 1, servers...)
+
+	// Check that client is not incorrectly purged
+	dur := (leader.opts.ClientHBInterval + leader.opts.ClientHBTimeout)
+	dur *= time.Duration(leader.opts.ClientHBFailCount + 1)
+	dur += 100 * time.Millisecond
+	time.Sleep(dur)
+	// Client should still be there
+	checkClientsInAllServers(t, 1, servers...)
+
+	// Take down the leader.
+	leader.Shutdown()
+	servers = removeServer(servers, leader)
+
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
+
+	// Client should still be there
+	checkClientsInAllServers(t, 1, servers...)
+
+	// kill the NATS conn
+	nc.Close()
+
+	// Check that the server closes the connection
+	checkClientsInAllServers(t, 0, servers...)
 }

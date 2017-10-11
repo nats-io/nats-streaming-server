@@ -163,6 +163,20 @@ func (cs *clientStore) setClientHB(ID string, interval time.Duration, f func()) 
 	c.Unlock()
 }
 
+// removeClientHB will stop and remove the client's heartbeat timer, if
+// present.
+func (cs *clientStore) removeClientHB(c *client) {
+	if c == nil {
+		return
+	}
+	c.Lock()
+	if c.hbt != nil {
+		c.hbt.Stop()
+		c.hbt = nil
+	}
+	c.Unlock()
+}
+
 // getClients returns a snapshot of the registered clients.
 // The map itself is a copy (can be iterated safely), but
 // the clients objects returned are the one stored in the clientStore.
