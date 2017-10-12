@@ -1345,9 +1345,14 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		nOpts = natsOpts.Clone()
 	}
 
-	// Default cluster Raft log path to ./<cluster-id>/<node-id> if not set.
-	if sOpts.Clustering.RaftLogPath == "" {
-		sOpts.Clustering.RaftLogPath = filepath.Join(sOpts.ID, sOpts.Clustering.NodeID)
+	if len(sOpts.Clustering.Peers) > 0 {
+		// If clustered, override store sync configuration with cluster sync.
+		sOpts.FileStoreOpts.DoSync = sOpts.Clustering.Sync
+
+		// Default cluster Raft log path to ./<cluster-id>/<node-id> if not set.
+		if sOpts.Clustering.RaftLogPath == "" {
+			sOpts.Clustering.RaftLogPath = filepath.Join(sOpts.ID, sOpts.Clustering.NodeID)
+		}
 	}
 
 	s := StanServer{
@@ -1410,11 +1415,6 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 
 	// Ensure store type option is in upper-case
 	sOpts.StoreType = strings.ToUpper(sOpts.StoreType)
-
-	// If clustered, override store sync configuration with cluster sync.
-	if s.isClustered() {
-		sOpts.FileStoreOpts.DoSync = sOpts.Clustering.Sync
-	}
 
 	// Create the store. So far either memory or file-based.
 	switch sOpts.StoreType {
