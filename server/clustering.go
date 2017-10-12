@@ -16,6 +16,16 @@ import (
 	"github.com/nats-io/nats-on-a-log"
 )
 
+// ClusteringOptions contains STAN Server options related to clustering.
+type ClusteringOptions struct {
+	NodeID       string   // ID of the node within the cluster.
+	Peers        []string // Cluster peer IDs.
+	RaftLogPath  string   // Path to Raft log store directory.
+	LogCacheSize int      // Number of Raft log entries to cache in memory to reduce disk IO.
+	LogSnapshots int      // Number of Raft log snapshots to retain.
+	TrailingLogs int64    // Number of logs left after a snapshot.
+}
+
 // raftNode is a handle to a member in a Raft consensus group.
 type raftNode struct {
 	*raft.Raft
@@ -41,7 +51,7 @@ func (r *raftNode) shutdown() error {
 
 // createRaftNode creates and starts a new Raft node with the given name and FSM.
 func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error) {
-	path := filepath.Join(s.opts.RaftLogPath, name)
+	path := filepath.Join(s.opts.Clustering.RaftLogPath, name)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := os.MkdirAll(path, os.ModeDir+os.ModePerm); err != nil {
 			return nil, err
@@ -54,14 +64,14 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 	if err != nil {
 		return nil, err
 	}
-	cacheStore, err := raft.NewLogCache(s.opts.LogCacheSize, store)
+	cacheStore, err := raft.NewLogCache(s.opts.Clustering.LogCacheSize, store)
 	if err != nil {
 		store.Close()
 		return nil, err
 	}
 
 	config := raft.DefaultConfig()
-	config.TrailingLogs = uint64(s.opts.TrailingLogs)
+	config.TrailingLogs = uint64(s.opts.Clustering.TrailingLogs)
 
 	// FIXME: Send output of Raft logger
 	// Raft expects a *log.Logger so can not swap that with another one,
@@ -100,7 +110,7 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 		}
 	}()
 
-	snapshotStore, err := raft.NewFileSnapshotStore(path, s.opts.LogSnapshots, logWriter)
+	snapshotStore, err := raft.NewFileSnapshotStore(path, s.opts.Clustering.LogSnapshots, logWriter)
 	if err != nil {
 		store.Close()
 		return nil, err
@@ -108,14 +118,14 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 
 	// TODO: using a single NATS conn for every channel might be a bottleneck. Maybe pool conns?
 	transport, err := natslog.NewNATSTransport(
-		fmt.Sprintf("%s.%s", s.opts.ClusterNodeID, name), s.ncr, 2*time.Second, logWriter)
+		fmt.Sprintf("%s.%s", s.opts.Clustering.NodeID, name), s.ncr, 2*time.Second, logWriter)
 	if err != nil {
 		store.Close()
 		return nil, err
 	}
 
-	peers := make([]string, len(s.opts.ClusterPeers))
-	for i, p := range s.opts.ClusterPeers {
+	peers := make([]string, len(s.opts.Clustering.Peers))
+	for i, p := range s.opts.Clustering.Peers {
 		peers[i] = fmt.Sprintf("%s.%s", p, name)
 	}
 	peersStore := &raft.StaticPeers{StaticPeers: peers}

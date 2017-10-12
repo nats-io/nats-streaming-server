@@ -431,12 +431,12 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&sopts.IOBatchSize, "io_batch_size", DefaultIOBatchSize, "stan.IOBatchSize")
 	fs.Int64Var(&sopts.IOSleepTime, "io_sleep_time", DefaultIOSleepTime, "stan.IOSleepTime")
 	fs.StringVar(&sopts.FTGroupName, "ft_group", "", "stan.FTGroupName")
-	fs.StringVar(&sopts.ClusterNodeID, "cluster_node_id", "", "stan.ClusterNodeID")
+	fs.StringVar(&sopts.Clustering.NodeID, "cluster_node_id", "", "stan.Clustering.NodeID")
 	fs.StringVar(&stanClusterPeers, "cluster_peers", "", "")
-	fs.StringVar(&sopts.RaftLogPath, "cluster_log_path", "", "stan.RaftLogPath")
-	fs.IntVar(&sopts.LogCacheSize, "cluster_log_cache_size", DefaultLogCacheSize, "stan.LogCacheSize")
-	fs.IntVar(&sopts.LogSnapshots, "cluster_log_snapshots", DefaultLogSnapshots, "stan.LogSnapshots")
-	fs.Int64Var(&sopts.TrailingLogs, "cluster_trailing_logs", DefaultTrailingLogs, "stan.TrailingLogs")
+	fs.StringVar(&sopts.Clustering.RaftLogPath, "cluster_log_path", "", "stan.Clustering.RaftLogPath")
+	fs.IntVar(&sopts.Clustering.LogCacheSize, "cluster_log_cache_size", DefaultLogCacheSize, "stan.Clustering.LogCacheSize")
+	fs.IntVar(&sopts.Clustering.LogSnapshots, "cluster_log_snapshots", DefaultLogSnapshots, "stan.Clustering.LogSnapshots")
+	fs.Int64Var(&sopts.Clustering.TrailingLogs, "cluster_trailing_logs", DefaultTrailingLogs, "stan.Clustering.TrailingLogs")
 
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
 	// It will be augmented with NATS specific flags and call fs.Parse(args) for us.
@@ -475,14 +475,14 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	}
 
 	if len(stanClusterPeers) > 0 {
-		sopts.ClusterPeers = strings.Split(stanClusterPeers, ",")
-		for i, peer := range sopts.ClusterPeers {
-			sopts.ClusterPeers[i] = strings.TrimSpace(peer)
+		sopts.Clustering.Peers = strings.Split(stanClusterPeers, ",")
+		for i, peer := range sopts.Clustering.Peers {
+			sopts.Clustering.Peers[i] = strings.TrimSpace(peer)
 		}
 	}
 
-	if sopts.RaftLogPath == "" {
-		sopts.RaftLogPath = filepath.Join(sopts.ID, sopts.ClusterNodeID)
+	if sopts.Clustering.RaftLogPath == "" {
+		sopts.Clustering.RaftLogPath = filepath.Join(sopts.ID, sopts.Clustering.NodeID)
 	}
 
 	// Special handling for some command line params
