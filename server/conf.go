@@ -480,9 +480,6 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 		for i, peer := range sopts.Clustering.Peers {
 			sopts.Clustering.Peers[i] = strings.TrimSpace(peer)
 		}
-
-		// If clustered, override store sync configuration with cluster sync.
-		sopts.FileStoreOpts.DoSync = sopts.Clustering.Sync
 	}
 
 	if sopts.Clustering.RaftLogPath == "" {
