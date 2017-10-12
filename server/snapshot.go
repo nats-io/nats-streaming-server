@@ -23,7 +23,7 @@ var (
 
 // channelSnapshot implements the raft.FSMSnapshot interface.
 type channelSnapshot struct {
-	channel *channel
+	*channel
 }
 
 func newChannelSnapshot(c *channel) raft.FSMSnapshot {
@@ -57,7 +57,7 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 	// constantly being truncated. Is there a way we can optimize this, e.g.
 	// handling Restore() out-of-band from Raft?
 
-	first, last, err := c.channel.store.Msgs.FirstAndLastSequence()
+	first, last, err := c.store.Msgs.FirstAndLastSequence()
 	if err != nil {
 		return err
 	}
@@ -69,7 +69,7 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 	batch.Messages = make([]*pb.MsgProto, 0, batchSize)
 
 	for seq := first; seq <= last; seq++ {
-		msg, err := c.channel.store.Msgs.Lookup(seq)
+		msg, err := c.store.Msgs.Lookup(seq)
 		if err != nil {
 			batchPool.Put(batch)
 			return err
@@ -78,7 +78,7 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 		if msg == nil {
 			// Channel truncation has occurred while snapshotting.
 			batchPool.Put(batch)
-			return fmt.Errorf("channel %q was truncated while snapshotting", c.channel.name)
+			return fmt.Errorf("channel %q was truncated while snapshotting", c.name)
 		}
 
 		// Previous batch is full, ship it.
