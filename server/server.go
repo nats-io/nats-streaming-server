@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -1342,6 +1343,11 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		nOpts = &no
 	} else {
 		nOpts = natsOpts.Clone()
+	}
+
+	// Default cluster Raft log path to ./<cluster-id>/<node-id> if not set.
+	if sOpts.Clustering.RaftLogPath == "" {
+		sOpts.Clustering.RaftLogPath = filepath.Join(sOpts.ID, sOpts.Clustering.NodeID)
 	}
 
 	s := StanServer{

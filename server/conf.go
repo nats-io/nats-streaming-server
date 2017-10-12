@@ -482,10 +482,6 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 		}
 	}
 
-	if sopts.Clustering.RaftLogPath == "" {
-		sopts.Clustering.RaftLogPath = filepath.Join(sopts.ID, sopts.Clustering.NodeID)
-	}
-
 	// Special handling for some command line params
 	var flagErr error
 	fs.Visit(func(f *flag.Flag) {
