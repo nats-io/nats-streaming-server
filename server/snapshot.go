@@ -43,8 +43,17 @@ func (c *channelSnapshot) Persist(sink raft.SnapshotSink) (err error) {
 		return err
 	}
 
-	// TODO: snapshot acks
-	// TODO: snapshot sub positions
+	if err := c.snapshotClients(sink); err != nil {
+		return err
+	}
+
+	if err := c.snapshotSubscriptions(sink); err != nil {
+		return err
+	}
+
+	if err := c.snapshotAcks(sink); err != nil {
+		return err
+	}
 
 	return sink.Close()
 }
@@ -108,6 +117,16 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 		}
 	}
 
+	return nil
+}
+
+func (c *channelSnapshot) snapshotSubscriptions(sink raft.SnapshotSink) error {
+	// TODO
+	return nil
+}
+
+func (c *channelSnapshot) snapshotAcks(sink raft.SnapshotSink) error {
+	// TODO
 	return nil
 }
 
