@@ -24,6 +24,7 @@ type ClusteringOptions struct {
 	LogCacheSize int      // Number of Raft log entries to cache in memory to reduce disk IO.
 	LogSnapshots int      // Number of Raft log snapshots to retain.
 	TrailingLogs int64    // Number of logs left after a snapshot.
+	Sync         bool     // Do a file sync after every write to the Raft log and message store.
 }
 
 // raftNode is a handle to a member in a Raft consensus group.
@@ -59,7 +60,7 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 	}
 	store, err := raftboltdb.New(raftboltdb.Options{
 		Path:   filepath.Join(path, raftLogFile),
-		NoSync: !s.opts.FileStoreOpts.DoSync,
+		NoSync: !s.opts.Clustering.Sync,
 	})
 	if err != nil {
 		return nil, err
