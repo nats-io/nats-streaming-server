@@ -142,8 +142,10 @@ message RemoveClient {
 // RaftSnapshotFragment is a part of a snapshot of a Raft log.
 message RaftSnapshotFragment {
   enum Type {
-    Messages = 0; // Channel messages.
+    Messages     = 0; // Channel messages.
+    Subscription = 1; // Channel subscription.
   }
-  Type  FragmentType = 1; // Snapshot fragment type.
-  Batch MessageBatch = 2; // Messages fragment data.
+  Type     FragmentType = 1; // Snapshot fragment type.
+  Batch    MessageBatch = 2; // Messages fragment data.
+  SubState Sub          = 3; // Subscription fragment data.
 }

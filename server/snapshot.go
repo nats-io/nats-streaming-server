@@ -43,10 +43,6 @@ func (c *channelSnapshot) Persist(sink raft.SnapshotSink) (err error) {
 		return err
 	}
 
-	if err := c.snapshotClients(sink); err != nil {
-		return err
-	}
-
 	if err := c.snapshotSubscriptions(sink); err != nil {
 		return err
 	}
@@ -121,7 +117,15 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 }
 
 func (c *channelSnapshot) snapshotSubscriptions(sink raft.SnapshotSink) error {
-	// TODO
+	var buf [4]byte
+	for _, sub := range c.ss.getAllSubs() {
+		fragment := newFragment()
+		fragment.FragmentType = spb.RaftSnapshotFragment_Subscription
+		fragment.Sub = &sub.SubState
+		if err := writeFragment(sink, fragment, buf); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -201,6 +205,9 @@ func (c *channel) restoreFromSnapshot(snapshot io.ReadCloser) error {
 			}
 			batchPool.Put(fragment.MessageBatch)
 			fragmentPool.Put(fragment)
+		case spb.RaftSnapshotFragment_Subscription:
+			// Channel subscription.
+			// TODO
 		default:
 			panic(fmt.Sprintf("unknown snapshot fragment type %s", fragment.FragmentType))
 		}
