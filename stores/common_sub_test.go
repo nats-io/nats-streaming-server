@@ -321,8 +321,24 @@ func TestCSSubLastSentCorrectOnRecovery(t *testing.T) {
 			s.Close()
 			s, state := testReOpenStore(t, st, nil)
 			defer s.Close()
+			cs = getRecoveredChannel(t, state, "foo")
 			subs := getRecoveredSubs(t, state, "foo", 1)
 			sub := subs[0]
+			// Check that sub's last seq is m2.Sequence
+			if sub.Sub.LastSent != m2.Sequence {
+				t.Fatalf("Expected LastSent to be %v, got %v", m2.Sequence, sub.Sub.LastSent)
+			}
+
+			// Ack m1 and m2
+			storeSubAck(t, cs, "foo", subID, m1.Sequence, m2.Sequence)
+
+			// Restart server
+			s.Close()
+			s, state = testReOpenStore(t, st, nil)
+			defer s.Close()
+			cs = getRecoveredChannel(t, state, "foo")
+			subs = getRecoveredSubs(t, state, "foo", 1)
+			sub = subs[0]
 			// Check that sub's last seq is m2.Sequence
 			if sub.Sub.LastSent != m2.Sequence {
 				t.Fatalf("Expected LastSent to be %v, got %v", m2.Sequence, sub.Sub.LastSent)

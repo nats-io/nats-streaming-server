@@ -48,6 +48,7 @@ const (
 	sqlDeleteSubscription
 	sqlDeleteSubMarkedAsDeleted
 	sqlDeleteSubPendingMessages
+	sqlSubUpdateLastSent
 	sqlSubAddPending
 	sqlSubDeletePending
 	sqlRecoverServerInfo
@@ -91,6 +92,7 @@ var sqlStmts = []string{
 	"DELETE FROM Subscriptions WHERE id=? AND subid=?",                                                                                                                               // sqlDeleteSubscription
 	"DELETE FROM Subscriptions WHERE id=? AND deleted=TRUE",                                                                                                                          // sqlDeleteSubMarkedAsDeleted
 	"DELETE FROM SubsPending WHERE subid=?",                                                                                                                                          // sqlDeleteSubPendingMessages
+	"UPDATE Subscriptions SET lastsent=? WHERE id=? AND subid=?",                                                                                                                     // sqlSubUpdateLastSent
 	"INSERT IGNORE INTO SubsPending (subid, seq) SELECT ?, ? FROM Subscriptions WHERE subid=?",                                                                                       // sqlSubAddPending
 	"DELETE FROM SubsPending WHERE subid=? AND seq=?",                                                                                                                                // sqlSubDeletePending
 	"SELECT id, proto, version FROM ServerInfo WHERE uniquerow=1",                                                                                                                    // sqlRecoverServerInfo
@@ -99,7 +101,7 @@ var sqlStmts = []string{
 	"SELECT COALESCE(MAX(subid), 0) FROM Subscriptions",                                                                                                                              // sqlRecoverMaxSubID
 	"SELECT id, name, maxseq FROM Channels WHERE deleted=FALSE",                                                                                                                      // sqlRecoverChannelsList
 	"SELECT COUNT(seq), COALESCE(MIN(seq), 0), COALESCE(MAX(seq), 0), COALESCE(SUM(size), 0), COALESCE(MAX(timestamp), 0) FROM Messages WHERE id=?",                                  // sqlRecoverChannelMsgs
-	"SELECT proto FROM Subscriptions WHERE id=? AND deleted=FALSE",                                                                                                                   // sqlRecoverChannelSubs
+	"SELECT lastsent, proto FROM Subscriptions WHERE id=? AND deleted=FALSE",                                                                                                         // sqlRecoverChannelSubs
 	"DELETE FROM SubsPending WHERE subid=? AND seq<?",                                                                                                                                // sqlRecoverDoPurgeSubsPending
 	"SELECT seq FROM SubsPending WHERE subid=?",                                                                                                                                      // sqlRecoverSubPendingSeqs
 	"SELECT maxmsgs, maxbytes, maxage FROM Channels WHERE id=?",                                                                                                                      // sqlRecoverGetChannelLimits
@@ -163,6 +165,7 @@ type SQLSubStore struct {
 	sqlStore       *SQLStore // Reference to "parent" store
 	limits         SubStoreLimits
 	hasMarkedAsDel bool
+	subLastSent    map[uint64]uint64
 }
 
 // SQLMsgStore is a per channel message store backed by an SQL Database
@@ -212,6 +215,29 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits) 
 	s.wg.Add(1)
 	go s.timeTick()
 	return s, nil
+}
+
+// creates an instance of a SQLMsgStore
+func (s *SQLStore) newSQLMsgStore(channel string, channelID int64, limits *MsgStoreLimits) *SQLMsgStore {
+	msgStore := &SQLMsgStore{
+		sqlStore:  s,
+		channelID: channelID,
+	}
+	msgStore.init(channel, s.log, limits)
+	return msgStore
+}
+
+// creates an instance of SQLSubStore
+func (s *SQLStore) newSQLSubStore(channelID int64, limits *SubStoreLimits) *SQLSubStore {
+	subStore := &SQLSubStore{
+		sqlStore:    s,
+		channelID:   channelID,
+		maxSubID:    &s.maxSubID,
+		limits:      *limits,
+		subLastSent: make(map[uint64]uint64),
+	}
+	subStore.log = s.log
+	return subStore
 }
 
 func (s *SQLStore) createPreparedStmts() error {
@@ -359,8 +385,7 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 
 		channelLimits := s.genericStore.getChannelLimits(name)
 
-		msgStore := &SQLMsgStore{channelID: channelID, sqlStore: s}
-		msgStore.init(name, s.log, &channelLimits.MsgStoreLimits)
+		msgStore := s.newSQLMsgStore(name, channelID, &channelLimits.MsgStoreLimits)
 
 		if err := s.applyLimitsOnRecovery(msgStore); err != nil {
 			return nil, err
@@ -390,9 +415,7 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 			msgStore.last = maxseq
 		}
 
-		subStore := &SQLSubStore{channelID: channelID, limits: channelLimits.SubStoreLimits, sqlStore: s}
-		subStore.log = s.log
-		subStore.maxSubID = &s.maxSubID
+		subStore := s.newSQLSubStore(channelID, &channelLimits.SubStoreLimits)
 
 		var subscriptions []*RecoveredSubscription
 
@@ -402,14 +425,21 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 		}
 		defer subRows.Close()
 		for subRows.Next() {
-			var protoBytes []byte
-			if err := subRows.Scan(&protoBytes); err != nil && err != sql.ErrNoRows {
+			var (
+				lastSent   uint64
+				protoBytes []byte
+			)
+			if err := subRows.Scan(&lastSent, &protoBytes); err != nil && err != sql.ErrNoRows {
 				return nil, err
 			}
 			if protoBytes != nil {
 				sub := &spb.SubState{}
 				if err := sub.Unmarshal(protoBytes); err != nil {
 					return nil, err
+				}
+				// We need to use the max of lastSent column or the one in the proto
+				if lastSent > sub.LastSent {
+					sub.LastSent = lastSent
 				}
 
 				// We can remove entries for sequence that are below the smallest
@@ -441,6 +471,9 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 					}
 				}
 				pendingSeqRows.Close()
+
+				// Update the in-memory map tracking last sent
+				subStore.subLastSent[sub.ID] = sub.LastSent
 
 				// Add to the recovered subscriptions
 				subscriptions = append(subscriptions, &RecoveredSubscription{Sub: sub, Pending: pendingAcks})
@@ -568,12 +601,8 @@ func (s *SQLStore) CreateChannel(channel string) (*Channel, error) {
 	}
 	s.maxChannelID = cid
 
-	msgStore := &SQLMsgStore{channelID: cid, sqlStore: s}
-	msgStore.init(channel, s.log, &channelLimits.MsgStoreLimits)
-
-	subStore := &SQLSubStore{channelID: cid, limits: channelLimits.SubStoreLimits, sqlStore: s}
-	subStore.log = s.log
-	subStore.maxSubID = &s.maxSubID
+	msgStore := s.newSQLMsgStore(channel, cid, &channelLimits.MsgStoreLimits)
+	subStore := s.newSQLSubStore(cid, &channelLimits.SubStoreLimits)
 
 	c := &Channel{
 		Subs: subStore,
@@ -981,6 +1010,10 @@ func (ss *SQLSubStore) DeleteSub(subid uint64) error {
 // AddSeqPending implements the SubStore interface
 func (ss *SQLSubStore) AddSeqPending(subid, seqno uint64) error {
 	ss.Lock()
+	ls := ss.subLastSent[subid]
+	if seqno > ls {
+		ss.subLastSent[subid] = seqno
+	}
 	_, err := ss.sqlStore.preparedStmts[sqlSubAddPending].Exec(subid, seqno, subid)
 	if err != nil {
 		err = sqlStmtError(sqlSubAddPending, err)
@@ -992,6 +1025,20 @@ func (ss *SQLSubStore) AddSeqPending(subid, seqno uint64) error {
 // AckSeqPending implements the SubStore interface
 func (ss *SQLSubStore) AckSeqPending(subid, seqno uint64) error {
 	ss.Lock()
+	updateLastSent := false
+	ls := ss.subLastSent[subid]
+	if seqno >= ls {
+		if seqno > ls {
+			ss.subLastSent[subid] = seqno
+		}
+		updateLastSent = true
+	}
+	if updateLastSent {
+		if _, err := ss.sqlStore.preparedStmts[sqlSubUpdateLastSent].Exec(seqno, ss.channelID, subid); err != nil {
+			ss.Unlock()
+			return sqlStmtError(sqlSubUpdateLastSent, err)
+		}
+	}
 	_, err := ss.sqlStore.preparedStmts[sqlSubDeletePending].Exec(subid, seqno)
 	if err != nil {
 		err = sqlStmtError(sqlSubDeletePending, err)
