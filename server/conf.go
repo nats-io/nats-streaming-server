@@ -267,7 +267,7 @@ func parsePerChannelLimits(itf interface{}, opts *Options) error {
 		if !ok {
 			return fmt.Errorf("expected channel limits to be a map/struct, got %v", limits)
 		}
-		if !util.IsSubjectValid(channelName, true) {
+		if !util.IsChannelNameValid(channelName, true) {
 			return fmt.Errorf("invalid channel name %q", channelName)
 		}
 		cl := &stores.ChannelLimits{}

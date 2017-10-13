@@ -308,6 +308,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "store_limits:{channels:{\"foo.*bar\":{}}}", wrongSubjErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo.>.>\":{}}}", wrongSubjErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo..bar\":{}}}", wrongSubjErr)
+	expectFailureFor(t, "store_limits:{channels:{\"foo/bar\":{}}}", wrongSubjErr)
 	expectFailureFor(t, "tls:{client_cert:123}", wrongTypeErr)
 	expectFailureFor(t, "tls:{client_key:123}", wrongTypeErr)
 	expectFailureFor(t, "tls:{client_ca:123}", wrongTypeErr)

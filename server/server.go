@@ -2155,7 +2155,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	}
 
 	// Make sure we have a clientID, guid, etc.
-	if pm.Guid == "" || !s.clients.isValid(pm.ClientID) || !util.IsSubjectValid(pm.Subject, false) {
+	if pm.Guid == "" || !s.clients.isValid(pm.ClientID) || !util.IsChannelNameValid(pm.Subject, false) {
 		s.log.Errorf("Received invalid client publish message %v", pm)
 		s.sendPublishErr(m.Reply, pm.Guid, ErrInvalidPubReq)
 		return
@@ -3115,8 +3115,8 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	}
 
 	// Make sure subject is valid
-	if !util.IsSubjectValid(sr.Subject, false) {
-		s.log.Errorf("[Client:%s] Invalid Subject %q in subscription request from %s",
+	if !util.IsChannelNameValid(sr.Subject, false) {
+		s.log.Errorf("[Client:%s] Invalid channel %q in subscription request from %s",
 			sr.ClientID, sr.Subject, m.Subject)
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubject)
 		return

@@ -137,7 +137,7 @@ func CloseFile(err error, f io.Closer) error {
 	return err
 }
 
-// IsSubjectValid returns false if any of these conditions apply:
+// IsChannelNameValid returns false if any of these conditions apply:
 // - is empty
 // - token separator `.` is first or last
 // - there are two consecutives token separators `.`
@@ -146,13 +146,16 @@ func CloseFile(err error, f io.Closer) error {
 // if wildcardsAllowed is true:
 // - '*' or '>' are not a token in their own
 // - `>` is not the last token
-func IsSubjectValid(subject string, wildcardsAllowed bool) bool {
-	if subject == "" || subject[0] == btsep {
+func IsChannelNameValid(channel string, wildcardsAllowed bool) bool {
+	if channel == "" || channel[0] == btsep {
 		return false
 	}
-	for i := 0; i < len(subject); i++ {
-		c := subject[i]
-		if (c == btsep) && (i == len(subject)-1 || subject[i+1] == btsep) {
+	for i := 0; i < len(channel); i++ {
+		c := channel[i]
+		if c == '/' {
+			return false
+		}
+		if (c == btsep) && (i == len(channel)-1 || channel[i+1] == btsep) {
 			return false
 		}
 		if !wildcardsAllowed {
@@ -160,13 +163,13 @@ func IsSubjectValid(subject string, wildcardsAllowed bool) bool {
 				return false
 			}
 		} else if c == pwc || c == fwc {
-			if i > 0 && subject[i-1] != btsep {
+			if i > 0 && channel[i-1] != btsep {
 				return false
 			}
-			if c == fwc && i != len(subject)-1 {
+			if c == fwc && i != len(channel)-1 {
 				return false
 			}
-			if i < len(subject)-1 && subject[i+1] != btsep {
+			if i < len(channel)-1 && channel[i+1] != btsep {
 				return false
 			}
 		}

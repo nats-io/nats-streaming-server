@@ -66,6 +66,7 @@ func TestPartitionsInvalidChannelName(t *testing.T) {
 	serverShouldFail("foo*")
 	serverShouldFail("foo.*.")
 	serverShouldFail("foo.>.bar")
+	serverShouldFail("foo/bar")
 }
 
 func TestPartitionsInvalidRequest(t *testing.T) {
