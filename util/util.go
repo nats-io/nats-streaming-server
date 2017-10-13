@@ -137,8 +137,10 @@ func CloseFile(err error, f io.Closer) error {
 	return err
 }
 
-// IsChannelNameValid returns false if any of these conditions apply:
+// IsChannelNameValid returns false if any of these conditions for
+// the channel name apply:
 // - is empty
+// - contains the `/` character
 // - token separator `.` is first or last
 // - there are two consecutives token separators `.`
 // if wildcardsAllowed is false:
@@ -177,12 +179,12 @@ func IsChannelNameValid(channel string, wildcardsAllowed bool) bool {
 	return true
 }
 
-// IsSubjectLiteral returns true if the subject is a literal (that is,
+// IsChannelNameLiteral returns true if the channel name is a literal (that is,
 // it does not contain any wildcard).
-// The subject is assumed to be valid.
-func IsSubjectLiteral(subject string) bool {
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == pwc || subject[i] == fwc {
+// The channel name is assumed to be valid.
+func IsChannelNameLiteral(channel string) bool {
+	for i := 0; i < len(channel); i++ {
+		if channel[i] == pwc || channel[i] == fwc {
 			return false
 		}
 	}

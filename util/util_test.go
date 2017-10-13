@@ -263,17 +263,17 @@ func TestIsChannelNameValid(t *testing.T) {
 	}
 }
 
-func TestIsSubjectLiteral(t *testing.T) {
-	subjects := []string{"foo.*", "foo.>", "foo.*.bar", "foo.bar.*"}
-	for _, s := range subjects {
-		if IsSubjectLiteral(s) {
-			t.Fatalf("IsSubjectLiteral for %q should have returned false", s)
+func TestIsChannelNameLiteral(t *testing.T) {
+	channels := []string{"foo.*", "foo.>", "foo.*.bar", "foo.bar.*"}
+	for _, s := range channels {
+		if IsChannelNameLiteral(s) {
+			t.Fatalf("IsChannelNameLiteral for %q should have returned false", s)
 		}
 	}
-	subjects = []string{"foo.bar", "foo.baz", "foo.baz.bar", "foo.bar.baz"}
-	for _, s := range subjects {
-		if !IsSubjectLiteral(s) {
-			t.Fatalf("IsSubjectLiteral for %q should have returned true", s)
+	channels = []string{"foo.bar", "foo.baz", "foo.baz.bar", "foo.bar.baz"}
+	for _, s := range channels {
+		if !IsChannelNameLiteral(s) {
+			t.Fatalf("IsChannelNameLiteral for %q should have returned true", s)
 		}
 	}
 }

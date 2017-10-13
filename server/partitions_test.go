@@ -49,9 +49,9 @@ func TestPartitionsInvalidChannelName(t *testing.T) {
 
 	opts := GetDefaultOptions()
 	opts.Partitioning = true
-	serverShouldFail := func(subject string) {
+	serverShouldFail := func(channel string) {
 		opts.StoreLimits.PerChannel = nil
-		opts.StoreLimits.AddPerChannel(subject, &stores.ChannelLimits{})
+		opts.StoreLimits.AddPerChannel(channel, &stores.ChannelLimits{})
 		s, err := RunServerWithOpts(opts, nil)
 		if s != nil {
 			s.Shutdown()

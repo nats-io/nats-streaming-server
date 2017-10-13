@@ -74,7 +74,7 @@ func (sl *StoreLimits) Build() error {
 		if !util.IsChannelNameValid(cn, true) {
 			return fmt.Errorf("invalid channel name %q", cn)
 		}
-		isLiteral := util.IsSubjectLiteral(cn)
+		isLiteral := util.IsChannelNameLiteral(cn)
 		if isLiteral {
 			literals++
 			if sl.MaxChannels > 0 && literals > sl.MaxChannels {
@@ -172,7 +172,7 @@ func (sl *StoreLimits) Print() []string {
 		sublist.Insert(cn, &channelLimitInfo{
 			name:      cn,
 			limits:    cl,
-			isLiteral: util.IsSubjectLiteral(cn),
+			isLiteral: util.IsChannelNameLiteral(cn),
 		})
 	}
 	maxLevels := sublist.NumLevels()
