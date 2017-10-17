@@ -21,7 +21,7 @@ const (
 	mapStructErr = "map/struct"
 	wrongTypeErr = "value is expected to be"
 	wrongTimeErr = "time: "
-	wrongSubjErr = "invalid channel name"
+	wrongChanErr = "invalid channel name"
 )
 
 func TestParseConfig(t *testing.T) {
@@ -305,9 +305,10 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_age:\"1h:0m\"}}}", wrongTimeErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_age:false}}}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_subs:false}}}", wrongTypeErr)
-	expectFailureFor(t, "store_limits:{channels:{\"foo.*bar\":{}}}", wrongSubjErr)
-	expectFailureFor(t, "store_limits:{channels:{\"foo.>.>\":{}}}", wrongSubjErr)
-	expectFailureFor(t, "store_limits:{channels:{\"foo..bar\":{}}}", wrongSubjErr)
+	expectFailureFor(t, "store_limits:{channels:{\"foo.*bar\":{}}}", wrongChanErr)
+	expectFailureFor(t, "store_limits:{channels:{\"foo.>.>\":{}}}", wrongChanErr)
+	expectFailureFor(t, "store_limits:{channels:{\"foo..bar\":{}}}", wrongChanErr)
+	expectFailureFor(t, "store_limits:{channels:{\"foo/bar\":{}}}", wrongChanErr)
 	expectFailureFor(t, "tls:{client_cert:123}", wrongTypeErr)
 	expectFailureFor(t, "tls:{client_key:123}", wrongTypeErr)
 	expectFailureFor(t, "tls:{client_ca:123}", wrongTypeErr)
