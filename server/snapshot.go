@@ -14,7 +14,7 @@ import (
 	"github.com/nats-io/nats-streaming-server/spb"
 )
 
-const batchSize = 200
+const snapshotBatchSize = 200
 
 var (
 	fragmentPool    = &sync.Pool{New: func() interface{} { return &spb.RaftSnapshotFragment{} }}
@@ -72,7 +72,7 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 		buf   [4]byte
 		batch = batchPool.Get().(*spb.Batch)
 	)
-	batch.Messages = make([]*pb.MsgProto, 0, batchSize)
+	batch.Messages = make([]*pb.MsgProto, 0, snapshotBatchSize)
 
 	for seq := first; seq <= last; seq++ {
 		msg, err := c.store.Msgs.Lookup(seq)
@@ -88,7 +88,7 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 		}
 
 		// Previous batch is full, ship it.
-		if len(batch.Messages) == batchSize {
+		if len(batch.Messages) == snapshotBatchSize {
 			fragment := newFragment()
 			fragment.FragmentType = spb.RaftSnapshotFragment_Messages
 			fragment.MessageBatch = batch
@@ -98,7 +98,7 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 
 			// Create a new batch.
 			batch = batchPool.Get().(*spb.Batch)
-			batch.Messages = make([]*pb.MsgProto, 0, batchSize)
+			batch.Messages = make([]*pb.MsgProto, 0, snapshotBatchSize)
 		}
 
 		batch.Messages = append(batch.Messages, msg)
