@@ -145,7 +145,13 @@ message RaftSnapshotFragment {
     Messages     = 0; // Channel messages.
     Subscription = 1; // Channel subscription.
   }
-  Type     FragmentType = 1; // Snapshot fragment type.
-  Batch    MessageBatch = 2; // Messages fragment data.
-  SubState Sub          = 3; // Subscription fragment data.
+  Type        FragmentType = 1; // Snapshot fragment type.
+  Batch       MessageBatch = 2; // Messages fragment data.
+  SubSnapshot Sub          = 3; // Subscription fragment data.
+}
+
+// SubSnapshot is a snapshot of a subscription.
+message SubSnapshot {
+  SubState State   = 1; // Subscription data.
+  string   Subject = 2; // Subscription subject.
 }

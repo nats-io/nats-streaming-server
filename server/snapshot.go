@@ -17,8 +17,9 @@ import (
 const batchSize = 200
 
 var (
-	fragmentPool = &sync.Pool{New: func() interface{} { return &spb.RaftSnapshotFragment{} }}
-	batchPool    = &sync.Pool{New: func() interface{} { return &spb.Batch{} }}
+	fragmentPool    = &sync.Pool{New: func() interface{} { return &spb.RaftSnapshotFragment{} }}
+	batchPool       = &sync.Pool{New: func() interface{} { return &spb.Batch{} }}
+	subSnapshotPool = &sync.Pool{New: func() interface{} { return &spb.SubSnapshot{} }}
 )
 
 // channelSnapshot implements the raft.FSMSnapshot interface.
@@ -121,7 +122,10 @@ func (c *channelSnapshot) snapshotSubscriptions(sink raft.SnapshotSink) error {
 	for _, sub := range c.ss.getAllSubs() {
 		fragment := newFragment()
 		fragment.FragmentType = spb.RaftSnapshotFragment_Subscription
-		fragment.Sub = &sub.SubState
+		subSnap := subSnapshotPool.Get().(*spb.SubSnapshot)
+		subSnap.Subject = sub.subject
+		subSnap.State = &sub.SubState
+		fragment.Sub = subSnap
 		if err := writeFragment(sink, fragment, buf); err != nil {
 			return err
 		}
@@ -140,6 +144,9 @@ func writeFragment(sink raft.SnapshotSink, fragment *spb.RaftSnapshotFragment, s
 	data, err := fragment.Marshal()
 	if fragment.MessageBatch != nil {
 		batchPool.Put(fragment.MessageBatch)
+	}
+	if fragment.Sub != nil {
+		subSnapshotPool.Put(fragment.Sub)
 	}
 	fragmentPool.Put(fragment)
 	if err != nil {
@@ -160,14 +167,19 @@ func newFragment() *spb.RaftSnapshotFragment {
 	return fragment
 }
 
-// restoreFromSnapshot restores a channel from a snapshot.
+// restoreFromSnapshot restores a channel from a snapshot. This is not called
+// concurrently with any other Raft commands.
 func (c *channel) restoreFromSnapshot(snapshot io.ReadCloser) error {
 	defer snapshot.Close()
 
 	// TODO: this needs to be fully implemented to support restoring the
 	// entire Raft log, not just channel messages.
 	// TODO: restore acks
-	// TODO: restore sub positions
+
+	// Drop all existing subs. These will be restored from the snapshot.
+	for _, sub := range c.ss.getAllSubs() {
+		c.stan.unsubscribe(c, sub.ClientID, sub, true)
+	}
 
 	sizeBuf := make([]byte, 4)
 	for {
@@ -207,7 +219,20 @@ func (c *channel) restoreFromSnapshot(snapshot io.ReadCloser) error {
 			fragmentPool.Put(fragment)
 		case spb.RaftSnapshotFragment_Subscription:
 			// Channel subscription.
-			// TODO
+			sub := &subState{
+				SubState:    *fragment.Sub.State,
+				subject:     fragment.Sub.Subject,
+				ackWait:     computeAckWait(fragment.Sub.State.AckWaitInSecs),
+				acksPending: make(map[uint64]int64),
+				store:       c.store.Subs,
+			}
+			if err := c.stan.addSubscription(c.ss, sub); err != nil {
+				subSnapshotPool.Put(fragment.Sub)
+				fragmentPool.Put(fragment)
+				return err
+			}
+			subSnapshotPool.Put(fragment.Sub)
+			fragmentPool.Put(fragment)
 		default:
 			panic(fmt.Sprintf("unknown snapshot fragment type %s", fragment.FragmentType))
 		}

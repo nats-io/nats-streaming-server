@@ -524,7 +524,7 @@ func TestClusteringLeaderFlap(t *testing.T) {
 	getChannelLeader(t, channel, 10*time.Second, servers...)
 }
 
-func TestClusteringLogSnapshotCatchup(t *testing.T) {
+func TestClusteringLogSnapshotRestore(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 	cleanupRaftLog(t)
@@ -571,6 +571,12 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	channel := "foo"
 	publishWithRetry(t, sc, channel, []byte("hello"))
 
+	// Create a subscription.
+	sub, err := sc.Subscribe(channel, func(_ *stan.Msg) {})
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
 		if err := sc.Publish(channel, []byte(strconv.Itoa(i+1))); err != nil {
@@ -596,6 +602,19 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 		if err := sc.Publish(channel, []byte(strconv.Itoa(i+6))); err != nil {
 			t.Fatalf("Unexpected error on publish: %v", err)
 		}
+	}
+
+	// Create two more subscriptions.
+	if _, err := sc.Subscribe(channel, func(_ *stan.Msg) {}, stan.DurableName("durable")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if _, err := sc.Subscribe(channel, func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Unsubscribe the previous subscription.
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatalf("Unexpected error on unsubscribe: %v", err)
 	}
 
 	// Force a log compaction on the leader.
@@ -628,6 +647,11 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 		expected[i-1] = msg{sequence: uint64(i), data: []byte(strconv.Itoa(i))}
 	}
 	verifyChannelConsistency(t, channel, 10*time.Second, 1, 11, expected, servers...)
+
+	// Verify subscriptions are consistent.
+	for _, srv := range servers {
+		waitForNumSubs(t, srv, clientName, 2)
+	}
 }
 
 // Ensures subscriptions are replicated such that when a leader fails over, the
