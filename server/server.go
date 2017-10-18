@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -452,14 +453,14 @@ func (c *channel) Apply(l *raft.Log) interface{} {
 	case spb.RaftOperation_Ack:
 		// If we proposed the ack, do nothing since we already processed it as
 		// leader.
-		if op.Leader == c.stan.opts.ClusterNodeID {
+		if op.Leader == c.stan.opts.Clustering.NodeID {
 			return nil
 		}
 		c.stan.processReplicatedAck(c, op.AckMsg.AckInbox, op.AckMsg.Sequence)
 	case spb.RaftOperation_Send:
 		// If we proposed the message sent update, do nothing since we already
 		// processed it as leader.
-		if op.Leader == c.stan.opts.ClusterNodeID {
+		if op.Leader == c.stan.opts.Clustering.NodeID {
 			return nil
 		}
 		c.stan.processReplicatedSentMsg(c, op.SendMsg.AckInbox, op.SendMsg.Sequence)
@@ -690,7 +691,7 @@ type StanServer struct {
 }
 
 func (s *StanServer) isClustered() bool {
-	return len(s.opts.ClusterPeers) > 0
+	return len(s.opts.Clustering.Peers) > 0
 }
 
 func (s *StanServer) isMetadataLeader() bool {
@@ -1126,14 +1127,7 @@ type Options struct {
 	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
 	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
-
-	// Clustering options
-	ClusterNodeID string   // ID of the node within the cluster.
-	ClusterPeers  []string // Cluster peer IDs.
-	RaftLogPath   string   // Path to Raft log store directory.
-	LogCacheSize  int      // Number of Raft log entries to cache in memory to reduce disk IO.
-	LogSnapshots  int      // Number of Raft log snapshots to retain.
-	TrailingLogs  int64    // Number of logs left after a snapshot.
+	Clustering         ClusteringOptions
 }
 
 // Clone returns a deep copy of the Options object.
@@ -1320,7 +1314,7 @@ func (s *StanServer) createNatsConnections(sOpts *Options, nOpts *server.Options
 	if err == nil && sOpts.FTGroupName != "" {
 		s.ftnc, err = s.createNatsClientConn("ft", sOpts, nOpts)
 	}
-	if err == nil && len(sOpts.ClusterPeers) > 0 {
+	if err == nil && s.isClustered() {
 		s.ncr, err = s.createNatsClientConn("raft", sOpts, nOpts)
 	}
 	return err
@@ -1349,6 +1343,16 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		nOpts = &no
 	} else {
 		nOpts = natsOpts.Clone()
+	}
+
+	if len(sOpts.Clustering.Peers) > 0 {
+		// If clustered, override store sync configuration with cluster sync.
+		sOpts.FileStoreOpts.DoSync = sOpts.Clustering.Sync
+
+		// Default cluster Raft log path to ./<cluster-id>/<node-id> if not set.
+		if sOpts.Clustering.RaftLogPath == "" {
+			sOpts.Clustering.RaftLogPath = filepath.Join(sOpts.ID, sOpts.Clustering.NodeID)
+		}
 	}
 
 	s := StanServer{
@@ -1477,8 +1481,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		}()
 	} else {
 		state := Standalone
-		if len(s.opts.ClusterPeers) > 0 {
-			if s.opts.ClusterNodeID == "" {
+		if s.isClustered() {
+			if s.opts.Clustering.NodeID == "" {
 				return nil, errors.New("cluster node id not provided")
 			}
 			state = Clustered
@@ -2211,7 +2215,7 @@ func (s *StanServer) isDuplicateConnect(client *client) bool {
 func (s *StanServer) replicateConnect(clientID, heartbeatInbox string, refresh bool) error {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Connect,
-		Leader: s.opts.ClusterNodeID,
+		Leader: s.opts.Clustering.NodeID,
 		ClientConnect: &spb.AddClient{
 			ClientID:       clientID,
 			HeartbeatInbox: heartbeatInbox,
@@ -2522,7 +2526,7 @@ func (s *StanServer) performConnClose(clientID, reply string) {
 func (s *StanServer) replicateConnClose(clientID, reply string, schedule bool) error {
 	op := &spb.RaftOperation{
 		OpType:           spb.RaftOperation_Disconnect,
-		Leader:           s.opts.ClusterNodeID,
+		Leader:           s.opts.Clustering.NodeID,
 		ClientDisconnect: &spb.RemoveClient{ClientID: clientID, Reply: reply, Schedule: schedule},
 	}
 	data, err := op.Marshal()
@@ -2965,7 +2969,7 @@ func (s *StanServer) getMsgForRedelivery(c *channel, sub *subState, seq uint64) 
 func (s *StanServer) replicateUpdateSentMsg(c *channel, sub *subState, sequence uint64) {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Send,
-		Leader: s.opts.ClusterNodeID,
+		Leader: s.opts.Clustering.NodeID,
 		SendMsg: &spb.AckMessage{
 			AckInbox: sub.AckInbox,
 			Sequence: sequence,
@@ -3341,7 +3345,7 @@ func (s *StanServer) replicate(iopms []*ioPendingMsg) (map[*channel]raft.Future,
 		op := &spb.RaftOperation{
 			OpType:       spb.RaftOperation_Publish,
 			PublishBatch: batch,
-			Leader:       s.opts.ClusterNodeID,
+			Leader:       s.opts.Clustering.NodeID,
 		}
 		data, err := op.Marshal()
 		if err != nil {
@@ -3559,7 +3563,7 @@ func (s *StanServer) replicateCloseSubscription(c *channel, clientID, ackInbox s
 func (s *StanServer) replicateUnsubscribe(c *channel, clientID, ackInbox string, opType spb.RaftOperation_Type) error {
 	op := &spb.RaftOperation{
 		OpType: opType,
-		Leader: s.opts.ClusterNodeID,
+		Leader: s.opts.Clustering.NodeID,
 		Unsub: &spb.RemoveSubscription{
 			AckInbox: ackInbox,
 			ClientID: clientID,
@@ -3671,7 +3675,7 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string, c *channel) (*subState, error) {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Subscribe,
-		Leader: s.opts.ClusterNodeID,
+		Leader: s.opts.Clustering.NodeID,
 		Sub: &spb.AddSubscription{
 			Request:  sr,
 			AckInbox: ackInbox,
@@ -4093,7 +4097,7 @@ func (s *StanServer) processAckMsg(m *nats.Msg) {
 func (s *StanServer) replicateAck(c *channel, ackInbox string, sequence uint64) {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Ack,
-		Leader: s.opts.ClusterNodeID,
+		Leader: s.opts.Clustering.NodeID,
 		AckMsg: &spb.AckMessage{
 			AckInbox: ackInbox,
 			Sequence: sequence,
@@ -4530,7 +4534,7 @@ func (s *StanServer) Apply(l *raft.Log) interface{} {
 			reply := op.ClientDisconnect.Reply
 			// Only send a reply if we are the server that proposed the
 			// disconnect.
-			if op.Leader != s.opts.ClusterNodeID {
+			if op.Leader != s.opts.Clustering.NodeID {
 				reply = ""
 			}
 			s.scheduleConnClose(op.ClientDisconnect.ClientID, reply)
