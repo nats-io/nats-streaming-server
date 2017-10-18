@@ -138,7 +138,7 @@ func (c *channelSnapshot) snapshotAcks(sink raft.SnapshotSink) error {
 	return nil
 }
 
-// writeFragment writes the marshalled RaftSnapshotFragment to the
+// writeFragment writes the marshaled RaftSnapshotFragment to the
 // SnapshotSink. The fragment should not be used after this is called.
 func writeFragment(sink raft.SnapshotSink, fragment *spb.RaftSnapshotFragment, sizeBuf [4]byte) error {
 	data, err := fragment.Marshal()
