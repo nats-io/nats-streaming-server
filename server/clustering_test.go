@@ -145,7 +145,7 @@ type msg struct {
 func verifyChannelConsistency(t *testing.T, channel string, timeout time.Duration,
 	expectedFirstSeq, expectedLastSeq uint64, expectedMsgs map[uint64]msg, servers ...*StanServer) {
 	deadline := time.Now().Add(timeout)
-OUTTER:
+OUTER:
 	for time.Now().Before(deadline) {
 		for _, server := range servers {
 			store := server.channels.get(channel).store.Msgs
@@ -155,11 +155,11 @@ OUTTER:
 			}
 			if first != expectedFirstSeq {
 				time.Sleep(100 * time.Millisecond)
-				continue OUTTER
+				continue OUTER
 			}
 			if last != expectedLastSeq {
 				time.Sleep(100 * time.Millisecond)
-				continue OUTTER
+				continue OUTER
 			}
 			for i := first; i <= last; i++ {
 				msg, err := store.Lookup(i)
