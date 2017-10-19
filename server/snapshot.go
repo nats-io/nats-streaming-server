@@ -69,8 +69,14 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 	}
 
 	var (
-		buf   [4]byte
-		batch = batchPool.Get().(*spb.Batch)
+		buf              [4]byte
+		batch            = batchPool.Get().(*spb.Batch)
+		writeMsgFragment = func(b *spb.Batch) error {
+			fragment := newFragment()
+			fragment.FragmentType = spb.RaftSnapshotFragment_Messages
+			fragment.MessageBatch = b
+			return writeFragment(sink, fragment, buf)
+		}
 	)
 	batch.Messages = make([]*pb.MsgProto, 0, snapshotBatchSize)
 
@@ -89,10 +95,7 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 
 		// Previous batch is full, ship it.
 		if len(batch.Messages) == snapshotBatchSize {
-			fragment := newFragment()
-			fragment.FragmentType = spb.RaftSnapshotFragment_Messages
-			fragment.MessageBatch = batch
-			if err := writeFragment(sink, fragment, buf); err != nil {
+			if err := writeMsgFragment(batch); err != nil {
 				return err
 			}
 
@@ -106,10 +109,7 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 
 	// Ship any partial batch.
 	if len(batch.Messages) > 0 {
-		fragment := newFragment()
-		fragment.FragmentType = spb.RaftSnapshotFragment_Messages
-		fragment.MessageBatch = batch
-		if err := writeFragment(sink, fragment, buf); err != nil {
+		if err := writeMsgFragment(batch); err != nil {
 			return err
 		}
 	}
