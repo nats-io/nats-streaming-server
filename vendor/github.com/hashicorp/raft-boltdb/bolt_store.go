@@ -41,6 +41,11 @@ type Options struct {
 	// BoltOptions contains any specific BoltDB options you might
 	// want to specify [e.g. open timeout]
 	BoltOptions *bolt.Options
+
+	// NoSync causes the database to skip fsync calls after each
+	// write to the log. This is unsafe, so it should be used
+	// with caution.
+	NoSync bool
 }
 
 // readOnly returns true if the contained bolt options say to open
@@ -62,6 +67,7 @@ func New(options Options) (*BoltStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	handle.NoSync = options.NoSync
 
 	// Create the new store
 	store := &BoltStore{
@@ -252,4 +258,11 @@ func (b *BoltStore) GetUint64(key []byte) (uint64, error) {
 		return 0, err
 	}
 	return bytesToUint64(val), nil
+}
+
+// Sync performs an fsync on the database file handle. This is not necessary
+// under normal operation unless NoSync is enabled, in which this forces the
+// database file to sync against the disk.
+func (b *BoltStore) Sync() error {
+	return b.conn.Sync()
 }

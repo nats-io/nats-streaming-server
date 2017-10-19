@@ -462,7 +462,17 @@ the request. Again, if no server handle this channel, the client's subscription 
 To monitor the NATS streaming system, a lightweight HTTP server is used on a dedicated monitoring port.
 The monitoring server provides several endpoints, all returning a JSON object.
 
-The NATS monitoring endpoints support JSONP and CORS, making it easy to create single page monitoring web applications.
+The NATS monitoring endpoints support JSONP, making it easy to create single page monitoring web applications.
+Simply pass `callback` query parameter to any endpoint.
+
+For example:
+
+```javascript
+// JQuery example
+$.getJSON('http://localhost:8222/streaming/serverz?callback=?', function(data) {
+  console.log(data);
+});
+```
 
 ### Enabling
 

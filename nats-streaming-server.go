@@ -41,6 +41,7 @@ Streaming Server Clustering Options:
     --cluster_log_cache_size <int>    Number of log entries to cache in memory to reduce disk IO. (default:512)
     --cluster_num_log_snapshots <int> Number of log snapshots to retain. (default: 2)
     --cluster_trailing_logs <int>     Number of log entries to leave after a snapshot and compaction.
+    --cluster_sync <bool>             Do a file sync after every write to the replication log and message store.
 
 Streaming Server File Store Options:
     --file_compact_enabled <bool>        Enable file compaction

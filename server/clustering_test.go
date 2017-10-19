@@ -46,11 +46,11 @@ func getTestDefaultOptsForClustering(id string, peers []string) *Options {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = filepath.Join(defaultDataStore, id)
 	opts.FileStoreOpts.BufferSize = 1024
-	opts.ClusterPeers = peers
-	opts.ClusterNodeID = id
-	opts.RaftLogPath = filepath.Join(defaultRaftLog, id)
-	opts.LogCacheSize = DefaultLogCacheSize
-	opts.LogSnapshots = 1
+	opts.Clustering.Peers = peers
+	opts.Clustering.NodeID = id
+	opts.Clustering.RaftLogPath = filepath.Join(defaultRaftLog, id)
+	opts.Clustering.LogCacheSize = DefaultLogCacheSize
+	opts.Clustering.LogSnapshots = 1
 	opts.NATSServerURL = "nats://localhost:4222"
 	return opts
 }
@@ -215,7 +215,7 @@ func TestClusteringConfig(t *testing.T) {
 	defer cleanupRaftLog(t)
 
 	opts := GetDefaultOptions()
-	opts.ClusterPeers = []string{"a", "b"}
+	opts.Clustering.Peers = []string{"a", "b"}
 	s, err := RunServerWithOpts(opts, nil)
 	if s != nil || err == nil {
 		if s != nil {
@@ -526,19 +526,19 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 
 	// Configure first server
 	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
-	s1sOpts.TrailingLogs = 0
+	s1sOpts.Clustering.TrailingLogs = 0
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
 	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
-	s2sOpts.TrailingLogs = 0
+	s2sOpts.Clustering.TrailingLogs = 0
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
 	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
-	s3sOpts.TrailingLogs = 0
+	s3sOpts.Clustering.TrailingLogs = 0
 	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
 
@@ -616,7 +616,7 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 	follower = runServerWithOpts(t, follower.opts, nil)
 	defer follower.Shutdown()
 	for i, server := range servers {
-		if server.opts.ClusterNodeID == follower.opts.ClusterNodeID {
+		if server.opts.Clustering.NodeID == follower.opts.Clustering.NodeID {
 			servers[i] = follower
 			break
 		}

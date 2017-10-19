@@ -117,6 +117,11 @@ func TestLimitsBuildErrors(t *testing.T) {
 	cl = &ChannelLimits{}
 	sl.AddPerChannel(".foo", cl)
 	expectError("invalid channel name")
+
+	sl = testDefaultStoreLimits
+	cl = &ChannelLimits{}
+	sl.AddPerChannel("foo/bar", cl)
+	expectError("invalid channel name")
 }
 
 func TestLimitsPerChannelOverride(t *testing.T) {
