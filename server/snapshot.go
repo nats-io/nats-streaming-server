@@ -168,6 +168,7 @@ func writeFragment(sink raft.SnapshotSink, fragment *spb.RaftSnapshotFragment, s
 func newFragment() *spb.RaftSnapshotFragment {
 	fragment := fragmentPool.Get().(*spb.RaftSnapshotFragment)
 	fragment.Msgs = nil
+	fragment.Sub = nil
 	return fragment
 }
 
