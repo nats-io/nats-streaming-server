@@ -48,10 +48,6 @@ func (c *channelSnapshot) Persist(sink raft.SnapshotSink) (err error) {
 		return err
 	}
 
-	if err := c.snapshotAcks(sink); err != nil {
-		return err
-	}
-
 	return sink.Close()
 }
 
@@ -62,6 +58,7 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 	// TODO: this is very expensive and might repeatedly fail if messages are
 	// constantly being truncated. Is there a way we can optimize this, e.g.
 	// handling Restore() out-of-band from Raft?
+	// See issue #410.
 
 	first, last, err := c.store.Msgs.FirstAndLastSequence()
 	if err != nil {
@@ -123,18 +120,21 @@ func (c *channelSnapshot) snapshotSubscriptions(sink raft.SnapshotSink) error {
 		fragment := newFragment()
 		fragment.FragmentType = spb.RaftSnapshotFragment_Subscription
 		subSnap := subSnapshotPool.Get().(*spb.SubSnapshot)
+		sub.Lock()
 		subSnap.Subject = sub.subject
 		subSnap.State = &sub.SubState
+		subSnap.AcksPending = make([]uint64, len(sub.acksPending))
+		i := 0
+		for seq, _ := range sub.acksPending {
+			subSnap.AcksPending[i] = seq
+			i++
+		}
+		sub.Unlock()
 		fragment.Sub = subSnap
 		if err := writeFragment(sink, fragment, buf); err != nil {
 			return err
 		}
 	}
-	return nil
-}
-
-func (c *channelSnapshot) snapshotAcks(sink raft.SnapshotSink) error {
-	// TODO
 	return nil
 }
 
@@ -171,10 +171,6 @@ func newFragment() *spb.RaftSnapshotFragment {
 // concurrently with any other Raft commands.
 func (c *channel) restoreFromSnapshot(snapshot io.ReadCloser) error {
 	defer snapshot.Close()
-
-	// TODO: this needs to be fully implemented to support restoring the
-	// entire Raft log, not just channel messages.
-	// TODO: restore acks
 
 	// Drop all existing subs. These will be restored from the snapshot.
 	for _, sub := range c.ss.getAllSubs() {
@@ -219,11 +215,18 @@ func (c *channel) restoreFromSnapshot(snapshot io.ReadCloser) error {
 			fragmentPool.Put(fragment)
 		case spb.RaftSnapshotFragment_Subscription:
 			// Channel subscription.
+			acksPending := make(map[uint64]int64, len(fragment.Sub.AcksPending))
+			for _, seq := range fragment.Sub.AcksPending {
+				// Set 0 for expiration time. This will be computed
+				// when the follower becomes leader and attempts to
+				// redeliver messages.
+				acksPending[seq] = 0
+			}
 			sub := &subState{
 				SubState:    *fragment.Sub.State,
 				subject:     fragment.Sub.Subject,
 				ackWait:     computeAckWait(fragment.Sub.State.AckWaitInSecs),
-				acksPending: make(map[uint64]int64),
+				acksPending: acksPending,
 				store:       c.store.Subs,
 			}
 			if err := c.stan.addSubscription(c.ss, sub); err != nil {

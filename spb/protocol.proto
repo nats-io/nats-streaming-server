@@ -152,6 +152,7 @@ message RaftSnapshotFragment {
 
 // SubSnapshot is a snapshot of a subscription.
 message SubSnapshot {
-  SubState State   = 1; // Subscription data.
-  string   Subject = 2; // Subscription subject.
+  SubState        State       = 1; // Subscription data.
+  string          Subject     = 2; // Subscription subject.
+  repeated uint64 AcksPending = 3; // Sequences of unacknowledged messages.
 }
