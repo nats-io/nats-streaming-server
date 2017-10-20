@@ -644,6 +644,161 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 	}
 }
 
+func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts.Clustering.TrailingLogs = 0
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts.Clustering.TrailingLogs = 0
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts.Clustering.TrailingLogs = 0
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Wait for metadata leader to be elected.
+	getMetadataLeader(t, 10*time.Second, servers...)
+
+	// Create a client connection.
+	sc, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Create a subscription. (this will create the channel and form the Raft group).
+	var (
+		ch      = make(chan *stan.Msg, 1)
+		channel = "foo"
+	)
+	_, err = sc.Subscribe(channel, func(msg *stan.Msg) {
+		// Do not ack.
+		ch <- msg
+	}, stan.DeliverAllAvailable(), stan.SetManualAckMode(), stan.AckWait(time.Second), stan.MaxInflight(1))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Wait for leader to be elected.
+	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
+
+	// Kill a follower.
+	var follower *StanServer
+	for _, s := range servers {
+		if leader != s {
+			follower = s
+			break
+		}
+	}
+	follower.Shutdown()
+
+	// Publish a message.
+	publishWithRetry(t, sc, channel, []byte("1"))
+
+	// Verify we received the message.
+	select {
+	case msg := <-ch:
+		assertMsg(t, msg.MsgProto, []byte("1"), 1)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected msg")
+	}
+
+	// Force a log compaction on the leader.
+	if err := leader.channels.get(channel).raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Unexpected error on snapshot: %v", err)
+	}
+
+	// Bring the follower back up.
+	follower = runServerWithOpts(t, follower.opts, nil)
+	defer follower.Shutdown()
+	for i, server := range servers {
+		if server.opts.Clustering.NodeID == follower.opts.Clustering.NodeID {
+			servers[i] = follower
+			break
+		}
+	}
+
+	// Ensure there is a leader before publishing.
+	getChannelLeader(t, channel, 10*time.Second, servers...)
+
+	// Publish a message to force a timely catch up.
+	if err := sc.Publish(channel, []byte("2")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	// Verify the server stores are consistent.
+	totalMsgs := uint64(2)
+	expected := make(map[uint64]msg, totalMsgs)
+	for i := uint64(0); i < totalMsgs; i++ {
+		expected[i+1] = msg{sequence: uint64(i + 1), data: []byte(strconv.Itoa(int(i + 1)))}
+	}
+	verifyChannelConsistency(t, channel, 10*time.Second, 1, totalMsgs, expected, servers...)
+
+	// Kill all the servers.
+	for _, s := range servers {
+		s.Shutdown()
+	}
+
+	// Restart the follower who caught up in standalone mode.
+	follower.opts.Clustering.Peers = nil
+	follower = runServerWithOpts(t, follower.opts, nil)
+	defer follower.Shutdown()
+
+	// Verify the message is redelivered and, after acking, we receive the next
+	// message.
+	select {
+	case msg := <-ch:
+		msg.Ack()
+		assertMsg(t, msg.MsgProto, []byte("1"), 1)
+	case <-time.After(10 * time.Second):
+		t.Fatal("expected msg")
+	}
+	var (
+		deadline = time.Now().Add(10 * time.Second)
+		m        *stan.Msg
+	)
+LOOP:
+	for time.Now().Before(deadline) {
+		select {
+		case msg := <-ch:
+			// It's possible the first message was redelivered multiple times.
+			if msg.Sequence == 1 {
+				continue
+			}
+			msg.Ack()
+			assertMsg(t, msg.MsgProto, []byte("2"), 2)
+			m = msg
+			break LOOP
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if m == nil {
+		t.Fatal("expected msg")
+	}
+}
+
 // Ensures subscriptions are replicated such that when a leader fails over, the
 // subscription continues to deliver messages.
 func TestClusteringSubscriberFailover(t *testing.T) {
