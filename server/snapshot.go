@@ -17,9 +17,10 @@ import (
 const snapshotBatchSize = 200
 
 var (
-	fragmentPool    = &sync.Pool{New: func() interface{} { return &spb.RaftSnapshotFragment{} }}
-	batchPool       = &sync.Pool{New: func() interface{} { return &spb.Batch{} }}
-	subSnapshotPool = &sync.Pool{New: func() interface{} { return &spb.SubSnapshot{} }}
+	fragmentPool     = &sync.Pool{New: func() interface{} { return &spb.RaftSnapshotFragment{} }}
+	batchPool        = &sync.Pool{New: func() interface{} { return &spb.Batch{} }}
+	msgsSnapshotPool = &sync.Pool{New: func() interface{} { return &spb.MessagesSnapshot{} }}
+	subSnapshotPool  = &sync.Pool{New: func() interface{} { return &spb.SubSnapshot{} }}
 )
 
 // channelSnapshot implements the raft.FSMSnapshot interface.
@@ -71,7 +72,9 @@ func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
 		writeMsgFragment = func(b *spb.Batch) error {
 			fragment := newFragment()
 			fragment.FragmentType = spb.RaftSnapshotFragment_Messages
-			fragment.MessageBatch = b
+			msgsSnap := msgsSnapshotPool.Get().(*spb.MessagesSnapshot)
+			msgsSnap.MessageBatch = b
+			fragment.Msgs = msgsSnap
 			return writeFragment(sink, fragment, buf)
 		}
 	)
@@ -142,8 +145,9 @@ func (c *channelSnapshot) snapshotSubscriptions(sink raft.SnapshotSink) error {
 // SnapshotSink. The fragment should not be used after this is called.
 func writeFragment(sink raft.SnapshotSink, fragment *spb.RaftSnapshotFragment, sizeBuf [4]byte) error {
 	data, err := fragment.Marshal()
-	if fragment.MessageBatch != nil {
-		batchPool.Put(fragment.MessageBatch)
+	if fragment.Msgs != nil {
+		batchPool.Put(fragment.Msgs.MessageBatch)
+		msgsSnapshotPool.Put(fragment.Msgs)
 	}
 	if fragment.Sub != nil {
 		subSnapshotPool.Put(fragment.Sub)
@@ -163,7 +167,7 @@ func writeFragment(sink raft.SnapshotSink, fragment *spb.RaftSnapshotFragment, s
 
 func newFragment() *spb.RaftSnapshotFragment {
 	fragment := fragmentPool.Get().(*spb.RaftSnapshotFragment)
-	fragment.MessageBatch = nil
+	fragment.Msgs = nil
 	return fragment
 }
 
@@ -204,41 +208,61 @@ func (c *channel) restoreFromSnapshot(snapshot io.ReadCloser) error {
 		switch fragment.FragmentType {
 		case spb.RaftSnapshotFragment_Messages:
 			// Channel messages.
-			for _, msg := range fragment.MessageBatch.Messages {
-				if _, err := c.store.Msgs.Store(msg); err != nil {
-					batchPool.Put(fragment.MessageBatch)
-					fragmentPool.Put(fragment)
-					return err
-				}
-			}
-			batchPool.Put(fragment.MessageBatch)
+			err := c.restoreMsgsFromSnapshot(fragment.Msgs)
+			batchPool.Put(fragment.Msgs.MessageBatch)
+			msgsSnapshotPool.Put(fragment.Msgs)
 			fragmentPool.Put(fragment)
-		case spb.RaftSnapshotFragment_Subscription:
-			// Channel subscription.
-			acksPending := make(map[uint64]int64, len(fragment.Sub.AcksPending))
-			for _, seq := range fragment.Sub.AcksPending {
-				// Set 0 for expiration time. This will be computed
-				// when the follower becomes leader and attempts to
-				// redeliver messages.
-				acksPending[seq] = 0
-			}
-			sub := &subState{
-				SubState:    *fragment.Sub.State,
-				subject:     fragment.Sub.Subject,
-				ackWait:     computeAckWait(fragment.Sub.State.AckWaitInSecs),
-				acksPending: acksPending,
-				store:       c.store.Subs,
-			}
-			if err := c.stan.addSubscription(c.ss, sub); err != nil {
-				subSnapshotPool.Put(fragment.Sub)
-				fragmentPool.Put(fragment)
+			if err != nil {
 				return err
 			}
+		case spb.RaftSnapshotFragment_Subscription:
+			// Channel subscription.
+			err := c.restoreSubFromSnapshot(fragment.Sub)
 			subSnapshotPool.Put(fragment.Sub)
 			fragmentPool.Put(fragment)
+			if err != nil {
+				return err
+			}
 		default:
 			panic(fmt.Sprintf("unknown snapshot fragment type %s", fragment.FragmentType))
 		}
 	}
 	return c.store.Msgs.Flush()
+}
+
+func (c *channel) restoreMsgsFromSnapshot(msgsSnapshot *spb.MessagesSnapshot) error {
+	for _, msg := range msgsSnapshot.MessageBatch.Messages {
+		if _, err := c.store.Msgs.Store(msg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *channel) restoreSubFromSnapshot(subSnapshot *spb.SubSnapshot) error {
+	acksPending := make(map[uint64]int64, len(subSnapshot.AcksPending))
+	for _, seq := range subSnapshot.AcksPending {
+		// Set 0 for expiration time. This will be computed
+		// when the follower becomes leader and attempts to
+		// redeliver messages.
+		acksPending[seq] = 0
+	}
+	sub := &subState{
+		SubState:    *subSnapshot.State,
+		subject:     subSnapshot.Subject,
+		ackWait:     computeAckWait(subSnapshot.State.AckWaitInSecs),
+		acksPending: acksPending,
+		store:       c.store.Subs,
+	}
+	// Store the subscription.
+	if err := c.stan.addSubscription(c.ss, sub); err != nil {
+		return err
+	}
+	// Store pending acks for the subscription.
+	for seq, _ := range sub.acksPending {
+		if err := sub.store.AddSeqPending(sub.ID, seq); err != nil {
+			return err
+		}
+	}
+	return nil
 }
