@@ -143,10 +143,10 @@ type msg struct {
 }
 
 func verifyChannelConsistency(t *testing.T, channel string, timeout time.Duration,
-	expectedFirstSeq, expectedLastSeq uint64, expectedMsgs []msg, servers ...*StanServer) {
+	expectedFirstSeq, expectedLastSeq uint64, expectedMsgs map[uint64]msg, servers ...*StanServer) {
 	deadline := time.Now().Add(timeout)
+OUTER:
 	for time.Now().Before(deadline) {
-	INNER:
 		for _, server := range servers {
 			store := server.channels.get(channel).store.Msgs
 			first, last, err := store.FirstAndLastSequence()
@@ -155,21 +155,18 @@ func verifyChannelConsistency(t *testing.T, channel string, timeout time.Duratio
 			}
 			if first != expectedFirstSeq {
 				time.Sleep(100 * time.Millisecond)
-				break INNER
+				continue OUTER
 			}
 			if last != expectedLastSeq {
 				time.Sleep(100 * time.Millisecond)
-				break INNER
+				continue OUTER
 			}
 			for i := first; i <= last; i++ {
 				msg, err := store.Lookup(i)
 				if err != nil {
 					t.Fatalf("Error getting message %d: %v", i, err)
 				}
-				if !compareMsg(t, *msg, expectedMsgs[i].data, expectedMsgs[i].sequence) {
-					time.Sleep(100 * time.Millisecond)
-					break INNER
-				}
+				assertMsg(t, *msg, expectedMsgs[i].data, expectedMsgs[i].sequence)
 			}
 		}
 		return
@@ -193,13 +190,6 @@ func assertMsg(t *testing.T, msg pb.MsgProto, expectedData []byte, expectedSeq u
 	if !bytes.Equal(msg.Data, expectedData) {
 		stackFatalf(t, "Msg data incorrect, expected: %s, got: %s", expectedData, msg.Data)
 	}
-}
-
-func compareMsg(t *testing.T, msg pb.MsgProto, expectedData []byte, expectedSeq uint64) bool {
-	if !bytes.Equal(msg.Data, expectedData) {
-		return false
-	}
-	return msg.Sequence == expectedSeq
 }
 
 func publishWithRetry(t *testing.T, sc stan.Conn, channel string, payload []byte) {
@@ -387,15 +377,15 @@ func TestClusteringBasic(t *testing.T) {
 	}
 
 	// Verify the server stores are consistent.
-	expected := make([]msg, 12)
-	expected[0] = msg{sequence: 1, data: []byte("hello")}
-	for i := 0; i < 5; i++ {
-		expected[i+1] = msg{sequence: uint64(i + 2), data: []byte(strconv.Itoa(i))}
+	expected := make(map[uint64]msg, 12)
+	expected[1] = msg{sequence: 1, data: []byte("hello")}
+	for i := uint64(0); i < 5; i++ {
+		expected[i+2] = msg{sequence: uint64(i + 2), data: []byte(strconv.Itoa(int(i)))}
 	}
-	for i := 0; i < 5; i++ {
-		expected[i+6] = msg{sequence: uint64(i + 7), data: []byte("foo-" + strconv.Itoa(i))}
+	for i := uint64(0); i < 5; i++ {
+		expected[i+7] = msg{sequence: uint64(i + 7), data: []byte("foo-" + strconv.Itoa(int(i)))}
 	}
-	expected[11] = msg{sequence: 12, data: []byte("goodbye")}
+	expected[12] = msg{sequence: 12, data: []byte("goodbye")}
 	verifyChannelConsistency(t, channel, 10*time.Second, 1, 12, expected, servers...)
 }
 
@@ -524,7 +514,7 @@ func TestClusteringLeaderFlap(t *testing.T) {
 	getChannelLeader(t, channel, 10*time.Second, servers...)
 }
 
-func TestClusteringLogSnapshotCatchup(t *testing.T) {
+func TestClusteringLogSnapshotRestore(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 	cleanupRaftLog(t)
@@ -569,11 +559,17 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	publishWithRetry(t, sc, channel, []byte("hello"))
+	publishWithRetry(t, sc, channel, []byte("1"))
+
+	// Create a subscription.
+	sub, err := sc.Subscribe(channel, func(_ *stan.Msg) {})
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
-		if err := sc.Publish(channel, []byte(strconv.Itoa(i+1))); err != nil {
+		if err := sc.Publish(channel, []byte(strconv.Itoa(i+2))); err != nil {
 			t.Fatalf("Unexpected error on publish: %v", err)
 		}
 	}
@@ -592,10 +588,23 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	follower.Shutdown()
 
 	// Publish some more messages.
-	for i := 0; i < 5; i++ {
-		if err := sc.Publish(channel, []byte(strconv.Itoa(i+6))); err != nil {
+	for i := 0; i < snapshotBatchSize; i++ {
+		if err := sc.Publish(channel, []byte(strconv.Itoa(i+7))); err != nil {
 			t.Fatalf("Unexpected error on publish: %v", err)
 		}
+	}
+
+	// Create two more subscriptions.
+	if _, err := sc.Subscribe(channel, func(_ *stan.Msg) {}, stan.DurableName("durable")); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	if _, err := sc.Subscribe(channel, func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+
+	// Unsubscribe the previous subscription.
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatalf("Unexpected error on unsubscribe: %v", err)
 	}
 
 	// Force a log compaction on the leader.
@@ -617,17 +626,22 @@ func TestClusteringLogSnapshotCatchup(t *testing.T) {
 	getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish a message to force a timely catch up.
-	if err := sc.Publish(channel, []byte("11")); err != nil {
+	if err := sc.Publish(channel, []byte(strconv.Itoa(snapshotBatchSize+7))); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
 	// Verify the server stores are consistent.
-	expected := make([]msg, 12)
-	expected[0] = msg{sequence: 1, data: []byte("hello")}
-	for i := 2; i < 13; i++ {
-		expected[i-1] = msg{sequence: uint64(i), data: []byte(strconv.Itoa(i))}
+	totalMsgs := uint64(snapshotBatchSize + 7)
+	expected := make(map[uint64]msg, totalMsgs)
+	for i := uint64(0); i < totalMsgs; i++ {
+		expected[i+1] = msg{sequence: uint64(i + 1), data: []byte(strconv.Itoa(int(i + 1)))}
 	}
-	verifyChannelConsistency(t, channel, 10*time.Second, 1, 11, expected, servers...)
+	verifyChannelConsistency(t, channel, 10*time.Second, 1, totalMsgs, expected, servers...)
+
+	// Verify subscriptions are consistent.
+	for _, srv := range servers {
+		waitForNumSubs(t, srv, clientName, 2)
+	}
 }
 
 // Ensures subscriptions are replicated such that when a leader fails over, the

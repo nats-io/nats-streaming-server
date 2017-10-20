@@ -3,7 +3,6 @@
 package server
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -563,40 +562,14 @@ func (c *channel) getAckSubject() string {
 // the FSM should be implemented in a fashion that allows for concurrent
 // updates while a snapshot is happening.
 func (c *channel) Snapshot() (raft.FSMSnapshot, error) {
-	// TODO: this needs to be fully implemented to support snapshotting the
-	// entire Raft log, not just channel messages.
 	return newChannelSnapshot(c), nil
 }
 
 // Restore is used to restore an FSM from a snapshot. It is not called
 // concurrently with any other command. The FSM must discard all previous
 // state.
-func (c *channel) Restore(old io.ReadCloser) error {
-	// TODO: this needs to be fully implemented to support restoring the
-	// entire Raft log, not just channel messages.
-	defer old.Close()
-	sizeBuf := make([]byte, 4)
-	for {
-		if _, err := io.ReadFull(old, sizeBuf); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
-		}
-		size := binary.BigEndian.Uint32(sizeBuf)
-		buf := make([]byte, size)
-		if _, err := io.ReadFull(old, buf); err != nil {
-			return err
-		}
-		msg := &pb.MsgProto{}
-		if err := msg.Unmarshal(buf); err != nil {
-			return err
-		}
-		if _, err := c.store.Msgs.Store(msg); err != nil {
-			return err
-		}
-	}
-	return c.store.Msgs.Flush()
+func (c *channel) Restore(snapshot io.ReadCloser) error {
+	return c.restoreFromSnapshot(snapshot)
 }
 
 // StanServer structure represents the STAN server
