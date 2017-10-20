@@ -687,15 +687,11 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	}
 	defer sc.Close()
 
-	// Publish a message (this will create the channel and form the Raft group).
-	channel := "foo"
-	publishWithRetry(t, sc, channel, []byte("1"))
-
-	// Wait for leader to be elected.
-	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
-
-	// Create a subscription.
-	ch := make(chan *stan.Msg, 1)
+	// Create a subscription. (this will create the channel and form the Raft group).
+	var (
+		ch      = make(chan *stan.Msg, 1)
+		channel = "foo"
+	)
 	_, err = sc.Subscribe(channel, func(msg *stan.Msg) {
 		// Do not ack.
 		ch <- msg
@@ -704,13 +700,8 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 
-	// Verify we received the message.
-	select {
-	case msg := <-ch:
-		assertMsg(t, msg.MsgProto, []byte("1"), 1)
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected msg")
-	}
+	// Wait for leader to be elected.
+	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Kill a follower.
 	var follower *StanServer
@@ -721,6 +712,17 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 		}
 	}
 	follower.Shutdown()
+
+	// Publish a message.
+	publishWithRetry(t, sc, channel, []byte("1"))
+
+	// Verify we received the message.
+	select {
+	case msg := <-ch:
+		assertMsg(t, msg.MsgProto, []byte("1"), 1)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected msg")
+	}
 
 	// Force a log compaction on the leader.
 	if err := leader.channels.get(channel).raft.Snapshot().Error(); err != nil {
