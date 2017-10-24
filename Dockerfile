@@ -1,12 +1,14 @@
-FROM golang:1.7.6
+FROM golang:1.8.4
 
 MAINTAINER Ivan Kozlovic <ivan.kozlovic@apcera.com>
 
 COPY . /go/src/github.com/nats-io/nats-streaming-server
 WORKDIR /go/src/github.com/nats-io/nats-streaming-server
 
-RUN CGO_ENABLED=0 go install -v -a -tags netgo -installsuffix netgo -ldflags "-s -w -X github.com/nats-io/nats-streaming-server/version.GITCOMMIT=`git rev-parse --short HEAD`"
+RUN CGO_ENABLED=0 GOOS=linux   GOARCH=amd64         go build -v -a -tags netgo -installsuffix netgo -ldflags "-s -w -X github.com/nats-io/nats-streaming-server/version.GITCOMMIT=`git rev-parse --short HEAD`" -o pkg/linux-amd64/nats-streaming-server
+RUN CGO_ENABLED=0 GOOS=linux   GOARCH=arm   GOARM=7 go build -v -a -tags netgo -installsuffix netgo -ldflags "-s -w -X github.com/nats-io/nats-streaming-server/version.GITCOMMIT=`git rev-parse --short HEAD`" -o pkg/linux-arm7/nats-streaming-server
+RUN CGO_ENABLED=0 GOOS=linux   GOARCH=arm64         go build -v -a -tags netgo -installsuffix netgo -ldflags "-s -w -X github.com/nats-io/nats-streaming-server/version.GITCOMMIT=`git rev-parse --short HEAD`" -o pkg/linux-arm64/nats-streaming-server
+RUN CGO_ENABLED=0 GOOS=windows GOARCH=amd64         go build -v -a -tags netgo -installsuffix netgo -ldflags "-s -w -X github.com/nats-io/nats-streaming-server/version.GITCOMMIT=`git rev-parse --short HEAD`" -o pkg/win-amd64/nats-streaming-server.exe
 
-EXPOSE 4222 8222
-ENTRYPOINT ["nats-streaming-server"]
-CMD ["--help"]
+ENTRYPOINT ["go"]
+CMD ["version"]
