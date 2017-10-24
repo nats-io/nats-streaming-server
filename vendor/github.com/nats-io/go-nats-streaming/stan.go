@@ -71,7 +71,7 @@ var (
 )
 
 // AckHandler is used for Async Publishing to provide status of the ack.
-// The func will be passed teh GUID and any error state. No error means the
+// The func will be passed the GUID and any error state. No error means the
 // message was successfully received by NATS Streaming.
 type AckHandler func(string, error)
 
@@ -144,7 +144,6 @@ func NatsConn(nc *nats.Conn) Option {
 type conn struct {
 	sync.RWMutex
 	clientID         string
-	serverID         string
 	pubPrefix        string // Publish prefix set by stan, append our subject.
 	subRequests      string // Subject to send subscription requests.
 	unsubRequests    string // Subject to send unsubscribe requests.
@@ -169,6 +168,7 @@ type ack struct {
 }
 
 // Connect will form a connection to the NATS Streaming subsystem.
+// Note that clientID can contain only alphanumeric and `-` or `_` characters.
 func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 	// Process Options
 	c := conn{clientID: clientID, opts: DefaultOptions}
@@ -464,12 +464,11 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 		cb(msg)
 	}
 
-	// Proces auto-ack
+	// Process auto-ack
 	if !isManualAck && nc != nil {
 		ack := &pb.Ack{Subject: msg.Subject, Sequence: msg.Sequence}
 		b, _ := ack.Marshal()
-		if err := nc.Publish(ackSubject, b); err != nil {
-			// FIXME(dlc) - Async error handler? Retry?
-		}
+		// FIXME(dlc) - Async error handler? Retry?
+		nc.Publish(ackSubject, b)
 	}
 }
