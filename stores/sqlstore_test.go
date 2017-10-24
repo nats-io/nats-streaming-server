@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -42,7 +43,7 @@ func cleanupSQLDatastore(t tLogger) {
 }
 
 func newSQLStore(t tLogger, driver, source string, limits *StoreLimits) (*SQLStore, *RecoveredState, error) {
-	ss, err := NewSQLStore(testLogger, driver, source, limits)
+	ss, err := NewSQLStore(testLogger, driver, source, limits, SQLNoBuffering(true))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -642,4 +643,106 @@ func TestSQLPurgeSubsPending(t *testing.T) {
 	if smallest != smallestThatShouldBeRecovered {
 		t.Fatalf("Expected %v to be first, got %v", smallestThatShouldBeRecovered, smallest)
 	}
+}
+
+func TestSQLNoBufferingOption(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	limits := testDefaultStoreLimits
+	limits.MaxMsgs = 5
+	limits.MaxAge = 500 * time.Millisecond
+	// Create a store with buffering enabled (which is default, but invoke option here)
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, &limits, SQLNoBuffering(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	// Create a channel
+	cs := storeCreateChannel(t, s, "foo")
+
+	// Store some messages (more than what is allowed so we test
+	// applying limits with caching).
+	msg := []byte("hello")
+	for i := 0; i < 10; i++ {
+		if _, err := cs.Msgs.Store(msg); err != nil {
+			t.Fatalf("Error storing message: %v", err)
+		}
+	}
+
+	// It should not be in database unless we call flush.
+	db := getDBConnection(t)
+	defer db.Close()
+	checkDB := func(expected int) {
+		r := db.QueryRow("SELECT COUNT(*) FROM Messages")
+		nr := 0
+		if err := r.Scan(&nr); err != nil {
+			t.Fatalf("Error during scan: %v", err)
+		}
+		if nr != expected {
+			t.Fatalf("Expected %d records, got %v", expected, nr)
+		}
+	}
+	checkDB(0)
+
+	// Lookup should work, getting it from internal cache
+	totalSize := 0
+	for i := 6; i <= 10; i++ {
+		m := msgStoreLookup(t, cs.Msgs, uint64(i))
+		if !reflect.DeepEqual(m.Data, msg) {
+			t.Fatalf("Unexpected message content: %v", m)
+		}
+		totalSize += m.Size()
+	}
+
+	// Check store stats
+	count, bytes := msgStoreState(t, cs.Msgs)
+	if count != limits.MaxMsgs || bytes != uint64(totalSize) {
+		t.Fatalf("Unexpected count/size, expected %v - %v, got %v - %v", limits.MaxMsgs, totalSize, count, bytes)
+	}
+
+	// Flush to database
+	if err := cs.Msgs.Flush(); err != nil {
+		t.Fatalf("Error on flush: %v", err)
+	}
+	// Should find it in the database
+	checkDB(5)
+
+	// Send more messages
+	for i := 0; i < 10; i++ {
+		if _, err := cs.Msgs.Store(msg); err != nil {
+			t.Fatalf("Error storing message: %v", err)
+		}
+	}
+	totalSize = 0
+	for i := 16; i <= 20; i++ {
+		m := msgStoreLookup(t, cs.Msgs, uint64(i))
+		if !reflect.DeepEqual(m.Data, msg) {
+			t.Fatalf("Unexpected message content: %v", m)
+		}
+		totalSize += m.Size()
+	}
+	count, bytes = msgStoreState(t, cs.Msgs)
+	if count != limits.MaxMsgs || bytes != uint64(totalSize) {
+		t.Fatalf("Unexpected count/size, expected %v - %v, got %v - %v", limits.MaxMsgs, totalSize, count, bytes)
+	}
+	// Flush to database
+	if err := cs.Msgs.Flush(); err != nil {
+		t.Fatalf("Error on flush: %v", err)
+	}
+	// Should find it in the database
+	checkDB(5)
+
+	// Wait for messages to expire
+	time.Sleep(limits.MaxAge + 100*time.Millisecond)
+	// There should be no more message
+	count, bytes = msgStoreState(t, cs.Msgs)
+	if count != 0 || bytes != 0 {
+		t.Fatalf("There should be no message, got %v - %v", count, bytes)
+	}
+	checkDB(0)
 }

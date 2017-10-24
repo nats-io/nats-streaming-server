@@ -139,6 +139,25 @@ var (
 type SQLStoreOptions struct {
 	Driver string
 	Source string
+
+	// By default, MsgStore.Store(), SubStore.AddSeqPending() and
+	// SubStore.AckSeqPending() are storing the actions in memory, and
+	// actual SQL statements are executed only when MsgStore.Flush()
+	// and SubStore.Flush() are called.
+	// If this option is set to `true`, each call to aforementioned
+	// APIs will cause execution of their respective SQL statements.
+	NoBuffering bool
+}
+
+// SQLStoreOption is a function on the options for a SQL Store
+type SQLStoreOption func(*SQLStoreOptions) error
+
+// SQLNoBuffering sets the NoBuffering option
+func SQLNoBuffering(noBuffering bool) SQLStoreOption {
+	return func(o *SQLStoreOptions) error {
+		o.NoBuffering = noBuffering
+		return nil
+	}
 }
 
 // SQLStore is a factory for message and subscription stores backed by
@@ -150,6 +169,7 @@ type SQLStore struct {
 	nowInNano int64
 
 	genericStore
+	opts          *SQLStoreOptions
 	db            *sql.DB
 	maxChannelID  int64
 	doneCh        chan struct{}
@@ -175,6 +195,26 @@ type SQLMsgStore struct {
 	sqlStore    *SQLStore // Reference to "parent" store
 	expireTimer *time.Timer
 	wg          sync.WaitGroup
+
+	// If option NoBuffering is false, uses this cache for storing Store()
+	// commands until caller calls Flush() in which case we use transaction
+	// to execute all pending store commands.
+	// The cache is also used in Lookup since messages may not be yet in the
+	// database.
+	writeCache *sqlMsgsCache
+}
+
+type sqlMsgsCache struct {
+	msgs map[uint64]*sqlCachedMsg
+	head *sqlCachedMsg
+	tail *sqlCachedMsg
+	free *sqlCachedMsg
+}
+
+type sqlCachedMsg struct {
+	msg  *pb.MsgProto
+	data []byte
+	next *sqlCachedMsg
 }
 
 // sqlStmtError returns an error including the text of the offending SQL statement.
@@ -189,7 +229,7 @@ func sqlStmtError(code int, err error) error {
 // NewSQLStore returns a factory for stores held in memory.
 // If not limits are provided, the store will be created with
 // DefaultStoreLimits.
-func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits) (*SQLStore, error) {
+func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits, options ...SQLStoreOption) (*SQLStore, error) {
 	initSQLStmts.Do(func() { initSQLStmtsTable(driver) })
 	db, err := sql.Open(driver, source)
 	if err != nil {
@@ -199,7 +239,16 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits) 
 		db.Close()
 		return nil, err
 	}
+	// Start with empty options
+	opts := &SQLStoreOptions{}
+	// And apply whatever is given to us as options.
+	for _, opt := range options {
+		if err := opt(opts); err != nil {
+			return nil, err
+		}
+	}
 	s := &SQLStore{
+		opts:          opts,
 		db:            db,
 		doneCh:        make(chan struct{}),
 		preparedStmts: make([]*sql.Stmt, 0, len(sqlStmts)),
@@ -224,6 +273,9 @@ func (s *SQLStore) newSQLMsgStore(channel string, channelID int64, limits *MsgSt
 		channelID: channelID,
 	}
 	msgStore.init(channel, s.log, limits)
+	if !s.opts.NoBuffering {
+		msgStore.writeCache = &sqlMsgsCache{msgs: make(map[uint64]*sqlCachedMsg)}
+	}
 	return msgStore
 }
 
@@ -712,6 +764,48 @@ func (s *SQLStore) Close() error {
 // SQLMsgStore methods
 ////////////////////////////////////////////////////////////////////////////
 
+func (mc *sqlMsgsCache) add(msg *pb.MsgProto, data []byte) {
+	cachedMsg := mc.free
+	if cachedMsg != nil {
+		mc.free = cachedMsg.next
+		cachedMsg.next = nil
+		// Remove old message from the map
+		delete(mc.msgs, cachedMsg.msg.Sequence)
+	} else {
+		cachedMsg = &sqlCachedMsg{}
+	}
+	cachedMsg.msg = msg
+	cachedMsg.data = data
+	mc.msgs[msg.Sequence] = cachedMsg
+	if mc.head == nil {
+		mc.head = cachedMsg
+	} else {
+		mc.tail.next = cachedMsg
+	}
+	mc.tail = cachedMsg
+}
+
+func (mc *sqlMsgsCache) transferToFreeList() {
+	if mc.tail != nil {
+		mc.tail.next = mc.free
+		mc.free = mc.head
+	}
+	mc.head = nil
+	mc.tail = nil
+}
+
+func (mc *sqlMsgsCache) pop() *sqlCachedMsg {
+	cm := mc.head
+	if cm != nil {
+		delete(mc.msgs, cm.msg.Sequence)
+		mc.head = cm.next
+		if mc.head == nil {
+			mc.tail = nil
+		}
+	}
+	return cm
+}
+
 // Store implements the MsgStore interface
 func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 	ms.Lock()
@@ -721,8 +815,14 @@ func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 	msgBytes, _ := msg.Marshal()
 
 	dataLen := uint64(len(msgBytes))
-	if _, err := ms.sqlStore.preparedStmts[sqlStoreMsg].Exec(ms.channelID, seq, msg.Timestamp, dataLen, msgBytes); err != nil {
-		return 0, sqlStmtError(sqlStoreMsg, err)
+
+	useCache := !ms.sqlStore.opts.NoBuffering
+	if useCache {
+		ms.writeCache.add(msg, msgBytes)
+	} else {
+		if _, err := ms.sqlStore.preparedStmts[sqlStoreMsg].Exec(ms.channelID, seq, msg.Timestamp, dataLen, msgBytes); err != nil {
+			return 0, sqlStmtError(sqlStoreMsg, err)
+		}
 	}
 	if ms.first == 0 {
 		ms.first = seq
@@ -739,14 +839,24 @@ func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 			((maxMsgs > 0 && ms.totalCount > maxMsgs) ||
 				(maxBytes > 0 && (ms.totalBytes > uint64(maxBytes)))) {
 
-			r := ms.sqlStore.preparedStmts[sqlGetSizeOfMessage].QueryRow(ms.channelID, ms.first)
+			didSQL := false
 			delBytes := uint64(0)
-			if err := r.Scan(&delBytes); err != nil && err != sql.ErrNoRows {
-				return 0, sqlStmtError(sqlGetSizeOfMessage, err)
+
+			if useCache && ms.writeCache.head.msg.Sequence == ms.first {
+				firstCachedMsg := ms.writeCache.pop()
+				delBytes = uint64(len(firstCachedMsg.data))
+			} else {
+				r := ms.sqlStore.preparedStmts[sqlGetSizeOfMessage].QueryRow(ms.channelID, ms.first)
+				if err := r.Scan(&delBytes); err != nil && err != sql.ErrNoRows {
+					return 0, sqlStmtError(sqlGetSizeOfMessage, err)
+				}
+				didSQL = true
 			}
 			if delBytes > 0 {
-				if _, err := ms.sqlStore.preparedStmts[sqlDeleteMessage].Exec(ms.channelID, ms.first); err != nil {
-					return 0, sqlStmtError(sqlDeleteMessage, err)
+				if didSQL {
+					if _, err := ms.sqlStore.preparedStmts[sqlDeleteMessage].Exec(ms.channelID, ms.first); err != nil {
+						return 0, sqlStmtError(sqlDeleteMessage, err)
+					}
 				}
 				ms.totalCount--
 				ms.totalBytes -= delBytes
@@ -760,40 +870,58 @@ func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 		}
 	}
 
-	if ms.limits.MaxAge > 0 && ms.expireTimer == nil {
-		ms.wg.Add(1)
-		ms.expireTimer = time.AfterFunc(ms.limits.MaxAge, ms.expireMsgs)
+	if !useCache && ms.limits.MaxAge > 0 && ms.expireTimer == nil {
+		ms.createExpireTimer()
 	}
-
 	return seq, nil
+}
+
+func (ms *SQLMsgStore) createExpireTimer() {
+	ms.wg.Add(1)
+	ms.expireTimer = time.AfterFunc(ms.limits.MaxAge, ms.expireMsgs)
 }
 
 // Lookup implements the MsgStore interface
 func (ms *SQLMsgStore) Lookup(seq uint64) (*pb.MsgProto, error) {
 	ms.Lock()
-	msg, err := ms.lookupLocked(seq)
+	msg, err := ms.lookup(seq)
 	ms.Unlock()
 	return msg, err
 }
 
-func (ms *SQLMsgStore) lookupLocked(seq uint64) (*pb.MsgProto, error) {
+func (ms *SQLMsgStore) lookup(seq uint64) (*pb.MsgProto, error) {
 	var (
 		timestamp int64
 		data      []byte
+		msg       *pb.MsgProto
 	)
-	r := ms.sqlStore.preparedStmts[sqlLookupMsg].QueryRow(ms.channelID, seq)
-	err := r.Scan(&timestamp, &data)
-	if err == sql.ErrNoRows {
+	if seq < ms.first || seq > ms.last {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, sqlStmtError(sqlLookupMsg, err)
+	if !ms.sqlStore.opts.NoBuffering {
+		cm := ms.writeCache.msgs[seq]
+		if cm != nil {
+			msg = cm.msg
+			timestamp = msg.Timestamp
+		}
+	}
+	if msg == nil {
+		r := ms.sqlStore.preparedStmts[sqlLookupMsg].QueryRow(ms.channelID, seq)
+		err := r.Scan(&timestamp, &data)
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, sqlStmtError(sqlLookupMsg, err)
+		}
 	}
 	if maxAge := int64(ms.limits.MaxAge); maxAge > 0 && atomic.LoadInt64(&ms.sqlStore.nowInNano) > timestamp+maxAge {
 		return nil, nil
 	}
-	msg := &pb.MsgProto{}
-	msg.Unmarshal(data)
+	if msg == nil {
+		msg = &pb.MsgProto{}
+		msg.Unmarshal(data)
+	}
 	return msg, nil
 }
 
@@ -824,7 +952,7 @@ func (ms *SQLMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error)
 // FirstMsg implements the MsgStore interface
 func (ms *SQLMsgStore) FirstMsg() (*pb.MsgProto, error) {
 	ms.Lock()
-	msg, err := ms.lookupLocked(ms.first)
+	msg, err := ms.lookup(ms.first)
 	ms.Unlock()
 	return msg, err
 }
@@ -832,7 +960,7 @@ func (ms *SQLMsgStore) FirstMsg() (*pb.MsgProto, error) {
 // LastMsg implements the MsgStore interface
 func (ms *SQLMsgStore) LastMsg() (*pb.MsgProto, error) {
 	ms.Lock()
-	msg, err := ms.lookupLocked(ms.last)
+	msg, err := ms.lookup(ms.last)
 	ms.Unlock()
 	return msg, err
 }
@@ -910,6 +1038,63 @@ func (ms *SQLMsgStore) expireMsgs() {
 	}
 }
 
+func (ms *SQLMsgStore) flush() error {
+	if ms.sqlStore.opts.NoBuffering {
+		return nil
+	}
+	if ms.writeCache.head == nil {
+		return nil
+	}
+	var (
+		tx *sql.Tx
+		ps *sql.Stmt
+	)
+	defer func() {
+		ms.writeCache.transferToFreeList()
+		if ps != nil {
+			ps.Close()
+		}
+		if tx != nil {
+			tx.Rollback()
+		}
+	}()
+	tx, err := ms.sqlStore.db.Begin()
+	if err != nil {
+		return err
+	}
+	ps, err = tx.Prepare(sqlStmts[sqlStoreMsg])
+	if err != nil {
+		return err
+	}
+	// Iterate through the cache, but do not remove elements from the list.
+	// They are needed in transferToFreeList().
+	for cm := ms.writeCache.head; cm != nil; cm = cm.next {
+		if _, err := ps.Exec(ms.channelID, cm.msg.Sequence, cm.msg.Timestamp, len(cm.data), cm.data); err != nil {
+			return err
+		}
+	}
+	if err := ps.Close(); err != nil {
+		return err
+	}
+	ps = nil
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	if ms.limits.MaxAge > 0 && ms.expireTimer == nil {
+		ms.createExpireTimer()
+	}
+	return nil
+}
+
+// Flush implements the MsgStore interface
+func (ms *SQLMsgStore) Flush() error {
+	ms.Lock()
+	err := ms.flush()
+	ms.Unlock()
+	return err
+}
+
 // Close implements the MsgStore interface
 func (ms *SQLMsgStore) Close() error {
 	ms.Lock()
@@ -923,10 +1108,11 @@ func (ms *SQLMsgStore) Close() error {
 			ms.wg.Done()
 		}
 	}
+	err := ms.flush()
 	ms.Unlock()
 
 	ms.wg.Wait()
-	return nil
+	return err
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -1001,6 +1187,7 @@ func (ss *SQLSubStore) DeleteSub(subid uint64) error {
 			return sqlStmtError(sqlDeleteSubscription, err)
 		}
 	}
+	delete(ss.subLastSent, subid)
 	// Ignore error on this since subscription would not be recovered
 	// if above executed ok.
 	ss.sqlStore.preparedStmts[sqlDeleteSubPendingMessages].Exec(subid)

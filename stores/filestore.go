@@ -3285,7 +3285,7 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 	// subscription count)
 	ss.Lock()
 	defer ss.Unlock()
-	if err := ss.createSubLocked(sub); err != nil {
+	if err := ss.createSub(sub); err != nil {
 		return err
 	}
 	if err := ss.writeRecord(nil, subRecNew, sub); err != nil {

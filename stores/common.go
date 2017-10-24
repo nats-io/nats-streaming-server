@@ -317,7 +317,7 @@ func (gss *genericSubStore) init(log logger.Logger, limits *SubStoreLimits) {
 // by the other SubStore methods.
 func (gss *genericSubStore) CreateSub(sub *spb.SubState) error {
 	gss.Lock()
-	err := gss.createSubLocked(sub)
+	err := gss.createSub(sub)
 	gss.Unlock()
 	return err
 }
@@ -330,7 +330,7 @@ func (gss *genericSubStore) UpdateSub(sub *spb.SubState) error {
 // createSubLocked checks that the number of subscriptions is below the max
 // and if so, assigns a new subscription ID and keep track of it in a map.
 // Lock is assumed to be held on entry.
-func (gss *genericSubStore) createSubLocked(sub *spb.SubState) error {
+func (gss *genericSubStore) createSub(sub *spb.SubState) error {
 	if gss.limits.MaxSubscriptions > 0 && len(gss.subs) >= gss.limits.MaxSubscriptions {
 		return ErrTooManySubs
 	}
