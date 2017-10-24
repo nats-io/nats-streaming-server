@@ -1,8 +1,8 @@
 language: go
 sudo: false
 go:
-- 1.8.x
-- 1.9.x
+- 1.8.4
+- 1.9.1
 install:
 - go get -t ./...
 - go get github.com/nats-io/gnatsd
