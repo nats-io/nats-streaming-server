@@ -515,7 +515,7 @@ various general statistics.
   "cluster_id": "test-cluster",
   "server_id": "J3Odi0wXYKWKFWz5D5uhH9",
   "version": "0.6.0",
-  "go": "go1.8.4",
+  "go": "go1.9.1",
   "state": "STANDALONE",
   "now": "2017-06-07T14:45:29.472535266+02:00",
   "start_time": "2017-06-07T14:44:49.936077607+02:00",
@@ -778,7 +778,7 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 > ./nats-streaming-server
 [13242] 2017/10/24 16:53:32.621030 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.6.0
 [13242] 2017/10/24 16:53:32.621108 [INF] STREAM: ServerID: MGIvFqj7Jq6MgLFogOr2HK
-[13242] 2017/10/24 16:53:32.621111 [INF] STREAM: Go version: go1.8.4
+[13242] 2017/10/24 16:53:32.621111 [INF] STREAM: Go version: go1.9.1
 [13242] 2017/10/24 16:53:32.621295 [INF] Starting nats-server version 1.0.4
 [13242] 2017/10/24 16:53:32.621369 [INF] Listening for client connections on 0.0.0.0:4222
 [13242] 2017/10/24 16:53:32.621373 [INF] Server is ready
