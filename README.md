@@ -494,10 +494,10 @@ nats-streaming-server -m 8222
 you should see that the NATS Streaming server starts with the HTTP monitoring port enabled:
 
 ```
-[19015] 2017/06/07 14:29:43.328760 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.5.0
+[13285] 2017/10/24 16:54:30.402549 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.6.0
 (...)
-[19015] 2017/06/07 14:29:43.329011 [INF] Starting http monitor on 0.0.0.0:8222
-[19015] 2017/06/07 14:29:43.329085 [INF] Listening for client connections on 0.0.0.0:4222
+[13285] 2017/10/24 16:54:30.402906 [INF] Starting http monitor on 0.0.0.0:8222
+[13285] 2017/10/24 16:54:30.402945 [INF] Listening for client connections on 0.0.0.0:4222
 (...)
 ```
 You can then point your browser (or curl) to [http://localhost:8222/streaming](http://localhost:8222/streaming)
@@ -514,8 +514,8 @@ various general statistics.
 {
   "cluster_id": "test-cluster",
   "server_id": "J3Odi0wXYKWKFWz5D5uhH9",
-  "version": "0.5.0",
-  "go": "go1.7.5",
+  "version": "0.6.0",
+  "go": "go1.9.1",
   "state": "STANDALONE",
   "now": "2017-06-07T14:45:29.472535266+02:00",
   "start_time": "2017-06-07T14:44:49.936077607+02:00",
@@ -776,21 +776,21 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[18648] 2017/06/27 12:28:25.989594 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.5.0
-[18648] 2017/06/27 12:28:25.989669 [INF] STREAM: ServerID: csSwT119qazk62IIen0oyB
-[18648] 2017/06/27 12:28:25.989672 [INF] STREAM: Go version: go1.7.5
-[18648] 2017/06/27 12:28:25.990300 [INF] Starting nats-server version 0.9.6
-[18648] 2017/06/27 12:28:25.991620 [INF] Listening for client connections on 0.0.0.0:4222
-[18648] 2017/06/27 12:28:25.992153 [INF] Server is ready
-[18648] 2017/06/27 12:28:26.279424 [INF] STREAM: Message store is MEMORY
-[18648] 2017/06/27 12:28:26.279491 [INF] STREAM: ---------- Store Limits ----------
-[18648] 2017/06/27 12:28:26.279496 [INF] STREAM: Channels:                  100 *
-[18648] 2017/06/27 12:28:26.279499 [INF] STREAM: --------- Channels Limits --------
-[18648] 2017/06/27 12:28:26.279503 [INF] STREAM:   Subscriptions:          1000 *
-[18648] 2017/06/27 12:28:26.279506 [INF] STREAM:   Messages     :       1000000 *
-[18648] 2017/06/27 12:28:26.279509 [INF] STREAM:   Bytes        :     976.56 MB *
-[18648] 2017/06/27 12:28:26.279512 [INF] STREAM:   Age          :     unlimited *
-[18648] 2017/06/27 12:28:26.279515 [INF] STREAM: ----------------------------------
+[13242] 2017/10/24 16:53:32.621030 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.6.0
+[13242] 2017/10/24 16:53:32.621108 [INF] STREAM: ServerID: MGIvFqj7Jq6MgLFogOr2HK
+[13242] 2017/10/24 16:53:32.621111 [INF] STREAM: Go version: go1.9.1
+[13242] 2017/10/24 16:53:32.621295 [INF] Starting nats-server version 1.0.4
+[13242] 2017/10/24 16:53:32.621369 [INF] Listening for client connections on 0.0.0.0:4222
+[13242] 2017/10/24 16:53:32.621373 [INF] Server is ready
+[13242] 2017/10/24 16:53:32.906984 [INF] STREAM: Message store is MEMORY
+[13242] 2017/10/24 16:53:32.907049 [INF] STREAM: ---------- Store Limits ----------
+[13242] 2017/10/24 16:53:32.907054 [INF] STREAM: Channels:                  100 *
+[13242] 2017/10/24 16:53:32.907057 [INF] STREAM: --------- Channels Limits --------
+[13242] 2017/10/24 16:53:32.907060 [INF] STREAM:   Subscriptions:          1000 *
+[13242] 2017/10/24 16:53:32.907062 [INF] STREAM:   Messages     :       1000000 *
+[13242] 2017/10/24 16:53:32.907065 [INF] STREAM:   Bytes        :     976.56 MB *
+[13242] 2017/10/24 16:53:32.907068 [INF] STREAM:   Age          :     unlimited *
+[13242] 2017/10/24 16:53:32.907071 [INF] STREAM: ----------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
