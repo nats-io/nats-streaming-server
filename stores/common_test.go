@@ -220,6 +220,12 @@ func storeSubAck(t tLogger, cs *Channel, channel string, subID uint64, seqs ...u
 	}
 }
 
+func storeSubFlush(t tLogger, cs *Channel, channel string) {
+	if err := cs.Subs.Flush(); err != nil {
+		stackFatalf(t, "Error flushing sub store for channel %q: %v", channel, err)
+	}
+}
+
 func storeSubDelete(t tLogger, cs *Channel, channel string, subID ...uint64) {
 	ss := cs.Subs
 	for _, s := range subID {

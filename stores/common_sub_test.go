@@ -336,7 +336,7 @@ func TestCSSubLastSentCorrectOnRecovery(t *testing.T) {
 			s.Close()
 			s, state = testReOpenStore(t, st, nil)
 			defer s.Close()
-			cs = getRecoveredChannel(t, state, "foo")
+			getRecoveredChannel(t, state, "foo")
 			subs = getRecoveredSubs(t, state, "foo", 1)
 			sub = subs[0]
 			// Check that sub's last seq is m2.Sequence

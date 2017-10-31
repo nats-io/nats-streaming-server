@@ -4,6 +4,7 @@ package stores
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -43,7 +44,9 @@ func cleanupSQLDatastore(t tLogger) {
 }
 
 func newSQLStore(t tLogger, driver, source string, limits *StoreLimits) (*SQLStore, *RecoveredState, error) {
-	ss, err := NewSQLStore(testLogger, driver, source, limits, SQLNoBuffering(true))
+	// Disable caching for most tests. To test caching, there will be
+	// specific tests that create the store with caching enabled.
+	ss, err := NewSQLStore(testLogger, driver, source, limits, SQLNoCaching(true))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -655,8 +658,8 @@ func TestSQLNoBufferingOption(t *testing.T) {
 	limits := testDefaultStoreLimits
 	limits.MaxMsgs = 5
 	limits.MaxAge = 500 * time.Millisecond
-	// Create a store with buffering enabled (which is default, but invoke option here)
-	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, &limits, SQLNoBuffering(false))
+	// Create a store with caching enabled (which is default, but invoke option here)
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, &limits, SQLNoCaching(false))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -745,4 +748,346 @@ func TestSQLNoBufferingOption(t *testing.T) {
 		t.Fatalf("There should be no message, got %v - %v", count, bytes)
 	}
 	checkDB(0)
+}
+
+func testSQLCheckPendingOrAcksRow(t tLogger, db *sql.DB, subID uint64, columnName string, expected ...uint64) {
+	rows, err := db.Query(fmt.Sprintf("SELECT %s FROM SubsPending WHERE subid=%v", columnName, subID))
+	if err != nil {
+		stackFatalf(t, "Error getting rows: %v", err)
+	}
+	defer rows.Close()
+	m := make(map[uint64]struct{})
+	for rows.Next() {
+		var (
+			rm    map[uint64]struct{}
+			bytes []byte
+		)
+		if err := rows.Scan(&bytes); err != nil {
+			stackFatalf(t, "Error getting bytes: %v", err)
+		}
+		json.Unmarshal(bytes, &rm)
+		for seq := range rm {
+			m[seq] = struct{}{}
+		}
+	}
+	rows.Close()
+	if len(expected) != len(m) {
+		stackFatalf(t, "Expected %v elements, got %v", len(expected), len(m))
+	}
+	for _, seq := range expected {
+		if _, exists := m[seq]; !exists {
+			stackFatalf(t, "Expected %v to be in %s, it was not", seq, columnName)
+		}
+	}
+}
+
+func testSQLCheckPendingRow(t tLogger, db *sql.DB, subID uint64, expectedPending ...uint64) {
+	testSQLCheckPendingOrAcksRow(t, db, subID, "pending", expectedPending...)
+}
+
+func testSQLCheckAckRow(t tLogger, db *sql.DB, subID uint64, expectedPending ...uint64) {
+	testSQLCheckPendingOrAcksRow(t, db, subID, "acks", expectedPending...)
+}
+func testSQLCheckSubLastSent(t tLogger, db *sql.DB, subID uint64, expected uint64) {
+	r := db.QueryRow(fmt.Sprintf("SELECT lastsent FROM Subscriptions WHERE subid=%v", subID))
+	lastSent := uint64(0)
+	if err := r.Scan(&lastSent); err != nil {
+		stackFatalf(t, "Error getting lastSent: %v", err)
+	}
+	if lastSent != expected {
+		stackFatalf(t, "Expected lastSent to be %v, got %v", expected, lastSent)
+	}
+}
+
+func TestSQLSubStoreCaching(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	sqlMaxPendingAcks = 10
+	// "disable" timer based flusing for now
+	sqlSubStoreFlushInterval = time.Hour
+	defer func() {
+		sqlMaxPendingAcks = sqlDefaultMaxPendingAcks
+		sqlSubStoreFlushInterval = sqlDefaultSubStoreFlushInterval
+	}()
+
+	// Tests are by default not using caching, so this
+	// test has to be explicit.
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	channel := "foo"
+	cs := storeCreateChannel(t, s, channel)
+
+	subID := storeSub(t, cs, channel)
+	storeSubPending(t, cs, channel, subID, 1, 2)
+	storeSubFlush(t, cs, channel)
+
+	db := getDBConnection(t)
+	defer db.Close()
+	testSQLCheckPendingRow(t, db, subID, 1, 2)
+	storeSubAck(t, cs, channel, subID, 1)
+	storeSubFlush(t, cs, channel)
+	// The two pending messages should still be present
+	testSQLCheckPendingRow(t, db, subID, 1, 2)
+	// Ack the last one
+	storeSubAck(t, cs, channel, subID, 2)
+	storeSubFlush(t, cs, channel)
+	// There should not be any pending now
+	testSQLCheckPendingRow(t, db, subID)
+	// Check auto-flush
+	seqs := make([]uint64, 0, sqlMaxPendingAcks)
+	for i := 0; i < sqlMaxPendingAcks; i++ {
+		seqs = append(seqs, uint64(3+i))
+	}
+	storeSubPending(t, cs, channel, subID, seqs...)
+	testSQLCheckPendingRow(t, db, subID, seqs...)
+	// Add a new row with the some more sequences and manually flush them
+	nextSeq := seqs[sqlMaxPendingAcks-1] + 1
+	storeSubPending(t, cs, channel, subID, nextSeq, nextSeq+1)
+	storeSubFlush(t, cs, channel)
+	// Ack the max number of elements but make sure
+	// we are not deleting completely the first row
+	storeSubAck(t, cs, channel, subID, seqs[0:sqlMaxPendingAcks-1]...)
+	storeSubAck(t, cs, channel, subID, nextSeq)
+	// Ack the missing ones
+	storeSubAck(t, cs, channel, subID, seqs[sqlMaxPendingAcks-1], nextSeq+1)
+	// They should be all gone now
+	testSQLCheckPendingRow(t, db, subID)
+	// Add more pending and flush them out
+	storeSubPending(t, cs, channel, subID, nextSeq+2, nextSeq+3)
+	storeSubFlush(t, cs, channel)
+	testSQLCheckPendingRow(t, db, subID, nextSeq+2, nextSeq+3)
+	// Deleting the subscription should delete any pending
+	storeSubDelete(t, cs, channel, subID)
+	testSQLCheckPendingRow(t, db, subID)
+
+	// Start with fresh subscription
+	subID = storeSub(t, cs, channel)
+	// Check that if pending is followed by ack within same flush
+	// nothing needs to be persisted.
+	storeSubPending(t, cs, channel, subID, 1, 2)
+	storeSubAck(t, cs, channel, subID, 1, 2)
+	storeSubFlush(t, cs, channel)
+	testSQLCheckPendingRow(t, db, subID)
+	// However, the subscription's lastSent should have been updated
+	testSQLCheckSubLastSent(t, db, subID, 2)
+
+	storeSubPending(t, cs, channel, subID, 3, 4)
+	storeSubFlush(t, cs, channel)
+	storeSubAck(t, cs, channel, subID, 3)
+	storeSubFlush(t, cs, channel)
+	storeSubAck(t, cs, channel, subID, 4)
+	storeSubFlush(t, cs, channel)
+	storeSubPending(t, cs, channel, subID, 5)
+	storeSubAck(t, cs, channel, subID, 5)
+	storeSubFlush(t, cs, channel)
+	testSQLCheckPendingRow(t, db, subID)
+	testSQLCheckSubLastSent(t, db, subID, 5)
+	// In case we were to store an ack for a sequence that
+	// we don't have, lastSent should still be updated properly.
+	storeSubAck(t, cs, channel, subID, 6)
+	storeSubFlush(t, cs, channel)
+	testSQLCheckSubLastSent(t, db, subID, 6)
+	// Delete sub
+	storeSubDelete(t, cs, channel, subID)
+	testSQLCheckPendingRow(t, db, subID)
+}
+
+func TestSQLSubStoreCachingFlushInterval(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	// set the flush timer to low value for this test
+	sqlSubStoreFlushInterval = 15 * time.Millisecond
+	defer func() {
+		sqlSubStoreFlushInterval = sqlDefaultSubStoreFlushInterval
+	}()
+
+	// Tests are by default not using caching, so this
+	// test has to be explicit.
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	db := getDBConnection(t)
+	defer db.Close()
+
+	channel := "foo"
+	cs := storeCreateChannel(t, s, channel)
+
+	subID := storeSub(t, cs, channel)
+	storeSubPending(t, cs, channel, subID, 1, 2)
+	time.Sleep(2 * sqlSubStoreFlushInterval)
+	testSQLCheckPendingRow(t, db, subID, 1, 2)
+
+	storeSubAck(t, cs, channel, subID, 1)
+	time.Sleep(2 * sqlSubStoreFlushInterval)
+	testSQLCheckAckRow(t, db, subID, 1)
+}
+
+func TestSQLSubStoreCachingAndRecovery(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	// "disable" timer based flusing for now
+	sqlSubStoreFlushInterval = time.Hour
+	defer func() {
+		sqlSubStoreFlushInterval = sqlDefaultSubStoreFlushInterval
+	}()
+
+	// Tests are by default not using caching, so this
+	// test has to be explicit.
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+	info := testDefaultServerInfo
+	if err := s.Init(&info); err != nil {
+		t.Fatalf("Unable to init store: %v", err)
+	}
+
+	channel := "foo"
+	cs := storeCreateChannel(t, s, channel)
+	for i := 0; i < 2; i++ {
+		storeMsg(t, cs, channel, []byte("msg"))
+	}
+
+	subID := storeSub(t, cs, channel)
+	storeSubPending(t, cs, channel, subID, 1, 2)
+	storeSubFlush(t, cs, channel)
+	storeSubAck(t, cs, channel, subID, 1)
+	// Store should be flushed on close
+	if err := s.Close(); err != nil {
+		t.Fatalf("Error closing store: %v", err)
+	}
+
+	db := getDBConnection(t)
+	defer db.Close()
+	testSQLCheckPendingRow(t, db, subID, 1, 2)
+
+	// Restart the store
+	s, err = NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+	state, err := s.Recover()
+	if err != nil {
+		t.Fatalf("Error recovering state: %v", err)
+	}
+	cs = getRecoveredChannel(t, state, channel)
+	subs := getRecoveredSubs(t, state, channel, 1)
+	sub := subs[0]
+	if len(sub.Pending) != 1 {
+		t.Fatalf("Expected 1 pending, got %v", len(sub.Pending))
+	}
+	if _, exists := sub.Pending[2]; !exists {
+		t.Fatal("Expected seq=2 to be pending, was not")
+	}
+	if sub.Sub.LastSent != 2 {
+		t.Fatalf("Expected sub's lastSent to be 2, got %v", sub.Sub.LastSent)
+	}
+
+	// Make sure we still have the pending as before
+	testSQLCheckPendingRow(t, db, subID, 1, 2)
+	// Check that what we have in memory after restart is correct
+	ss := cs.Subs.(*SQLSubStore)
+	ss.Lock()
+	ap := ss.cache.subs[subID]
+	if ap.lastSent != 2 {
+		ss.Unlock()
+		t.Fatalf("Expected lastSent to be 2, got %v", ap.lastSent)
+	}
+	if ap.prevLastSent != ap.lastSent {
+		ss.Unlock()
+		t.Fatalf("Expected prevLastSent to be same than lastSent, got %v, %v", ap.prevLastSent, ap.lastSent)
+	}
+	if len(ap.msgToRow) != 1 || ap.msgToRow[2] == nil {
+		ss.Unlock()
+		t.Fatalf("Expected seq 2 to be in msgToRow, got %v", ap.msgToRow)
+	}
+	if len(ap.ackToRow) != 1 || ap.ackToRow[1] == nil {
+		ss.Unlock()
+		t.Fatalf("Expected seq 1 to be in ackToRow, got %v", ap.ackToRow)
+	}
+	row := ap.msgToRow[2]
+	if row == nil || len(row.msgs) != 2 {
+		ss.Unlock()
+		t.Fatalf("Expected row to have 1 and 2, got %v", row.msgs)
+	}
+	if row.msgsRefs != 1 || row.acksRefs != 0 {
+		ss.Unlock()
+		t.Fatalf("Expected row pending refs to be 1, acksRef to be 0, got %v and %v", row.msgsRefs, row.acksRefs)
+	}
+
+	row = ap.ackToRow[1]
+	if row == nil || len(row.msgs) != 0 {
+		ss.Unlock()
+		t.Fatalf("Expected row to have no message, got %v", row.msgs)
+	}
+	if row.msgsRefs != 0 || row.acksRefs != 1 {
+		ss.Unlock()
+		t.Fatalf("Expected row pending refs to be 0, acksRef to be 1, got %v and %v", row.msgsRefs, row.acksRefs)
+	}
+
+	if len(ap.msgs) != 0 || len(ap.acks) != 0 {
+		ss.Unlock()
+		t.Fatalf("ap.msgs and ap.acks should be empty on recovery, got %v and %v", ap.msgs, ap.acks)
+	}
+	rowID := row.ID
+	ss.Unlock()
+
+	// Normally, when a row has no more pending and ack references,
+	// the row is deleted. For instance, ack'ing seq 2 here would
+	// cause all rows to be deleted. So to check the case where the
+	// deletion would not occur at runtime, but those "empty" rows
+	// are recovered, add the ACK for 2 after the store was closed.
+	s.Close()
+	acks := make(map[uint64]struct{})
+	acks[2] = struct{}{}
+	ackBytes, _ := json.Marshal(acks)
+	stmt := "INSERT INTO SubsPending (subid, row, lastsent, pending, acks) VALUES (?, ?, ?, ?, ?)"
+	if testSQLDriver == driverPostgres {
+		stmt = "INSERT INTO SubsPending (subid, row, lastsent, pending, acks) VALUES ($1, $2, $3, $4, $5)"
+	}
+	if _, err := db.Exec(stmt, subID, rowID+1, 0, nil, ackBytes); err != nil {
+		t.Fatalf("Error inserting into subspending: %v", err)
+	}
+	// Restart the store
+	s, err = NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+	state, err = s.Recover()
+	if err != nil {
+		t.Fatalf("Error recovering state: %v", err)
+	}
+	getRecoveredChannel(t, state, channel)
+	subs = getRecoveredSubs(t, state, channel, 1)
+	sub = subs[0]
+	if len(sub.Pending) != 0 {
+		t.Fatalf("Expected 0 pending, got %v", len(sub.Pending))
+	}
+	if sub.Sub.LastSent != 2 {
+		t.Fatalf("Expected sub's lastSent to be 2, got %v", sub.Sub.LastSent)
+	}
+	// Verify that rows have been removed on recovery.
+	testSQLCheckPendingRow(t, db, subID)
 }

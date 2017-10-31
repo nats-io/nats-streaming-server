@@ -4,6 +4,7 @@ package stores
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -50,7 +51,9 @@ const (
 	sqlDeleteSubPendingMessages
 	sqlSubUpdateLastSent
 	sqlSubAddPending
+	sqlSubAddPendingRow
 	sqlSubDeletePending
+	sqlSubDeletePendingRow
 	sqlRecoverServerInfo
 	sqlRecoverClients
 	sqlRecoverMaxChannelID
@@ -59,7 +62,7 @@ const (
 	sqlRecoverChannelMsgs
 	sqlRecoverChannelSubs
 	sqlRecoverDoPurgeSubsPending
-	sqlRecoverSubPendingSeqs
+	sqlRecoverSubPending
 	sqlRecoverGetChannelLimits
 	sqlRecoverDoExpireMsgs
 	sqlRecoverGetMessagesCount
@@ -93,8 +96,10 @@ var sqlStmts = []string{
 	"DELETE FROM Subscriptions WHERE id=? AND deleted=TRUE",                                                                                                                          // sqlDeleteSubMarkedAsDeleted
 	"DELETE FROM SubsPending WHERE subid=?",                                                                                                                                          // sqlDeleteSubPendingMessages
 	"UPDATE Subscriptions SET lastsent=? WHERE id=? AND subid=?",                                                                                                                     // sqlSubUpdateLastSent
-	"INSERT IGNORE INTO SubsPending (subid, seq) SELECT ?, ? FROM Subscriptions WHERE subid=?",                                                                                       // sqlSubAddPending
+	"INSERT INTO SubsPending (subid, row, seq) VALUES (?, ?, ?)",                                                                                                                     // sqlSubAddPending
+	"INSERT INTO SubsPending (subid, row, lastsent, pending, acks) VALUES (?, ?, ?, ?, ?)",                                                                                           // sqlSubAddPendingRow
 	"DELETE FROM SubsPending WHERE subid=? AND seq=?",                                                                                                                                // sqlSubDeletePending
+	"DELETE FROM SubsPending WHERE subid=? AND row=?",                                                                                                                                // sqlSubDeletePendingRow
 	"SELECT id, proto, version FROM ServerInfo WHERE uniquerow=1",                                                                                                                    // sqlRecoverServerInfo
 	"SELECT id, hbinbox FROM Clients",                                                                                                                                                // sqlRecoverClients
 	"SELECT COALESCE(MAX(id), 0) FROM Channels",                                                                                                                                      // sqlRecoverMaxChannelID
@@ -102,8 +107,8 @@ var sqlStmts = []string{
 	"SELECT id, name, maxseq FROM Channels WHERE deleted=FALSE",                                                                                                                      // sqlRecoverChannelsList
 	"SELECT COUNT(seq), COALESCE(MIN(seq), 0), COALESCE(MAX(seq), 0), COALESCE(SUM(size), 0), COALESCE(MAX(timestamp), 0) FROM Messages WHERE id=?",                                  // sqlRecoverChannelMsgs
 	"SELECT lastsent, proto FROM Subscriptions WHERE id=? AND deleted=FALSE",                                                                                                         // sqlRecoverChannelSubs
-	"DELETE FROM SubsPending WHERE subid=? AND seq<?",                                                                                                                                // sqlRecoverDoPurgeSubsPending
-	"SELECT seq FROM SubsPending WHERE subid=?",                                                                                                                                      // sqlRecoverSubPendingSeqs
+	"DELETE FROM SubsPending WHERE subid=? AND (seq > 0 AND seq<?)",                                                                                                                  // sqlRecoverDoPurgeSubsPending
+	"SELECT row, seq, lastsent, pending, acks FROM SubsPending WHERE subid=?",                                                                                                        // sqlRecoverSubPending
 	"SELECT maxmsgs, maxbytes, maxage FROM Channels WHERE id=?",                                                                                                                      // sqlRecoverGetChannelLimits
 	"DELETE FROM Messages WHERE id=? AND timestamp<=?",                                                                                                                               // sqlRecoverDoExpireMsgs
 	"SELECT COUNT(seq) FROM Messages WHERE id=?",                                                                                                                                     // sqlRecoverGetMessagesCount
@@ -125,6 +130,18 @@ const (
 
 	// Interval at which time is captured.
 	sqlDefaultTimeTickInterval = time.Second
+
+	// Max number of elements in the pending or acks column in SubsPending table
+	// after which a flush is forced.
+	sqlDefaultMaxPendingAcks = 2000
+
+	// The SubStore flusher timer is created once and reset to this
+	// duration to indicate that it is idle.
+	sqlDefaultSubStoreFlushIdleInterval = time.Hour
+
+	// This is the default interval after which the SubStore will be
+	// flushed when a subspending row need updating
+	sqlDefaultSubStoreFlushInterval = time.Second
 )
 
 // These are initialized based on the constants that have reasonable values.
@@ -133,6 +150,9 @@ const (
 var (
 	sqlExpirationIntervalOnError = sqlDefaultExpirationIntervalOnError
 	sqlTimeTickInterval          = sqlDefaultTimeTickInterval
+	sqlMaxPendingAcks            = sqlDefaultMaxPendingAcks
+	sqlSubStoreFlushIdleInterval = sqlDefaultSubStoreFlushIdleInterval
+	sqlSubStoreFlushInterval     = sqlDefaultSubStoreFlushInterval
 )
 
 // SQLStoreOptions are used to configure the SQL Store.
@@ -146,16 +166,16 @@ type SQLStoreOptions struct {
 	// and SubStore.Flush() are called.
 	// If this option is set to `true`, each call to aforementioned
 	// APIs will cause execution of their respective SQL statements.
-	NoBuffering bool
+	NoCaching bool
 }
 
 // SQLStoreOption is a function on the options for a SQL Store
 type SQLStoreOption func(*SQLStoreOptions) error
 
-// SQLNoBuffering sets the NoBuffering option
-func SQLNoBuffering(noBuffering bool) SQLStoreOption {
+// SQLNoCaching sets the NoCaching option
+func SQLNoCaching(noCaching bool) SQLStoreOption {
 	return func(o *SQLStoreOptions) error {
-		o.NoBuffering = noBuffering
+		o.NoCaching = noCaching
 		return nil
 	}
 }
@@ -175,6 +195,15 @@ type SQLStore struct {
 	doneCh        chan struct{}
 	wg            sync.WaitGroup
 	preparedStmts []*sql.Stmt
+	ssFlusher     *subStoresFlusher
+}
+
+type subStoresFlusher struct {
+	sync.Mutex
+	stores   map[*SQLSubStore]struct{}
+	signalCh chan struct{}
+	doneCh   chan struct{}
+	signaled bool
 }
 
 // SQLSubStore is a subscription store backed by an SQL Database
@@ -186,6 +215,29 @@ type SQLSubStore struct {
 	limits         SubStoreLimits
 	hasMarkedAsDel bool
 	subLastSent    map[uint64]uint64
+	curRow         uint64
+	cache          *sqlSubAcksPendingCache
+}
+
+type sqlSubAcksPendingCache struct {
+	subs       map[uint64]*sqlSubAcksPending // Key is subscription ID.
+	needsFlush bool
+}
+
+type sqlSubAcksPending struct {
+	lastSent     uint64
+	prevLastSent uint64
+	msgToRow     map[uint64]*sqlSubsPendingRow
+	ackToRow     map[uint64]*sqlSubsPendingRow
+	msgs         map[uint64]struct{}
+	acks         map[uint64]struct{}
+}
+
+type sqlSubsPendingRow struct {
+	ID       uint64
+	msgs     map[uint64]struct{}
+	msgsRefs int
+	acksRefs int
 }
 
 // SQLMsgStore is a per channel message store backed by an SQL Database
@@ -222,6 +274,12 @@ func sqlStmtError(code int, err error) error {
 	return fmt.Errorf("sql: error executing %q: %v", sqlStmts[code], err)
 }
 
+var sqlSeqMapPool = &sync.Pool{
+	New: func() interface{} {
+		return make(map[uint64]struct{})
+	},
+}
+
 ////////////////////////////////////////////////////////////////////////////
 // SQLStore methods
 ////////////////////////////////////////////////////////////////////////////
@@ -250,7 +308,7 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits, 
 	s := &SQLStore{
 		opts:          opts,
 		db:            db,
-		doneCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}, 1),
 		preparedStmts: make([]*sql.Stmt, 0, len(sqlStmts)),
 	}
 	if err := s.init(TypeSQL, log, limits); err != nil {
@@ -261,9 +319,86 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits, 
 		s.Close()
 		return nil, err
 	}
+	s.Lock()
 	s.wg.Add(1)
 	go s.timeTick()
+	if !s.opts.NoCaching {
+		s.wg.Add(1)
+		s.ssFlusher = &subStoresFlusher{
+			stores:   make(map[*SQLSubStore]struct{}),
+			signalCh: make(chan struct{}, 1),
+			doneCh:   make(chan struct{}, 1),
+		}
+		go s.subStoresFlusher()
+	}
+	s.Unlock()
 	return s, nil
+}
+
+// When a SubStore adds a pending message or an ack, it will
+// notify this go-routine so that the store gets flushed after
+// some time should it not be flushed explicitly.
+// This go routine waits to be signaled and when that happens
+// reset a timer to fire in a short period of time. It then
+// go through the list of SubStore that have been registered
+// as needing a flush and call Flush() on them.
+func (s *SQLStore) subStoresFlusher() {
+	defer s.wg.Done()
+
+	s.Lock()
+	flusher := s.ssFlusher
+	s.Unlock()
+
+	var (
+		stores []*SQLSubStore
+		tm     = time.NewTimer(sqlSubStoreFlushIdleInterval)
+	)
+
+	for {
+		select {
+		case <-flusher.doneCh:
+			return
+		case <-flusher.signalCh:
+			if !tm.Stop() {
+				<-tm.C
+			}
+			tm.Reset(sqlSubStoreFlushInterval)
+		case <-tm.C:
+			flusher.Lock()
+			for ss := range flusher.stores {
+				stores = append(stores, ss)
+				delete(flusher.stores, ss)
+			}
+			flusher.signaled = false
+			flusher.Unlock()
+			for _, ss := range stores {
+				ss.Flush()
+			}
+			stores = stores[:0]
+			tm.Reset(sqlSubStoreFlushIdleInterval)
+		}
+	}
+}
+
+// Add this store to the list of SubStore needing flushing
+// and signal the go-routine responsible for flushing if
+// need be.
+func (s *SQLStore) scheduleSubStoreFlush(ss *SQLSubStore) {
+	needSignal := false
+	f := s.ssFlusher
+	f.Lock()
+	f.stores[ss] = struct{}{}
+	if !f.signaled {
+		f.signaled = true
+		needSignal = true
+	}
+	f.Unlock()
+	if needSignal {
+		select {
+		case f.signalCh <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // creates an instance of a SQLMsgStore
@@ -273,7 +408,7 @@ func (s *SQLStore) newSQLMsgStore(channel string, channelID int64, limits *MsgSt
 		channelID: channelID,
 	}
 	msgStore.init(channel, s.log, limits)
-	if !s.opts.NoBuffering {
+	if !s.opts.NoCaching {
 		msgStore.writeCache = &sqlMsgsCache{msgs: make(map[uint64]*sqlCachedMsg)}
 	}
 	return msgStore
@@ -282,13 +417,19 @@ func (s *SQLStore) newSQLMsgStore(channel string, channelID int64, limits *MsgSt
 // creates an instance of SQLSubStore
 func (s *SQLStore) newSQLSubStore(channelID int64, limits *SubStoreLimits) *SQLSubStore {
 	subStore := &SQLSubStore{
-		sqlStore:    s,
-		channelID:   channelID,
-		maxSubID:    &s.maxSubID,
-		limits:      *limits,
-		subLastSent: make(map[uint64]uint64),
+		sqlStore:  s,
+		channelID: channelID,
+		maxSubID:  &s.maxSubID,
+		limits:    *limits,
 	}
 	subStore.log = s.log
+	if s.opts.NoCaching {
+		subStore.subLastSent = make(map[uint64]uint64)
+	} else {
+		subStore.cache = &sqlSubAcksPendingCache{
+			subs: make(map[uint64]*sqlSubAcksPending),
+		}
+	}
 	return subStore
 }
 
@@ -297,7 +438,7 @@ func (s *SQLStore) createPreparedStmts() error {
 	for _, stmt := range sqlStmts {
 		ps, err := s.db.Prepare(stmt)
 		if err != nil {
-			return err
+			return fmt.Errorf("unable to prepare statement %q: %v", stmt, err)
 		}
 		s.preparedStmts = append(s.preparedStmts, ps)
 	}
@@ -310,8 +451,6 @@ func initSQLStmtsTable(driver string) {
 	// Update the statements for the selected driver.
 	switch driver {
 	case driverPostgres:
-		// Support for INSERT IGNORE is for Postgres 9.5+
-		sqlStmts[sqlSubAddPending] = "INSERT INTO SubsPending (subid, seq) SELECT $1, $2 FROM Subscriptions WHERE subid=$3 AND NOT EXISTS (SELECT 1 FROM SubsPending WHERE subid=$1 AND seq=$2)"
 		// Replace ? with $1, $2, etc...
 		reg := regexp.MustCompile(`\?`)
 		for i, stmt := range sqlStmts {
@@ -480,6 +619,7 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 			var (
 				lastSent   uint64
 				protoBytes []byte
+				ap         *sqlSubAcksPending
 			)
 			if err := subRows.Scan(&lastSent, &protoBytes); err != nil && err != sql.ErrNoRows {
 				return nil, err
@@ -493,45 +633,55 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 				if lastSent > sub.LastSent {
 					sub.LastSent = lastSent
 				}
-
-				// We can remove entries for sequence that are below the smallest
-				// sequence that was found in Messages.
-				if _, err := s.preparedStmts[sqlRecoverDoPurgeSubsPending].Exec(sub.ID, msgStore.first); err != nil {
-					return nil, sqlStmtError(sqlRecoverDoPurgeSubsPending, err)
+				if s.opts.NoCaching {
+					// We can remove entries for sequence that are below the smallest
+					// sequence that was found in Messages.
+					if _, err := s.preparedStmts[sqlRecoverDoPurgeSubsPending].Exec(sub.ID, msgStore.first); err != nil {
+						return nil, sqlStmtError(sqlRecoverDoPurgeSubsPending, err)
+					}
+				} else {
+					ap = subStore.getOrCreateAcksPending(sub.ID, 0)
 				}
-
-				var pendingAcks PendingAcks
-				pendingSeqRows, err := s.preparedStmts[sqlRecoverSubPendingSeqs].Query(sub.ID)
+				rows, err := s.preparedStmts[sqlRecoverSubPending].Query(sub.ID)
 				if err != nil {
-					return nil, sqlStmtError(sqlRecoverSubPendingSeqs, err)
+					return nil, sqlStmtError(sqlRecoverSubPending, err)
 				}
-				defer pendingSeqRows.Close()
-				for pendingSeqRows.Next() {
-					var seq uint64
-					if err := pendingSeqRows.Scan(&seq); err != nil && err != sql.ErrNoRows {
+				defer rows.Close()
+				pendingAcks := make(PendingAcks)
+				var gcedRows map[uint64]struct{}
+				if !s.opts.NoCaching {
+					gcedRows = make(map[uint64]struct{})
+				}
+				for rows.Next() {
+					if err := subStore.recoverPendingRow(rows, sub, ap, pendingAcks, gcedRows); err != nil {
 						return nil, err
 					}
-					if seq > 0 {
-						// Update subscription's LastSent based on the highest recoveverd sequence number.
-						if seq > sub.LastSent {
-							sub.LastSent = seq
+				}
+				rows.Close()
+
+				if s.opts.NoCaching {
+					// Update the in-memory map tracking last sent
+					subStore.subLastSent[sub.ID] = sub.LastSent
+				} else {
+					// Go over garbage collected rows and delete them
+					for rowID := range gcedRows {
+						if err := subStore.deleteSubPendingRow(sub.ID, rowID); err != nil {
+							return nil, err
 						}
-						if pendingAcks == nil {
-							pendingAcks = make(PendingAcks)
-						}
-						pendingAcks[seq] = struct{}{}
 					}
 				}
-				pendingSeqRows.Close()
-
-				// Update the in-memory map tracking last sent
-				subStore.subLastSent[sub.ID] = sub.LastSent
 
 				// Add to the recovered subscriptions
 				subscriptions = append(subscriptions, &RecoveredSubscription{Sub: sub, Pending: pendingAcks})
 			}
 		}
 		subRows.Close()
+
+		if !s.opts.NoCaching {
+			// Clear the needsFlush flag that may have been set during recovery
+			// due to use of common code.
+			subStore.cache.needsFlush = false
+		}
 
 		rc := &RecoveredChannel{
 			Channel: &Channel{
@@ -736,9 +886,12 @@ func (s *SQLStore) Close() error {
 	err := s.close()
 	db := s.db
 	wg := &s.wg
+	// Signal background go-routines to quit
 	if s.doneCh != nil {
-		// Signal background go-routine to quit
-		close(s.doneCh)
+		s.doneCh <- struct{}{}
+	}
+	if s.ssFlusher != nil {
+		s.ssFlusher.doneCh <- struct{}{}
 	}
 	s.Unlock()
 
@@ -816,7 +969,7 @@ func (ms *SQLMsgStore) Store(data []byte) (uint64, error) {
 
 	dataLen := uint64(len(msgBytes))
 
-	useCache := !ms.sqlStore.opts.NoBuffering
+	useCache := !ms.sqlStore.opts.NoCaching
 	if useCache {
 		ms.writeCache.add(msg, msgBytes)
 	} else {
@@ -898,7 +1051,7 @@ func (ms *SQLMsgStore) lookup(seq uint64) (*pb.MsgProto, error) {
 	if seq < ms.first || seq > ms.last {
 		return nil, nil
 	}
-	if !ms.sqlStore.opts.NoBuffering {
+	if !ms.sqlStore.opts.NoCaching {
 		cm := ms.writeCache.msgs[seq]
 		if cm != nil {
 			msg = cm.msg
@@ -1039,7 +1192,7 @@ func (ms *SQLMsgStore) expireMsgs() {
 }
 
 func (ms *SQLMsgStore) flush() error {
-	if ms.sqlStore.opts.NoBuffering {
+	if ms.sqlStore.opts.NoCaching {
 		return nil
 	}
 	if ms.writeCache.head == nil {
@@ -1187,23 +1340,131 @@ func (ss *SQLSubStore) DeleteSub(subid uint64) error {
 			return sqlStmtError(sqlDeleteSubscription, err)
 		}
 	}
-	delete(ss.subLastSent, subid)
+	if ss.cache != nil {
+		delete(ss.cache.subs, subid)
+	} else {
+		delete(ss.subLastSent, subid)
+	}
 	// Ignore error on this since subscription would not be recovered
 	// if above executed ok.
 	ss.sqlStore.preparedStmts[sqlDeleteSubPendingMessages].Exec(subid)
 	return nil
 }
 
+// This returns the structure responsible to keep track of
+// pending messages and acks for a given subscription ID.
+func (ss *SQLSubStore) getOrCreateAcksPending(subid, seqno uint64) *sqlSubAcksPending {
+	if !ss.cache.needsFlush {
+		ss.cache.needsFlush = true
+		ss.sqlStore.scheduleSubStoreFlush(ss)
+	}
+	ap := ss.cache.subs[subid]
+	if ap == nil {
+		ap = &sqlSubAcksPending{
+			msgToRow: make(map[uint64]*sqlSubsPendingRow),
+			ackToRow: make(map[uint64]*sqlSubsPendingRow),
+			msgs:     make(map[uint64]struct{}),
+			acks:     make(map[uint64]struct{}),
+		}
+		ss.cache.subs[subid] = ap
+	}
+	if seqno > ap.lastSent {
+		ap.lastSent = seqno
+	}
+	return ap
+}
+
+// Adds the given sequence to the list of pending messages.
+// Returns true if the number of pending messages has
+// reached a certain threshold, indicating that the
+// store should be flushed.
+func (ss *SQLSubStore) addSeq(subid, seqno uint64) bool {
+	ap := ss.getOrCreateAcksPending(subid, seqno)
+	ap.msgs[seqno] = struct{}{}
+	return len(ap.msgs) >= sqlMaxPendingAcks
+}
+
+// Adds the given sequence to the list of acks and possibly
+// delete rows that have all their pending messages acknowledged.
+// Returns true if the number of acks has reached a certain threshold,
+// indicating that the store should be flushed.
+func (ss *SQLSubStore) ackSeq(subid, seqno uint64) (bool, error) {
+	ap := ss.getOrCreateAcksPending(subid, seqno)
+	// If still in cache and not persisted into a row,
+	// then simply remove from map and do not persist the ack.
+	if _, exists := ap.msgs[seqno]; exists {
+		delete(ap.msgs, seqno)
+	} else if row := ap.msgToRow[seqno]; row != nil {
+		ap.acks[seqno] = struct{}{}
+		// This is an ack for a pending msg that was persisted
+		// in a row. Update the row's msgRef count.
+		delete(ap.msgToRow, seqno)
+		row.msgsRefs--
+		// If all pending messages in that row have been ack'ed
+		if row.msgsRefs == 0 {
+			// and if all acks on that row are no longer needed
+			// (or there was none)
+			if row.acksRefs == 0 {
+				// then this row can be deleted.
+				if err := ss.deleteSubPendingRow(subid, row.ID); err != nil {
+					return false, err
+				}
+				// If there is no error, we don't even need
+				// to persist this ack.
+				delete(ap.acks, seqno)
+			}
+			// Since there is no pending message left in this
+			// row, let's find all the corresponding acks' rows
+			// for these sequences and update their acksRefs
+			for seq := range row.msgs {
+				delete(row.msgs, seq)
+				ackRow := ap.ackToRow[seq]
+				if ackRow != nil {
+					// We found the row for the ack of this sequence,
+					// remove from map and update reference count.
+					// delete(ap.ackToRow, seq)
+					ackRow.acksRefs--
+					// If all acks for that row are no longer needed and
+					// that row has also no pending messages, then ok to
+					// delete.
+					if ackRow.acksRefs == 0 && ackRow.msgsRefs == 0 {
+						if err := ss.deleteSubPendingRow(subid, ackRow.ID); err != nil {
+							return false, err
+						}
+					}
+				} else {
+					// That means the ack is in current cache so we won't
+					// need to persist it.
+					delete(ap.acks, seq)
+				}
+			}
+			sqlSeqMapPool.Put(row.msgs)
+			row.msgs = nil
+		}
+	}
+	return len(ap.acks) >= sqlMaxPendingAcks, nil
+}
+
 // AddSeqPending implements the SubStore interface
 func (ss *SQLSubStore) AddSeqPending(subid, seqno uint64) error {
+	var err error
 	ss.Lock()
-	ls := ss.subLastSent[subid]
-	if seqno > ls {
-		ss.subLastSent[subid] = seqno
-	}
-	_, err := ss.sqlStore.preparedStmts[sqlSubAddPending].Exec(subid, seqno, subid)
-	if err != nil {
-		err = sqlStmtError(sqlSubAddPending, err)
+	if !ss.closed {
+		if ss.cache != nil {
+			if isFull := ss.addSeq(subid, seqno); isFull {
+				err = ss.flush()
+			}
+		} else {
+			ls := ss.subLastSent[subid]
+			if seqno > ls {
+				ss.subLastSent[subid] = seqno
+			}
+			ss.curRow++
+			_, err = ss.sqlStore.preparedStmts[sqlSubAddPending].Exec(subid, ss.curRow, seqno)
+			if err != nil {
+				err = sqlStmtError(sqlSubAddPending, err)
+			}
+		}
 	}
 	ss.Unlock()
 	return err
@@ -1211,35 +1472,204 @@ func (ss *SQLSubStore) AddSeqPending(subid, seqno uint64) error {
 
 // AckSeqPending implements the SubStore interface
 func (ss *SQLSubStore) AckSeqPending(subid, seqno uint64) error {
+	var err error
 	ss.Lock()
-	updateLastSent := false
-	ls := ss.subLastSent[subid]
-	if seqno >= ls {
-		if seqno > ls {
-			ss.subLastSent[subid] = seqno
+	if !ss.closed {
+		if ss.cache != nil {
+			var isFull bool
+			isFull, err = ss.ackSeq(subid, seqno)
+			if err == nil && isFull {
+				err = ss.flush()
+			}
+		} else {
+			updateLastSent := false
+			ls := ss.subLastSent[subid]
+			if seqno >= ls {
+				if seqno > ls {
+					ss.subLastSent[subid] = seqno
+				}
+				updateLastSent = true
+			}
+			if updateLastSent {
+				if _, err := ss.sqlStore.preparedStmts[sqlSubUpdateLastSent].Exec(seqno, ss.channelID, subid); err != nil {
+					ss.Unlock()
+					return sqlStmtError(sqlSubUpdateLastSent, err)
+				}
+			}
+			_, err = ss.sqlStore.preparedStmts[sqlSubDeletePending].Exec(subid, seqno)
+			if err != nil {
+				err = sqlStmtError(sqlSubDeletePending, err)
+			}
 		}
-		updateLastSent = true
-	}
-	if updateLastSent {
-		if _, err := ss.sqlStore.preparedStmts[sqlSubUpdateLastSent].Exec(seqno, ss.channelID, subid); err != nil {
-			ss.Unlock()
-			return sqlStmtError(sqlSubUpdateLastSent, err)
-		}
-	}
-	_, err := ss.sqlStore.preparedStmts[sqlSubDeletePending].Exec(subid, seqno)
-	if err != nil {
-		err = sqlStmtError(sqlSubDeletePending, err)
 	}
 	ss.Unlock()
 	return err
 }
 
+func (ss *SQLSubStore) deleteSubPendingRow(subid, rowid uint64) error {
+	if _, err := ss.sqlStore.preparedStmts[sqlSubDeletePendingRow].Exec(subid, rowid); err != nil {
+		return sqlStmtError(sqlSubDeletePendingRow, err)
+	}
+	return nil
+}
+
+func (ss *SQLSubStore) recoverPendingRow(rows *sql.Rows, sub *spb.SubState, ap *sqlSubAcksPending, pendingAcks PendingAcks,
+	gcedRows map[uint64]struct{}) error {
+	var (
+		seq, lastSent           uint64
+		pendingBytes, acksBytes []byte
+	)
+	if err := rows.Scan(&ss.curRow, &seq, &lastSent, &pendingBytes, &acksBytes); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	// If seq is non zero, this was created from a non-buffered run.
+	if seq > 0 {
+		if seq > sub.LastSent {
+			sub.LastSent = seq
+		}
+		pendingAcks[seq] = struct{}{}
+	} else {
+		row := &sqlSubsPendingRow{
+			ID:   ss.curRow,
+			msgs: sqlSeqMapPool.Get().(map[uint64]struct{}),
+		}
+		ap.lastSent = lastSent
+		ap.prevLastSent = lastSent
+
+		if lastSent > sub.LastSent {
+			sub.LastSent = lastSent
+		}
+		var pending, acks map[uint64]struct{}
+		json.Unmarshal(pendingBytes, &pending)
+		for seq := range pending {
+			pendingAcks[seq] = struct{}{}
+			row.msgsRefs++
+			row.msgs[seq] = struct{}{}
+			ap.msgToRow[seq] = row
+		}
+		json.Unmarshal(acksBytes, &acks)
+		for seq := range acks {
+			if _, exists := pendingAcks[seq]; exists {
+				delete(pendingAcks, seq)
+				row.acksRefs++
+				ap.ackToRow[seq] = row
+
+				seqRow := ap.msgToRow[seq]
+				if seqRow != nil {
+					delete(ap.msgToRow, seq)
+					seqRow.msgsRefs--
+					if seqRow.msgsRefs == 0 && seqRow.acksRefs == 0 {
+						gcedRows[seqRow.ID] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // Flush implements the SubStore interface
 func (ss *SQLSubStore) Flush() error {
+	ss.Lock()
+	err := ss.flush()
+	ss.Unlock()
+	return err
+}
+
+func (ss *SQLSubStore) flush() error {
+	if ss.cache == nil || !ss.cache.needsFlush || ss.closed {
+		return nil
+	}
+	var (
+		tx  *sql.Tx
+		ps  *sql.Stmt
+		err error
+	)
+	defer func() {
+		if ps != nil {
+			ps.Close()
+		}
+		if tx != nil {
+			tx.Rollback()
+		}
+	}()
+	tx, err = ss.sqlStore.db.Begin()
+	if err != nil {
+		return err
+	}
+	ps, err = tx.Prepare(sqlStmts[sqlSubAddPendingRow])
+	if err != nil {
+		return err
+	}
+	for subid, ap := range ss.cache.subs {
+		prevLastSent := ap.prevLastSent
+		ap.prevLastSent = ap.lastSent
+		if len(ap.msgs) == 0 && len(ap.acks) == 0 {
+			// Update subscription's lastSent column if it has changed.
+			if ap.lastSent != prevLastSent {
+				if _, err := tx.Exec(sqlStmts[sqlSubUpdateLastSent], ap.lastSent, ss.channelID, subid); err != nil {
+					return err
+				}
+			}
+			// Since there was no pending nor ack for this sub, simply continue
+			// with the next subscription.
+			continue
+		}
+		var (
+			pendingBytes []byte
+			acksBytes    []byte
+		)
+		ss.curRow++
+		row := &sqlSubsPendingRow{ID: ss.curRow}
+		if len(ap.msgs) > 0 {
+			for seqno := range ap.msgs {
+				row.msgsRefs++
+				ap.msgToRow[seqno] = row
+			}
+			row.msgs = ap.msgs
+			pendingBytes, err = json.Marshal(ap.msgs)
+			if err != nil {
+				return err
+			}
+			ap.msgs = sqlSeqMapPool.Get().(map[uint64]struct{})
+		}
+		if len(ap.acks) > 0 {
+			acksBytes, err = json.Marshal(ap.acks)
+			if err != nil {
+				return err
+			}
+			for seqno := range ap.acks {
+				delete(ap.acks, seqno)
+				row.acksRefs++
+				ap.ackToRow[seqno] = row
+			}
+		}
+		if _, err := ps.Exec(subid, ss.curRow, ap.lastSent, pendingBytes, acksBytes); err != nil {
+			return err
+		}
+	}
+	if err := ps.Close(); err != nil {
+		return err
+	}
+	ps = nil
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	ss.cache.needsFlush = false
 	return nil
 }
 
 // Close implements the SubStore interface
 func (ss *SQLSubStore) Close() error {
-	return nil
+	ss.Lock()
+	if ss.closed {
+		ss.Unlock()
+		return nil
+	}
+	// Flush before switching the state to closed.
+	err := ss.flush()
+	ss.closed = true
+	ss.Unlock()
+	return err
 }
