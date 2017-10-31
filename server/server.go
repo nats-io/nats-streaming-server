@@ -4527,14 +4527,12 @@ func (s *StanServer) Apply(l *raft.Log) interface{} {
 // the FSM should be implemented in a fashion that allows for concurrent
 // updates while a snapshot is happening.
 func (s *StanServer) Snapshot() (raft.FSMSnapshot, error) {
-	// TODO
-	return nil, nil
+	return &serverSnapshot{s}, nil
 }
 
 // Restore is used to restore an FSM from a snapshot. It is not called
 // concurrently with any other command. The FSM must discard all previous
 // state.
-func (s *StanServer) Restore(io.ReadCloser) error {
-	// TODO
-	return nil
+func (s *StanServer) Restore(snapshot io.ReadCloser) error {
+	return s.restoreFromSnapshot(snapshot)
 }

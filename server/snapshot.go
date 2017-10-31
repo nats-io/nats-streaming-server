@@ -17,13 +17,131 @@ import (
 const snapshotBatchSize = 200
 
 var (
-	fragmentPool     = &sync.Pool{New: func() interface{} { return &spb.RaftSnapshotFragment{} }}
-	batchPool        = &sync.Pool{New: func() interface{} { return &spb.Batch{} }}
-	msgsSnapshotPool = &sync.Pool{New: func() interface{} { return &spb.MessagesSnapshot{} }}
-	subSnapshotPool  = &sync.Pool{New: func() interface{} { return &spb.SubSnapshot{} }}
+	fragmentPool       = &sync.Pool{New: func() interface{} { return &spb.RaftSnapshotFragment{} }}
+	batchPool          = &sync.Pool{New: func() interface{} { return &spb.Batch{} }}
+	msgsSnapshotPool   = &sync.Pool{New: func() interface{} { return &spb.MessagesSnapshot{} }}
+	subSnapshotPool    = &sync.Pool{New: func() interface{} { return &spb.SubSnapshot{} }}
+	clientSnapshotPool = &sync.Pool{New: func() interface{} { return &spb.ClientSnapshot{} }}
 )
 
-// channelSnapshot implements the raft.FSMSnapshot interface.
+// serverSnapshot implements the raft.FSMSnapshot interface by snapshotting
+// StanServer state.
+type serverSnapshot struct {
+	*StanServer
+}
+
+func newServerSnapshot(s *StanServer) raft.FSMSnapshot {
+	return &serverSnapshot{s}
+}
+
+// Persist should dump all necessary state to the WriteCloser 'sink',
+// and call sink.Close() when finished or call sink.Cancel() on error.
+func (s *serverSnapshot) Persist(sink raft.SnapshotSink) (err error) {
+	defer func() {
+		if err != nil {
+			sink.Cancel()
+		}
+	}()
+
+	// Snapshot clients. We are only snapshotting the client metadata here
+	// (heartbeat inbox and client ID). Subscriptions are replicated through
+	// the channel Raft groups, so upon snapshot restore, the server will
+	// load any of the client's subscriptions from the store.
+	var buf [4]byte
+	for _, client := range s.clients.getClients() {
+		fragment := newFragment()
+		fragment.FragmentType = spb.RaftSnapshotFragment_Conn
+		clientSnap := clientSnapshotPool.Get().(*spb.ClientSnapshot)
+		client.RLock()
+		clientSnap.Info = &client.info.ClientInfo
+		client.RUnlock()
+		fragment.Client = clientSnap
+		if err := writeFragment(sink, fragment, buf); err != nil {
+			return err
+		}
+	}
+
+	return sink.Close()
+}
+
+// Release is a no-op.
+func (s *serverSnapshot) Release() {}
+
+// restoreFromSnapshot restores a server from a snapshot. This is not called
+// concurrently with any other Raft commands.
+func (s *StanServer) restoreFromSnapshot(snapshot io.ReadCloser) error {
+	defer snapshot.Close()
+
+	// Drop all existing clients. These will be restored from the snapshot.
+	// However, keep a copy so we can recover subs.
+	oldClients := s.clients.getClients()
+	for _, client := range oldClients {
+		if _, err := s.clients.unregister(client.info.ID); err != nil {
+			return err
+		}
+	}
+
+	sizeBuf := make([]byte, 4)
+	for {
+		// Read the fragment size.
+		if _, err := io.ReadFull(snapshot, sizeBuf); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		// Read the fragment.
+		size := binary.BigEndian.Uint32(sizeBuf)
+		buf := make([]byte, size)
+		if _, err := io.ReadFull(snapshot, buf); err != nil {
+			return err
+		}
+
+		// Unmarshal the fragment.
+		fragment := newFragment()
+		if err := fragment.Unmarshal(buf); err != nil {
+			return err
+		}
+
+		// Apply the fragment.
+		switch fragment.FragmentType {
+		case spb.RaftSnapshotFragment_Conn:
+			// Client.
+			err := s.restoreClientFromSnapshot(fragment.Client, oldClients)
+			clientSnapshotPool.Put(fragment.Client)
+			fragmentPool.Put(fragment)
+			if err != nil {
+				return err
+			}
+		default:
+			panic(fmt.Sprintf("unknown snapshot fragment type %s", fragment.FragmentType))
+		}
+	}
+	return nil
+}
+
+func (s *StanServer) restoreClientFromSnapshot(clientSnapshot *spb.ClientSnapshot, oldClients map[string]*client) error {
+	client, _, err := s.clients.register(clientSnapshot.Info.ID, clientSnapshot.Info.HbInbox)
+	if err != nil {
+		return err
+	}
+
+	// Restore any subscriptions.
+	// QUESTION: are there potential race conditions due to how subscriptions
+	// and clients are handled on different Raft groups?
+	oldClient, ok := oldClients[client.info.ID]
+	if ok {
+		for _, sub := range oldClient.getSubsCopy() {
+			s.clients.addSub(client.info.ID, sub)
+		}
+	}
+
+	return nil
+}
+
+// channelSnapshot implements the raft.FSMSnapshot interface by snapshotting
+// channel state.
 type channelSnapshot struct {
 	*channel
 }
