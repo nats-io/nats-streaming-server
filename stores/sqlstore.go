@@ -1255,13 +1255,14 @@ func (ms *SQLMsgStore) Close() error {
 		ms.Unlock()
 		return nil
 	}
+	// Flush before switching the state to closed
+	err := ms.flush()
 	ms.closed = true
 	if ms.expireTimer != nil {
 		if ms.expireTimer.Stop() {
 			ms.wg.Done()
 		}
 	}
-	err := ms.flush()
 	ms.Unlock()
 
 	ms.wg.Wait()

@@ -648,7 +648,7 @@ func TestSQLPurgeSubsPending(t *testing.T) {
 	}
 }
 
-func TestSQLNoBufferingOption(t *testing.T) {
+func TestSQLNoCachingOption(t *testing.T) {
 	if !doSQL {
 		t.SkipNow()
 	}
@@ -748,6 +748,46 @@ func TestSQLNoBufferingOption(t *testing.T) {
 		t.Fatalf("There should be no message, got %v - %v", count, bytes)
 	}
 	checkDB(0)
+}
+
+func TestSQLCachingWithExpirationOnClose(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	limits := testDefaultStoreLimits
+	limits.MaxAge = 5 * time.Second
+	// Create a store with caching enabled (which is default, but invoke option here)
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, &limits, SQLNoCaching(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	cs := storeCreateChannel(t, s, "foo")
+	m := storeMsg(t, cs, "foo", []byte("msg"))
+	doneCh := make(chan struct{}, 1)
+	go func() {
+		s.Close()
+		doneCh <- struct{}{}
+	}()
+	select {
+	case <-doneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Store Close() hanged?")
+	}
+	db := getDBConnection(t)
+	defer db.Close()
+	r := db.QueryRow("SELECT seq FROM Messages WHERE id=1")
+	seq := uint64(0)
+	if err := r.Scan(&seq); err != nil {
+		t.Fatalf("Error getting sequence: %v", err)
+	}
+	if seq != m.Sequence {
+		t.Fatalf("Expected sequence %v, got %v", m.Sequence, seq)
+	}
 }
 
 func testSQLCheckPendingOrAcksRow(t tLogger, db *sql.DB, subID uint64, columnName string, expected ...uint64) {
