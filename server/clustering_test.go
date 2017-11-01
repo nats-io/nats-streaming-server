@@ -799,6 +799,157 @@ LOOP:
 	}
 }
 
+func TestClusteringLogSnapshotRestoreMetadata(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts.Clustering.TrailingLogs = 0
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts.Clustering.TrailingLogs = 0
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts.Clustering.TrailingLogs = 0
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Wait for metadata leader to be elected.
+	leader := getMetadataLeader(t, 10*time.Second, servers...)
+
+	// Create a client connection.
+	sc1, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc1.Close()
+
+	// Create a subscription.
+	var (
+		ch      = make(chan *stan.Msg, 1)
+		channel = "foo"
+	)
+	sub1, err := sc1.Subscribe(channel, func(msg *stan.Msg) {
+		ch <- msg
+	}, stan.DeliverAllAvailable(), stan.MaxInflight(1))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub1.Unsubscribe()
+
+	// Wait for channel leader to be elected.
+	getChannelLeader(t, channel, 10*time.Second, servers...)
+
+	// Publish a message.
+	publishWithRetry(t, sc1, channel, []byte("1"))
+
+	// Verify we received the message.
+	select {
+	case msg := <-ch:
+		assertMsg(t, msg.MsgProto, []byte("1"), 1)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected msg")
+	}
+
+	// Create another subscription.
+	sub2, err := sc1.Subscribe("bar", func(msg *stan.Msg) {})
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	defer sub2.Unsubscribe()
+
+	// Create another client connection.
+	sc2, err := stan.Connect(clusterName, "bob")
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc2.Close()
+
+	// Ensure clients are consistent across servers.
+	checkClientsInAllServers(t, 2, servers...)
+
+	// Ensure subs are consistent across servers.
+	for _, srv := range servers {
+		waitForNumSubs(t, srv, clientName, 2)
+		waitForNumSubs(t, srv, "bob", 0)
+	}
+
+	// Kill a follower.
+	var follower *StanServer
+	for _, s := range servers {
+		if leader != s {
+			follower = s
+			break
+		}
+	}
+	follower.Shutdown()
+
+	// Create one more client connection.
+	sc3, err := stan.Connect(clusterName, "alice")
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc3.Close()
+
+	// Close one client.
+	if err := sc2.Close(); err != nil {
+		t.Fatalf("Unexpected error on close: %v", err)
+	}
+
+	// Force a log compaction on the metadata leader.
+	if err := leader.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Unexpected error on snapshot: %v", err)
+	}
+
+	// Bring the follower back up.
+	follower = runServerWithOpts(t, follower.opts, nil)
+	defer follower.Shutdown()
+	for i, server := range servers {
+		if server.opts.Clustering.NodeID == follower.opts.Clustering.NodeID {
+			servers[i] = follower
+			break
+		}
+	}
+
+	// Ensure there is a leader.
+	getMetadataLeader(t, 10*time.Second, servers...)
+
+	// Create one last client connection to force a timely catch up.
+	sc4, err := stan.Connect(clusterName, "tyler")
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc4.Close()
+
+	// Ensure clients are consistent across servers.
+	checkClientsInAllServers(t, 3, servers...)
+
+	// Ensure subs are consistent across servers.
+	for _, srv := range servers {
+		waitForNumSubs(t, srv, clientName, 2)
+		waitForNumSubs(t, srv, "alice", 0)
+		waitForNumSubs(t, srv, "tyler", 0)
+	}
+}
+
 // Ensures subscriptions are replicated such that when a leader fails over, the
 // subscription continues to deliver messages.
 func TestClusteringSubscriberFailover(t *testing.T) {

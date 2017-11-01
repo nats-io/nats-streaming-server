@@ -144,10 +144,12 @@ message RaftSnapshotFragment {
   enum Type {
     Messages     = 0; // Channel messages.
     Subscription = 1; // Channel subscription.
+    Conn         = 2; // Client connection.
   }
   Type             FragmentType = 1; // Snapshot fragment type.
   MessagesSnapshot Msgs         = 2; // Messages fragment data.
   SubSnapshot      Sub          = 3; // Subscription fragment data.
+  ClientSnapshot   Client       = 4; // Conn fragment data.
 }
 
 // MessagesSnapshot is a snapshot of a portion of a channel's messages.
@@ -160,4 +162,9 @@ message SubSnapshot {
   SubState        State       = 1; // Subscription data.
   string          Subject     = 2; // Subscription subject.
   repeated uint64 AcksPending = 3; // Sequences of unacknowledged messages.
+}
+
+// ClientSnapshot is a snapshot of a client connection.
+message ClientSnapshot {
+  ClientInfo           Info = 1; // Connection metadata.
 }
