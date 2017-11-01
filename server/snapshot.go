@@ -132,7 +132,10 @@ func (s *StanServer) restoreClientFromSnapshot(clientSnapshot *spb.ClientSnapsho
 	// and clients are handled on different Raft groups?
 	oldClient, ok := oldClients[client.info.ID]
 	if ok {
-		for _, sub := range oldClient.getSubsCopy() {
+		oldClient.RLock()
+		subs := oldClient.getSubsCopy()
+		oldClient.RUnlock()
+		for _, sub := range subs {
 			s.clients.addSub(client.info.ID, sub)
 		}
 	}
