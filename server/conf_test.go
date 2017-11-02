@@ -358,8 +358,8 @@ func TestParseConfigureOptions(t *testing.T) {
 		fs := flag.NewFlagSet("test", flag.ContinueOnError)
 		// Silence the flagSet so that on failure nothing is printed.
 		// (flag.FlagSet internally would print error message about unknown flags, etc..)
-		silenceOuput := &bytes.Buffer{}
-		fs.SetOutput(silenceOuput)
+		silenceOutput := &bytes.Buffer{}
+		fs.SetOutput(silenceOutput)
 		sopts, nopts, err := ConfigureOptions(fs, args, noPrint, noPrint, noPrint)
 		if sopts != nil || nopts != nil || err == nil {
 			stackFatalf(t, "Expected no option and an error, got sopts=%v and nopts=%v and err=%v", sopts, nopts, err)

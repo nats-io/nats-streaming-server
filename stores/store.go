@@ -146,7 +146,7 @@ type Store interface {
 	//
 	// It is important to note that the implementation should
 	// make an effort to distinguish error conditions deemed
-	// fatal (and therefore trying again would invariabily result
+	// fatal (and therefore trying again would invariably result
 	// in the same error) and those deemed transient, in which
 	// case no error should be returned to indicate that the
 	// caller could try later.
@@ -164,7 +164,7 @@ type Store interface {
 	// Recover returns the recovered state.
 	// Implementations that do not persist state and therefore cannot
 	// recover from a previous run MUST return nil, not an error.
-	// However, an error must be returned for implementions that are
+	// However, an error must be returned for implementations that are
 	// attempting to recover the state but fail to do so.
 	Recover() (*RecoveredState, error)
 
@@ -189,7 +189,7 @@ type Store interface {
 	DeleteClient(clientID string) error
 
 	// Close closes this store (including all MsgStore and SubStore).
-	// If an exlusive lock was acquired, the lock shall be released.
+	// If an exclusive lock was acquired, the lock shall be released.
 	Close() error
 }
 

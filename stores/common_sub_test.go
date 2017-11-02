@@ -298,7 +298,7 @@ func TestCSUpdatedSub(t *testing.T) {
 			defer s.Close()
 
 			cs := storeCreateChannel(t, s, "foo")
-			// Creeate a subscription.
+			// Create a subscription.
 			subID := storeSub(t, cs, "foo")
 
 			// A message

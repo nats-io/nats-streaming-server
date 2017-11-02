@@ -19,7 +19,7 @@ type lockFile struct {
 // if necessary. On success, the file is returned, otherwise
 // an error is returned.
 // The file returned should be closed to release the lock
-// quicker than if left to the operating systen.
+// quicker than if left to the operating system.
 func CreateLockFile(file string) (LockFile, error) {
 	f, err := os.Create(file)
 	if err != nil {
