@@ -51,6 +51,8 @@ Streaming Server File Store Options:
 Streaming Server SQL Store Options:
     --sql_driver <string>            Name of the SQL Driver ("mysql" or "postgres")
     --sql_source <string>            Datasource used when opening an SQL connection to the database
+    --sql_no_caching <bool>          Enable/Disable caching for improved performance
+    --sql_max_open_conns <int>       Maximum number of opened connections to the database
 
 Streaming Server TLS Options:
     -secure <bool>                   Use a TLS connection to the NATS server without

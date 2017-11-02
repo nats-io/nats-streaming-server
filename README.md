@@ -50,6 +50,7 @@ NATS Streaming provides the following high-level feature set.
         * [File Store](#file-store)
             * [File Store Options](#file-store-options)
         * [SQL Store](#sql-store)
+            * [SQL Store Options](#sql-store-options)
 - [Clients](#clients)
 - [License](#license)
 
@@ -1039,6 +1040,8 @@ SQL Options Configuration:
 |:----|:----|:----|:----|
 | driver | Name of the SQL driver to use | `mysql` or `postgres` | `driver: "mysql"` |
 | source | How to connect to the database. This is driver specific | String | `source: "ivan:pwd@/nss_db"` |
+| no_caching | Enable/Disable caching for messages and subscriptions operations. The default is `false`, which means that caching is enabled | `true` or `false` | `no_caching: false` |
+| max_open_conns | Maximum number of opened connections to the database. Value <= 0 means no limit. The default is 0 (unlimited) | Number | `max_open_conns: 5` |
 
 ## Store Limits
 
@@ -1319,6 +1322,34 @@ the database, tables or indexes. This has to be done by the Database Administrat
 We provide 2 files (`mysql.db.sql` and `postgres.db.sql`) that can be used to create the tables and indexes to the
 database of your choice. However, administrators are free to configure and optimize the database as long as the name of tables
 and columns are preserved, since the NATS Streaming Server is going to issue SQL statements based on those.
+
+Here is an example of creating an user `nss` with password `password` for the MySQL database:
+
+```
+mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE nss_db;"
+```
+
+The above has gives all permissions to user `nss`. Once this user is created, we can then create the tables using this user
+and selecting the `nss_db` database. We then execute all the SQL statements creating the tables from the sql file that
+is provided in this repo:
+
+```
+mysql -u nss -p -D nss_db -e "$(cat ./mysql.db.sql)"
+```
+
+#### SQL Store Options
+
+Aside from the driver and datasource, the available options are the maximum number of opened connections to the database (`max_open_conns`)
+that you may need to set to avoid errors due to `too many opened files`.
+
+The other option is `no_caching` which is a boolean that enables/disables caching. By default caching is enabled. It means
+that some operations are buffered in memory before being sent to the database. For storing messages, this still offers the
+guarantee that if a producer gets an OK ack back, the message will be successfully persisted in the database.
+
+For subscriptions, the optimization may lead to messages possibly redelivered if the server were to be restarted before
+some of the operations were "flushed" to the database. The performance improvement is significant to justify the risk
+of getting redelivered messages (which is always possible with NATS Streaming regardless of this option). Still,
+if you want to ensure that each operation is immediately committed to the database, you should set `no_caching` to true.
 
 ## Clients
 

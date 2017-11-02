@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,7 +47,8 @@ func cleanupSQLDatastore(t tLogger) {
 func newSQLStore(t tLogger, driver, source string, limits *StoreLimits) (*SQLStore, *RecoveredState, error) {
 	// Disable caching for most tests. To test caching, there will be
 	// specific tests that create the store with caching enabled.
-	ss, err := NewSQLStore(testLogger, driver, source, limits, SQLNoCaching(true))
+	// Also, set the max number of connections to rather low value.
+	ss, err := NewSQLStore(testLogger, driver, source, limits, SQLNoCaching(true), SQLMaxOpenConns(5))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1130,4 +1132,53 @@ func TestSQLSubStoreCachingAndRecovery(t *testing.T) {
 	}
 	// Verify that rows have been removed on recovery.
 	testSQLCheckPendingRow(t, db, subID)
+}
+
+func TestSQLMaxConnections(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	limits := testDefaultStoreLimits
+	limits.MaxChannels = 500
+
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, &limits, SQLNoCaching(true), SQLMaxOpenConns(10))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	var css []*Channel
+	for i := 0; i < limits.MaxChannels; i++ {
+		channel := fmt.Sprintf("foo.%d", i)
+		cs := storeCreateChannel(t, s, channel)
+		storeMsg(t, cs, channel, []byte("msg"))
+		css = append(css, cs)
+	}
+
+	errCh := make(chan error, 1)
+	wg := sync.WaitGroup{}
+	wg.Add(len(css))
+	for _, cs := range css {
+		go func(cs *Channel) {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				_, err := cs.Msgs.Lookup(1)
+				if err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+				}
+			}
+		}(cs)
+	}
+	wg.Wait()
+	select {
+	case e := <-errCh:
+		t.Fatalf("Error: %v", e)
+	default:
+	}
 }

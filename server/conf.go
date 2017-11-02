@@ -391,6 +391,16 @@ func parseSQLOptions(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.SQLStoreOpts.Source = v.(string)
+		case "no_caching":
+			if err := checkType(name, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.SQLStoreOpts.NoCaching = v.(bool)
+		case "max_open_conns", "max_conns":
+			if err := checkType(name, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.SQLStoreOpts.MaxOpenConns = int(v.(int64))
 		}
 	}
 	return nil
@@ -463,6 +473,8 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.StringVar(&sopts.FTGroupName, "ft_group", "", "stan.FTGroupName")
 	fs.StringVar(&sopts.SQLStoreOpts.Driver, "sql_driver", "", "SQL Driver")
 	fs.StringVar(&sopts.SQLStoreOpts.Source, "sql_source", "", "SQL Data Source")
+	fs.BoolVar(&sopts.SQLStoreOpts.NoCaching, "sql_no_caching", false, "Enable/Disable caching")
+	fs.IntVar(&sopts.SQLStoreOpts.MaxOpenConns, "sql_max_open_conns", 0, "Max opened connections to the database")
 
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
 	// It will be augmented with NATS specific flags and call fs.Parse(args) for us.

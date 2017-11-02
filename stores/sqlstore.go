@@ -167,6 +167,11 @@ type SQLStoreOptions struct {
 	// If this option is set to `true`, each call to aforementioned
 	// APIs will cause execution of their respective SQL statements.
 	NoCaching bool
+
+	// Maximum number of open connections to the database.
+	// If <= 0, then there is no limit on the number of open connections.
+	// The default is 0 (unlimited).
+	MaxOpenConns int
 }
 
 // SQLStoreOption is a function on the options for a SQL Store
@@ -176,6 +181,14 @@ type SQLStoreOption func(*SQLStoreOptions) error
 func SQLNoCaching(noCaching bool) SQLStoreOption {
 	return func(o *SQLStoreOptions) error {
 		o.NoCaching = noCaching
+		return nil
+	}
+}
+
+// SQLMaxOpenConns sets the MaxOpenConns option
+func SQLMaxOpenConns(max int) SQLStoreOption {
+	return func(o *SQLStoreOptions) error {
+		o.MaxOpenConns = max
 		return nil
 	}
 }
@@ -305,6 +318,7 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits, 
 			return nil, err
 		}
 	}
+	db.SetMaxOpenConns(opts.MaxOpenConns)
 	s := &SQLStore{
 		opts:          opts,
 		db:            db,

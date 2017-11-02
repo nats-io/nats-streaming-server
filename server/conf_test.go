@@ -175,10 +175,16 @@ func TestParseConfig(t *testing.T) {
 		t.Fatalf("Expected Partitioning to be true, got false")
 	}
 	if opts.SQLStoreOpts.Driver != "mysql" {
-		t.Fatalf("Expected SQL Driver to my %q, got %q", "mysql", opts.SQLStoreOpts.Driver)
+		t.Fatalf("Expected SQL Driver to be %q, got %q", "mysql", opts.SQLStoreOpts.Driver)
 	}
 	if opts.SQLStoreOpts.Source != "ivan:pwd@/nss_db" {
-		t.Fatalf("Expected SQL Source to my %q, got %q", "ivan:pwd@/nss_db", opts.SQLStoreOpts.Source)
+		t.Fatalf("Expected SQL Source to be %q, got %q", "ivan:pwd@/nss_db", opts.SQLStoreOpts.Source)
+	}
+	if !opts.SQLStoreOpts.NoCaching {
+		t.Fatal("Expected SQL NoCaching to be true, got false")
+	}
+	if opts.SQLStoreOpts.MaxOpenConns != 5 {
+		t.Fatalf("Expected SQL MaxOpenConns to be 5, got %v", opts.SQLStoreOpts.MaxOpenConns)
 	}
 }
 
@@ -357,6 +363,8 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "file:{parallel_recovery:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{driver:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{source:false}", wrongTypeErr)
+	expectFailureFor(t, "sql:{no_caching:123}", wrongTypeErr)
+	expectFailureFor(t, "sql:{max_open_conns:false}", wrongTypeErr)
 }
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {
