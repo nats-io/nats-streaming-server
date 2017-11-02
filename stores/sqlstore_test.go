@@ -971,11 +971,11 @@ func TestSQLSubStoreCachingFlushInterval(t *testing.T) {
 
 	subID := storeSub(t, cs, channel)
 	storeSubPending(t, cs, channel, subID, 1, 2)
-	time.Sleep(2 * sqlSubStoreFlushInterval)
+	time.Sleep(3 * sqlSubStoreFlushInterval)
 	testSQLCheckPendingRow(t, db, subID, 1, 2)
 
 	storeSubAck(t, cs, channel, subID, 1)
-	time.Sleep(2 * sqlSubStoreFlushInterval)
+	time.Sleep(3 * sqlSubStoreFlushInterval)
 	testSQLCheckAckRow(t, db, subID, 1)
 }
 

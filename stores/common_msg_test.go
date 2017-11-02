@@ -4,6 +4,7 @@ package stores
 
 import (
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 
@@ -333,7 +334,7 @@ func TestCSMaxAge(t *testing.T) {
 					expectedFirst, expectedLast, first, last)
 			}
 			// Wait more and all should be gone.
-			time.Sleep(60 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
 				t.Fatalf("All messages should have expired, got %v", n)
 			}
@@ -360,7 +361,7 @@ func TestCSMaxAge(t *testing.T) {
 			// ...which should be m2: this should not fail
 			msgStoreLookup(t, cs.Msgs, m2.Sequence)
 			// Again, wait more and second message should not be gone
-			time.Sleep(60 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
 				t.Fatalf("All messages should have expired, got %v", n)
 			}
@@ -401,7 +402,13 @@ func TestCSGetSeqFromStartTime(t *testing.T) {
 			defer s.Close()
 
 			limits := testDefaultStoreLimits
-			limits.MaxAge = 500 * time.Millisecond
+			// On windows, the 1ms between each send may actually be more
+			// so we need a bigger expiration value.
+			if runtime.GOOS == "windows" {
+				limits.MaxAge = 1500 * time.Millisecond
+			} else {
+				limits.MaxAge = 500 * time.Millisecond
+			}
 			s.SetLimits(&limits)
 			// Force creation of channel without storing anything yet
 			cs := storeCreateChannel(t, s, "foo")
