@@ -31,7 +31,7 @@ func TestSubscribeShrink(t *testing.T) {
 	}
 	// Check number of subs
 	waitForNumSubs(t, s, clientName, nsubs)
-	// Now unsubsribe them all
+	// Now unsubscribe them all
 	for _, sub := range subs {
 		err := sub.Unsubscribe()
 		if err != nil {
