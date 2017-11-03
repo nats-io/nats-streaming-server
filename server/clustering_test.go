@@ -41,12 +41,12 @@ func cleanupRaftLog(t *testing.T) {
 	}
 }
 
-func getTestDefaultOptsForClustering(id string, peers []string) *Options {
+func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
 	opts := GetDefaultOptions()
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = filepath.Join(defaultDataStore, id)
 	opts.FileStoreOpts.BufferSize = 1024
-	opts.Clustering.Peers = peers
+	opts.Clustering.Bootstrap = bootstrap
 	opts.Clustering.NodeID = id
 	opts.Clustering.RaftLogPath = filepath.Join(defaultRaftLog, id)
 	opts.Clustering.LogCacheSize = DefaultLogCacheSize
@@ -208,23 +208,6 @@ func publishWithRetry(t *testing.T, sc stan.Conn, channel string, payload []byte
 	}
 }
 
-func TestClusteringConfig(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-	cleanupRaftLog(t)
-	defer cleanupRaftLog(t)
-
-	opts := GetDefaultOptions()
-	opts.Clustering.Peers = []string{"a", "b"}
-	s, err := RunServerWithOpts(opts, nil)
-	if s != nil || err == nil {
-		if s != nil {
-			s.Shutdown()
-		}
-		t.Fatal("Server should have failed to start with cluster peers and no cluster node id")
-	}
-}
-
 // Ensure basic replication works as expected. This test starts three servers
 // in a cluster, publishes messages to the cluster, kills the leader, publishes
 // more messages, kills the new leader, verifies progress cannot be made when
@@ -241,17 +224,17 @@ func TestClusteringBasic(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
 	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
 
@@ -400,12 +383,12 @@ func TestClusteringNoPanicOnShutdown(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
@@ -465,12 +448,12 @@ func TestClusteringLeaderFlap(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
@@ -525,19 +508,19 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1sOpts.Clustering.TrailingLogs = 0
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2sOpts.Clustering.TrailingLogs = 0
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
 	s3sOpts.Clustering.TrailingLogs = 0
 	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
@@ -655,19 +638,19 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1sOpts.Clustering.TrailingLogs = 0
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2sOpts.Clustering.TrailingLogs = 0
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
 	s3sOpts.Clustering.TrailingLogs = 0
 	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
@@ -761,7 +744,7 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	}
 
 	// Restart the follower who caught up in standalone mode.
-	follower.opts.Clustering.Peers = nil
+	follower.opts.Clustering.NodeID = ""
 	follower = runServerWithOpts(t, follower.opts, nil)
 	defer follower.Shutdown()
 
@@ -810,19 +793,19 @@ func TestClusteringLogSnapshotRestoreMetadata(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1sOpts.Clustering.TrailingLogs = 0
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2sOpts.Clustering.TrailingLogs = 0
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
 	s3sOpts.Clustering.TrailingLogs = 0
 	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
@@ -1017,17 +1000,17 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 			defer ns.Shutdown()
 
 			// Configure first server
-			s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+			s1sOpts := getTestDefaultOptsForClustering("a", true)
 			s1 := runServerWithOpts(t, s1sOpts, nil)
 			defer s1.Shutdown()
 
 			// Configure second server.
-			s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+			s2sOpts := getTestDefaultOptsForClustering("b", false)
 			s2 := runServerWithOpts(t, s2sOpts, nil)
 			defer s2.Shutdown()
 
 			// Configure third server.
-			s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+			s3sOpts := getTestDefaultOptsForClustering("c", false)
 			s3 := runServerWithOpts(t, s3sOpts, nil)
 			defer s3.Shutdown()
 
@@ -1111,17 +1094,17 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
 	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
 
@@ -1213,17 +1196,17 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
 	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
 
@@ -1302,17 +1285,17 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
 	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
 
@@ -1413,17 +1396,17 @@ func TestClusteringConnClose(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
 	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
 
@@ -1468,17 +1451,17 @@ func TestClusteringClientCrashAndReconnect(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
 	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
 
@@ -1571,7 +1554,7 @@ func TestClusteringHeartbeatFailover(t *testing.T) {
 	defer ns.Shutdown()
 
 	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", []string{"b", "c"})
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1sOpts.ClientHBInterval = 50 * time.Millisecond
 	s1sOpts.ClientHBTimeout = 10 * time.Millisecond
 	s1sOpts.ClientHBFailCount = 5
@@ -1579,7 +1562,7 @@ func TestClusteringHeartbeatFailover(t *testing.T) {
 	defer s1.Shutdown()
 
 	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", []string{"a", "c"})
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2sOpts.ClientHBInterval = 50 * time.Millisecond
 	s2sOpts.ClientHBTimeout = 10 * time.Millisecond
 	s2sOpts.ClientHBFailCount = 5
@@ -1587,7 +1570,7 @@ func TestClusteringHeartbeatFailover(t *testing.T) {
 	defer s2.Shutdown()
 
 	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", []string{"a", "b"})
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
 	s3sOpts.ClientHBInterval = 50 * time.Millisecond
 	s3sOpts.ClientHBTimeout = 10 * time.Millisecond
 	s3sOpts.ClientHBFailCount = 5

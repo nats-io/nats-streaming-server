@@ -79,6 +79,17 @@ message CtrlMsg {
   string  RefID    = 4; 
 }
 
+// RaftJoinRequest is a request to join a Raft group.
+message RaftJoinRequest {
+  string NodeID   = 1; // ID of the joining node.
+  string NodeAddr = 2; // Address of the joining node.
+}
+
+// RaftJoinResponse is a response to a RaftJoinRequest.
+message RaftJoinResponse {
+  string Error = 1; // Error string, omitted if no error. 
+}
+
 // RaftOperation is a Raft log message.
 message RaftOperation {
   enum Type {

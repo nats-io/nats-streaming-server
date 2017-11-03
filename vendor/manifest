@@ -116,7 +116,7 @@
 			"importpath": "github.com/hashicorp/raft",
 			"repository": "https://github.com/hashicorp/raft",
 			"vcs": "git",
-			"revision": "ac704075e75b8626023224c76c56be4d6958a5dc",
+			"revision": "6d14f0c70869faabd9e60ba7ed88a6cbbd6a661f",
 			"branch": "master",
 			"notests": true
 		},
@@ -165,7 +165,7 @@
 			"importpath": "github.com/nats-io/nats-on-a-log",
 			"repository": "https://github.com/nats-io/nats-on-a-log",
 			"vcs": "git",
-			"revision": "9b7f3b2048fdd59aa0df297014fed1690209ccd7",
+			"revision": "2070433f45f93173589cc3d5034f12665564d9f2",
 			"branch": "master",
 			"notests": true
 		},
