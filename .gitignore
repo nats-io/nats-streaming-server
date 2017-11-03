@@ -29,3 +29,6 @@ _testmain.go
 
 # MS Visual Code
 .vscode/
+
+# Intellij
+.idea/
