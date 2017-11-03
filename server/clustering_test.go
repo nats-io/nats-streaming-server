@@ -208,6 +208,62 @@ func publishWithRetry(t *testing.T, sc stan.Conn, channel string, payload []byte
 	}
 }
 
+// Ensure starting a clustered node fails when there is no seed node to join.
+func TestClusteringNoSeed(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server. Starting this should fail because there is no
+	// seed node.
+	s1sOpts := getTestDefaultOptsForClustering("a", false)
+	if _, err := RunServerWithOpts(s1sOpts, nil); err == nil {
+		t.Fatal("Expected error on server start")
+	}
+}
+
+// Ensure starting a cluster works when we start one node in bootstrap mode.
+func TestClusteringBootstrap(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server as a seed.
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server which should automatically join the first.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	var (
+		servers = []*StanServer{s1, s2}
+		leader  = getMetadataLeader(t, 10*time.Second, servers...)
+	)
+
+	// Verify configuration.
+	future := leader.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		t.Fatalf("Unexpected error on GetConfiguration: %v", err)
+	}
+	configServers := future.Configuration().Servers
+	if len(configServers) != 2 {
+		t.Fatalf("Expected 2 servers, got %d", len(configServers))
+	}
+}
+
 // Ensure basic replication works as expected. This test starts three servers
 // in a cluster, publishes messages to the cluster, kills the leader, publishes
 // more messages, kills the new leader, verifies progress cannot be made when
