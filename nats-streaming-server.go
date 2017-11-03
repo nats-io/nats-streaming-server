@@ -36,7 +36,7 @@ Streaming Server Options:
 
 Streaming Server Clustering Options:
     --cluster_node_id <string>        ID of the node within the cluster
-	--cluster_bootstrap <bool>        Bootstrap the cluster if there is no existing state (default: false)
+    --cluster_bootstrap <bool>        Bootstrap the cluster if there is no existing state (default: false)
     --cluster_log_path <string>       Directory to store log replication data
     --cluster_log_cache_size <int>    Number of log entries to cache in memory to reduce disk IO (default: 512)
     --cluster_log_snapshots <int>     Number of log snapshots to retain (default: 2)
