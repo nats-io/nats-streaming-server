@@ -19,6 +19,15 @@ import (
 	"github.com/nats-io/nats-on-a-log"
 )
 
+type joinRequest struct {
+	ID string `json:"id"`
+}
+
+type joinResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error"`
+}
+
 func main() {
 	var (
 		port         = flag.String("port", "8080", "http port")
@@ -26,20 +35,13 @@ func main() {
 		kvPath       = flag.String("kv-path", "", "KV store path")
 		logPath      = flag.String("log-path", "", "Raft log path")
 		snapshotPath = flag.String("sn-path", "", "Log snapshot path")
-		peersPath    = flag.String("peers-path", "", "Peers JSON path")
-		peers        = flag.String("peers", "", "List of peers")
+		join         = flag.String("join", "", "Join address (leave empty to seed")
 	)
 	flag.Parse()
 
-	if *kvPath == "" || *logPath == "" || *snapshotPath == "" || *peersPath == "" {
+	if *kvPath == "" || *logPath == "" || *snapshotPath == "" {
 		panic("path not provided")
 	}
-
-	if *peers == "" {
-		panic("peers not provided")
-	}
-
-	p := strings.Split(*peers, ",")
 
 	var (
 		config   = raft.DefaultConfig()
@@ -49,6 +51,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	config.LocalID = raft.ServerID(*id)
 
 	store, err := raftboltdb.NewBoltStore(*logPath)
 	if err != nil {
@@ -75,13 +78,47 @@ func main() {
 		panic(err)
 	}
 
-	peersStore := raft.NewJSONPeers(*peersPath, trans)
-	if err := peersStore.SetPeers(p); err != nil {
+	node, err := raft.NewRaft(config, fsm, cacheStore, store, snapshots, trans)
+	if err != nil {
 		panic(err)
 	}
 
-	node, err := raft.NewRaft(config, fsm, cacheStore, store, snapshots, peersStore, trans)
+	// Bootstrap if no node to join is provided and there is no existing state.
+	existingState, err := raft.HasExistingState(cacheStore, store, snapshots)
 	if err != nil {
+		panic(err)
+	}
+	if *join == "" && !existingState {
+		config := raft.Configuration{
+			Servers: []raft.Server{
+				raft.Server{
+					ID:      raft.ServerID(*id),
+					Address: raft.ServerAddress(*id),
+				},
+			},
+		}
+		if err := node.BootstrapCluster(config).Error(); err != nil {
+			panic(err)
+		}
+	}
+
+	// Handle join requests.
+	if _, err := conn.Subscribe(fmt.Sprintf("%s.join", *id), func(msg *nats.Msg) {
+		var req joinRequest
+		if err := json.Unmarshal(msg.Data, &req); err != nil {
+			resp, _ := json.Marshal(&joinResponse{OK: false, Error: err.Error()})
+			conn.Publish(msg.Reply, resp)
+			return
+		}
+		future := node.AddVoter(raft.ServerID(req.ID), raft.ServerAddress(req.ID), 0, 0)
+		resp := &joinResponse{OK: true}
+		if err := future.Error(); err != nil {
+			resp.OK = false
+			resp.Error = err.Error()
+		}
+		r, _ := json.Marshal(resp)
+		conn.Publish(msg.Reply, r)
+	}); err != nil {
 		panic(err)
 	}
 
@@ -98,6 +135,22 @@ func main() {
 			}
 		}
 	}()
+
+	// If node to join was provided, add it to the cluster.
+	if *join != "" {
+		req, _ := json.Marshal(&joinRequest{ID: *id})
+		resp, err := conn.Request(fmt.Sprintf("%s.join", *join), req, 5*time.Second)
+		if err != nil {
+			panic(err)
+		}
+		var r joinResponse
+		if err := json.Unmarshal(resp.Data, &r); err != nil {
+			panic(err)
+		}
+		if !r.OK {
+			panic(r.Error)
+		}
+	}
 
 	http.HandleFunc("/set", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {

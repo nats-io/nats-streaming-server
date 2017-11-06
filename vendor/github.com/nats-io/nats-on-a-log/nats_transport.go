@@ -203,7 +203,7 @@ func (n *natsStreamLayer) newNATSConn(address string) *natsConn {
 // Dial creates a new net.Conn with the remote address. This is implemented by
 // performing a handshake over NATS which establishes unique inboxes at each
 // endpoint for streaming data.
-func (n *natsStreamLayer) Dial(address string, timeout time.Duration) (net.Conn, error) {
+func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
 	// QUESTION: The Raft NetTransport does connection pooling, which is useful
 	// for TCP sockets. The NATS transport simulates a socket using a
 	// subscription at each endpoint, but everything goes over the same NATS
@@ -219,7 +219,7 @@ func (n *natsStreamLayer) Dial(address string, timeout time.Duration) (net.Conn,
 		panic(err)
 	}
 
-	peerConn := n.newNATSConn(address)
+	peerConn := n.newNATSConn(string(address))
 
 	// Setup inbox.
 	sub, err := n.conn.Subscribe(connect.Inbox, peerConn.msgHandler)
@@ -327,12 +327,21 @@ func NewNATSTransport(id string, conn *nats.Conn, timeout time.Duration, logOutp
 // NewNATSTransportWithLogger creates a new raft.NetworkTransport implemented
 // with NATS as the transport layer using the provided Logger.
 func NewNATSTransportWithLogger(id string, conn *nats.Conn, timeout time.Duration, logger *log.Logger) (*raft.NetworkTransport, error) {
-	return newNATSTransport(id, conn, timeout, logger, func(stream raft.StreamLayer) *raft.NetworkTransport {
+	return newNATSTransport(id, conn, logger, func(stream raft.StreamLayer) *raft.NetworkTransport {
 		return raft.NewNetworkTransportWithLogger(stream, 3, timeout, logger)
 	})
 }
 
-func newNATSTransport(id string, conn *nats.Conn, timeout time.Duration, logger *log.Logger,
+// NewNATSTransportWithConfig returns a raft.NetworkTransport implemented
+// with NATS as the transport layer, using the given config struct.
+func NewNATSTransportWithConfig(id string, conn *nats.Conn, config *raft.NetworkTransportConfig) (*raft.NetworkTransport, error) {
+	return newNATSTransport(id, conn, config.Logger, func(stream raft.StreamLayer) *raft.NetworkTransport {
+		config.Stream = stream
+		return raft.NewNetworkTransportWithConfig(config)
+	})
+}
+
+func newNATSTransport(id string, conn *nats.Conn, logger *log.Logger,
 	transportCreator func(stream raft.StreamLayer) *raft.NetworkTransport) (*raft.NetworkTransport, error) {
 
 	stream, err := newNATSStreamLayer(id, conn, logger)

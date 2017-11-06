@@ -664,7 +664,7 @@ type StanServer struct {
 }
 
 func (s *StanServer) isClustered() bool {
-	return len(s.opts.Clustering.Peers) > 0
+	return s.opts.Clustering.NodeID != ""
 }
 
 func (s *StanServer) isMetadataLeader() bool {
@@ -1318,7 +1318,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		nOpts = natsOpts.Clone()
 	}
 
-	if len(sOpts.Clustering.Peers) > 0 {
+	if sOpts.Clustering.NodeID != "" {
 		// If clustered, override store sync configuration with cluster sync.
 		sOpts.FileStoreOpts.DoSync = sOpts.Clustering.Sync
 

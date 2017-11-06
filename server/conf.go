@@ -374,9 +374,8 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	sopts := GetDefaultOptions()
 
 	var (
-		stanConfigFile   string
-		natsConfigFile   string
-		stanClusterPeers string
+		stanConfigFile string
+		natsConfigFile string
 	)
 
 	fs.StringVar(&sopts.ID, "cluster_id", DefaultClusterID, "stan.ID")
@@ -431,7 +430,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.Int64Var(&sopts.IOSleepTime, "io_sleep_time", DefaultIOSleepTime, "stan.IOSleepTime")
 	fs.StringVar(&sopts.FTGroupName, "ft_group", "", "stan.FTGroupName")
 	fs.StringVar(&sopts.Clustering.NodeID, "cluster_node_id", "", "stan.Clustering.NodeID")
-	fs.StringVar(&stanClusterPeers, "cluster_peers", "", "")
+	fs.BoolVar(&sopts.Clustering.Bootstrap, "cluster_bootstrap", false, "stan.Clustering.Bootstrap")
 	fs.StringVar(&sopts.Clustering.RaftLogPath, "cluster_log_path", "", "stan.Clustering.RaftLogPath")
 	fs.IntVar(&sopts.Clustering.LogCacheSize, "cluster_log_cache_size", DefaultLogCacheSize, "stan.Clustering.LogCacheSize")
 	fs.IntVar(&sopts.Clustering.LogSnapshots, "cluster_log_snapshots", DefaultLogSnapshots, "stan.Clustering.LogSnapshots")
@@ -472,13 +471,6 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 		// No need to check for errors since this has already been called
 		// in natsd.ConfigureOptions()
 		fs.Parse(args)
-	}
-
-	if len(stanClusterPeers) > 0 {
-		sopts.Clustering.Peers = strings.Split(stanClusterPeers, ",")
-		for i, peer := range sopts.Clustering.Peers {
-			sopts.Clustering.Peers[i] = strings.TrimSpace(peer)
-		}
 	}
 
 	// Special handling for some command line params
