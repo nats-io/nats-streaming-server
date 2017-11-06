@@ -46,8 +46,8 @@ func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = filepath.Join(defaultDataStore, id)
 	opts.FileStoreOpts.BufferSize = 1024
+	opts.Clustering.Clustered = true
 	opts.Clustering.Bootstrap = bootstrap
-	opts.Clustering.NodeID = id
 	opts.Clustering.RaftLogPath = filepath.Join(defaultRaftLog, id)
 	opts.Clustering.LogCacheSize = DefaultLogCacheSize
 	opts.Clustering.LogSnapshots = 1
@@ -800,7 +800,7 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	}
 
 	// Restart the follower who caught up in standalone mode.
-	follower.opts.Clustering.NodeID = ""
+	follower.opts.Clustering.Clustered = false
 	follower = runServerWithOpts(t, follower.opts, nil)
 	defer follower.Shutdown()
 

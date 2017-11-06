@@ -35,7 +35,8 @@ Streaming Server Options:
           --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 
 Streaming Server Clustering Options:
-    --cluster_node_id <string>        ID of the node within the cluster
+    --clustered <bool>                Run the server in a clustered configuration (default: false)
+    --cluster_node_id <string>        ID of the node within the cluster if there is no stored ID (default: random UUID)
     --cluster_bootstrap <bool>        Bootstrap the cluster if there is no existing state (default: false)
     --cluster_log_path <string>       Directory to store log replication data
     --cluster_log_cache_size <int>    Number of log entries to cache in memory to reduce disk IO (default: 512)

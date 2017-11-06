@@ -664,7 +664,7 @@ type StanServer struct {
 }
 
 func (s *StanServer) isClustered() bool {
-	return s.opts.Clustering.NodeID != ""
+	return s.opts.Clustering.Clustered
 }
 
 func (s *StanServer) isMetadataLeader() bool {
@@ -1455,9 +1455,6 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	} else {
 		state := Standalone
 		if s.isClustered() {
-			if s.opts.Clustering.NodeID == "" {
-				return nil, errors.New("cluster node id not provided")
-			}
 			state = Clustered
 		}
 		if err := s.start(state); err != nil {
@@ -1558,6 +1555,9 @@ func (s *StanServer) start(runningState State) error {
 			callStoreInit = true
 		}
 
+		// Use recovered clustering node ID.
+		s.opts.Clustering.NodeID = s.info.NodeID
+
 		// Restore clients state
 		s.processRecoveredClients(recoveredState.Clients)
 
@@ -1568,6 +1568,13 @@ func (s *StanServer) start(runningState State) error {
 		}
 	} else {
 		s.info.ClusterID = s.opts.ID
+
+		// Assign a random cluster node ID if not provided.
+		if s.opts.Clustering.NodeID == "" {
+			s.opts.Clustering.NodeID = nuid.Next()
+		}
+		s.info.NodeID = s.opts.Clustering.NodeID
+
 		// Generate Subjects
 		s.info.Discovery = fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.info.ClusterID)
 		s.info.Publish = fmt.Sprintf("%s.%s", DefaultPubPrefix, subjID)

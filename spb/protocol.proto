@@ -50,6 +50,7 @@ message ServerInfo {
   string Close       = 6; // Subject server receives close requests on.
   string SubClose    = 7; // Subject server receives subscription close requests on.
   string AcksSubs    = 8; // Subject prefix server receives subscription acks when using pool of ack subscribers.
+  string NodeID      = 9; // Clustering node ID.
 }
 
 // ClientInfo contains information related to a Client
