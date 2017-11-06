@@ -132,6 +132,34 @@ func getDBConnection(t *testing.T) *sql.DB {
 	return db
 }
 
+func TestSQLAllOptions(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	opts := &SQLStoreOptions{
+		NoCaching:    true,
+		MaxOpenConns: 123,
+	}
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLAllOptions(opts))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	s.RLock()
+	so := s.opts
+	s.RUnlock()
+	if !so.NoCaching {
+		t.Fatal("NoCaching should be true")
+	}
+	if so.MaxOpenConns != 123 {
+		t.Fatalf("MaxOpenConns should be 123, got %v", so.MaxOpenConns)
+	}
+}
+
 func TestSQLPostgresDriverInit(t *testing.T) {
 	if !doSQL {
 		t.SkipNow()

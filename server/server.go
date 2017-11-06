@@ -1122,7 +1122,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 			stores.AllOptions(&sOpts.FileStoreOpts))
 	case stores.TypeSQL:
 		store, err = stores.NewSQLStore(s.log, sOpts.SQLStoreOpts.Driver, sOpts.SQLStoreOpts.Source,
-			storeLimits)
+			storeLimits, stores.SQLAllOptions(&sOpts.SQLStoreOpts))
 	case stores.TypeMemory:
 		store, err = stores.NewMemoryStore(s.log, storeLimits)
 	default:

@@ -193,6 +193,16 @@ func SQLMaxOpenConns(max int) SQLStoreOption {
 	}
 }
 
+// SQLAllOptions is a convenient option to pass all options from a SQLStoreOptions
+// structure to the constructor.
+func SQLAllOptions(opts *SQLStoreOptions) SQLStoreOption {
+	return func(o *SQLStoreOptions) error {
+		o.NoCaching = opts.NoCaching
+		o.MaxOpenConns = opts.MaxOpenConns
+		return nil
+	}
+}
+
 // SQLStore is a factory for message and subscription stores backed by
 // a SQL Database.
 type SQLStore struct {
