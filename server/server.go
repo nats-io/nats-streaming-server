@@ -125,6 +125,7 @@ var (
 	ErrInvalidDurName     = errors.New("stan: durable name of a durable queue subscriber can't contain the character ':'")
 	ErrUnknownClient      = errors.New("stan: unknown clientID")
 	ErrNoChannel          = errors.New("stan: no configured channel")
+	ErrClusteredRestart   = errors.New("stan: cannot restart server in clustered mode if it was not previously clustered")
 )
 
 // Shared regular expression to check clientID validity.
@@ -1555,6 +1556,13 @@ func (s *StanServer) start(runningState State) error {
 			callStoreInit = true
 		}
 
+		// If clustering was enabled but we are recovering a server that was
+		// previously not clustered, return an error. This is not allowed
+		// because there is preexisting state that is not represented in the
+		// Raft log.
+		if s.isClustered() && s.info.NodeID == "" {
+			return ErrClusteredRestart
+		}
 		// Use recovered clustering node ID.
 		s.opts.Clustering.NodeID = s.info.NodeID
 
@@ -1569,8 +1577,8 @@ func (s *StanServer) start(runningState State) error {
 	} else {
 		s.info.ClusterID = s.opts.ID
 
-		// Assign a random cluster node ID if not provided.
-		if s.opts.Clustering.NodeID == "" {
+		// If clustered, assign a random cluster node ID if not provided.
+		if s.isClustered() && s.opts.Clustering.NodeID == "" {
 			s.opts.Clustering.NodeID = nuid.Next()
 		}
 		s.info.NodeID = s.opts.Clustering.NodeID

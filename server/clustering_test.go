@@ -208,6 +208,34 @@ func publishWithRetry(t *testing.T, sc stan.Conn, channel string, payload []byte
 	}
 }
 
+// Ensure restarting a non-clustered server in clustered mode fails.
+func TestClusteringRestart(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure the server in non-clustered mode.
+	s1sOpts := getTestDefaultOptsForClustering("a", false)
+	s1sOpts.Clustering.Clustered = false
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+
+	// Restart in clustered mode. This should fail.
+	s1.Shutdown()
+	s1sOpts.Clustering.Clustered = true
+	_, err := RunServerWithOpts(s1sOpts, nil)
+	if err == nil {
+		t.Fatal("Expected error on server start")
+	}
+	if err != ErrClusteredRestart {
+		t.Fatalf("Incorrect error, expected: ErrClusteredRaftRestart, got: %v", err)
+	}
+}
+
 // Ensure starting a clustered node fails when there is no seed node to join.
 func TestClusteringNoSeed(t *testing.T) {
 	cleanupDatastore(t)
