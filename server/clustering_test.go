@@ -192,22 +192,6 @@ func assertMsg(t *testing.T, msg pb.MsgProto, expectedData []byte, expectedSeq u
 	}
 }
 
-func publishWithRetry(t *testing.T, sc stan.Conn, channel string, payload []byte) {
-	// TODO: there is a race where connection might not be established on
-	// leader so publish can fail, so retry a few times if necessary. Remove
-	// this once connection replication is implemented.
-	for i := 0; i < 10; i++ {
-		if err := sc.Publish(channel, payload); err != nil {
-			if i == 9 {
-				stackFatalf(t, "Unexpected error on publish: %v", err)
-			}
-			time.Sleep(time.Millisecond)
-			continue
-		}
-		break
-	}
-}
-
 // Ensure restarting a non-clustered server in clustered mode fails.
 func TestClusteringRestart(t *testing.T) {
 	cleanupDatastore(t)
@@ -435,7 +419,9 @@ func TestClusteringBasic(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	publishWithRetry(t, sc, channel, []byte("hello"))
+	if err := sc.Publish(channel, []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
 
 	ch := make(chan *stan.Msg, 100)
 	sub, err := sc.Subscribe(channel, func(msg *stan.Msg) {
@@ -650,7 +636,9 @@ func TestClusteringLeaderFlap(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	publishWithRetry(t, sc, channel, []byte("hello"))
+	if err := sc.Publish(channel, []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
 
 	// Wait for leader to be elected.
 	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
@@ -722,7 +710,9 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	publishWithRetry(t, sc, channel, []byte("1"))
+	if err := sc.Publish(channel, []byte("1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
 
 	// Create a subscription.
 	sub, err := sc.Subscribe(channel, func(_ *stan.Msg) {})
@@ -877,7 +867,9 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	follower.Shutdown()
 
 	// Publish a message.
-	publishWithRetry(t, sc, channel, []byte("1"))
+	if err := sc.Publish(channel, []byte("1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
 
 	// Verify we received the message.
 	select {
@@ -1022,7 +1014,9 @@ func TestClusteringLogSnapshotRestoreMetadata(t *testing.T) {
 	getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish a message.
-	publishWithRetry(t, sc1, channel, []byte("1"))
+	if err := sc1.Publish(channel, []byte("1")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
 
 	// Verify we received the message.
 	select {
@@ -1215,7 +1209,9 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 			defer sc2.Close()
 
 			// Publish a message (this will create the channel and form the Raft group).
-			publishWithRetry(t, sc1, channel, []byte("hello"))
+			if err := sc1.Publish(channel, []byte("hello")); err != nil {
+				t.Fatalf("Unexpected error on publish: %v", err)
+			}
 
 			if err := tc.subscribe(); err != nil {
 				t.Fatalf("Error subscribing: %v", err)
@@ -1305,7 +1301,9 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	publishWithRetry(t, sc, channel, []byte("hello"))
+	if err := sc.Publish(channel, []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
 
 	ch := make(chan *stan.Msg, 100)
 	sub, err := sc.Subscribe(channel, func(msg *stan.Msg) {
@@ -1407,7 +1405,9 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	publishWithRetry(t, sc, channel, []byte("hello"))
+	if err := sc.Publish(channel, []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
 
 	ch := make(chan *stan.Msg, 100)
 	sub, err := sc.Subscribe(channel, func(msg *stan.Msg) {
@@ -1496,7 +1496,9 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 
 	// Publish a message (this will create the channel and form the Raft group).
 	channel := "foo"
-	publishWithRetry(t, sc, channel, []byte("hello"))
+	if err := sc.Publish(channel, []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
 
 	ch := make(chan bool, 1)
 	doAckMsg := int32(0)
@@ -1525,7 +1527,9 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 
 	atomic.StoreInt32(&doAckMsg, 1)
 	// Publish one more message and wait for message to be received
-	publishWithRetry(t, sc, channel, []byte("hello"))
+	if err := sc.Publish(channel, []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our message")
 	}
