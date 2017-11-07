@@ -1319,8 +1319,14 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		nOpts = natsOpts.Clone()
 	}
 
-	if sOpts.Clustering.NodeID != "" {
-		// If clustered, override store sync configuration with cluster sync.
+	if sOpts.Clustering.Clustered {
+		// If clustered, assign a random cluster node ID if not provided. If
+		// this server is recovering, this will be overwritten later.
+		if sOpts.Clustering.NodeID == "" {
+			sOpts.Clustering.NodeID = nuid.Next()
+		}
+
+		// Override store sync configuration with cluster sync.
 		sOpts.FileStoreOpts.DoSync = sOpts.Clustering.Sync
 
 		// Default cluster Raft log path to ./<cluster-id>/<node-id> if not set.
@@ -1576,11 +1582,6 @@ func (s *StanServer) start(runningState State) error {
 		}
 	} else {
 		s.info.ClusterID = s.opts.ID
-
-		// If clustered, assign a random cluster node ID if not provided.
-		if s.isClustered() && s.opts.Clustering.NodeID == "" {
-			s.opts.Clustering.NodeID = nuid.Next()
-		}
 		s.info.NodeID = s.opts.Clustering.NodeID
 
 		// Generate Subjects
