@@ -302,6 +302,14 @@ var sqlSeqMapPool = &sync.Pool{
 		return make(map[uint64]struct{})
 	},
 }
+var sqlSeqArrayPool = &sync.Pool{
+	New: func() interface{} {
+		// This is to silence megacheck that says that sync.Pool should
+		// only be used with pointers.
+		a := make([]uint64, 0, 1024)
+		return &a
+	},
+}
 
 ////////////////////////////////////////////////////////////////////////////
 // SQLStore methods
@@ -1564,29 +1572,34 @@ func (ss *SQLSubStore) recoverPendingRow(rows *sql.Rows, sub *spb.SubState, ap *
 		if lastSent > sub.LastSent {
 			sub.LastSent = lastSent
 		}
-		var pending, acks map[uint64]struct{}
-		json.Unmarshal(pendingBytes, &pending)
-		for seq := range pending {
-			pendingAcks[seq] = struct{}{}
-			row.msgsRefs++
-			row.msgs[seq] = struct{}{}
-			ap.msgToRow[seq] = row
+		if len(pendingBytes) > 0 {
+			if err := sqlDecodeSeqs(pendingBytes, func(seq uint64) {
+				pendingAcks[seq] = struct{}{}
+				row.msgsRefs++
+				row.msgs[seq] = struct{}{}
+				ap.msgToRow[seq] = row
+			}); err != nil {
+				return err
+			}
 		}
-		json.Unmarshal(acksBytes, &acks)
-		for seq := range acks {
-			if _, exists := pendingAcks[seq]; exists {
-				delete(pendingAcks, seq)
-				row.acksRefs++
-				ap.ackToRow[seq] = row
+		if len(acksBytes) > 0 {
+			if err := sqlDecodeSeqs(acksBytes, func(seq uint64) {
+				if _, exists := pendingAcks[seq]; exists {
+					delete(pendingAcks, seq)
+					row.acksRefs++
+					ap.ackToRow[seq] = row
 
-				seqRow := ap.msgToRow[seq]
-				if seqRow != nil {
-					delete(ap.msgToRow, seq)
-					seqRow.msgsRefs--
-					if seqRow.msgsRefs == 0 && seqRow.acksRefs == 0 {
-						gcedRows[seqRow.ID] = struct{}{}
+					seqRow := ap.msgToRow[seq]
+					if seqRow != nil {
+						delete(ap.msgToRow, seq)
+						seqRow.msgsRefs--
+						if seqRow.msgsRefs == 0 && seqRow.acksRefs == 0 {
+							gcedRows[seqRow.ID] = struct{}{}
+						}
 					}
 				}
+			}); err != nil {
+				return err
 			}
 		}
 	}
@@ -1647,26 +1660,24 @@ func (ss *SQLSubStore) flush() error {
 		ss.curRow++
 		row := &sqlSubsPendingRow{ID: ss.curRow}
 		if len(ap.msgs) > 0 {
-			for seqno := range ap.msgs {
+			pendingBytes, err = sqlEncodeSeqs(ap.msgs, func(seqno uint64) {
 				row.msgsRefs++
 				ap.msgToRow[seqno] = row
-			}
-			row.msgs = ap.msgs
-			pendingBytes, err = json.Marshal(ap.msgs)
+			})
 			if err != nil {
 				return err
 			}
+			row.msgs = ap.msgs
 			ap.msgs = sqlSeqMapPool.Get().(map[uint64]struct{})
 		}
 		if len(ap.acks) > 0 {
-			acksBytes, err = json.Marshal(ap.acks)
-			if err != nil {
-				return err
-			}
-			for seqno := range ap.acks {
+			acksBytes, err = sqlEncodeSeqs(ap.acks, func(seqno uint64) {
 				delete(ap.acks, seqno)
 				row.acksRefs++
 				ap.ackToRow[seqno] = row
+			})
+			if err != nil {
+				return err
 			}
 		}
 		if _, err := ps.Exec(subid, ss.curRow, ap.lastSent, pendingBytes, acksBytes); err != nil {
@@ -1682,6 +1693,38 @@ func (ss *SQLSubStore) flush() error {
 	}
 	tx = nil
 	ss.cache.needsFlush = false
+	return nil
+}
+
+func sqlEncodeSeqs(m map[uint64]struct{}, f func(seq uint64)) ([]byte, error) {
+	// We store as a pointer in the sync pool.
+	pseqarray := sqlSeqArrayPool.Get().(*[]uint64)
+	seqarray := *pseqarray
+	for seqno := range m {
+		f(seqno)
+		seqarray = append(seqarray, seqno)
+	}
+	b, err := json.Marshal(seqarray)
+	if err != nil {
+		return nil, err
+	}
+	seqarray = seqarray[:0]
+	sqlSeqArrayPool.Put(&seqarray)
+	return b, nil
+}
+
+func sqlDecodeSeqs(data []byte, f func(seq uint64)) error {
+	var seqarray []uint64
+	if err := json.Unmarshal(data, &seqarray); err != nil {
+		return err
+	}
+	if seqarray != nil {
+		for _, seq := range seqarray {
+			f(seq)
+		}
+		seqarray = seqarray[:0]
+		sqlSeqArrayPool.Put(&seqarray)
+	}
 	return nil
 }
 

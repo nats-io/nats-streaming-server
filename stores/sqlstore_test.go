@@ -4,7 +4,6 @@ package stores
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -829,16 +828,14 @@ func testSQLCheckPendingOrAcksRow(t tLogger, db *sql.DB, subID uint64, columnNam
 	m := make(map[uint64]struct{})
 	for rows.Next() {
 		var (
-			rm    map[uint64]struct{}
 			bytes []byte
 		)
 		if err := rows.Scan(&bytes); err != nil {
 			stackFatalf(t, "Error getting bytes: %v", err)
 		}
-		json.Unmarshal(bytes, &rm)
-		for seq := range rm {
+		sqlDecodeSeqs(bytes, func(seq uint64) {
 			m[seq] = struct{}{}
-		}
+		})
 	}
 	rows.Close()
 	if len(expected) != len(m) {
@@ -1131,7 +1128,7 @@ func TestSQLSubStoreCachingAndRecovery(t *testing.T) {
 	s.Close()
 	acks := make(map[uint64]struct{})
 	acks[2] = struct{}{}
-	ackBytes, _ := json.Marshal(acks)
+	ackBytes, _ := sqlEncodeSeqs(acks, func(_ uint64) {})
 	stmt := "INSERT INTO SubsPending (subid, row, lastsent, pending, acks) VALUES (?, ?, ?, ?, ?)"
 	if testSQLDriver == driverPostgres {
 		stmt = "INSERT INTO SubsPending (subid, row, lastsent, pending, acks) VALUES ($1, $2, $3, $4, $5)"
