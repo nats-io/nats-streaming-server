@@ -21,6 +21,7 @@ import (
 
 // ClusteringOptions contains STAN Server options related to clustering.
 type ClusteringOptions struct {
+	Clustered    bool   // Run the server in a clustered configuration.
 	NodeID       string // ID of the node within the cluster.
 	Bootstrap    bool   // Bootstrap the cluster as a seed node if there is no existing state.
 	RaftLogPath  string // Path to Raft log store directory.
@@ -80,7 +81,7 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 
 	addr := s.getClusteringAddr(name)
 	config := raft.DefaultConfig()
-	config.LocalID = raft.ServerID(addr)
+	config.LocalID = raft.ServerID(s.opts.Clustering.NodeID)
 	config.TrailingLogs = uint64(s.opts.Clustering.TrailingLogs)
 
 	// FIXME: Send output of Raft logger
@@ -153,7 +154,7 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 		config := raft.Configuration{
 			Servers: []raft.Server{
 				raft.Server{
-					ID:      raft.ServerID(addr),
+					ID:      raft.ServerID(s.opts.Clustering.NodeID),
 					Address: raft.ServerAddress(addr),
 				},
 			},
@@ -183,7 +184,9 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 		// came from ourselves.
 		resp := &spb.RaftJoinResponse{}
 		if req.NodeID != s.opts.Clustering.NodeID {
-			future := node.AddVoter(raft.ServerID(req.NodeID), raft.ServerAddress(req.NodeAddr), 0, 0)
+			future := node.AddVoter(
+				raft.ServerID(req.NodeID),
+				raft.ServerAddress(req.NodeAddr), 0, 0)
 			if err := future.Error(); err != nil {
 				resp.Error = err.Error()
 			}
@@ -204,7 +207,7 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 
 	// Attempt to join the cluster if we're not bootstrapping.
 	if !s.opts.Clustering.Bootstrap {
-		req, err := (&spb.RaftJoinRequest{NodeID: addr, NodeAddr: addr}).Marshal()
+		req, err := (&spb.RaftJoinRequest{NodeID: s.opts.Clustering.NodeID, NodeAddr: addr}).Marshal()
 		if err != nil {
 			panic(err)
 		}

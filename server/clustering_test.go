@@ -46,8 +46,8 @@ func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
 	opts.StoreType = stores.TypeFile
 	opts.FilestoreDir = filepath.Join(defaultDataStore, id)
 	opts.FileStoreOpts.BufferSize = 1024
+	opts.Clustering.Clustered = true
 	opts.Clustering.Bootstrap = bootstrap
-	opts.Clustering.NodeID = id
 	opts.Clustering.RaftLogPath = filepath.Join(defaultRaftLog, id)
 	opts.Clustering.LogCacheSize = DefaultLogCacheSize
 	opts.Clustering.LogSnapshots = 1
@@ -208,6 +208,34 @@ func publishWithRetry(t *testing.T, sc stan.Conn, channel string, payload []byte
 	}
 }
 
+// Ensure restarting a non-clustered server in clustered mode fails.
+func TestClusteringRestart(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure the server in non-clustered mode.
+	s1sOpts := getTestDefaultOptsForClustering("a", false)
+	s1sOpts.Clustering.Clustered = false
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+
+	// Restart in clustered mode. This should fail.
+	s1.Shutdown()
+	s1sOpts.Clustering.Clustered = true
+	_, err := RunServerWithOpts(s1sOpts, nil)
+	if err == nil {
+		t.Fatal("Expected error on server start")
+	}
+	if err != ErrClusteredRestart {
+		t.Fatalf("Incorrect error, expected: ErrClusteredRaftRestart, got: %v", err)
+	}
+}
+
 // Ensure starting a clustered node fails when there is no seed node to join.
 func TestClusteringNoSeed(t *testing.T) {
 	cleanupDatastore(t)
@@ -224,6 +252,102 @@ func TestClusteringNoSeed(t *testing.T) {
 	s1sOpts := getTestDefaultOptsForClustering("a", false)
 	if _, err := RunServerWithOpts(s1sOpts, nil); err == nil {
 		t.Fatal("Expected error on server start")
+	}
+}
+
+// Ensure clustering node ID is assigned when not provided and stored/recovered
+// on server restart.
+func TestClusteringAssignedDurableNodeID(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure server.
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+
+	// Wait to elect self as leader.
+	leader := getMetadataLeader(t, 10*time.Second, s1)
+
+	future := leader.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		t.Fatalf("Unexpected error on GetConfiguration: %v", err)
+	}
+	id := future.Configuration().Servers[0].ID
+
+	if id == "" {
+		t.Fatal("Expected non-empty cluster node id")
+	}
+
+	// Restart server without setting node ID.
+	s1.Shutdown()
+	s1sOpts.Clustering.NodeID = ""
+	s1 = runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Wait to elect self as leader.
+	leader = getMetadataLeader(t, 10*time.Second, s1)
+
+	future = leader.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		t.Fatalf("Unexpected error on GetConfiguration: %v", err)
+	}
+	newID := future.Configuration().Servers[0].ID
+	if id != newID {
+		t.Fatalf("Incorrect cluster node id, expected: %s, got: %s", id, newID)
+	}
+}
+
+// Ensure clustering node ID is stored and recovered on server restart.
+func TestClusteringDurableNodeID(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure server.
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.NodeID = "a"
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+
+	// Wait to elect self as leader.
+	leader := getMetadataLeader(t, 10*time.Second, s1)
+
+	future := leader.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		t.Fatalf("Unexpected error on GetConfiguration: %v", err)
+	}
+	id := future.Configuration().Servers[0].ID
+
+	if id != "a" {
+		t.Fatalf("Incorrect cluster node id, expected: a, got: %s", id)
+	}
+
+	// Restart server without setting node ID.
+	s1.Shutdown()
+	s1sOpts.Clustering.NodeID = ""
+	s1 = runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Wait to elect self as leader.
+	leader = getMetadataLeader(t, 10*time.Second, s1)
+
+	future = leader.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		t.Fatalf("Unexpected error on GetConfiguration: %v", err)
+	}
+	newID := future.Configuration().Servers[0].ID
+	if newID != "a" {
+		t.Fatalf("Incorrect cluster node id, expected: a, got: %s", newID)
 	}
 }
 
@@ -800,7 +924,7 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	}
 
 	// Restart the follower who caught up in standalone mode.
-	follower.opts.Clustering.NodeID = ""
+	follower.opts.Clustering.Clustered = false
 	follower = runServerWithOpts(t, follower.opts, nil)
 	defer follower.Shutdown()
 

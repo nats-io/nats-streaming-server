@@ -125,6 +125,7 @@ var (
 	ErrInvalidDurName     = errors.New("stan: durable name of a durable queue subscriber can't contain the character ':'")
 	ErrUnknownClient      = errors.New("stan: unknown clientID")
 	ErrNoChannel          = errors.New("stan: no configured channel")
+	ErrClusteredRestart   = errors.New("stan: cannot restart server in clustered mode if it was not previously clustered")
 )
 
 // Shared regular expression to check clientID validity.
@@ -664,7 +665,7 @@ type StanServer struct {
 }
 
 func (s *StanServer) isClustered() bool {
-	return s.opts.Clustering.NodeID != ""
+	return s.opts.Clustering.Clustered
 }
 
 func (s *StanServer) isMetadataLeader() bool {
@@ -1455,9 +1456,6 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	} else {
 		state := Standalone
 		if s.isClustered() {
-			if s.opts.Clustering.NodeID == "" {
-				return nil, errors.New("cluster node id not provided")
-			}
 			state = Clustered
 		}
 		if err := s.start(state); err != nil {
@@ -1558,6 +1556,16 @@ func (s *StanServer) start(runningState State) error {
 			callStoreInit = true
 		}
 
+		// If clustering was enabled but we are recovering a server that was
+		// previously not clustered, return an error. This is not allowed
+		// because there is preexisting state that is not represented in the
+		// Raft log.
+		if s.isClustered() && s.info.NodeID == "" {
+			return ErrClusteredRestart
+		}
+		// Use recovered clustering node ID.
+		s.opts.Clustering.NodeID = s.info.NodeID
+
 		// Restore clients state
 		s.processRecoveredClients(recoveredState.Clients)
 
@@ -1568,6 +1576,13 @@ func (s *StanServer) start(runningState State) error {
 		}
 	} else {
 		s.info.ClusterID = s.opts.ID
+
+		// If clustered, assign a random cluster node ID if not provided.
+		if s.isClustered() && s.opts.Clustering.NodeID == "" {
+			s.opts.Clustering.NodeID = nuid.Next()
+		}
+		s.info.NodeID = s.opts.Clustering.NodeID
+
 		// Generate Subjects
 		s.info.Discovery = fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.info.ClusterID)
 		s.info.Publish = fmt.Sprintf("%s.%s", DefaultPubPrefix, subjID)
