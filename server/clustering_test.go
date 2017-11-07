@@ -945,11 +945,11 @@ LOOP:
 	for time.Now().Before(deadline) {
 		select {
 		case msg := <-ch:
+			msg.Ack()
 			// It's possible the first message was redelivered multiple times.
 			if msg.Sequence == 1 {
 				continue
 			}
-			msg.Ack()
 			assertMsg(t, msg.MsgProto, []byte("2"), 2)
 			m = msg
 			break LOOP
