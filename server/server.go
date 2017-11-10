@@ -1688,27 +1688,29 @@ func (s *StanServer) startChannelGossiping() error {
 		count := uint32(len(s.channels.channels))
 		s.channels.RUnlock()
 
+		if count >= c.NumChannels {
+			return
+		}
+
 		// If our count is less, request the list of channels from the other
 		// server and reconcile.
-		if count < c.NumChannels {
-			resp, err := s.ncr.Request(m.Reply, nil, 5*time.Second)
-			if err != nil {
-				s.log.Errorf("Failed to fetch channels from another server: %v", err)
-				return
-			}
-			channelResp := &spb.ChannelResponse{}
-			if err := channelResp.Unmarshal(resp.Data); err != nil {
-				s.log.Errorf("Received invalid channels response from server: %v", err)
-				return
-			}
-			// Reconcile list of channels.
-			for _, channel := range channelResp.Channels {
-				if s.channels.get(channel) == nil {
-					if _, err := s.channels.createChannel(s, channel); err != nil {
-						s.log.Errorf("Failed to create channel %s while reconciling channels: %v", channel, err)
-					} else {
-						s.log.Debugf("Created channel %s while reconciling channels", channel)
-					}
+		resp, err := s.ncr.Request(m.Reply, nil, 5*time.Second)
+		if err != nil {
+			s.log.Errorf("Failed to fetch channels from another server: %v", err)
+			return
+		}
+		channelResp := &spb.ChannelResponse{}
+		if err := channelResp.Unmarshal(resp.Data); err != nil {
+			s.log.Errorf("Received invalid channels response from server: %v", err)
+			return
+		}
+		// Reconcile list of channels.
+		for _, channel := range channelResp.Channels {
+			if s.channels.get(channel) == nil {
+				if _, err := s.channels.createChannel(s, channel); err != nil {
+					s.log.Errorf("Failed to create channel %s while reconciling channels: %v", channel, err)
+				} else {
+					s.log.Debugf("Created channel %s while reconciling channels", channel)
 				}
 			}
 		}
