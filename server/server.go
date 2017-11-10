@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/url"
 	"os"
@@ -47,6 +48,7 @@ const (
 	DefaultUnSubPrefix    = "_STAN.unsub"
 	DefaultClosePrefix    = "_STAN.close"
 	defaultAcksPrefix     = "_STAN.ack"
+	defaultGossipPrefix   = "_STAN.gossip"
 	DefaultStoreType      = stores.TypeMemory
 
 	// Prefix of subject active server is sending HBs to
@@ -81,6 +83,10 @@ const (
 	// DefaultTrailingLogs is the number of log entries to leave after a
 	// snapshot and compaction.
 	DefaultTrailingLogs = 10240
+
+	// DefaultGossipInterval is the interval in which to gossip channels to the
+	// cluster (plus some random delay).
+	DefaultGossipInterval = 30 * time.Second
 
 	// Length of the channel used to schedule subscriptions start requests.
 	// Subscriptions requests are processed from the same NATS subscription.
@@ -1610,9 +1616,12 @@ func (s *StanServer) start(runningState State) error {
 		}
 	}
 
-	// If clustered, start metadata Raft group.
+	// If clustered, start metadata Raft group and start gossiping channels.
 	if s.isClustered() {
 		if err := s.startMetadataRaftNode(); err != nil {
+			return err
+		}
+		if err := s.startChannelGossiping(); err != nil {
 			return err
 		}
 	}
@@ -1653,6 +1662,104 @@ func (s *StanServer) start(runningState State) error {
 		s.wg.Add(1)
 		go s.performRedeliveryOnStartup(recoveredSubs)
 	}
+	return nil
+}
+
+// startChannelGossiping sets up a NATS subscription to a cluster gossip
+// subject to receive messages from the cluster on what channels exist. It also
+// starts a goroutine which periodically publishes the channels this server
+// knows about. When a server discovers it's missing channels, it requests the
+// missing channels from another server and creates them. This should only be
+// called if the server is running in clustered mode.
+func (s *StanServer) startChannelGossiping() error {
+	// Setup sub for receiving channel gossip.
+	gossipInbox := fmt.Sprintf("%s.%s.channels", defaultGossipPrefix, s.opts.ID)
+	_, err := s.ncr.Subscribe(gossipInbox, func(m *nats.Msg) {
+		c := &spb.ChannelGossip{}
+		if err := c.Unmarshal(m.Data); err != nil {
+			s.log.Errorf("Received invalid channel gossip message: %v", err)
+			return
+		}
+		if c.NodeID == s.opts.Clustering.NodeID {
+			// Ignore messages from ourselves.
+			return
+		}
+		s.channels.RLock()
+		count := uint32(len(s.channels.channels))
+		s.channels.RUnlock()
+
+		// If our count is less, request the list of channels from the other
+		// server and reconcile.
+		if count < c.NumChannels {
+			resp, err := s.ncr.Request(m.Reply, nil, 5*time.Second)
+			if err != nil {
+				s.log.Errorf("Failed to fetch channels from another server: %v", err)
+				return
+			}
+			channelResp := &spb.ChannelResponse{}
+			if err := channelResp.Unmarshal(resp.Data); err != nil {
+				s.log.Errorf("Received invalid channels response from server: %v", err)
+				return
+			}
+			// Reconcile list of channels.
+			for _, channel := range channelResp.Channels {
+				if s.channels.get(channel) == nil {
+					if _, err := s.channels.createChannel(s, channel); err != nil {
+						s.log.Errorf("Failed to create channel %s while reconciling channels: %v", channel, err)
+					} else {
+						s.log.Debugf("Created channel %s while reconciling channels", channel)
+					}
+				}
+			}
+		}
+	})
+	if err != nil {
+		return err
+	}
+
+	// Setup sub for receiving channel requests.
+	reqInbox := fmt.Sprintf("%s.%s.channels.%s", defaultGossipPrefix, s.opts.ID, s.opts.Clustering.NodeID)
+	_, err = s.ncr.Subscribe(reqInbox, func(m *nats.Msg) {
+		s.channels.RLock()
+		channels := make([]string, len(s.channels.channels))
+		i := 0
+		for channel, _ := range s.channels.channels {
+			channels[i] = channel
+			i++
+		}
+		s.channels.RUnlock()
+		resp, err := (&spb.ChannelResponse{Channels: channels}).Marshal()
+		if err != nil {
+			panic(err)
+		}
+		s.ncr.Publish(m.Reply, resp)
+	})
+	if err != nil {
+		return err
+	}
+
+	// Start publishing channel info.
+	go func() {
+		rand.Seed(time.Now().UnixNano())
+		for {
+			// Publish on a fixed interval with some random jitter.
+			randomDelay := time.Duration(rand.Intn(6)) * time.Second
+			select {
+			case <-time.After(s.opts.Clustering.GossipInterval + randomDelay):
+				s.channels.RLock()
+				count := uint32(len(s.channels.channels))
+				s.channels.RUnlock()
+				data, err := (&spb.ChannelGossip{NodeID: s.opts.Clustering.NodeID, NumChannels: count}).Marshal()
+				if err != nil {
+					panic(err)
+				}
+				s.ncr.PublishRequest(gossipInbox, reqInbox, data)
+			case <-s.shutdownCh:
+				return
+			}
+		}
+	}()
+
 	return nil
 }
 

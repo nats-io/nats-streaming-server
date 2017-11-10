@@ -35,14 +35,15 @@ Streaming Server Options:
           --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 
 Streaming Server Clustering Options:
-    --clustered <bool>                Run the server in a clustered configuration (default: false)
-    --cluster_node_id <string>        ID of the node within the cluster if there is no stored ID (default: random UUID)
-    --cluster_bootstrap <bool>        Bootstrap the cluster if there is no existing state (default: false)
-    --cluster_log_path <string>       Directory to store log replication data
-    --cluster_log_cache_size <int>    Number of log entries to cache in memory to reduce disk IO (default: 512)
-    --cluster_log_snapshots <int>     Number of log snapshots to retain (default: 2)
-    --cluster_trailing_logs <int>     Number of log entries to leave after a snapshot and compaction
-    --cluster_sync <bool>             Do a file sync after every write to the replication log and message store
+    --clustered <bool>                   Run the server in a clustered configuration (default: false)
+    --cluster_node_id <string>           ID of the node within the cluster if there is no stored ID (default: random UUID)
+    --cluster_bootstrap <bool>           Bootstrap the cluster if there is no existing state (default: false)
+    --cluster_log_path <string>          Directory to store log replication data
+    --cluster_log_cache_size <int>       Number of log entries to cache in memory to reduce disk IO (default: 512)
+    --cluster_log_snapshots <int>        Number of log snapshots to retain (default: 2)
+    --cluster_trailing_logs <int>        Number of log entries to leave after a snapshot and compaction
+    --cluster_sync <bool>                Do a file sync after every write to the replication log and message store
+    --cluster_gossip_interval <duration> Interval in which to gossip channels to the cluster (plus some random delay) (default: 30s)
 
 Streaming Server File Store Options:
     --file_compact_enabled <bool>        Enable file compaction

@@ -137,6 +137,31 @@ func checkClientsInAllServers(t *testing.T, expected int, servers ...*StanServer
 	}
 }
 
+func checkChannelsInAllServers(t *testing.T, channels []string, timeout time.Duration, servers ...*StanServer) {
+	deadline := time.Now().Add(timeout)
+OUTER:
+	for time.Now().Before(deadline) {
+		for _, server := range servers {
+			server.channels.RLock()
+			if len(server.channels.channels) != len(channels) {
+				server.channels.RUnlock()
+				time.Sleep(100 * time.Millisecond)
+				continue OUTER
+			}
+			for _, c := range channels {
+				if server.channels.get(c) == nil {
+					server.channels.RUnlock()
+					time.Sleep(100 * time.Millisecond)
+					continue OUTER
+				}
+			}
+			server.channels.RUnlock()
+		}
+		return
+	}
+	stackFatalf(t, "Channels are inconsistent")
+}
+
 type msg struct {
 	sequence uint64
 	data     []byte
@@ -1803,4 +1828,82 @@ func TestClusteringHeartbeatFailover(t *testing.T) {
 
 	// Check that the server closes the connection
 	checkClientsInAllServers(t, 0, servers...)
+}
+
+func TestClusteringChannelGossip(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.GossipInterval = time.Second
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.GossipInterval = time.Second
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.Clustering.GossipInterval = time.Second
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Wait for metadata leader to be elected.
+	leader := getMetadataLeader(t, 10*time.Second, servers...)
+
+	sc, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Publish a message (this will create the channel and form the Raft group).
+	publishWithRetry(t, sc, "foo", []byte("hello"))
+
+	// Wait for channel leader to be elected.
+	getChannelLeader(t, "foo", 10*time.Second, servers...)
+
+	// Ensure channel is replicated.
+	checkChannelsInAllServers(t, []string{"foo"}, 10*time.Second, servers...)
+
+	// Kill a follower.
+	var follower *StanServer
+	for i, s := range servers {
+		if leader != s {
+			follower = s
+			servers = append(servers[:i], servers[i+1:]...)
+			break
+		}
+	}
+	follower.Shutdown()
+
+	// Implicitly create two more channels.
+	publishWithRetry(t, sc, "bar", []byte("hello"))
+	publishWithRetry(t, sc, "baz", []byte("hello"))
+
+	// Ensure channels are replicated amongst remaining cluster members.
+	checkChannelsInAllServers(t, []string{"foo", "bar", "baz"}, 10*time.Second, servers...)
+
+	// Restart the follower.
+	follower = runServerWithOpts(t, follower.opts, nil)
+	defer follower.Shutdown()
+	servers = append(servers, follower)
+
+	// Ensure follower reconciles channels.
+	checkChannelsInAllServers(t, []string{"foo", "bar", "baz"}, 10*time.Second, servers...)
 }
