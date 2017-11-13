@@ -180,3 +180,10 @@ message SubSnapshot {
 message ClientSnapshot {
   ClientInfo           Info = 1; // Connection metadata.
 }
+
+// ChannelGossip contains info about channels that is periodically gossiped
+// between servers in a cluster.
+message ChannelGossip {
+  string NodeID      = 1; // The cluster node ID of the origin server.
+  uint32 NumChannels = 2; // The number of channels the server has.
+}

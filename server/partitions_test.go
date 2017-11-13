@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/nats-io/nats-streaming-server/util"
 )
 
 func setPartitionsVarsForTest() {
@@ -185,7 +186,7 @@ func TestPartitionsMaxPayload(t *testing.T) {
 	cb := func(m *nats.Msg) {
 		req := &spb.CtrlMsg{}
 		req.Unmarshal(m.Data)
-		channels, _ := decodeChannels(req.Data)
+		channels, _ := util.DecodeChannels(req.Data)
 		for _, c := range channels {
 			verifyChannels[c] = struct{}{}
 			count++
@@ -447,7 +448,7 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 		return func(m *nats.Msg) {
 			req := &spb.CtrlMsg{}
 			req.Unmarshal(m.Data)
-			channels, _ := decodeChannels(req.Data)
+			channels, _ := util.DecodeChannels(req.Data)
 			for _, c := range channels {
 				mu.Lock()
 				if c == "foo" && *s != nil && req.ServerID == (*s).serverID {

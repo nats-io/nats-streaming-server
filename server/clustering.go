@@ -21,14 +21,15 @@ import (
 
 // ClusteringOptions contains STAN Server options related to clustering.
 type ClusteringOptions struct {
-	Clustered    bool   // Run the server in a clustered configuration.
-	NodeID       string // ID of the node within the cluster.
-	Bootstrap    bool   // Bootstrap the cluster as a seed node if there is no existing state.
-	RaftLogPath  string // Path to Raft log store directory.
-	LogCacheSize int    // Number of Raft log entries to cache in memory to reduce disk IO.
-	LogSnapshots int    // Number of Raft log snapshots to retain.
-	TrailingLogs int64  // Number of logs left after a snapshot.
-	Sync         bool   // Do a file sync after every write to the Raft log and message store.
+	Clustered      bool          // Run the server in a clustered configuration.
+	NodeID         string        // ID of the node within the cluster.
+	Bootstrap      bool          // Bootstrap the cluster as a seed node if there is no existing state.
+	RaftLogPath    string        // Path to Raft log store directory.
+	LogCacheSize   int           // Number of Raft log entries to cache in memory to reduce disk IO.
+	LogSnapshots   int           // Number of Raft log snapshots to retain.
+	TrailingLogs   int64         // Number of logs left after a snapshot.
+	Sync           bool          // Do a file sync after every write to the Raft log and message store.
+	GossipInterval time.Duration // Interval in which to gossip channels to the cluster (plus some random delay).
 }
 
 // raftNode is a handle to a member in a Raft consensus group.
