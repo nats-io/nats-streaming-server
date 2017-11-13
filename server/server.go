@@ -1729,10 +1729,6 @@ func (s *StanServer) reconcileChannels(m *nats.Msg) {
 		s.log.Errorf("Error processing channel reconcile request: %v", err)
 		return
 	}
-	// Ignore messages from ourselves.
-	if req.ServerID == s.serverID {
-		return
-	}
 	channels, err := util.DecodeChannels(req.Data)
 	if err != nil {
 		s.log.Errorf("Error processing channel reconcile request: %v", err)
