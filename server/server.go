@@ -1672,71 +1672,20 @@ func (s *StanServer) start(runningState State) error {
 // missing channels from another server and creates them. This should only be
 // called if the server is running in clustered mode.
 func (s *StanServer) startChannelGossiping() error {
+	// Setup sub for receiving channel lists for reconciliation.
+	if _, err := s.ncr.Subscribe(s.getChannelReconcileInbox(), s.reconcileChannels); err != nil {
+		return err
+	}
+
 	// Setup sub for receiving channel gossip.
 	gossipInbox := fmt.Sprintf("%s.%s.channels", defaultGossipPrefix, s.opts.ID)
-	_, err := s.ncr.Subscribe(gossipInbox, func(m *nats.Msg) {
-		c := &spb.ChannelGossip{}
-		if err := c.Unmarshal(m.Data); err != nil {
-			s.log.Errorf("Received invalid channel gossip message: %v", err)
-			return
-		}
-		if c.NodeID == s.opts.Clustering.NodeID {
-			// Ignore messages from ourselves.
-			return
-		}
-		s.channels.RLock()
-		count := uint32(len(s.channels.channels))
-		s.channels.RUnlock()
-
-		if count >= c.NumChannels {
-			return
-		}
-
-		// If our count is less, request the list of channels from the other
-		// server and reconcile.
-		resp, err := s.ncr.Request(m.Reply, nil, 5*time.Second)
-		if err != nil {
-			s.log.Errorf("Failed to fetch channels from another server: %v", err)
-			return
-		}
-		channelResp := &spb.ChannelResponse{}
-		if err := channelResp.Unmarshal(resp.Data); err != nil {
-			s.log.Errorf("Received invalid channels response from server: %v", err)
-			return
-		}
-		// Reconcile list of channels.
-		for _, channel := range channelResp.Channels {
-			if s.channels.get(channel) == nil {
-				if _, err := s.channels.createChannel(s, channel); err != nil {
-					s.log.Errorf("Failed to create channel %s while reconciling channels: %v", channel, err)
-				} else {
-					s.log.Debugf("Created channel %s while reconciling channels", channel)
-				}
-			}
-		}
-	})
-	if err != nil {
+	if _, err := s.ncr.Subscribe(gossipInbox, s.processChannelGossip); err != nil {
 		return err
 	}
 
 	// Setup sub for receiving channel requests.
-	reqInbox := fmt.Sprintf("%s.%s.channels.%s", defaultGossipPrefix, s.opts.ID, s.opts.Clustering.NodeID)
-	_, err = s.ncr.Subscribe(reqInbox, func(m *nats.Msg) {
-		s.channels.RLock()
-		channels := make([]string, len(s.channels.channels))
-		i := 0
-		for channel, _ := range s.channels.channels {
-			channels[i] = channel
-			i++
-		}
-		s.channels.RUnlock()
-		resp, err := (&spb.ChannelResponse{Channels: channels}).Marshal()
-		if err != nil {
-			panic(err)
-		}
-		s.ncr.Publish(m.Reply, resp)
-	})
-	if err != nil {
+	reqInbox := fmt.Sprintf("%s.%s.channels.request.%s", defaultGossipPrefix, s.opts.ID, s.opts.Clustering.NodeID)
+	if _, err := s.ncr.Subscribe(reqInbox, s.processChannelListRequest); err != nil {
 		return err
 	}
 
@@ -1763,6 +1712,96 @@ func (s *StanServer) startChannelGossiping() error {
 	}()
 
 	return nil
+}
+
+// reconcileChannels is a NATS handler that handles asynchronous responses from
+// a peer after requesting the list of channels. This is done asynchronously
+// since the list can exceed the max NATS message size, so we stream the list
+// in chunks asynchronously. Reconciling channels should be idempotent.
+func (s *StanServer) reconcileChannels(m *nats.Msg) {
+	// Message cannot be empty, we are supposed to receive
+	// a spb.CtrlMsg_Partitioning protocol.
+	if len(m.Data) == 0 {
+		return
+	}
+	req := spb.CtrlMsg{}
+	if err := req.Unmarshal(m.Data); err != nil {
+		s.log.Errorf("Error processing channel reconcile request: %v", err)
+		return
+	}
+	// Ignore messages from ourselves.
+	if req.ServerID == s.serverID {
+		return
+	}
+	channels, err := util.DecodeChannels(req.Data)
+	if err != nil {
+		s.log.Errorf("Error processing channel reconcile request: %v", err)
+		return
+	}
+	// Reconcile list of channels.
+	for _, channel := range channels {
+		if s.channels.get(channel) == nil {
+			if _, err := s.channels.createChannel(s, channel); err != nil {
+				s.log.Errorf("Failed to create channel %s while reconciling channels: %v", channel, err)
+			} else {
+				s.log.Debugf("Created channel %s while reconciling channels", channel)
+			}
+		}
+	}
+}
+
+// processChannelGossip is a NATS handler that handles gossip messages from
+// cluster peers containing the number of channels they have. If we detect
+// we're missing channels, request the list of channels from the server to
+// reconcile.
+func (s *StanServer) processChannelGossip(m *nats.Msg) {
+	c := &spb.ChannelGossip{}
+	if err := c.Unmarshal(m.Data); err != nil {
+		s.log.Errorf("Received invalid channel gossip message: %v", err)
+		return
+	}
+	if c.NodeID == s.opts.Clustering.NodeID {
+		// Ignore messages from ourselves.
+		return
+	}
+	s.channels.RLock()
+	count := uint32(len(s.channels.channels))
+	s.channels.RUnlock()
+
+	if count >= c.NumChannels {
+		return
+	}
+
+	// If our count is less, request the list of channels from the other
+	// server and reconcile. This is done asynchronously.
+	if err := s.ncr.PublishRequest(m.Reply, s.getChannelReconcileInbox(), nil); err != nil {
+		s.log.Errorf("Failed to fetch channels from another server: %v", err)
+		return
+	}
+}
+
+// processChannelListRequest is a NATS handler that handles requests from
+// cluster peers to stream the list of channels to them. This is done by
+// streaming the list in chunks to the peer since the list can exceed the max
+// NATS message size.
+func (s *StanServer) processChannelListRequest(m *nats.Msg) {
+	s.channels.RLock()
+	channels := make([]string, len(s.channels.channels))
+	i := 0
+	for channel, _ := range s.channels.channels {
+		channels[i] = channel
+		i++
+	}
+	s.channels.RUnlock()
+	if err := util.SendChannelsList(channels, m.Reply, "", s.ncr, s.serverID); err != nil {
+		s.log.Errorf("Failed to send channel list to peer: %v", err)
+	}
+}
+
+// getChannelReconcileInbox returns the NATS subject for streaming channels to
+// for reconciliation.
+func (s *StanServer) getChannelReconcileInbox() string {
+	return fmt.Sprintf("%s.%s.channels.reconcile.%s", defaultGossipPrefix, s.opts.ID, s.opts.Clustering.NodeID)
 }
 
 // startMetadataRaftNode creates and starts the metadata Raft group. This is
