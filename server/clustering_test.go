@@ -376,8 +376,9 @@ func TestClusteringDurableNodeID(t *testing.T) {
 	}
 }
 
-// Ensure starting a cluster works when we start one node in bootstrap mode.
-func TestClusteringBootstrap(t *testing.T) {
+// Ensure starting a cluster with auto configuration works when we start one
+// node in bootstrap mode.
+func TestClusteringBootstrapAutoConfig(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 	cleanupRaftLog(t)
@@ -410,6 +411,62 @@ func TestClusteringBootstrap(t *testing.T) {
 	configServers := future.Configuration().Servers
 	if len(configServers) != 2 {
 		t.Fatalf("Expected 2 servers, got %d", len(configServers))
+	}
+}
+
+// Ensure starting a cluster with manual configuration works when we provide
+// the cluster configuration to each server.
+func TestClusteringBootstrapManualConfig(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server.
+	s1sOpts := getTestDefaultOptsForClustering("a", false)
+	s1sOpts.Clustering.NodeID = "a"
+	s1sOpts.Clustering.Peers = []string{"b"}
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.NodeID = "b"
+	s2sOpts.Clustering.Peers = []string{"a"}
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	var (
+		servers = []*StanServer{s1, s2}
+		leader  = getMetadataLeader(t, 10*time.Second, servers...)
+	)
+
+	// Verify configuration.
+	future := leader.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		t.Fatalf("Unexpected error on GetConfiguration: %v", err)
+	}
+	configServers := future.Configuration().Servers
+	if len(configServers) != 2 {
+		t.Fatalf("Expected 2 servers, got %d", len(configServers))
+	}
+
+	// Ensure new servers can automatically join once the cluster is formed.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	future = leader.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		t.Fatalf("Unexpected error on GetConfiguration: %v", err)
+	}
+	configServers = future.Configuration().Servers
+	if len(configServers) != 3 {
+		t.Fatalf("Expected 3 servers, got %d", len(configServers))
 	}
 }
 

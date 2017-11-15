@@ -24,6 +24,7 @@ type ClusteringOptions struct {
 	Clustered      bool          // Run the server in a clustered configuration.
 	NodeID         string        // ID of the node within the cluster.
 	Bootstrap      bool          // Bootstrap the cluster as a seed node if there is no existing state.
+	Peers          []string      // List of cluster peer node IDs to bootstrap cluster state.
 	RaftLogPath    string        // Path to Raft log store directory.
 	LogCacheSize   int           // Number of Raft log entries to cache in memory to reduce disk IO.
 	LogSnapshots   int           // Number of Raft log snapshots to retain.
@@ -151,17 +152,12 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 	if err != nil {
 		return nil, err
 	}
-	if s.opts.Clustering.Bootstrap && !existingState {
-		config := raft.Configuration{
-			Servers: []raft.Server{
-				raft.Server{
-					ID:      raft.ServerID(s.opts.Clustering.NodeID),
-					Address: raft.ServerAddress(addr),
-				},
-			},
-		}
-		s.log.Debugf("Bootstrapping Raft group %s", name)
-		if err := node.BootstrapCluster(config).Error(); err != nil {
+
+	// Bootstrap if there is no previous state and we are starting this node as
+	// a seed or a cluster configuration is provided.
+	bootstrap := !existingState && (s.opts.Clustering.Bootstrap || len(s.opts.Clustering.Peers) > 0)
+	if bootstrap {
+		if err := s.bootstrapCluster(name, node); err != nil {
 			return nil, err
 		}
 	}
@@ -207,7 +203,7 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 	}
 
 	// Attempt to join the cluster if we're not bootstrapping.
-	if !s.opts.Clustering.Bootstrap {
+	if !bootstrap {
 		req, err := (&spb.RaftJoinRequest{NodeID: s.opts.Clustering.NodeID, NodeAddr: addr}).Marshal()
 		if err != nil {
 			panic(err)
@@ -256,6 +252,39 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 	}, nil
 }
 
+// bootstrapCluster bootstraps the node for the provided Raft group either as a
+// seed node or with the given peer configuration, depending on configuration
+// and with the latter taking precedence.
+func (s *StanServer) bootstrapCluster(name string, node *raft.Raft) error {
+	var (
+		addr = s.getClusteringAddr(name)
+		// Include ourself in the cluster.
+		servers = []raft.Server{raft.Server{
+			ID:      raft.ServerID(s.opts.Clustering.NodeID),
+			Address: raft.ServerAddress(addr),
+		}}
+	)
+	if len(s.opts.Clustering.Peers) > 0 {
+		// Bootstrap using provided cluster configuration.
+		s.log.Debugf("Bootstrapping Raft group %s using provided configuration", name)
+		for _, peer := range s.opts.Clustering.Peers {
+			servers = append(servers, raft.Server{
+				ID:      raft.ServerID(peer),
+				Address: raft.ServerAddress(s.getClusteringPeerAddr(name, peer)),
+			})
+		}
+	} else {
+		// Bootstrap as a seed node.
+		s.log.Debugf("Bootstrapping Raft group %s as seed node", name)
+	}
+	config := raft.Configuration{Servers: servers}
+	return node.BootstrapCluster(config).Error()
+}
+
 func (s *StanServer) getClusteringAddr(raftName string) string {
-	return fmt.Sprintf("%s.%s.%s", s.opts.ID, s.opts.Clustering.NodeID, raftName)
+	return s.getClusteringPeerAddr(raftName, s.opts.Clustering.NodeID)
+}
+
+func (s *StanServer) getClusteringPeerAddr(raftName, nodeID string) string {
+	return fmt.Sprintf("%s.%s.%s", s.opts.ID, nodeID, raftName)
 }

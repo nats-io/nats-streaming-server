@@ -376,6 +376,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	var (
 		stanConfigFile string
 		natsConfigFile string
+		clusterPeers   string
 	)
 
 	fs.StringVar(&sopts.ID, "cluster_id", DefaultClusterID, "stan.ID")
@@ -432,6 +433,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.BoolVar(&sopts.Clustering.Clustered, "clustered", false, "stan.Clustering.Clustered")
 	fs.StringVar(&sopts.Clustering.NodeID, "cluster_node_id", "", "stan.Clustering.NodeID")
 	fs.BoolVar(&sopts.Clustering.Bootstrap, "cluster_bootstrap", false, "stan.Clustering.Bootstrap")
+	fs.StringVar(&clusterPeers, "cluster_peers", "", "stan.Clustering.Peers")
 	fs.StringVar(&sopts.Clustering.RaftLogPath, "cluster_log_path", "", "stan.Clustering.RaftLogPath")
 	fs.IntVar(&sopts.Clustering.LogCacheSize, "cluster_log_cache_size", DefaultLogCacheSize, "stan.Clustering.LogCacheSize")
 	fs.IntVar(&sopts.Clustering.LogSnapshots, "cluster_log_snapshots", DefaultLogSnapshots, "stan.Clustering.LogSnapshots")
@@ -448,6 +450,13 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	// At this point, if NATS config file was specified in the command line (-c of -config)
 	// nopts.ConfigFile will not be empty.
 	natsConfigFile = nopts.ConfigFile
+
+	if clusterPeers != "" {
+		sopts.Clustering.Peers = []string{}
+		for _, p := range strings.Split(clusterPeers, ",") {
+			sopts.Clustering.Peers = append(sopts.Clustering.Peers, strings.TrimSpace(p))
+		}
+	}
 
 	// If both nats and streaming configuration files are used, then
 	// we only use the config file for the corresponding module.
