@@ -1326,19 +1326,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	}
 
 	if sOpts.Clustering.Clustered {
-		// If clustered, assign a random cluster node ID if not provided. If
-		// this server is recovering, this will be overwritten later.
-		if sOpts.Clustering.NodeID == "" {
-			sOpts.Clustering.NodeID = nuid.Next()
-		}
-
 		// Override store sync configuration with cluster sync.
 		sOpts.FileStoreOpts.DoSync = sOpts.Clustering.Sync
-
-		// Default cluster Raft log path to ./<cluster-id>/<node-id> if not set.
-		if sOpts.Clustering.RaftLogPath == "" {
-			sOpts.Clustering.RaftLogPath = filepath.Join(sOpts.ID, sOpts.Clustering.NodeID)
-		}
 	}
 
 	s := StanServer{
@@ -1534,11 +1523,27 @@ func (s *StanServer) start(runningState State) error {
 	s.state = runningState
 
 	var (
-		err            error
-		recoveredState *stores.RecoveredState
-		recoveredSubs  []*subState
-		callStoreInit  bool
+		err                error
+		recoveredState     *stores.RecoveredState
+		recoveredSubs      []*subState
+		callStoreInit      bool
+		defaultRaftLogPath bool
 	)
+
+	if s.opts.Clustering.Clustered {
+		// If clustered, assign a random cluster node ID if not provided. If
+		// we're recovering, this will be overwritten later by the stored ID.
+		if s.opts.Clustering.NodeID == "" {
+			s.opts.Clustering.NodeID = nuid.Next()
+		}
+		s.info.NodeID = s.opts.Clustering.NodeID
+
+		// Default Raft log path to ./<cluster-id>/<node-id> if not set.
+		if s.opts.Clustering.RaftLogPath == "" {
+			s.opts.Clustering.RaftLogPath = filepath.Join(s.opts.ID, s.opts.Clustering.NodeID)
+			defaultRaftLogPath = true
+		}
+	}
 
 	// Recover the state.
 	recoveredState, err = s.store.Recover()
@@ -1578,6 +1583,13 @@ func (s *StanServer) start(runningState State) error {
 		// Use recovered clustering node ID.
 		s.opts.Clustering.NodeID = s.info.NodeID
 
+		// Since we've recovered the clustering node ID, we need to update the
+		// Raft log path if the default was being used since it relies on the
+		// node ID.
+		if defaultRaftLogPath {
+			s.opts.Clustering.RaftLogPath = filepath.Join(s.opts.ID, s.opts.Clustering.NodeID)
+		}
+
 		// Restore clients state
 		s.processRecoveredClients(recoveredState.Clients)
 
@@ -1588,7 +1600,6 @@ func (s *StanServer) start(runningState State) error {
 		}
 	} else {
 		s.info.ClusterID = s.opts.ID
-		s.info.NodeID = s.opts.Clustering.NodeID
 
 		// Generate Subjects
 		s.info.Discovery = fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.info.ClusterID)
