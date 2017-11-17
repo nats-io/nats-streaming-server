@@ -2,6 +2,14 @@
 	"version": 0,
 	"dependencies": [
 		{
+			"importpath": "github.com/go-sql-driver/mysql",
+			"repository": "https://github.com/go-sql-driver/mysql",
+			"vcs": "git",
+			"revision": "cd4cb909ce1a31435164be29bf3682031f61539a",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/gogo/protobuf/gogoproto",
 			"repository": "https://github.com/gogo/protobuf",
 			"vcs": "git",
@@ -38,6 +46,14 @@
 			"notests": true
 		},
 		{
+			"importpath": "github.com/lib/pq",
+			"repository": "https://github.com/lib/pq",
+			"vcs": "git",
+			"revision": "8c6ee72f3e6bcb1542298dd5f76cb74af9742cec",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/nats-io/gnatsd",
 			"repository": "https://github.com/nats-io/gnatsd",
 			"vcs": "git",
@@ -67,6 +83,15 @@
 			"vcs": "git",
 			"revision": "289cccf02c178dc782430d534e3c1f5b72af807f",
 			"branch": "master",
+			"notests": true
+		},
+		{
+			"importpath": "google.golang.org/appengine/cloudsql",
+			"repository": "https://github.com/golang/appengine",
+			"vcs": "git",
+			"revision": "9d8544a6b2c7df9cff240fcf92d7b2f59bc13416",
+			"branch": "master",
+			"path": "/cloudsql",
 			"notests": true
 		}
 	]
