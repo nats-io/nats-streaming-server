@@ -307,6 +307,7 @@ func TestParseMapStruct(t *testing.T) {
 	expectFailureFor(t, "store_limits: {\nchannels: {\n\"foo\": xxx\n}\n}", mapStructErr)
 	expectFailureFor(t, "tls: xxx", mapStructErr)
 	expectFailureFor(t, "file: xxx", mapStructErr)
+	expectFailureFor(t, "cluster: xxx", mapStructErr)
 }
 
 func TestParseWrongTypes(t *testing.T) {
@@ -359,6 +360,15 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "file:{slice_archive_script:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{fds_limit:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{parallel_recovery:false}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{node_id:false}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{bootstrap:1}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{peers:1}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{log_path:1}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{log_cache_size:false}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{log_snapshots:false}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{trailing_logs:false}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{sync:1}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{gossip_interval:false}", wrongTypeErr)
 }
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {
