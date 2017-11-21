@@ -136,6 +136,10 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.Partitioning = v.(bool)
+		case "cluster":
+			if err := parseCluster(v, opts); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -175,6 +179,74 @@ func parseTLS(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.ClientCA = v.(string)
+		}
+	}
+	return nil
+}
+
+// parseCluster updates `opts` with cluster config
+func parseCluster(itf interface{}, opts *Options) error {
+	m, ok := itf.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("expected cluster to be a map/struct, got %v", itf)
+	}
+	opts.Clustering.Clustered = true
+	for k, v := range m {
+		name := strings.ToLower(k)
+		switch name {
+		case "node_id":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.Clustering.NodeID = v.(string)
+		case "bootstrap":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.Clustering.Bootstrap = v.(bool)
+		case "peers":
+			if err := checkType(k, reflect.Slice, v); err != nil {
+				return err
+			}
+			peers := make([]string, len(v.([]interface{})))
+			for i, p := range v.([]interface{}) {
+				peers[i] = p.(string)
+			}
+			opts.Clustering.Peers = peers
+		case "log_path":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.Clustering.RaftLogPath = v.(string)
+		case "log_cache_size":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.Clustering.LogCacheSize = int(v.(int64))
+		case "log_snapshots":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.Clustering.LogSnapshots = int(v.(int64))
+		case "trailing_logs":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.Clustering.TrailingLogs = v.(int64)
+		case "sync":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.Clustering.Sync = v.(bool)
+		case "gossip_interval":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			dur, err := time.ParseDuration(v.(string))
+			if err != nil {
+				return err
+			}
+			opts.Clustering.GossipInterval = dur
 		}
 	}
 	return nil

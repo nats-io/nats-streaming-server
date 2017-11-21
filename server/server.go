@@ -1326,19 +1326,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	}
 
 	if sOpts.Clustering.Clustered {
-		// If clustered, assign a random cluster node ID if not provided. If
-		// this server is recovering, this will be overwritten later.
-		if sOpts.Clustering.NodeID == "" {
-			sOpts.Clustering.NodeID = nuid.Next()
-		}
-
 		// Override store sync configuration with cluster sync.
 		sOpts.FileStoreOpts.DoSync = sOpts.Clustering.Sync
-
-		// Default cluster Raft log path to ./<cluster-id>/<node-id> if not set.
-		if sOpts.Clustering.RaftLogPath == "" {
-			sOpts.Clustering.RaftLogPath = filepath.Join(sOpts.ID, sOpts.Clustering.NodeID)
-		}
 	}
 
 	s := StanServer{
@@ -1588,7 +1577,6 @@ func (s *StanServer) start(runningState State) error {
 		}
 	} else {
 		s.info.ClusterID = s.opts.ID
-		s.info.NodeID = s.opts.Clustering.NodeID
 
 		// Generate Subjects
 		s.info.Discovery = fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, s.info.ClusterID)
@@ -1598,6 +1586,14 @@ func (s *StanServer) start(runningState State) error {
 		s.info.Unsubscribe = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, subjID)
 		s.info.Close = fmt.Sprintf("%s.%s", DefaultClosePrefix, subjID)
 		s.info.AcksSubs = fmt.Sprintf("%s.%s", defaultAcksPrefix, subjID)
+
+		if s.opts.Clustering.Clustered {
+			// If clustered, assign a random cluster node ID if not provided.
+			if s.opts.Clustering.NodeID == "" {
+				s.opts.Clustering.NodeID = nuid.Next()
+			}
+			s.info.NodeID = s.opts.Clustering.NodeID
+		}
 
 		callStoreInit = true
 	}
@@ -1618,6 +1614,10 @@ func (s *StanServer) start(runningState State) error {
 
 	// If clustered, start metadata Raft group and start gossiping channels.
 	if s.isClustered() {
+		// Default Raft log path to ./<cluster-id>/<node-id> if not set.
+		if s.opts.Clustering.RaftLogPath == "" {
+			s.opts.Clustering.RaftLogPath = filepath.Join(s.opts.ID, s.opts.Clustering.NodeID)
+		}
 		if err := s.startMetadataRaftNode(); err != nil {
 			return err
 		}

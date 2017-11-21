@@ -171,6 +171,42 @@ func TestParseConfig(t *testing.T) {
 	if !opts.Partitioning {
 		t.Fatalf("Expected Partitioning to be true, got false")
 	}
+	if !opts.Clustering.Clustered {
+		t.Fatal("Expected Clustered to be true, got false")
+	}
+	if opts.Clustering.NodeID != "a" {
+		t.Fatalf("Expected NodeID to be %q, got %q", "a", opts.Clustering.NodeID)
+	}
+	if !opts.Clustering.Bootstrap {
+		t.Fatal("Expected Bootstrap to be true, got false")
+	}
+	peers := []string{"b", "c"}
+	if len(peers) != len(opts.Clustering.Peers) {
+		t.Fatalf("Expected Peers to be %s, got %s", peers, opts.Clustering.Peers)
+	}
+	for i, p := range opts.Clustering.Peers {
+		if p != peers[i] {
+			t.Fatalf("Expected peer %q, got %q", peers[i], p)
+		}
+	}
+	if opts.Clustering.RaftLogPath != "/path/to/log" {
+		t.Fatalf("Expected RaftLogPath to be %q, got %q", "/path/to/log", opts.Clustering.RaftLogPath)
+	}
+	if opts.Clustering.LogCacheSize != 1024 {
+		t.Fatalf("Expected LogCacheSize to be 1024, got %d", opts.Clustering.LogCacheSize)
+	}
+	if opts.Clustering.LogSnapshots != 1 {
+		t.Fatalf("Expected LogSnapshots to be 1, got %d", opts.Clustering.LogSnapshots)
+	}
+	if opts.Clustering.TrailingLogs != 256 {
+		t.Fatalf("Expected TrailingLogs to be 256, got %d", opts.Clustering.TrailingLogs)
+	}
+	if !opts.Clustering.Sync {
+		t.Fatal("Expected Sync to be true, got false")
+	}
+	if opts.Clustering.GossipInterval != 10*time.Second {
+		t.Fatalf("Expected GossipInterval to be %s, got %s", 10*time.Second, opts.Clustering.GossipInterval)
+	}
 }
 
 func TestParsePermError(t *testing.T) {
@@ -271,6 +307,7 @@ func TestParseMapStruct(t *testing.T) {
 	expectFailureFor(t, "store_limits: {\nchannels: {\n\"foo\": xxx\n}\n}", mapStructErr)
 	expectFailureFor(t, "tls: xxx", mapStructErr)
 	expectFailureFor(t, "file: xxx", mapStructErr)
+	expectFailureFor(t, "cluster: xxx", mapStructErr)
 }
 
 func TestParseWrongTypes(t *testing.T) {
@@ -323,6 +360,15 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "file:{slice_archive_script:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{fds_limit:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{parallel_recovery:false}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{node_id:false}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{bootstrap:1}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{peers:1}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{log_path:1}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{log_cache_size:false}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{log_snapshots:false}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{trailing_logs:false}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{sync:1}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{gossip_interval:false}", wrongTypeErr)
 }
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {
