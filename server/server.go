@@ -1523,27 +1523,11 @@ func (s *StanServer) start(runningState State) error {
 	s.state = runningState
 
 	var (
-		err                error
-		recoveredState     *stores.RecoveredState
-		recoveredSubs      []*subState
-		callStoreInit      bool
-		defaultRaftLogPath bool
+		err            error
+		recoveredState *stores.RecoveredState
+		recoveredSubs  []*subState
+		callStoreInit  bool
 	)
-
-	if s.opts.Clustering.Clustered {
-		// If clustered, assign a random cluster node ID if not provided. If
-		// we're recovering, this will be overwritten later by the stored ID.
-		if s.opts.Clustering.NodeID == "" {
-			s.opts.Clustering.NodeID = nuid.Next()
-		}
-		s.info.NodeID = s.opts.Clustering.NodeID
-
-		// Default Raft log path to ./<cluster-id>/<node-id> if not set.
-		if s.opts.Clustering.RaftLogPath == "" {
-			s.opts.Clustering.RaftLogPath = filepath.Join(s.opts.ID, s.opts.Clustering.NodeID)
-			defaultRaftLogPath = true
-		}
-	}
 
 	// Recover the state.
 	recoveredState, err = s.store.Recover()
@@ -1583,13 +1567,6 @@ func (s *StanServer) start(runningState State) error {
 		// Use recovered clustering node ID.
 		s.opts.Clustering.NodeID = s.info.NodeID
 
-		// Since we've recovered the clustering node ID, we need to update the
-		// Raft log path if the default was being used since it relies on the
-		// node ID.
-		if defaultRaftLogPath {
-			s.opts.Clustering.RaftLogPath = filepath.Join(s.opts.ID, s.opts.Clustering.NodeID)
-		}
-
 		// Restore clients state
 		s.processRecoveredClients(recoveredState.Clients)
 
@@ -1610,6 +1587,14 @@ func (s *StanServer) start(runningState State) error {
 		s.info.Close = fmt.Sprintf("%s.%s", DefaultClosePrefix, subjID)
 		s.info.AcksSubs = fmt.Sprintf("%s.%s", defaultAcksPrefix, subjID)
 
+		if s.opts.Clustering.Clustered {
+			// If clustered, assign a random cluster node ID if not provided.
+			if s.opts.Clustering.NodeID == "" {
+				s.opts.Clustering.NodeID = nuid.Next()
+			}
+			s.info.NodeID = s.opts.Clustering.NodeID
+		}
+
 		callStoreInit = true
 	}
 	if callStoreInit {
@@ -1629,6 +1614,10 @@ func (s *StanServer) start(runningState State) error {
 
 	// If clustered, start metadata Raft group and start gossiping channels.
 	if s.isClustered() {
+		// Default Raft log path to ./<cluster-id>/<node-id> if not set.
+		if s.opts.Clustering.RaftLogPath == "" {
+			s.opts.Clustering.RaftLogPath = filepath.Join(s.opts.ID, s.opts.Clustering.NodeID)
+		}
 		if err := s.startMetadataRaftNode(); err != nil {
 			return err
 		}
