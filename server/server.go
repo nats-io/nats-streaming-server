@@ -289,7 +289,7 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 }
 
 func assignChannelRaft(s *StanServer, c *channel) error {
-	node, err := s.createRaftNode(c.name, c)
+	node, err := s.createChannelRaftNode(c.name, c)
 	if err != nil {
 		return err
 	}
@@ -1811,7 +1811,7 @@ func (s *StanServer) getChannelReconcileInbox() string {
 // used to handle replication of connection state and cluster metadata. This
 // should only be called if the server is running in clustered mode.
 func (s *StanServer) startMetadataRaftNode() error {
-	node, err := s.createRaftNode("_metadata", s)
+	node, err := s.createMetadataRaftNode(s)
 	if err != nil {
 		return err
 	}
