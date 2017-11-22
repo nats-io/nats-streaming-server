@@ -26,6 +26,8 @@ NATS Streaming provides the following high-level feature set.
             * [Redelivery](#redelivery)
     * [Store Interface](#store-interface)
     * [Clustering](#clustering)
+        * [Clustering Configuration](#clustering-configuration)
+        * [Clustering Auto Configuration](#clustering-auto-configuration)
     * [Fault Tolerance](#fault-tolerance)
         * [Active Server](#active-server)
         * [Standby Servers](#standby-servers)
@@ -279,7 +281,7 @@ majority of servers are available, the cluster cannot make progress, e.g. if
 two nodes go down in a cluster of three, the cluster is unavailable until at
 least one node comes back.
 
-## Clustering Configuration
+### Clustering Configuration
 
 We can bootstrap a NATS Streaming cluster by providing the cluster topology
 using the `-cluster_peers` flag. This is simply the set of node IDs
@@ -288,7 +290,8 @@ start subsequent servers without providing this configuration as they will
 automatically join the leader. If the server is recovering, it will use the
 recovered cluster configuration.
 
-Here is an example of starting three servers in a cluster:
+Here is an example of starting three servers in a cluster. For this example,
+we run a separate NATS server which the Streaming servers connect to.
 
 ```
 nats-streaming-server -store file -dir store-a -clustered -cluster_node_id a -cluster_peers b,c -nats_server nats://localhost:4222
@@ -312,7 +315,7 @@ The equivalent clustering configurations can be specified in a configuration
 file under the `cluster` group. See the [Configuring](#configuring) section for
 more information.
 
-## Clustering Auto Configuration
+### Clustering Auto Configuration
 
 We can also bootstrap a NATS Streaming cluster by starting one server as the
 seed node using the `-cluster_bootstrap` flag. This node will elect itself
