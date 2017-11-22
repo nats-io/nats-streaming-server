@@ -1570,6 +1570,13 @@ func (s *StanServer) start(runningState State) error {
 		// Restore clients state
 		s.processRecoveredClients(recoveredState.Clients)
 
+		// Default Raft log path to ./<cluster-id>/<node-id> if not set. This
+		// must be done here before recovering channels since that will
+		// initialize Raft groups if clustered.
+		if s.opts.Clustering.RaftLogPath == "" {
+			s.opts.Clustering.RaftLogPath = filepath.Join(s.opts.ID, s.opts.Clustering.NodeID)
+		}
+
 		// Process recovered channels (if any).
 		recoveredSubs, err = s.processRecoveredChannels(recoveredState.Channels)
 		if err != nil {
