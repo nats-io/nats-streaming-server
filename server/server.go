@@ -289,7 +289,7 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 }
 
 func assignChannelRaft(s *StanServer, c *channel) error {
-	node, err := s.createRaftNode(c.name, c)
+	node, err := s.createChannelRaftNode(c.name, c)
 	if err != nil {
 		return err
 	}
@@ -1570,6 +1570,13 @@ func (s *StanServer) start(runningState State) error {
 		// Restore clients state
 		s.processRecoveredClients(recoveredState.Clients)
 
+		// Default Raft log path to ./<cluster-id>/<node-id> if not set. This
+		// must be done here before recovering channels since that will
+		// initialize Raft groups if clustered.
+		if s.opts.Clustering.RaftLogPath == "" {
+			s.opts.Clustering.RaftLogPath = filepath.Join(s.opts.ID, s.opts.Clustering.NodeID)
+		}
+
 		// Process recovered channels (if any).
 		recoveredSubs, err = s.processRecoveredChannels(recoveredState.Channels)
 		if err != nil {
@@ -1804,7 +1811,7 @@ func (s *StanServer) getChannelReconcileInbox() string {
 // used to handle replication of connection state and cluster metadata. This
 // should only be called if the server is running in clustered mode.
 func (s *StanServer) startMetadataRaftNode() error {
-	node, err := s.createRaftNode("_metadata", s)
+	node, err := s.createMetadataRaftNode(s)
 	if err != nil {
 		return err
 	}

@@ -60,12 +60,107 @@ func (r *raftNode) shutdown() error {
 	return r.logInput.Close()
 }
 
+// createMetadataRaftNode creates and starts a new Raft node for the metadata
+// group.
+func (s *StanServer) createMetadataRaftNode(fsm raft.FSM) (*raftNode, error) {
+	var (
+		name                     = "_metadata"
+		addr                     = s.getClusteringAddr(name)
+		node, existingState, err = s.createRaftNode(name, fsm)
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Bootstrap if there is no previous state and we are starting this node as
+	// a seed or a cluster configuration is provided.
+	bootstrap := !existingState && (s.opts.Clustering.Bootstrap || len(s.opts.Clustering.Peers) > 0)
+	if bootstrap {
+		if err := s.bootstrapCluster(name, node.Raft); err != nil {
+			node.shutdown()
+			return nil, err
+		}
+	} else if !existingState {
+		// Attempt to join the cluster if we're not bootstrapping.
+		req, err := (&spb.RaftJoinRequest{NodeID: s.opts.Clustering.NodeID, NodeAddr: addr}).Marshal()
+		if err != nil {
+			panic(err)
+		}
+		var (
+			joined = false
+			resp   = &spb.RaftJoinResponse{}
+		)
+		s.log.Debugf("Joining Raft group %s", name)
+		// Attempt to join up to 5 times before giving up.
+		for i := 0; i < 5; i++ {
+			r, err := s.ncr.Request(fmt.Sprintf("raft.%s.join", name), req, time.Second)
+			if err != nil {
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+			if err := resp.Unmarshal(r.Data); err != nil {
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+			if resp.Error != "" {
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+			joined = true
+			break
+		}
+		if !joined {
+			node.shutdown()
+			return nil, fmt.Errorf("failed to join Raft group %s", name)
+		}
+	}
+	return node, nil
+}
+
+// createChannelRaftNode creates and starts a new Raft node for the given
+// channel group.
+func (s *StanServer) createChannelRaftNode(channel string, fsm raft.FSM) (*raftNode, error) {
+	node, existingState, err := s.createRaftNode(channel, fsm)
+	if err != nil {
+		return nil, err
+	}
+	// Pull configuration from metadata group if there is no existing state.
+	if !existingState {
+		// If the metadata Raft node is nil, this indicates we're recovering a
+		// channel. If there is no existing state, it means we've recovered a
+		// channel without recovering any Raft state.
+		if s.raft == nil {
+			panic("Recovered channel but there was no recovered Raft state for it")
+		}
+		future := s.raft.GetConfiguration()
+		if err := future.Error(); err != nil {
+			node.shutdown()
+			return nil, fmt.Errorf("failed to get config from metadata Raft: %v", err)
+		}
+		servers := make([]raft.Server, len(future.Configuration().Servers))
+		for i, p := range future.Configuration().Servers {
+			servers[i] = raft.Server{
+				ID:       p.ID,
+				Address:  raft.ServerAddress(s.getClusteringPeerAddr(channel, string(p.ID))),
+				Suffrage: p.Suffrage,
+			}
+		}
+		s.log.Debugf("Bootstrapping Raft group %s using metadata configuration", channel)
+		config := raft.Configuration{Servers: servers}
+		if err := node.BootstrapCluster(config).Error(); err != nil {
+			node.Shutdown()
+			return nil, fmt.Errorf("failed to bootstrap Raft node: %v", err)
+		}
+	}
+	return node, nil
+}
+
 // createRaftNode creates and starts a new Raft node with the given name and FSM.
-func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error) {
+func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, bool, error) {
 	path := filepath.Join(s.opts.Clustering.RaftLogPath, name)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := os.MkdirAll(path, os.ModeDir+os.ModePerm); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	store, err := raftboltdb.New(raftboltdb.Options{
@@ -73,12 +168,12 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 		NoSync: !s.opts.Clustering.Sync,
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	cacheStore, err := raft.NewLogCache(s.opts.Clustering.LogCacheSize, store)
 	if err != nil {
 		store.Close()
-		return nil, err
+		return nil, false, err
 	}
 
 	addr := s.getClusteringAddr(name)
@@ -126,14 +221,14 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 	snapshotStore, err := raft.NewFileSnapshotStore(path, s.opts.Clustering.LogSnapshots, logWriter)
 	if err != nil {
 		store.Close()
-		return nil, err
+		return nil, false, err
 	}
 
 	// TODO: using a single NATS conn for every channel might be a bottleneck. Maybe pool conns?
 	transport, err := natslog.NewNATSTransport(addr, s.ncr, 2*time.Second, logWriter)
 	if err != nil {
 		store.Close()
-		return nil, err
+		return nil, false, err
 	}
 
 	// Set up a channel for reliable leader notifications.
@@ -144,26 +239,16 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 	if err != nil {
 		transport.Close()
 		store.Close()
-		return nil, err
+		return nil, false, err
 	}
 
-	// Check if we need to bootstrap the cluster.
 	existingState, err := raft.HasExistingState(cacheStore, store, snapshotStore)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	if existingState {
 		s.log.Debugf("Loaded existing state for Raft group %s", name)
-	}
-
-	// Bootstrap if there is no previous state and we are starting this node as
-	// a seed or a cluster configuration is provided.
-	bootstrap := !existingState && (s.opts.Clustering.Bootstrap || len(s.opts.Clustering.Peers) > 0)
-	if bootstrap {
-		if err := s.bootstrapCluster(name, node); err != nil {
-			return nil, err
-		}
 	}
 
 	// Handle requests to join the cluster.
@@ -203,44 +288,7 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 	if err != nil {
 		transport.Close()
 		store.Close()
-		return nil, err
-	}
-
-	// Attempt to join the cluster if we're not bootstrapping.
-	if !bootstrap && !existingState {
-		req, err := (&spb.RaftJoinRequest{NodeID: s.opts.Clustering.NodeID, NodeAddr: addr}).Marshal()
-		if err != nil {
-			panic(err)
-		}
-		var (
-			joined = false
-			resp   = &spb.RaftJoinResponse{}
-		)
-		s.log.Debugf("Joining Raft group %s", name)
-		// Attempt to join up to 5 times before giving up.
-		for i := 0; i < 5; i++ {
-			r, err := s.ncr.Request(fmt.Sprintf("raft.%s.join", name), req, time.Second)
-			if err != nil {
-				time.Sleep(20 * time.Millisecond)
-				continue
-			}
-			if err := resp.Unmarshal(r.Data); err != nil {
-				time.Sleep(20 * time.Millisecond)
-				continue
-			}
-			if resp.Error != "" {
-				time.Sleep(20 * time.Millisecond)
-				continue
-			}
-			joined = true
-			break
-		}
-		if !joined {
-			transport.Close()
-			store.Close()
-			sub.Unsubscribe()
-			return nil, fmt.Errorf("failed to join Raft group %s", name)
-		}
+		return nil, false, err
 	}
 
 	return &raftNode{
@@ -250,7 +298,7 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, error
 		logInput:  logWriter,
 		notifyCh:  raftNotifyCh,
 		joinSub:   sub,
-	}, nil
+	}, existingState, nil
 }
 
 // bootstrapCluster bootstraps the node for the provided Raft group either as a
