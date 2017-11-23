@@ -26,6 +26,8 @@ NATS Streaming provides the following high-level feature set.
             * [Redelivery](#redelivery)
     * [Store Interface](#store-interface)
     * [Clustering](#clustering)
+        * [Clustering Configuration](#clustering-configuration)
+        * [Clustering Auto Configuration](#clustering-auto-configuration)
     * [Fault Tolerance](#fault-tolerance)
         * [Active Server](#active-server)
         * [Standby Servers](#standby-servers)
@@ -258,11 +260,79 @@ You can check [MemStore](https://github.com/nats-io/nats-streaming-server/blob/m
 
 ## Clustering
 
-NATS Streaming Server does not support clustering at this time. The confusion is that it can run with a cluster of NATS Servers,
-but as previously explained, the NATS Servers are the backbone of the streaming systems. So it is possible to run a single
-streaming server attached to a cluster of NATS Servers and streaming clients attached to any of the NATS Server in the NATS cluster.
+NATS Streaming Server supports clustering and data replication, implemented
+with the [Raft consensus algorithm](https://raft.github.io/), for the purposes
+of high availability.
 
-Streaming clustering with full replication of data across a set of streaming servers is planned for later this year.
+There are two ways to bootstrap a cluster: with an explicit cluster
+configuration or with "auto" configuration using a seed node. With the first,
+we provide the IDs of the nodes participating in the cluster. In this case, the
+participating nodes will elect a leader. With the second, we start one server
+as a seed node, which will elect itself as leader, and subsequent servers will
+automatically join the seed (note that this also works with the explicit
+cluster configuration once the leader has been established). With the second
+method, we need to be careful to avoid starting multiple servers as seed as
+this will result in a split-brain. Both of these configuration methods are
+shown in the sections below.
+
+It is recommended to run an odd number of servers in a cluster with a minimum
+of three servers to avoid split-brain scenarios. Note that if less than a
+majority of servers are available, the cluster cannot make progress, e.g. if
+two nodes go down in a cluster of three, the cluster is unavailable until at
+least one node comes back.
+
+### Clustering Configuration
+
+We can bootstrap a NATS Streaming cluster by providing the cluster topology
+using the `-cluster_peers` flag. This is simply the set of node IDs
+participating in the cluster. Note that once a leader is established, we can
+start subsequent servers without providing this configuration as they will
+automatically join the leader. If the server is recovering, it will use the
+recovered cluster configuration.
+
+Here is an example of starting three servers in a cluster. For this example,
+we run a separate NATS server which the Streaming servers connect to.
+
+```
+nats-streaming-server -store file -dir store-a -clustered -cluster_node_id a -cluster_peers b,c -nats_server nats://localhost:4222
+
+nats-streaming-server -store file -dir store-b -clustered -cluster_node_id b -cluster_peers a,c -nats_server nats://localhost:4222
+
+nats-streaming-server -store file -dir store-c -clustered -cluster_node_id c -cluster_peers a,b -nats_server nats://localhost:4222
+```
+
+Note that once a leader is elected, subsequent servers can be started without
+providing the cluster configuration. They will automatically join the cluster.
+Similarly, the cluster node ID does not need to be provided as one will be
+automatically assigned. As long as the file store is used, this ID will be
+recovered on restart.
+
+```
+nats-streaming-server -store file -dir store-d -clustered -nats_server nats://localhost:4222
+```
+
+The equivalent clustering configurations can be specified in a configuration
+file under the `cluster` group. See the [Configuring](#configuring) section for
+more information.
+
+### Clustering Auto Configuration
+
+We can also bootstrap a NATS Streaming cluster by starting one server as the
+seed node using the `-cluster_bootstrap` flag. This node will elect itself
+leader, so it's important to avoid starting multiple servers as seed. Once a
+seed node is started, other servers will automatically join the cluster. If the
+server is recovering, it will use the recovered cluster configuration.
+
+Here is an example of starting three servers in a cluster by starting one as
+the seed and letting the others automatically join:
+
+```
+nats-streaming-server -store file -dir store-a -clustered -cluster_bootstrap -nats_server nats://localhost:4222
+
+nats-streaming-server -store file -dir store-b -clustered -nats_server nats://localhost:4222
+
+nats-streaming-server -store file -dir store-c -clustered -nats_server nats://localhost:4222
+```
 
 ## Fault Tolerance
 
@@ -831,6 +901,18 @@ Streaming Server Options:
           --ack_subs <int>           Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription)
           --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 
+Streaming Server Clustering Options:
+    --clustered <bool>                   Run the server in a clustered configuration (default: false)
+    --cluster_node_id <string>           ID of the node within the cluster if there is no stored ID (default: random UUID)
+    --cluster_bootstrap <bool>           Bootstrap the cluster if there is no existing state by electing self as leader (default: false)
+    --cluster_peers <string>             List of cluster peer node IDs to bootstrap cluster state.
+    --cluster_log_path <string>          Directory to store log replication data
+    --cluster_log_cache_size <int>       Number of log entries to cache in memory to reduce disk IO (default: 512)
+    --cluster_log_snapshots <int>        Number of log snapshots to retain (default: 2)
+    --cluster_trailing_logs <int>        Number of log entries to leave after a snapshot and compaction
+    --cluster_sync <bool>                Do a file sync after every write to the replication log and message store
+    --cluster_gossip_interval <duration> Interval in which to gossip channels to the cluster (plus some random delay) (default: 30s)
+
 Streaming Server File Store Options:
     --file_compact_enabled <bool>        Enable file compaction
     --file_compact_frag <int>            File fragmentation threshold for compaction
@@ -967,6 +1049,7 @@ In general the configuration parameters are the same as the command line argumen
 | ack_subs_pool_size | Normally, when a client creates a subscription, the server creates an internal subscription to receive its ACKs. If lots of subscriptions are created, the number of internal subscriptions in the server could be very high. To curb this growth, use this parameter to configure a pool of internal ACKs subscriptions | Number | `ack_subs_pool_size: 10` |
 | ft_group | In Fault Tolerance mode, you can start a group of streaming servers with only one server being active while others are running in standby mode. This is the name of this FT group | String | `ft_group: "my_ft_group"` |
 | partitioning | If set to true, a list of channels must be defined in store_limits/channels section. This section then serves two purposes, overriding limits for a given channel or adding it to the partition | `true` or `false` | `partitioning: true` |
+| cluster | Cluster Configuration | Map: `cluster: { ... }` | **See details below** |
 
 TLS Configuration:
 
@@ -1026,6 +1109,20 @@ File Options Configuration:
 | slice_archive_script | Define the location and name of a script to be invoked when the server discards a file slice due to limits. The script is invoked with the name of the channel, the name of data and index files. It is the responsibility of the script to then remove the unused files | File path | `slice_archive_script: "/home/nats-streaming/archive/script.sh"` |
 | file_descriptors_limit | Channels translate to sub-directories under the file store's root directory. Each channel needs several files to maintain the state so the need for file descriptors increase with the number of channels. This option instructs the store to limit the concurrent use of file descriptors. Note that this is a soft limit and there may be cases when the store will use more than this number. A value of 0 means no limit. Setting a limit will probably have a performance impact | Number >= 0 | `file_descriptors_limit: 100` |
 | parallel_recovery | When the server starts, the recovery of channels (directories) is done sequentially. However, when using SSDs, it may be worth setting this value to something higher than 1 to perform channels recovery in parallel | Number >= 1 | `parallel_recovery: 4` |
+
+Cluster Configuration:
+
+| Parameter | Meaning | Possible values | Usage example |
+|:----|:----|:----|:----|
+| node_id | ID of the node within the cluster if there is no stored ID | String (no whitespace) | `node_id: "node-a"` |
+| bootstrap | Bootstrap the cluster if there is no existing state by electing self as leader | `true` or `false` | `bootstrap: true` |
+| peers | List of cluster peer node IDs to bootstrap cluster state | List of node IDs | `peers: ["node-b", "node-c"]` |
+| log_path | Directory to store log replication data | File path | `log_path: "/path/to/storage"` |
+| log_cache_size | Number of log entries to cache in memory to reduce disk IO | Number >= 0 | `log_cache_size: 1024` |
+| log_snapshots | Number of log snapshots to retain | Number >= 0 | `log_snapshots: 1` |
+| trailing_logs | Number of log entries to leave after a snapshot and compaction | Number >= 0 | `trailing_logs: 256` |
+| sync | Do a file sync after every write to the replication log and message store | `true` or `false` | `sync: true` |
+| gossip_interval | Interval in which to gossip channels to the cluster (plus some random delay) | Duration | `gossip_interval: "10s"` |
 
 ## Store Limits
 
