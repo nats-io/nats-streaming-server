@@ -633,8 +633,11 @@ func TestPersistentStoreMultipleShadowQSubs(t *testing.T) {
 		err   error
 	)
 	limits := stores.DefaultStoreLimits
-	if persistentStoreType == stores.TypeFile {
+	switch persistentStoreType {
+	case stores.TypeFile:
 		store, err = stores.NewFileStore(testLogger, defaultDataStore, &limits)
+	case stores.TypeSQL:
+		store, err = stores.NewSQLStore(testLogger, testSQLDriver, testSQLSource, &limits)
 	}
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)

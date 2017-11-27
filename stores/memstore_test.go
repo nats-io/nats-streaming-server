@@ -7,8 +7,9 @@ import (
 	"testing"
 )
 
-func createDefaultMemStore(t *testing.T) *MemoryStore {
-	ms, err := NewMemoryStore(testLogger, &testDefaultStoreLimits)
+func createDefaultMemStore(t tLogger) *MemoryStore {
+	limits := testDefaultStoreLimits
+	ms, err := NewMemoryStore(testLogger, &limits)
 	if err != nil {
 		stackFatalf(t, "Unexpected error: %v", err)
 	}

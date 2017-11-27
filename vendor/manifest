@@ -31,6 +31,14 @@
 			"repository": "https://github.com/circonus-labs/circonusllhist",
 			"vcs": "git",
 			"revision": "6e85b9352cf0c2bb969831347491388bb3ae9c69",
+            "branch": "master",
+            "notests": true
+        },
+        {
+			"importpath": "github.com/go-sql-driver/mysql",
+			"repository": "https://github.com/go-sql-driver/mysql",
+			"vcs": "git",
+			"revision": "cd4cb909ce1a31435164be29bf3682031f61539a",
 			"branch": "master",
 			"notests": true
 		},
@@ -75,6 +83,14 @@
 			"repository": "https://github.com/hashicorp/go-cleanhttp",
 			"vcs": "git",
 			"revision": "3573b8b52aa7b37b9358d966a898feb387f62437",
+            "branch": "master",
+            "notests": true
+        },
+        {
+			"importpath": "github.com/lib/pq",
+			"repository": "https://github.com/lib/pq",
+			"vcs": "git",
+			"revision": "8c6ee72f3e6bcb1542298dd5f76cb74af9742cec",
 			"branch": "master",
 			"notests": true
 		},
@@ -246,6 +262,15 @@
 			"revision": "89d4068c4f4ccfd051a041f6088b8a7b8ecccb9c",
 			"branch": "master",
 			"path": "/unix",
+            "notests": true
+        },
+        {
+			"importpath": "google.golang.org/appengine/cloudsql",
+			"repository": "https://github.com/golang/appengine",
+			"vcs": "git",
+			"revision": "9d8544a6b2c7df9cff240fcf92d7b2f59bc13416",
+			"branch": "master",
+			"path": "/cloudsql",
 			"notests": true
 		}
 	]
