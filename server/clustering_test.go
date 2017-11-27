@@ -220,12 +220,13 @@ func assertMsg(t *testing.T, msg pb.MsgProto, expectedData []byte, expectedSeq u
 func publishWithRetry(t *testing.T, sc stan.Conn, channel string, payload []byte) {
 	// TODO: there is a race where connection might not be established on
 	// leader so publish can fail, so retry a few times if necessary. Remove
-	// this once connection replication is implemented.
+	// this once connection replication race is fixed.
 	for i := 0; i < 10; i++ {
 		if err := sc.Publish(channel, payload); err != nil {
 			if i == 9 {
-				stackFatalf(t, "Unexpected error on publish: %v", err)
+				stackFatalf(t, "Error in publishWithRetry [10/10]: %v", err)
 			}
+			t.Logf("Error in publishWithRetry [%d/10]: %v\n%s\n", i+1, err, stack())
 			time.Sleep(time.Millisecond)
 			continue
 		}
@@ -1607,7 +1608,9 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 
 	atomic.StoreInt32(&doAckMsg, 1)
 	// Publish one more message and wait for message to be received
-	publishWithRetry(t, sc, channel, []byte("hello"))
+	if err := sc.Publish(channel, []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our message")
 	}

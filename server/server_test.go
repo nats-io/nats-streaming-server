@@ -100,9 +100,12 @@ func init() {
 }
 
 func stackFatalf(t tLogger, f string, args ...interface{}) {
+	msg := fmt.Sprintf(f, args...) + "\n" + stack()
+	t.Fatalf(msg)
+}
+
+func stack() string {
 	lines := make([]string, 0, 32)
-	msg := fmt.Sprintf(f, args...)
-	lines = append(lines, msg)
 
 	// Generate the Stack of callers:
 	for i := 1; true; i++ {
@@ -114,7 +117,7 @@ func stackFatalf(t tLogger, f string, args ...interface{}) {
 		lines = append(lines, msg)
 	}
 
-	t.Fatalf("%s", strings.Join(lines, "\n"))
+	return strings.Join(lines, "\n")
 }
 
 func msgStoreFirstAndLastSequence(t tLogger, ms stores.MsgStore) (uint64, uint64) {
