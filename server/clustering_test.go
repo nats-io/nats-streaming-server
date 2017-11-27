@@ -226,8 +226,7 @@ func publishWithRetry(t *testing.T, sc stan.Conn, channel string, payload []byte
 			if i == 9 {
 				stackFatalf(t, "Error in publishWithRetry [10/10]: %v", err)
 			}
-			t.Logf("Error in publishWithRetry [%d/10]: %v\n", i+1, err)
-			t.Log(stack())
+			t.Logf("Error in publishWithRetry [%d/10]: %v\n%s\n", i+1, err, stack())
 			time.Sleep(time.Millisecond)
 			continue
 		}
