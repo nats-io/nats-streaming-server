@@ -49,6 +49,8 @@ NATS Streaming provides the following high-level feature set.
     * [Persistence](#persistence)
         * [File Store](#file-store)
             * [File Store Options](#file-store-options)
+        * [SQL Store](#sql-store)
+            * [SQL Store Options](#sql-store-options)
 - [Clients](#clients)
 - [License](#license)
 
@@ -847,6 +849,10 @@ Streaming Server File Store Options:
     --file_fds_limit <int>               Store will try to use no more file descriptors than this given limit
     --file_parallel_recovery <int>       On startup, number of channels that can be recovered in parallel
 
+Streaming Server SQL Store Options:
+    --sql_driver <string>            Name of the SQL Driver ("mysql" or "postgres")
+    --sql_source <string>            Datasource used when opening an SQL connection to the database
+
 Streaming Server TLS Options:
     -secure <bool>                   Use a TLS connection to the NATS server without
                                      verification; weaker than specifying certificates.
@@ -961,6 +967,7 @@ In general the configuration parameters are the same as the command line argumen
 | tls | TLS Configuration | Map: `tls: { ... }` | **See details below** |
 | store_limits | Store Limits | Map: `store_limits: { ... }` | **See details below** |
 | file_options | File Store specific options | Map: `file_options: { ... }` | **See details below** |
+| sql_options | SQL Store specific options | Map: `sql_options: { ... }` | **See details below** |
 | hb_interval | Interval at which the server sends an heartbeat to a client | Duration | `hb_interval: "10s"` |
 | hb_timeout | How long the server waits for a heartbeat response from the client before considering it a failed heartbeat | Duration | `hb_timeout: "10s"` |
 | hb_fail_count | Count of failed heartbeats before server closes the client connection. The actual total wait is: (fail count + 1) * (hb interval + hb timeout) | Number | `hb_fail_count: 2` |
@@ -1026,6 +1033,15 @@ File Options Configuration:
 | slice_archive_script | Define the location and name of a script to be invoked when the server discards a file slice due to limits. The script is invoked with the name of the channel, the name of data and index files. It is the responsibility of the script to then remove the unused files | File path | `slice_archive_script: "/home/nats-streaming/archive/script.sh"` |
 | file_descriptors_limit | Channels translate to sub-directories under the file store's root directory. Each channel needs several files to maintain the state so the need for file descriptors increase with the number of channels. This option instructs the store to limit the concurrent use of file descriptors. Note that this is a soft limit and there may be cases when the store will use more than this number. A value of 0 means no limit. Setting a limit will probably have a performance impact | Number >= 0 | `file_descriptors_limit: 100` |
 | parallel_recovery | When the server starts, the recovery of channels (directories) is done sequentially. However, when using SSDs, it may be worth setting this value to something higher than 1 to perform channels recovery in parallel | Number >= 1 | `parallel_recovery: 4` |
+
+SQL Options Configuration:
+
+| Parameter | Meaning | Possible values | Usage example |
+|:----|:----|:----|:----|
+| driver | Name of the SQL driver to use | `mysql` or `postgres` | `driver: "mysql"` |
+| source | How to connect to the database. This is driver specific | String | `source: "ivan:pwd@/nss_db"` |
+| no_caching | Enable/Disable caching for messages and subscriptions operations. The default is `false`, which means that caching is enabled | `true` or `false` | `no_caching: false` |
+| max_open_conns | Maximum number of opened connections to the database. Value <= 0 means no limit. The default is 0 (unlimited) | Number | `max_open_conns: 5` |
 
 ## Store Limits
 
@@ -1291,6 +1307,49 @@ the option `fds_limit` (or command line parameter `--file_fds_limit`) may be con
 Note that this is a soft limit. It is possible for the store to use more file descriptors than the given limit if the
 number of concurrent read/writes to different channels is more than the said limit. It is also understood that this
 may affect performance since files may need to be closed/re-opened as needed.
+
+### SQL Store
+
+Using a SQL Database for persistence is another option.
+
+In order to do so, `-store` simply needs to be set to `sql` and `-sql_driver` set to `mysql` or `postgres`
+(the two drivers supported at the moment). The parameter `-sql_source` is driver specific, but generally
+contains the information required to connect to a specific database on the given SQL database server.
+
+Note that the NATS Streaming Server does not need root privileges to connect to the database since it does not create
+the database, tables or indexes. This has to be done by the Database Administrator.
+
+We provide 2 files (`mysql.db.sql` and `postgres.db.sql`) that can be used to create the tables and indexes to the
+database of your choice. However, administrators are free to configure and optimize the database as long as the name of tables
+and columns are preserved, since the NATS Streaming Server is going to issue SQL statements based on those.
+
+Here is an example of creating an user `nss` with password `password` for the MySQL database:
+
+```
+mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE nss_db;"
+```
+
+The above has gives all permissions to user `nss`. Once this user is created, we can then create the tables using this user
+and selecting the `nss_db` database. We then execute all the SQL statements creating the tables from the sql file that
+is provided in this repo:
+
+```
+mysql -u nss -p -D nss_db -e "$(cat ./mysql.db.sql)"
+```
+
+#### SQL Store Options
+
+Aside from the driver and datasource, the available options are the maximum number of opened connections to the database (`max_open_conns`)
+that you may need to set to avoid errors due to `too many opened files`.
+
+The other option is `no_caching` which is a boolean that enables/disables caching. By default caching is enabled. It means
+that some operations are buffered in memory before being sent to the database. For storing messages, this still offers the
+guarantee that if a producer gets an OK ack back, the message will be successfully persisted in the database.
+
+For subscriptions, the optimization may lead to messages possibly redelivered if the server were to be restarted before
+some of the operations were "flushed" to the database. The performance improvement is significant to justify the risk
+of getting redelivered messages (which is always possible with NATS Streaming regardless of this option). Still,
+if you want to ensure that each operation is immediately committed to the database, you should set `no_caching` to true.
 
 ## Clients
 

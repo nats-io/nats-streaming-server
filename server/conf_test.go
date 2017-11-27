@@ -174,6 +174,18 @@ func TestParseConfig(t *testing.T) {
 	if !opts.Partitioning {
 		t.Fatalf("Expected Partitioning to be true, got false")
 	}
+	if opts.SQLStoreOpts.Driver != "mysql" {
+		t.Fatalf("Expected SQL Driver to be %q, got %q", "mysql", opts.SQLStoreOpts.Driver)
+	}
+	if opts.SQLStoreOpts.Source != "ivan:pwd@/nss_db" {
+		t.Fatalf("Expected SQL Source to be %q, got %q", "ivan:pwd@/nss_db", opts.SQLStoreOpts.Source)
+	}
+	if !opts.SQLStoreOpts.NoCaching {
+		t.Fatal("Expected SQL NoCaching to be true, got false")
+	}
+	if opts.SQLStoreOpts.MaxOpenConns != 5 {
+		t.Fatalf("Expected SQL MaxOpenConns to be 5, got %v", opts.SQLStoreOpts.MaxOpenConns)
+	}
 }
 
 func TestParsePermError(t *testing.T) {
@@ -238,6 +250,27 @@ func TestParseStoreType(t *testing.T) {
 	if err := ProcessConfigFile(confFile, &opts); err == nil {
 		t.Fatal("Expected failure due to unknown store type, got none")
 	}
+	os.Remove(confFile)
+
+	goodStores := []string{
+		stores.TypeMemory,
+		stores.TypeFile,
+		stores.TypeSQL,
+	}
+	for _, gs := range goodStores {
+		if err := ioutil.WriteFile(confFile, []byte("store="+gs), 0660); err != nil {
+			t.Fatalf("Unexpected error creating conf file: %v", err)
+		}
+		defer os.Remove(confFile)
+		opts = Options{}
+		if err := ProcessConfigFile(confFile, &opts); err != nil {
+			t.Fatalf("Error processing config file: %v", err)
+		}
+		os.Remove(confFile)
+		if opts.StoreType != gs {
+			t.Fatalf("Expected store type to be %q, got %q", gs, opts.StoreType)
+		}
+	}
 }
 
 func TestParsePerChannelLimitsSetToZero(t *testing.T) {
@@ -274,6 +307,7 @@ func TestParseMapStruct(t *testing.T) {
 	expectFailureFor(t, "store_limits: {\nchannels: {\n\"foo\": xxx\n}\n}", mapStructErr)
 	expectFailureFor(t, "tls: xxx", mapStructErr)
 	expectFailureFor(t, "file: xxx", mapStructErr)
+	expectFailureFor(t, "sql: xxx", mapStructErr)
 }
 
 func TestParseWrongTypes(t *testing.T) {
@@ -327,6 +361,10 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "file:{slice_archive_script:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{fds_limit:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{parallel_recovery:false}", wrongTypeErr)
+	expectFailureFor(t, "sql:{driver:false}", wrongTypeErr)
+	expectFailureFor(t, "sql:{source:false}", wrongTypeErr)
+	expectFailureFor(t, "sql:{no_caching:123}", wrongTypeErr)
+	expectFailureFor(t, "sql:{max_open_conns:false}", wrongTypeErr)
 }
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {

@@ -33,7 +33,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.6.0"
+	VERSION = "0.7.0"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -809,6 +809,7 @@ type Options struct {
 	StoreType          string
 	FilestoreDir       string
 	FileStoreOpts      stores.FileStoreOptions
+	SQLStoreOpts       stores.SQLStoreOptions
 	stores.StoreLimits               // Store limits (MaxChannels, etc..)
 	EnableLogging      bool          // Enables logging
 	CustomLogger       logger.Logger // Server will start with the provided logger
@@ -1119,6 +1120,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	case stores.TypeFile:
 		store, err = stores.NewFileStore(s.log, sOpts.FilestoreDir, storeLimits,
 			stores.AllOptions(&sOpts.FileStoreOpts))
+	case stores.TypeSQL:
+		store, err = stores.NewSQLStore(s.log, sOpts.SQLStoreOpts.Driver, sOpts.SQLStoreOpts.Source,
+			storeLimits, stores.SQLAllOptions(&sOpts.SQLStoreOpts))
 	case stores.TypeMemory:
 		store, err = stores.NewMemoryStore(s.log, storeLimits)
 	default:
@@ -1247,9 +1251,15 @@ func (s *StanServer) start(runningState State) error {
 	)
 
 	// Recover the state.
+	s.log.Noticef("Recovering the state...")
 	recoveredState, err = s.store.Recover()
 	if err != nil {
 		return err
+	}
+	if recoveredState != nil {
+		s.log.Noticef("Recovered %v channel(s)", len(recoveredState.Channels))
+	} else {
+		s.log.Noticef("No recovered state")
 	}
 	subjID := s.opts.ID
 	// In FT or with static channels (aka partitioning), we use the cluster ID

@@ -58,11 +58,10 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 			if err := checkType(k, reflect.String, v); err != nil {
 				return err
 			}
-			switch strings.ToUpper(v.(string)) {
-			case stores.TypeFile:
-				opts.StoreType = stores.TypeFile
-			case stores.TypeMemory:
-				opts.StoreType = stores.TypeMemory
+			st := strings.ToUpper(v.(string))
+			switch st {
+			case stores.TypeFile, stores.TypeMemory, stores.TypeSQL:
+				opts.StoreType = st
 			default:
 				return fmt.Errorf("unknown store type: %v", v.(string))
 			}
@@ -101,6 +100,10 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 			}
 		case "file", "file_options":
 			if err := parseFileOptions(v, opts); err != nil {
+				return err
+			}
+		case "sql", "sql_options":
+			if err := parseSQLOptions(v, opts); err != nil {
 				return err
 			}
 		case "hbi", "hb_interval", "server_to_client_hb_interval":
@@ -370,6 +373,39 @@ func parseFileOptions(itf interface{}, opts *Options) error {
 	return nil
 }
 
+func parseSQLOptions(itf interface{}, opts *Options) error {
+	m, ok := itf.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("expected SQL options to be a map/struct, got %v", itf)
+	}
+	for k, v := range m {
+		name := strings.ToLower(k)
+		switch name {
+		case "driver":
+			if err := checkType(name, reflect.String, v); err != nil {
+				return err
+			}
+			opts.SQLStoreOpts.Driver = v.(string)
+		case "source":
+			if err := checkType(name, reflect.String, v); err != nil {
+				return err
+			}
+			opts.SQLStoreOpts.Source = v.(string)
+		case "no_caching":
+			if err := checkType(name, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.SQLStoreOpts.NoCaching = v.(bool)
+		case "max_open_conns", "max_conns":
+			if err := checkType(name, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.SQLStoreOpts.MaxOpenConns = int(v.(int64))
+		}
+	}
+	return nil
+}
+
 // ConfigureOptions accepts a flag set and augment it with NATS Streaming Server
 // specific flags. It then invokes the corresponding function from NATS Server.
 // On success, Streaming and NATS options structures are returned configured
@@ -435,6 +471,10 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&sopts.IOBatchSize, "io_batch_size", DefaultIOBatchSize, "stan.IOBatchSize")
 	fs.Int64Var(&sopts.IOSleepTime, "io_sleep_time", DefaultIOSleepTime, "stan.IOSleepTime")
 	fs.StringVar(&sopts.FTGroupName, "ft_group", "", "stan.FTGroupName")
+	fs.StringVar(&sopts.SQLStoreOpts.Driver, "sql_driver", "", "SQL Driver")
+	fs.StringVar(&sopts.SQLStoreOpts.Source, "sql_source", "", "SQL Data Source")
+	fs.BoolVar(&sopts.SQLStoreOpts.NoCaching, "sql_no_caching", false, "Enable/Disable caching")
+	fs.IntVar(&sopts.SQLStoreOpts.MaxOpenConns, "sql_max_open_conns", 0, "Max opened connections to the database")
 
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
 	// It will be augmented with NATS specific flags and call fs.Parse(args) for us.

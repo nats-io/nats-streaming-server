@@ -4,6 +4,7 @@ package stores
 
 import (
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 
@@ -308,7 +309,7 @@ func TestCSMaxAge(t *testing.T) {
 			defer s.Close()
 
 			sl := testDefaultStoreLimits
-			sl.MaxAge = 250 * time.Millisecond
+			sl.MaxAge = 100 * time.Millisecond
 			s.SetLimits(&sl)
 
 			cs := storeCreateChannel(t, s, "foo")
@@ -317,13 +318,13 @@ func TestCSMaxAge(t *testing.T) {
 				storeMsg(t, cs, "foo", msg)
 			}
 			// Wait a bit
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(60 * time.Millisecond)
 			// Send more
 			for i := 0; i < 5; i++ {
 				storeMsg(t, cs, "foo", msg)
 			}
 			// Wait a bit
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(60 * time.Millisecond)
 			// We should have the first 10 expired and 5 left.
 			expectedFirst := uint64(11)
 			expectedLast := uint64(15)
@@ -333,22 +334,59 @@ func TestCSMaxAge(t *testing.T) {
 					expectedFirst, expectedLast, first, last)
 			}
 			// Wait more and all should be gone.
-			time.Sleep(sl.MaxAge)
+			time.Sleep(100 * time.Millisecond)
 			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
 				t.Fatalf("All messages should have expired, got %v", n)
 			}
+
+			// We are going to set a limit of MaxMsgs to 1 on top
+			// of the expiration and make sure that expiration works
+			// ok if first message that was supposed to expire is
+			// gone by the time it should have expired.
+			sl.MaxMsgs = 1
+			s.SetLimits(&sl)
+
+			cs = storeCreateChannel(t, s, "bar")
+			storeMsg(t, cs, "bar", msg)
+			// Wait a bit
+			time.Sleep(60 * time.Millisecond)
+			// Send another message that should replace the first one
+			m2 := storeMsg(t, cs, "bar", msg)
+			// Wait more so that max age of initial message is passed
+			time.Sleep(60 * time.Millisecond)
+			// Ensure there is still 1 message...
+			if n, _ := msgStoreState(t, cs.Msgs); n != 1 {
+				t.Fatalf("There should be 1 message, got %v", n)
+			}
+			// ...which should be m2: this should not fail
+			msgStoreLookup(t, cs.Msgs, m2.Sequence)
+			// Again, wait more and second message should not be gone
+			time.Sleep(100 * time.Millisecond)
+			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
+				t.Fatalf("All messages should have expired, got %v", n)
+			}
+
 			if st.name == TypeMemory {
-				// Store a message
-				storeMsg(t, cs, "foo", []byte("msg"))
 				// Verify timer is set
-				ms := s.(*MemoryStore)
-				ms.RLock()
-				timerSet := cs.Msgs.(*MemoryMsgStore).ageTimer != nil
-				ms.RUnlock()
-				if !timerSet {
+				isSet := func() bool {
+					var timerSet bool
+					if st.name == TypeMemory {
+						ms := cs.Msgs.(*MemoryMsgStore)
+						ms.RLock()
+						timerSet = ms.ageTimer != nil
+						ms.RUnlock()
+					}
+					return timerSet
+				}
+				if isSet() {
+					t.Fatal("Timer should not be set")
+				}
+				// Store a message
+				storeMsg(t, cs, "bar", []byte("msg"))
+				// Now timer should have been set again
+				if !isSet() {
 					t.Fatal("Timer should have been set")
 				}
-
 			}
 		})
 	}
@@ -364,7 +402,13 @@ func TestCSGetSeqFromStartTime(t *testing.T) {
 			defer s.Close()
 
 			limits := testDefaultStoreLimits
-			limits.MaxAge = 500 * time.Millisecond
+			// On windows, the 1ms between each send may actually be more
+			// so we need a bigger expiration value.
+			if runtime.GOOS == "windows" {
+				limits.MaxAge = 1500 * time.Millisecond
+			} else {
+				limits.MaxAge = 500 * time.Millisecond
+			}
 			s.SetLimits(&limits)
 			// Force creation of channel without storing anything yet
 			cs := storeCreateChannel(t, s, "foo")
@@ -417,16 +461,16 @@ func TestCSGetSeqFromStartTime(t *testing.T) {
 			}
 
 			if st.recoverable {
-				// Restart the server, make sure we can get the expected sequence
+				// Restart the store, make sure we can get the expected sequence
 				times := []int64{
 					time.Now().UnixNano() - int64(time.Hour),
 					time.Now().UnixNano() + int64(time.Hour),
 				}
-				expectedSeqs := []uint64{1, 101}
+				expectedSeqs := []uint64{101, 101}
 
 				for i := 0; i < len(times); i++ {
 					s.Close()
-					s, state := testReOpenStore(t, st, nil)
+					s, state := testReOpenStore(t, st, &limits)
 					defer s.Close()
 
 					cs := getRecoveredChannel(t, state, "foo")
@@ -498,6 +542,11 @@ func TestCSFirstAndLastMsg(t *testing.T) {
 					firstMsg = ms.firstMsg
 					lastMsg = ms.lastMsg
 					ms.RUnlock()
+				case TypeSQL:
+					// Not applicable since this store does not store
+					// the first and last message.
+					firstMsg = msgStoreFirstMsg(t, cs.Msgs)
+					lastMsg = msgStoreLastMsg(t, cs.Msgs)
 				default:
 					stackFatalf(t, "Fix test for store type: %v", st.name)
 				}
@@ -522,6 +571,77 @@ func TestCSFirstAndLastMsg(t *testing.T) {
 				t.Fatalf("Unexpected last message: %v", lastMsg)
 			}
 
+		})
+	}
+}
+
+func TestCSLimitsOnRecovery(t *testing.T) {
+	for _, st := range testStores {
+		st := st
+		t.Run(st.name, func(t *testing.T) {
+			if !st.recoverable {
+				return
+			}
+			t.Parallel()
+			defer endTest(t, st)
+
+			storeMsgs := func(cs *Channel, count, size int) {
+				msg := make([]byte, size)
+				for i := 0; i < count; i++ {
+					storeMsg(t, cs, "foo", msg)
+				}
+			}
+
+			// First run store with no limit.
+			s := startTest(t, st)
+			defer s.Close()
+			cs := storeCreateChannel(t, s, "foo")
+			storeMsgs(cs, 1, 10)
+			s.Close()
+
+			// Add limit of MaxAge
+			limits := testDefaultStoreLimits
+			limits.MaxAge = 15 * time.Millisecond
+			// Wait more than max age
+			time.Sleep(30 * time.Millisecond)
+			// Reopen store
+			s, state := testReOpenStore(t, st, &limits)
+			cs = state.Channels["foo"].Channel
+			// Message should be gone.
+			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
+				t.Fatalf("Expected no message, got %v", n)
+			}
+			s.Close()
+
+			// Remove MaxAge
+			limits.MaxAge = time.Duration(0)
+			s, state = testReOpenStore(t, st, &limits)
+			cs = state.Channels["foo"].Channel
+			// Store 3 messages. We will set the limit to 2 on restart.
+			storeMsgs(cs, 3, 10)
+			s.Close()
+			limits.MaxMsgs = 2
+			s, state = testReOpenStore(t, st, &limits)
+			cs = state.Channels["foo"].Channel
+			if n, _ := msgStoreState(t, cs.Msgs); n != limits.MaxMsgs {
+				t.Fatalf("Expected %d messages, got %v", limits.MaxMsgs, n)
+			}
+			s.Close()
+
+			// Remove MaxMsgs
+			limits.MaxMsgs = 0
+			s, state = testReOpenStore(t, st, &limits)
+			cs = state.Channels["foo"].Channel
+			// Send more about 1000 bytes, we will set the limit to 500
+			storeMsgs(cs, 10, 100)
+			s.Close()
+			limits.MaxBytes = 500
+			s, state = testReOpenStore(t, st, &limits)
+			cs = state.Channels["foo"].Channel
+			if _, n := msgStoreState(t, cs.Msgs); n > uint64(limits.MaxBytes) {
+				t.Fatalf("Expected bytes less than %v, got %v", limits.MaxBytes, n)
+			}
+			s.Close()
 		})
 	}
 }

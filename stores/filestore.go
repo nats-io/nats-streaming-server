@@ -1196,7 +1196,6 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 		return nil, err
 	}
 	if len(channels) > 0 {
-		fs.log.Noticef("Recovering the state...")
 		wg, poolCh, errCh, recoverCh := initParalleRecovery(fs.opts.ParallelRecovery, len(channels))
 		ctx := &channelRecoveryCtx{wg: wg, poolCh: poolCh, errCh: errCh, recoverCh: recoverCh}
 		for _, c := range channels {
@@ -1247,7 +1246,6 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 		Clients:  recoveredClients,
 		Channels: recoveredChannels,
 	}
-	fs.log.Noticef("Recovered %v channels", len(fs.channels))
 	return recoveredState, nil
 }
 
@@ -3287,7 +3285,7 @@ func (ss *FileSubStore) CreateSub(sub *spb.SubState) error {
 	// subscription count)
 	ss.Lock()
 	defer ss.Unlock()
-	if err := ss.createSubLocked(sub); err != nil {
+	if err := ss.createSub(sub); err != nil {
 		return err
 	}
 	if err := ss.writeRecord(nil, subRecNew, sub); err != nil {

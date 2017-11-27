@@ -116,7 +116,7 @@ func TestPersistentStoreAutomaticDeliveryOnRestart(t *testing.T) {
 
 	opts := getTestDefaultOptsForPersistentStore()
 	s := runServerWithOpts(t, opts, nil)
-	defer s.Shutdown()
+	defer shutdownRestartedServerOnTestExit(&s)
 
 	toSend := int32(10)
 	msg := []byte("msg")
@@ -162,9 +162,7 @@ func TestPersistentStoreAutomaticDeliveryOnRestart(t *testing.T) {
 
 	// Restart server
 	s.Shutdown()
-	s = nil
-	s2 := runServerWithOpts(t, opts, nil)
-	// defer s.Shutdown()
+	s = runServerWithOpts(t, opts, nil)
 
 	// Release 	the consumer
 	close(blocked)
@@ -173,6 +171,5 @@ func TestPersistentStoreAutomaticDeliveryOnRestart(t *testing.T) {
 		t.Fatal("Messages were not automatically delivered")
 	}
 	sc.Close()
-	s2.Shutdown()
-	s2 = nil
+	nc.Close()
 }

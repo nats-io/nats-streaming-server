@@ -15,6 +15,7 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
+	"github.com/nats-io/nats-streaming-server/test"
 	"github.com/nats-io/nuid"
 )
 
@@ -47,13 +48,15 @@ type testStore struct {
 }
 
 var (
-	nuidGen    *nuid.NUID
 	testLogger logger.Logger
-	testStores = []*testStore{&testStore{TypeMemory, false}, &testStore{TypeFile, true}}
+	testStores = []*testStore{
+		&testStore{TypeMemory, false},
+		&testStore{TypeFile, true},
+		&testStore{TypeSQL, true},
+	}
 )
 
 func init() {
-	nuidGen = nuid.New()
 	// Create an empty logger (no actual logger is set without calling SetLogger())
 	testLogger = logger.NewStanLogger()
 }
@@ -175,7 +178,7 @@ func storeDeleteClient(t tLogger, s Store, clientID string) {
 	}
 }
 
-func storeMsg(t *testing.T, cs *Channel, channel string, data []byte) *pb.MsgProto {
+func storeMsg(t tLogger, cs *Channel, channel string, data []byte) *pb.MsgProto {
 	ms := cs.Msgs
 	seq, err := ms.Store(data)
 	if err != nil {
@@ -184,12 +187,13 @@ func storeMsg(t *testing.T, cs *Channel, channel string, data []byte) *pb.MsgPro
 	return msgStoreLookup(t, ms, seq)
 }
 
-func storeSub(t *testing.T, cs *Channel, channel string) uint64 {
+func storeSub(t tLogger, cs *Channel, channel string) uint64 {
+	nid := nuid.New()
 	ss := cs.Subs
 	sub := &spb.SubState{
 		ClientID:      "me",
-		Inbox:         nuidGen.Next(),
-		AckInbox:      nuidGen.Next(),
+		Inbox:         nid.Next(),
+		AckInbox:      nid.Next(),
 		AckWaitInSecs: 10,
 	}
 	if err := ss.CreateSub(sub); err != nil {
@@ -198,7 +202,7 @@ func storeSub(t *testing.T, cs *Channel, channel string) uint64 {
 	return sub.ID
 }
 
-func storeSubPending(t *testing.T, cs *Channel, channel string, subID uint64, seqs ...uint64) {
+func storeSubPending(t tLogger, cs *Channel, channel string, subID uint64, seqs ...uint64) {
 	ss := cs.Subs
 	for _, s := range seqs {
 		if err := ss.AddSeqPending(subID, s); err != nil {
@@ -207,7 +211,7 @@ func storeSubPending(t *testing.T, cs *Channel, channel string, subID uint64, se
 	}
 }
 
-func storeSubAck(t *testing.T, cs *Channel, channel string, subID uint64, seqs ...uint64) {
+func storeSubAck(t tLogger, cs *Channel, channel string, subID uint64, seqs ...uint64) {
 	ss := cs.Subs
 	for _, s := range seqs {
 		if err := ss.AckSeqPending(subID, s); err != nil {
@@ -216,7 +220,13 @@ func storeSubAck(t *testing.T, cs *Channel, channel string, subID uint64, seqs .
 	}
 }
 
-func storeSubDelete(t *testing.T, cs *Channel, channel string, subID ...uint64) {
+func storeSubFlush(t tLogger, cs *Channel, channel string) {
+	if err := cs.Subs.Flush(); err != nil {
+		stackFatalf(t, "Error flushing sub store for channel %q: %v", channel, err)
+	}
+}
+
+func storeSubDelete(t tLogger, cs *Channel, channel string, subID ...uint64) {
 	ss := cs.Subs
 	for _, s := range subID {
 		subStoreDeleteSub(t, ss, s)
@@ -249,41 +259,88 @@ func getRecoveredSubs(t tLogger, state *RecoveredState, name string, expected in
 	return subs
 }
 
-func startTest(t *testing.T, ts *testStore) Store {
+func startTest(t tLogger, ts *testStore) Store {
 	switch ts.name {
 	case TypeMemory:
 		return createDefaultMemStore(t)
 	case TypeFile:
-		cleanupDatastore(t)
+		cleanupFSDatastore(t)
 		return createDefaultFileStore(t)
+	case TypeSQL:
+		cleanupSQLDatastore(t)
+		return createDefaultSQLStore(t)
 	default:
-		stackFatalf(t, "Cannot start test for store type: ", ts.name)
-	}
-	return nil
-}
-
-func endTest(t *testing.T, ts *testStore) {
-	if ts.name == TypeFile {
-		cleanupDatastore(t)
+		// This is used with testStores table. If a store type has been
+		// added there, it needs to be added here.
+		panic(fmt.Sprintf("Add new store type %q in startTest", ts.name))
 	}
 }
 
-func testReOpenStore(t *testing.T, ts *testStore, limits *StoreLimits) (Store, *RecoveredState) {
+func endTest(t tLogger, ts *testStore) {
+	switch ts.name {
+	case TypeFile:
+		cleanupFSDatastore(t)
+	case TypeSQL:
+		cleanupSQLDatastore(t)
+	}
+}
+
+func testReOpenStore(t tLogger, ts *testStore, limits *StoreLimits) (Store, *RecoveredState) {
 	if !ts.recoverable {
 		stackFatalf(t, "Cannot reopen a store (%v) that is not recoverable", ts.name)
 	}
 	switch ts.name {
 	case TypeFile:
 		return openDefaultFileStoreWithLimits(t, limits)
+	case TypeSQL:
+		return openDefaultSQLStoreWithLimits(t, limits)
+	default:
+		// This is used with testStores table. If a recoverable
+		// store type has been added there, it needs to be added here.
+		panic(fmt.Sprintf("Add new store type %q in testReopenStore", ts.name))
 	}
-	return nil, nil
 }
 
+var doSQL bool
+
 func TestMain(m *testing.M) {
-	flag.BoolVar(&disableBufferWriters, "no_buffer", false, "Disable use of buffer writers")
-	flag.BoolVar(&setFDsLimit, "set_fds_limit", false, "Set some FDs limit")
+	flag.BoolVar(&testFSDisableBufferWriters, "fs_no_buffer", false, "Disable use of buffer writers")
+	flag.BoolVar(&testFSSetFDsLimit, "fs_set_fds_limit", false, "Set some FDs limit")
+	flag.BoolVar(&doSQL, "sql", true, "Set this to false if you don't want SQL to be tested")
+	test.AddSQLFlags(flag.CommandLine, &testSQLDriver, &testSQLSource, &testSQLSourceAdmin, &testSQLDatabaseName)
 	flag.Parse()
-	os.Exit(m.Run())
+
+	if doSQL {
+		defaultSources := make(map[string][]string)
+		defaultSources[test.DriverMySQL] = []string{testDefaultMySQLSource, testDefaultMySQLSourceAdmin}
+		defaultSources[test.DriverPostgres] = []string{testDefaultPostgresSource, testDefaultPostgresSourceAdmin}
+		if err := test.ProcessSQLFlags(flag.CommandLine, defaultSources); err != nil {
+			fmt.Println(err.Error())
+			os.Exit(2)
+		}
+		// Create the SQL Database once, the cleanup is simply deleting
+		// content from tables (so we don't have to recreate them).
+		if err := test.CreateSQLDatabase(testSQLDriver, testSQLSourceAdmin,
+			testSQLSource, testSQLDatabaseName); err != nil {
+			fmt.Printf("Error initializing SQL Datastore: %v", err)
+			os.Exit(2)
+		}
+	} else {
+		// Remove SQL Store from the testStores array
+		newArray := []*testStore{}
+		for _, st := range testStores {
+			if st.name != TypeSQL {
+				newArray = append(newArray, st)
+			}
+		}
+		testStores = newArray
+	}
+	ret := m.Run()
+	if doSQL {
+		// Now that the tests/bench have all run, delete the database.
+		test.DeleteSQLDatabase(testSQLDriver, testSQLSourceAdmin, testSQLDatabaseName)
+	}
+	os.Exit(ret)
 }
 
 func TestGSNoOps(t *testing.T) {

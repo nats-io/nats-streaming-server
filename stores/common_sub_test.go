@@ -100,11 +100,19 @@ func TestCSBasicSubStore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Unexpected error on create sub: %v", err)
 			}
+			subID := sub.ID
 			if sub.ID == 0 {
 				t.Fatalf("Expected a positive subID, got: %v", sub.ID)
 			}
 			if err := ss.AddSeqPending(sub.ID, 1); err != nil {
 				t.Fatalf("Unexpected error on AddSeqPending: %v", err)
+			}
+			// Make sure call is idempotent
+			if err := ss.AddSeqPending(sub.ID, 1); err != nil {
+				t.Fatalf("Unexpected error on AddSeqPending: %v", err)
+			}
+			if err := ss.AckSeqPending(sub.ID, 1); err != nil {
+				t.Fatalf("Unexpected error on AckSeqPending: %v", err)
 			}
 			if err := ss.AckSeqPending(sub.ID, 1); err != nil {
 				t.Fatalf("Unexpected error on AckSeqPending: %v", err)
@@ -123,6 +131,39 @@ func TestCSBasicSubStore(t *testing.T) {
 			// Check that ack update for non existent sub is OK
 			if err := ss.AckSeqPending(sub.ID+1, 10); err != nil {
 				t.Fatalf("Unexpected error on AddSeqPending: %v", err)
+			}
+
+			// Create a new subscription, make sure subID is not reused
+			err = ss.CreateSub(sub)
+			if err != nil {
+				t.Fatalf("Error on create sub: %v", err)
+			}
+			if sub.ID <= subID {
+				t.Fatalf("Unexpected subID: %v", sub.ID)
+			}
+			subToDelete := sub.ID
+			subID = sub.ID
+			// Create another
+			err = ss.CreateSub(sub)
+			if err != nil {
+				t.Fatalf("Error on create sub: %v", err)
+			}
+			if sub.ID <= subID {
+				t.Fatalf("Unexpected subID: %v", sub.ID)
+			}
+			subID = sub.ID
+			// Remove the sub created before the last
+			if err := ss.DeleteSub(subToDelete); err != nil {
+				t.Fatalf("Error on delete sub: %v", err)
+			}
+			// Create a last one and make sure it does not collide with the
+			// second sub we created.
+			err = ss.CreateSub(sub)
+			if err != nil {
+				t.Fatalf("Error on create sub: %v", err)
+			}
+			if sub.ID <= subID {
+				t.Fatalf("Unexpected subID: %v", sub.ID)
 			}
 		})
 	}
@@ -178,8 +219,8 @@ func TestCSRecoverSubUpdateForDeleteSubOK(t *testing.T) {
 			// recovered one, we should fail creating a new one.
 			sub := &spb.SubState{
 				ClientID:      "me",
-				Inbox:         nuidGen.Next(),
-				AckInbox:      nuidGen.Next(),
+				Inbox:         "inbox",
+				AckInbox:      "ackinbox",
 				AckWaitInSecs: 10,
 			}
 			if err := cs.Subs.CreateSub(sub); err == nil || err != ErrTooManySubs {
@@ -220,10 +261,15 @@ func TestCSNoSubIDCollisionAfterRecovery(t *testing.T) {
 				t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", sub1+1, sub2)
 			}
 
-			// Store a delete subscription with higher ID and make sure
-			// we use something higher on restart
-			delSub := uint64(sub1 + 10)
-			storeSubDelete(t, cs, "foo", delSub)
+			// Delete sub1, and create a new one. sub1 ID should not be reused
+			storeSubDelete(t, cs, "foo", sub1)
+			sub3 := storeSub(t, cs, "foo")
+			if sub3 <= sub2 {
+				t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", sub2+1, sub3)
+			}
+
+			// Delete the last sub and make sure after recovery we get a higher id
+			storeSubDelete(t, cs, "foo", sub3)
 
 			// Close the store
 			s.Close()
@@ -232,14 +278,14 @@ func TestCSNoSubIDCollisionAfterRecovery(t *testing.T) {
 			s, state = testReOpenStore(t, st, nil)
 			defer s.Close()
 			cs = getRecoveredChannel(t, state, "foo")
-			// sub1 & sub2 should be recovered
-			getRecoveredSubs(t, state, "foo", 2)
+			// sub2 should be recovered
+			getRecoveredSubs(t, state, "foo", 1)
 
 			// Store new subscription
-			sub3 := storeSub(t, cs, "foo")
+			sub4 := storeSub(t, cs, "foo")
 
-			if sub3 <= sub1 || sub3 <= delSub {
-				t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", delSub+1, sub3)
+			if sub4 <= sub3 {
+				t.Fatalf("Invalid subscription id after recovery, should be at leat %v, got %v", sub3+1, sub4)
 			}
 		})
 	}
@@ -275,8 +321,24 @@ func TestCSSubLastSentCorrectOnRecovery(t *testing.T) {
 			s.Close()
 			s, state := testReOpenStore(t, st, nil)
 			defer s.Close()
+			cs = getRecoveredChannel(t, state, "foo")
 			subs := getRecoveredSubs(t, state, "foo", 1)
 			sub := subs[0]
+			// Check that sub's last seq is m2.Sequence
+			if sub.Sub.LastSent != m2.Sequence {
+				t.Fatalf("Expected LastSent to be %v, got %v", m2.Sequence, sub.Sub.LastSent)
+			}
+
+			// Ack m1 and m2
+			storeSubAck(t, cs, "foo", subID, m1.Sequence, m2.Sequence)
+
+			// Restart server
+			s.Close()
+			s, state = testReOpenStore(t, st, nil)
+			defer s.Close()
+			getRecoveredChannel(t, state, "foo")
+			subs = getRecoveredSubs(t, state, "foo", 1)
+			sub = subs[0]
 			// Check that sub's last seq is m2.Sequence
 			if sub.Sub.LastSent != m2.Sequence {
 				t.Fatalf("Expected LastSent to be %v, got %v", m2.Sequence, sub.Sub.LastSent)
@@ -317,7 +379,7 @@ func TestCSUpdatedSub(t *testing.T) {
 			updatedSub := &spb.SubState{
 				ID:            subID,
 				ClientID:      "me",
-				Inbox:         nuidGen.Next(),
+				Inbox:         "inbox",
 				AckInbox:      "newAckInbox",
 				AckWaitInSecs: 10,
 			}
@@ -331,8 +393,8 @@ func TestCSUpdatedSub(t *testing.T) {
 			subWithoutNew := &spb.SubState{
 				ID:            subID + 1,
 				ClientID:      "me",
-				Inbox:         nuidGen.Next(),
-				AckInbox:      nuidGen.Next(),
+				Inbox:         "inbox",
+				AckInbox:      "ackinbox",
 				AckWaitInSecs: 10,
 			}
 			if err := ss.UpdateSub(subWithoutNew); err != nil {

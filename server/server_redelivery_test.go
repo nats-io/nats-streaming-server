@@ -598,6 +598,19 @@ func TestPersistentStoreRedeliveryCbPerSub(t *testing.T) {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 
+	// Make sure the messages are added to the subscriptions before shutting down.
+	waitForCount(t, 2, func() (string, int) {
+		subs := s.clients.getSubs(clientName)
+		good := 0
+		for _, sub := range subs {
+			sub.Lock()
+			if len(sub.acksPending) == 1 {
+				good++
+			}
+		}
+		return "pending message per sub", good
+	})
+
 	// Restart server
 	s.Shutdown()
 	s = runServerWithOpts(t, opts, nil)

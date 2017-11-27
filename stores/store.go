@@ -15,6 +15,8 @@ const (
 	TypeMemory = "MEMORY"
 	// TypeFile is the store type name for file based stores
 	TypeFile = "FILE"
+	// TypeSQL is the store type name for sql based stores
+	TypeSQL = "SQL"
 )
 
 // Errors.

@@ -23,6 +23,7 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/nats-io/nats-streaming-server/test"
 	"github.com/nats-io/nuid"
 )
 
@@ -45,24 +46,44 @@ var (
 	persistentStoreType = stores.TypeFile
 )
 
+// The SourceAdmin is used by the test setup to have access
+// to the database server and create the test streaming database.
+// The Source contains the URL that the Store needs to actually
+// connect to the server and use the database.
+const (
+	testDefaultDatabaseName = "test_server_nats_streaming"
+
+	testDefaultMySQLSource      = "nss:password@/" + testDefaultDatabaseName
+	testDefaultMySQLSourceAdmin = "nss:password@/"
+
+	testDefaultPostgresSource      = "dbname=" + testDefaultDatabaseName + " sslmode=disable"
+	testDefaultPostgresSourceAdmin = "sslmode=disable"
+)
+
+var (
+	testSQLDriver       = test.DriverMySQL
+	testSQLSource       = testDefaultMySQLSource
+	testSQLSourceAdmin  = testDefaultMySQLSourceAdmin
+	testSQLDatabaseName = testDefaultDatabaseName
+)
+
 func TestMain(m *testing.M) {
 	var (
-		bst string
-		pst string
+		bst   string
+		pst   string
+		doSQL bool
 	)
 	flag.StringVar(&bst, "bench_store", "", "store type for bench tests (mem, file)")
 	flag.StringVar(&pst, "persistent_store", "", "store type for server recovery related tests (file)")
+	test.AddSQLFlags(flag.CommandLine, &testSQLDriver, &testSQLSource, &testSQLSourceAdmin, &testSQLDatabaseName)
 	flag.Parse()
-	bst = strings.ToLower(bst)
-	pst = strings.ToLower(pst)
-	// Will add DB store and others when avail
+	bst = strings.ToUpper(bst)
+	pst = strings.ToUpper(pst)
 	switch bst {
 	case "":
 		// use default
-	case "mem":
-		benchStoreType = stores.TypeMemory
-	case "file":
-		benchStoreType = stores.TypeFile
+	case stores.TypeMemory, stores.TypeFile, stores.TypeSQL:
+		benchStoreType = bst
 	default:
 		fmt.Printf("Unknown store %q for bench tests\n", bst)
 		os.Exit(2)
@@ -70,12 +91,40 @@ func TestMain(m *testing.M) {
 	// Will add DB store and others when avail
 	switch pst {
 	case "":
-		// use default
+	// use default
+	case stores.TypeFile, stores.TypeSQL:
+		persistentStoreType = pst
 	default:
 		fmt.Printf("Unknown or unsupported store %q for persistent store server tests\n", pst)
 		os.Exit(2)
 	}
-	os.Exit(m.Run())
+
+	// If either (or both) bench or tests select an SQL store, we need to do
+	// so initializing and cleaning at the end of the test.
+	doSQL = benchStoreType == stores.TypeSQL || persistentStoreType == stores.TypeSQL
+
+	if doSQL {
+		defaultSources := make(map[string][]string)
+		defaultSources[test.DriverMySQL] = []string{testDefaultMySQLSource, testDefaultMySQLSourceAdmin}
+		defaultSources[test.DriverPostgres] = []string{testDefaultPostgresSource, testDefaultPostgresSourceAdmin}
+		if err := test.ProcessSQLFlags(flag.CommandLine, defaultSources); err != nil {
+			fmt.Println(err.Error())
+			os.Exit(2)
+		}
+		// Create the SQL Database once, the cleanup is simply deleting
+		// content from tables (so we don't have to recreate them).
+		if err := test.CreateSQLDatabase(testSQLDriver, testSQLSourceAdmin,
+			testSQLSource, testSQLDatabaseName); err != nil {
+			fmt.Printf("Error initializing SQL Datastore: %v", err)
+			os.Exit(2)
+		}
+	}
+	ret := m.Run()
+	if doSQL {
+		// Now that the tests/benchs are done, delete the database
+		test.DeleteSQLDatabase(testSQLDriver, testSQLSourceAdmin, testSQLDatabaseName)
+	}
+	os.Exit(ret)
 }
 
 func init() {
@@ -289,20 +338,29 @@ func NewDefaultConnection(t tLogger) stan.Conn {
 	return sc
 }
 
-func cleanupDatastore(t *testing.T) {
-	if persistentStoreType == stores.TypeFile {
+func cleanupDatastore(t tLogger) {
+	switch persistentStoreType {
+	case stores.TypeFile:
 		if err := os.RemoveAll(defaultDataStore); err != nil {
 			stackFatalf(t, "Error cleaning up datastore: %v", err)
 		}
+	case stores.TypeSQL:
+		test.CleanupSQLDatastore(t, testSQLDriver, testSQLSource)
 	}
 }
 
 func getTestDefaultOptsForPersistentStore() *Options {
 	opts := GetDefaultOptions()
 	opts.StoreType = persistentStoreType
-	if persistentStoreType == stores.TypeFile {
+	switch persistentStoreType {
+	case stores.TypeFile:
 		opts.FilestoreDir = defaultDataStore
 		opts.FileStoreOpts.BufferSize = 1024
+	case stores.TypeSQL:
+		opts.SQLStoreOpts.Driver = testSQLDriver
+		opts.SQLStoreOpts.Source = testSQLSource
+	default:
+		panic(fmt.Sprintf("Need to specify configuration for store: %q", persistentStoreType))
 	}
 	return opts
 }
