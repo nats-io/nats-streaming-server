@@ -1013,7 +1013,7 @@ File Options Configuration:
 | Parameter | Meaning | Possible values | Usage example |
 |:----|:----|:----|:----|
 | compact | Enable/disable file compaction. Only some of the files (`clients.dat` and `subs.dat`) are subject to compaction | `true` or `false` | `compact: true` |
-| compact_fragmemtation | Compaction threshold (in percentage) | Number >= 0 | `compact_fragmentation: 50` |
+| compact_fragmentation | Compaction threshold (in percentage) | Number >= 0 | `compact_fragmentation: 50` |
 | compact_interval | Minimum interval between attempts to compact files | Expressed in seconds | `compact_interval: 300` |
 | compact_min_size | Minimum size of a file before compaction can be attempted | Bytes | `compact_min_size: 1GB` |
 | buffer_size | Size of buffers that can be used to buffer write operations | Bytes | `buffer_size: 2MB` |
