@@ -2709,8 +2709,8 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 		// else we will report an error below...
 	}
 
-	// Make sure we have a clientID, guid, etc.
-	if pm.Guid == "" || !s.clients.isValid(pm.ClientID) || !util.IsChannelNameValid(pm.Subject, false) {
+	// Make sure we have a guid and valid channel name.
+	if pm.Guid == "" || !util.IsChannelNameValid(pm.Subject, false) {
 		s.log.Errorf("Received invalid client publish message %v", pm)
 		s.sendPublishErr(m.Reply, pm.Guid, ErrInvalidPubReq)
 		return
@@ -2728,6 +2728,18 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 		if !c.isLeader() {
 			return
 		}
+	}
+
+	// Check if the client is valid. We do this after the clustered check so
+	// that only the leader performs this check.
+	//
+	// TODO: there is a race where the connection might not be replicated yet
+	// on this server, resulting in an invalid client id. This causes the
+	// publish to fail, so the client must retry.
+	if !s.clients.isValid(pm.ClientID) {
+		s.log.Errorf("Received invalid client publish message %v", pm)
+		s.sendPublishErr(m.Reply, pm.Guid, ErrInvalidPubReq)
+		return
 	}
 
 	s.ioChannel <- iopm
