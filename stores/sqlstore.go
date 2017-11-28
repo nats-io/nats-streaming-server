@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/util"
+	"github.com/nats-io/nuid"
 )
 
 const (
@@ -27,7 +28,10 @@ const (
 )
 
 const (
-	sqlHasServerInfoRow = iota
+	sqlDBLockSelect = iota
+	sqlDBLockInsert
+	sqlDBLockUpdate
+	sqlHasServerInfoRow
 	sqlUpdateServerInfo
 	sqlAddServerInfo
 	sqlAddClient
@@ -73,6 +77,9 @@ const (
 )
 
 var sqlStmts = []string{
+	"SELECT id, tick from StoreLock FOR UPDATE",                                                                                                                                      // sqlDBLockSelect
+	"INSERT INTO StoreLock (id, tick) VALUES (?, ?)",                                                                                                                                 // sqlDBLockInsert
+	"UPDATE StoreLock SET id=?, tick=?",                                                                                                                                              // sqlDBLockUpdate
 	"SELECT COUNT(uniquerow) FROM ServerInfo",                                                                                                                                        // sqlHasServerInfoRow
 	"UPDATE ServerInfo SET id=?, proto=?, version=? WHERE uniquerow=1",                                                                                                               // sqlUpdateServerInfo
 	"INSERT INTO ServerInfo (id, proto, version) VALUES (?, ?, ?)",                                                                                                                   // sqlAddServerInfo
@@ -142,6 +149,14 @@ const (
 	// This is the default interval after which the SubStore will be
 	// flushed when a subspending row need updating
 	sqlDefaultSubStoreFlushInterval = time.Second
+
+	// This is the default interval at which the lock table is updated
+	// when GetExclusiveLock() has returned that the lock is acquired.
+	sqlDefaultLockUpdateInterval = time.Second
+
+	// Number of missed update interval after which the lock is assumed
+	// lost and another instance can update it.
+	sqlDefaultLockLostCount = 3
 )
 
 // These are initialized based on the constants that have reasonable values.
@@ -153,6 +168,9 @@ var (
 	sqlMaxPendingAcks            = sqlDefaultMaxPendingAcks
 	sqlSubStoreFlushIdleInterval = sqlDefaultSubStoreFlushIdleInterval
 	sqlSubStoreFlushInterval     = sqlDefaultSubStoreFlushInterval
+	sqlLockUpdateInterval        = sqlDefaultLockUpdateInterval
+	sqlLockLostCount             = sqlDefaultLockLostCount
+	sqlNoPanic                   = false // Used in tests to avoid go-routine to panic
 )
 
 // SQLStoreOptions are used to configure the SQL Store.
@@ -172,6 +190,13 @@ type SQLStoreOptions struct {
 	// If <= 0, then there is no limit on the number of open connections.
 	// The default is 0 (unlimited).
 	MaxOpenConns int
+}
+
+func DefaultSQLStoreOptions() *SQLStoreOptions {
+	return &SQLStoreOptions{
+		NoCaching:    false,
+		MaxOpenConns: 0,
+	}
 }
 
 // SQLStoreOption is a function on the options for a SQL Store
@@ -212,6 +237,7 @@ type SQLStore struct {
 	nowInNano int64
 
 	genericStore
+	dbLock        *sqlDBLock
 	opts          *SQLStoreOptions
 	db            *sql.DB
 	maxChannelID  int64
@@ -221,11 +247,17 @@ type SQLStore struct {
 	ssFlusher     *subStoresFlusher
 }
 
+type sqlDBLock struct {
+	sync.Mutex
+	db      *sql.DB
+	id      string
+	isOwner bool
+}
+
 type subStoresFlusher struct {
 	sync.Mutex
 	stores   map[*SQLSubStore]struct{}
 	signalCh chan struct{}
-	doneCh   chan struct{}
 	signaled bool
 }
 
@@ -329,7 +361,7 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits, 
 		return nil, err
 	}
 	// Start with empty options
-	opts := &SQLStoreOptions{}
+	opts := DefaultSQLStoreOptions()
 	// And apply whatever is given to us as options.
 	for _, opt := range options {
 		if err := opt(opts); err != nil {
@@ -340,7 +372,7 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits, 
 	s := &SQLStore{
 		opts:          opts,
 		db:            db,
-		doneCh:        make(chan struct{}, 1),
+		doneCh:        make(chan struct{}),
 		preparedStmts: make([]*sql.Stmt, 0, len(sqlStmts)),
 	}
 	if err := s.init(TypeSQL, log, limits); err != nil {
@@ -359,12 +391,154 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits, 
 		s.ssFlusher = &subStoresFlusher{
 			stores:   make(map[*SQLSubStore]struct{}),
 			signalCh: make(chan struct{}, 1),
-			doneCh:   make(chan struct{}, 1),
 		}
 		go s.subStoresFlusher()
 	}
 	s.Unlock()
 	return s, nil
+}
+
+// GetExclusiveLock implements the Store interface
+func (s *SQLStore) GetExclusiveLock() (bool, error) {
+	s.Lock()
+	defer s.Unlock()
+	if s.closed {
+		return false, nil
+	}
+	if s.dbLock == nil {
+		s.dbLock = &sqlDBLock{
+			id: nuid.New().Next(),
+			db: s.db,
+		}
+	}
+	if s.dbLock.isOwner {
+		return true, nil
+	}
+	hasLock, id, tick, err := s.acquireDBLock(false)
+	if err != nil {
+		return false, err
+	}
+	if !hasLock {
+		// We did not get the lock. Try to see if the table is updated
+		// after 1 interval. If so, consider the lock "healthy" and just
+		// return that we did not get the lock. If after a configured
+		// number of tries the tick for current owner is not updated,
+		// steal the lock.
+		prevID := id
+		prevTick := tick
+		for i := 0; i < sqlLockLostCount; i++ {
+			time.Sleep(time.Duration(1.5 * float64(sqlLockUpdateInterval)))
+			hasLock, id, tick, err = s.acquireDBLock(false)
+			if hasLock || err != nil || id != prevID || tick != prevTick {
+				return hasLock, err
+			}
+			prevTick = tick
+		}
+		// Try to steal.
+		hasLock, _, _, err = s.acquireDBLock(true)
+	}
+	if hasLock {
+		// Success. Keep track that we own the lock so we can clear
+		// the table on clean shutdown to release the lock immediately.
+		s.dbLock.Lock()
+		s.dbLock.isOwner = true
+		s.wg.Add(1)
+		go s.updateDBLock()
+		s.dbLock.Unlock()
+	}
+	return hasLock, err
+}
+
+// This go-routine updates the DB store lock at regular intervals.
+func (s *SQLStore) updateDBLock() {
+	defer s.wg.Done()
+
+	var (
+		ticker  = time.NewTicker(sqlLockUpdateInterval)
+		hasLock = true
+		err     error
+		failed  int
+	)
+	for {
+		select {
+		case <-ticker.C:
+			hasLock, _, _, err = s.acquireDBLock(false)
+			if !hasLock || err != nil {
+				// If there is no error but we did not get the lock,
+				// something is really wrong, abort right away.
+				stopNow := !hasLock && err == nil
+				if err != nil {
+					failed++
+					s.log.Errorf("Unable to update store lock (failed=%v err=%v)", failed, err)
+				}
+				if stopNow || failed == sqlLockLostCount {
+					if sqlNoPanic {
+						s.log.Fatalf("Aborting")
+						return
+					}
+					panic("lost store lock, aborting")
+				}
+			} else {
+				failed = 0
+			}
+		case <-s.doneCh:
+			ticker.Stop()
+			return
+		}
+	}
+}
+
+// Returns if lock is acquired, the owner and tick value of the lock record.
+func (s *SQLStore) acquireDBLock(steal bool) (bool, string, uint64, error) {
+	s.dbLock.Lock()
+	defer s.dbLock.Unlock()
+	var (
+		lockID  string
+		tick    uint64
+		hasLock bool
+	)
+	tx, err := s.dbLock.db.Begin()
+	if err != nil {
+		return false, "", 0, err
+	}
+	defer func() {
+		if tx != nil {
+			tx.Rollback()
+		}
+	}()
+	r := tx.QueryRow(sqlStmts[sqlDBLockSelect])
+	err = r.Scan(&lockID, &tick)
+	if err != nil && err != sql.ErrNoRows {
+		return false, "", 0, sqlStmtError(sqlDBLockSelect, err)
+	}
+	if err == sql.ErrNoRows || steal || lockID == "" || lockID == s.dbLock.id {
+		// If we are stealing, reset tick to 0 (so it will become 1 in update statement)
+		if steal {
+			tick = 0
+		}
+		stmt := sqlStmts[sqlDBLockUpdate]
+		if err == sql.ErrNoRows {
+			stmt = sqlStmts[sqlDBLockInsert]
+		}
+		if _, err := tx.Exec(stmt, s.dbLock.id, tick+1); err != nil {
+			return false, "", 0, sqlStmtError(sqlDBLockUpdate, err)
+		}
+		hasLock = true
+	}
+	if err := tx.Commit(); err != nil {
+		return false, "", 0, err
+	}
+	tx = nil
+	return hasLock, lockID, tick, nil
+}
+
+// Release the store lock if this store was the owner of the lock
+func (s *SQLStore) releaseDBLockIfOwner() {
+	s.dbLock.Lock()
+	defer s.dbLock.Unlock()
+	if s.dbLock.isOwner {
+		s.dbLock.db.Exec(sqlStmts[sqlDBLockUpdate], "", 0)
+	}
 }
 
 // When a SubStore adds a pending message or an ack, it will
@@ -388,7 +562,7 @@ func (s *SQLStore) subStoresFlusher() {
 
 	for {
 		select {
-		case <-flusher.doneCh:
+		case <-s.doneCh:
 			return
 		case <-flusher.signalCh:
 			if !tm.Stop() {
@@ -920,10 +1094,7 @@ func (s *SQLStore) Close() error {
 	wg := &s.wg
 	// Signal background go-routines to quit
 	if s.doneCh != nil {
-		s.doneCh <- struct{}{}
-	}
-	if s.ssFlusher != nil {
-		s.ssFlusher.doneCh <- struct{}{}
+		close(s.doneCh)
 	}
 	s.Unlock()
 
@@ -937,6 +1108,9 @@ func (s *SQLStore) Close() error {
 		}
 	}
 	if db != nil {
+		if s.dbLock != nil {
+			s.releaseDBLockIfOwner()
+		}
 		if lerr := db.Close(); lerr != nil && err == nil {
 			err = lerr
 		}

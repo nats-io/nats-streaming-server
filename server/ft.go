@@ -172,8 +172,8 @@ func (s *StanServer) ftSendHBLoop(activationTime time.Time) {
 // so this parameter is not checked here.
 func (s *StanServer) ftSetup() error {
 	// Check that store type is ok. So far only support for FileStore
-	if s.opts.StoreType != stores.TypeFile {
-		return fmt.Errorf("ft: only %v stores supported in FT mode", stores.TypeFile)
+	if s.opts.StoreType != stores.TypeFile && s.opts.StoreType != stores.TypeSQL {
+		return fmt.Errorf("ft: only %v or %v stores supported in FT mode", stores.TypeFile, stores.TypeSQL)
 	}
 	// So far, those are not exposed to users, just used in tests.
 	// Still make sure that the missed HB interval is > than the HB
