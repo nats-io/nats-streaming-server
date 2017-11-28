@@ -259,7 +259,7 @@ func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, err
 		return nil, err
 	}
 	if s.isClustered() {
-		if err := assignChannelRaft(s, c); err != nil {
+		if err := assignChannelRaft(s, c, false); err != nil {
 			return nil, err
 		}
 	} else {
@@ -288,26 +288,29 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 	return c, nil
 }
 
-func assignChannelRaft(s *StanServer, c *channel) error {
+func assignChannelRaft(s *StanServer, c *channel, recovery bool) error {
 	node, err := s.createChannelRaftNode(c.name, c)
 	if err != nil {
 		return err
 	}
 	c.raft = node
 
-	// Wait for a leader to be elected before proceeding.
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if leader := node.Leader(); leader != "" {
-			// Leader was elected.
-			break
+	// If this is not a recovery, wait for a leader to be elected before
+	// proceeding.
+	if !recovery {
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if leader := node.Leader(); leader != "" {
+				// Leader was elected.
+				break
+			}
+			// Wait a bit.
+			time.Sleep(5 * time.Millisecond)
 		}
-		// Wait a bit.
-		time.Sleep(5 * time.Millisecond)
-	}
-	if node.Leader() == "" {
-		node.shutdown()
-		return errors.New("channel leader was not elected in time")
+		if node.Leader() == "" {
+			node.shutdown()
+			return errors.New("channel leader was not elected in time")
+		}
 	}
 
 	leaderWait := make(chan struct{}, 1)
@@ -2134,7 +2137,7 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 		// Delay creating of raft group to avoid races between processing of
 		// subs above and raft thread replaying the channel's raft log.
 		if isClustered {
-			if err := assignChannelRaft(s, channel); err != nil {
+			if err := assignChannelRaft(s, channel, true); err != nil {
 				return nil, err
 			}
 		}
