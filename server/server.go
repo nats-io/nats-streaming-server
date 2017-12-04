@@ -1115,7 +1115,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// Ensure store type option is in upper-case
 	sOpts.StoreType = strings.ToUpper(sOpts.StoreType)
 
-	// Create the store. So far either memory or file-based.
+	// Create the store.
 	switch sOpts.StoreType {
 	case stores.TypeFile:
 		store, err = stores.NewFileStore(s.log, sOpts.FilestoreDir, storeLimits,

@@ -90,6 +90,7 @@ func CleanupSQLDatastore(t TLogger, driver, source string) {
 		StackFatalf(t, "Error cleaning up SQL datastore", err)
 	}
 	defer db.Close()
+	MustExecuteSQL(t, db, "DELETE FROM StoreLock")
 	MustExecuteSQL(t, db, "DELETE FROM ServerInfo")
 	MustExecuteSQL(t, db, "DELETE FROM Clients")
 	MustExecuteSQL(t, db, "DELETE FROM Channels")

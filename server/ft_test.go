@@ -64,17 +64,22 @@ func setFTTestsHBInterval() {
 func getTestFTDefaultOptions() *Options {
 	// We support only FileStore for now, so set the options directly here.
 	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = defaultDataStore
-	opts.FileStoreOpts.BufferSize = 1024
+	opts.StoreType = persistentStoreType
+	if persistentStoreType == stores.TypeFile {
+		opts.FilestoreDir = defaultDataStore
+		opts.FileStoreOpts.BufferSize = 1024
+	} else {
+		opts.SQLStoreOpts.Driver = testSQLDriver
+		opts.SQLStoreOpts.Source = testSQLSource
+		opts.SQLStoreOpts.NoCaching = true
+		opts.SQLStoreOpts.MaxOpenConns = 5
+	}
 	opts.FTGroupName = "ft"
 	return opts
 }
 
 func cleanupFTDatastore(t tLogger) {
-	if err := os.RemoveAll(defaultDataStore); err != nil {
-		stackFatalf(t, "Error cleaning up datastore: %v", err)
-	}
+	cleanupDatastore(t)
 }
 
 func delayFirstLockAttempt() {
@@ -327,7 +332,9 @@ func TestFTPartition(t *testing.T) {
 
 	sOpts := getTestFTDefaultOptions()
 	sOpts.NATSServerURL = natsURL
-	sOpts.FilestoreDir = ds
+	if persistentStoreType == stores.TypeFile {
+		sOpts.FilestoreDir = ds
+	}
 	s := runServerWithOpts(t, sOpts, nil)
 	defer s.Shutdown()
 
@@ -340,9 +347,23 @@ func TestFTPartition(t *testing.T) {
 		errCh := make(chan error, 1)
 		go func() {
 			defer wg.Done()
+			params := []string{
+				"-ft_partition", ds,
+				"-test.v",
+				"-test.run=TestFTPartition$",
+				"-persistent_store", persistentStoreType,
+			}
 			// Start a process that will be the standby
-			out, err := exec.Command(os.Args[0], "-ft_partition", ds,
-				"-test.v", "-test.run=TestFTPartition$").CombinedOutput()
+			if persistentStoreType == stores.TypeSQL {
+				params = append(params,
+					"-sql_create_db=false",
+					"-sql_delete_db=false",
+					"-sql_driver", testSQLDriver,
+					"-sql_source", testSQLSource,
+					"-sql_source_admin", testSQLSourceAdmin,
+					"-sql_db_name", testSQLDatabaseName)
+			}
+			out, err := exec.Command(os.Args[0], params...).CombinedOutput()
 			if err != nil {
 				errCh <- fmt.Errorf("Standby error: %v - %v", err, string(out))
 			}
@@ -445,9 +466,23 @@ func TestFTPartitionReversed(t *testing.T) {
 		errCh := make(chan error, 1)
 		go func() {
 			defer wg.Done()
+			params := []string{
+				"-ft_partition", ds,
+				"-test.v",
+				"-test.run=TestFTPartitionReversed$",
+				"-persistent_store", persistentStoreType,
+			}
 			// Start a process that will act as the active server
-			out, err := exec.Command(os.Args[0], "-ft_partition", ds,
-				"-test.v", "-test.run=TestFTPartitionReversed$").CombinedOutput()
+			if persistentStoreType == stores.TypeSQL {
+				params = append(params,
+					"-sql_create_db=false",
+					"-sql_delete_db=false",
+					"-sql_driver", testSQLDriver,
+					"-sql_source", testSQLSource,
+					"-sql_source_admin", testSQLSourceAdmin,
+					"-sql_db_name", testSQLDatabaseName)
+			}
+			out, err := exec.Command(os.Args[0], params...).CombinedOutput()
 			if err != nil {
 				errCh <- fmt.Errorf("Active error: %v - %v", err, string(out))
 			}
@@ -461,7 +496,9 @@ func TestFTPartitionReversed(t *testing.T) {
 		// Now start our streaming server, it should be a standby
 		sOpts := getTestFTDefaultOptions()
 		sOpts.NATSServerURL = natsURL
-		sOpts.FilestoreDir = ds
+		if persistentStoreType == stores.TypeFile {
+			sOpts.FilestoreDir = ds
+		}
 		s := runServerWithOpts(t, sOpts, nil)
 		defer s.Shutdown()
 		checkState(t, s, FTStandby)
@@ -498,7 +535,9 @@ func TestFTPartitionReversed(t *testing.T) {
 	} else {
 		sOpts := getTestFTDefaultOptions()
 		sOpts.NATSServerURL = natsURL
-		sOpts.FilestoreDir = ds
+		if persistentStoreType == stores.TypeFile {
+			sOpts.FilestoreDir = ds
+		}
 		s := runServerWithOpts(t, sOpts, nil)
 		defer s.Shutdown()
 

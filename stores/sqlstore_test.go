@@ -103,6 +103,11 @@ func restoreDBConnection(t *testing.T, s Store) {
 	db, err := sql.Open(testSQLDriver, testSQLSource)
 	if err == nil {
 		ss.db = db
+		if ss.dbLock != nil {
+			ss.dbLock.Lock()
+			ss.dbLock.db = db
+			ss.dbLock.Unlock()
+		}
 		for _, c := range ss.channels {
 			ms := c.Msgs.(*SQLMsgStore)
 			ms.Lock()
@@ -1206,4 +1211,145 @@ func TestSQLMaxConnections(t *testing.T) {
 		t.Fatalf("Error: %v", e)
 	default:
 	}
+}
+
+type getExclusiveLockLogger struct {
+	sync.Mutex
+	msgs []string
+}
+
+func (d *getExclusiveLockLogger) log(format string, args ...interface{}) {
+	d.Lock()
+	d.msgs = append(d.msgs, fmt.Sprintf(format, args...))
+	d.Unlock()
+}
+
+func (d *getExclusiveLockLogger) Noticef(format string, args ...interface{}) {}
+func (d *getExclusiveLockLogger) Debugf(format string, args ...interface{})  {}
+func (d *getExclusiveLockLogger) Tracef(format string, args ...interface{})  {}
+func (d *getExclusiveLockLogger) Errorf(format string, args ...interface{})  { d.log(format, args...) }
+func (d *getExclusiveLockLogger) Fatalf(format string, args ...interface{})  { d.log(format, args...) }
+
+func TestSQLGetExclusiveLock(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	sqlLockUpdateInterval = 250 * time.Millisecond
+	sqlLockLostCount = 2
+	sqlNoPanic = true
+	defer func() {
+		sqlLockUpdateInterval = sqlDefaultLockUpdateInterval
+		sqlLockLostCount = sqlDefaultLockLostCount
+		sqlNoPanic = false
+	}()
+
+	s1 := createDefaultSQLStore(t)
+	defer s1.Close()
+
+	// We should be able to acquire the lock, and calling GetExclusiveLock
+	// while we have the lock should still return true and no error
+	for i := 0; i < 2; i++ {
+		hasLock, err := s1.GetExclusiveLock()
+		if !hasLock || err != nil {
+			t.Fatalf("Expected lock to be acquired, got %v, %v", hasLock, err)
+		}
+	}
+
+	dl := &getExclusiveLockLogger{}
+	s2, err := NewSQLStore(dl, testSQLDriver, testSQLSource, nil, SQLNoCaching(true))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s2.Close()
+
+	hasLock, err := s2.GetExclusiveLock()
+	if hasLock || err != nil {
+		t.Fatalf("Expected lock to fail, got %v, %v", hasLock, err)
+	}
+
+	// Closing store should release the lock immediately.
+	s1.Close()
+
+	// This should return false, no error
+	hasLock, err = s1.GetExclusiveLock()
+	if hasLock || err != nil {
+		t.Fatalf("Expected lock to fail, got %v, %v", hasLock, err)
+	}
+
+	// This should succeed
+	hasLock, err = s2.GetExclusiveLock()
+	if !hasLock || err != nil {
+		t.Fatalf("Expected lock to be acquired, got %v, %v", hasLock, err)
+	}
+
+	// Create a 3rd store
+	s3, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(true))
+	if err != nil {
+		t.Fatalf("Unable to create store: %v", err)
+	}
+	defer s3.Close()
+
+	// Try to get the lock for s3 once, so that it keeps track of current
+	// owner.
+	hasLock, err = s3.GetExclusiveLock()
+	if hasLock || err != nil {
+		t.Fatalf("Expected lock to fail, got %v, %v", hasLock, err)
+	}
+
+	// Make it so that s2 stops updating the lock table
+	failDBConnection(t, s2)
+
+	// This call will take some time (2 times the update interval) but it
+	// should then succeed.
+	start := time.Now()
+	hasLock, err = s3.GetExclusiveLock()
+	if !hasLock || err != nil {
+		t.Fatalf("Expected lock to be acquired, got %v, %v", hasLock, err)
+	}
+	dur := time.Since(start)
+
+	maxTime := time.Duration(float64(sqlLockLostCount)*(1.5*float64(sqlLockUpdateInterval))) + 100*time.Millisecond
+	if dur > maxTime {
+		t.Fatalf("Took too long to acquire lock: %v", dur)
+	}
+
+	// Check s2 log. It should have complained about updating lock (2 times)
+	// and then says that it aborts.
+	dl.Lock()
+	good := 0
+	for i, m := range dl.msgs {
+		if i < 2 {
+			if strings.Contains(m, "Unable to update store lock") {
+				good++
+			}
+		} else if m == "Aborting" {
+			good++
+		}
+	}
+	dl.Unlock()
+	if good != 3 {
+		t.Fatalf("Unexpected errors in log: %v", dl.msgs)
+	}
+
+	restoreDBConnection(t, s2)
+	s2.Close()
+	s3.Close()
+
+	// All stores have been shutdown
+	s4, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(true))
+	if err != nil {
+		t.Fatalf("Unable to create store: %v", err)
+	}
+	defer s4.Close()
+	// Fail DB
+	failDBConnection(t, s4)
+	// Trying to get lock should return error
+	hasLock, err = s4.GetExclusiveLock()
+	if hasLock || err == nil {
+		t.Fatalf("Expected error, got lock=%v err=%v", hasLock, err)
+	}
+	restoreDBConnection(t, s4)
 }

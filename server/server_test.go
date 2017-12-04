@@ -69,12 +69,17 @@ var (
 
 func TestMain(m *testing.M) {
 	var (
-		bst   string
-		pst   string
-		doSQL bool
+		bst         string
+		pst         string
+		doSQL       bool
+		sqlCreateDb bool
+		sqlDeleteDb bool
 	)
 	flag.StringVar(&bst, "bench_store", "", "store type for bench tests (mem, file)")
 	flag.StringVar(&pst, "persistent_store", "", "store type for server recovery related tests (file)")
+	// Those 2 sql related flags are handled here, not in AddSQLFlags
+	flag.BoolVar(&sqlCreateDb, "sql_create_db", true, "create sql database on startup")
+	flag.BoolVar(&sqlDeleteDb, "sql_delete_db", true, "delete sql database on exit")
 	test.AddSQLFlags(flag.CommandLine, &testSQLDriver, &testSQLSource, &testSQLSourceAdmin, &testSQLDatabaseName)
 	flag.Parse()
 	bst = strings.ToUpper(bst)
@@ -111,16 +116,18 @@ func TestMain(m *testing.M) {
 			fmt.Println(err.Error())
 			os.Exit(2)
 		}
-		// Create the SQL Database once, the cleanup is simply deleting
-		// content from tables (so we don't have to recreate them).
-		if err := test.CreateSQLDatabase(testSQLDriver, testSQLSourceAdmin,
-			testSQLSource, testSQLDatabaseName); err != nil {
-			fmt.Printf("Error initializing SQL Datastore: %v", err)
-			os.Exit(2)
+		if sqlCreateDb {
+			// Create the SQL Database once, the cleanup is simply deleting
+			// content from tables (so we don't have to recreate them).
+			if err := test.CreateSQLDatabase(testSQLDriver, testSQLSourceAdmin,
+				testSQLSource, testSQLDatabaseName); err != nil {
+				fmt.Printf("Error initializing SQL Datastore: %v", err)
+				os.Exit(2)
+			}
 		}
 	}
 	ret := m.Run()
-	if doSQL {
+	if doSQL && sqlDeleteDb {
 		// Now that the tests/benchs are done, delete the database
 		test.DeleteSQLDatabase(testSQLDriver, testSQLSourceAdmin, testSQLDatabaseName)
 	}
