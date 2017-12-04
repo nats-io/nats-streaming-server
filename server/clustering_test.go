@@ -3977,3 +3977,75 @@ func TestClusteringRaftDefaultTimeouts(t *testing.T) {
 		t.Fatalf("Expected commit timeout to be %v, got %v", defaultRaftCommitTimeout, commitTimeout)
 	}
 }
+
+func TestClusteringWithCryptoStore(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Encrypt = true
+	s1sOpts.EncryptionKey = []byte("key1")
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Encrypt = true
+	s2sOpts.EncryptionKey = []byte("key2")
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+	// Wait for leader to be elected.
+	getLeader(t, 10*time.Second, servers...)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	payload := []byte("this is the content of the message")
+	sc.Publish("foo", payload)
+
+	ch := make(chan pb.MsgProto, 1)
+	sc.Subscribe("foo", func(m *stan.Msg) {
+		ch <- m.MsgProto
+	}, stan.DeliverAllAvailable())
+
+	select {
+	case m := <-ch:
+		assertMsg(t, m, payload, uint64(1))
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Did not get our message")
+	}
+
+	// Now check that raft logs do not contain the payload in plain text
+	s1.raft.Lock()
+	fname1 := s1.raft.store.fileName
+	s1.raft.Unlock()
+
+	s2.raft.Lock()
+	fname2 := s2.raft.store.fileName
+	s2.raft.Unlock()
+
+	sc.Close()
+	s2.Shutdown()
+	s1.Shutdown()
+
+	check := func(t *testing.T, name, fname string) {
+		t.Helper()
+		content, err := ioutil.ReadFile(fname)
+		if err != nil {
+			t.Fatalf("Error reading file %q: %v", fname1, err)
+		}
+		if bytes.Contains(content, payload) {
+			t.Fatalf("Expected raft log of %q to not contain payload in plain text", name)
+		}
+	}
+	check(t, "s1", fname1)
+	check(t, "s2", fname2)
+}

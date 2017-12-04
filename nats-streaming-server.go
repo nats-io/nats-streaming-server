@@ -48,7 +48,9 @@ Streaming Server Options:
     -hbf, --hb_fail_count <int>       Number of failed heartbeats before server closes the client connection
           --ft_group <string>         Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
     -sl,  --signal <signal>[=<pid>]   Send signal to nats-streaming-server process (stop, quit, reopen)
-
+          --encrypt <bool>            Specify if server should use encryption at rest
+          --encryption_key <sting>    Encryption Key. It is recommended to specify it through the NATS_STREAMING_ENCRYPTION_KEY environment variable instead
+    
 Streaming Server Clustering Options:
     --clustered <bool>                   Run the server in a clustered configuration (default: false)
     --cluster_node_id <string>           ID of the node within the cluster if there is no stored ID (default: random UUID)

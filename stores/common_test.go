@@ -292,23 +292,35 @@ func getRecoveredSubs(t tLogger, state *RecoveredState, name string, expected in
 }
 
 func startTest(t tLogger, ts *testStore) Store {
+	var s Store
 	switch ts.name {
 	case TypeMemory:
-		return createDefaultMemStore(t)
+		s = createDefaultMemStore(t)
 	case TypeFile:
 		cleanupFSDatastore(t)
-		return createDefaultFileStore(t)
+		s = createDefaultFileStore(t)
 	case TypeSQL:
 		cleanupSQLDatastore(t)
-		return createDefaultSQLStore(t)
+		s = createDefaultSQLStore(t)
 	case TypeRaft:
 		cleanupRaftDatastore(t)
-		return createDefaultRaftStore(t)
+		s = createDefaultRaftStore(t)
 	default:
 		// This is used with testStores table. If a store type has been
 		// added there, it needs to be added here.
 		panic(fmt.Sprintf("Add new store type %q in startTest", ts.name))
 	}
+	if testUseEncryption {
+		var err error
+		// Because tests work on parallel, and NewCryptoStore would clear
+		// the key, make a copy here to avoid races.
+		key := append([]byte(nil), testEncryptionKey...)
+		s, err = NewCryptoStore(s, key)
+		if err != nil {
+			stackFatalf(t, "Error creating crypto store: %v", err)
+		}
+	}
+	return s
 }
 
 func endTest(t tLogger, ts *testStore) {
@@ -339,7 +351,13 @@ func testReOpenStore(t tLogger, ts *testStore, limits *StoreLimits) (Store, *Rec
 }
 
 func isStorageBasedOnFile(s Store) bool {
-	switch s.(type) {
+	var as Store
+	if cs, ok := s.(*CryptoStore); ok {
+		as = cs.Store
+	} else {
+		as = s
+	}
+	switch as.(type) {
 	case *FileStore:
 		return true
 	case *RaftStore:
@@ -350,13 +368,21 @@ func isStorageBasedOnFile(s Store) bool {
 }
 
 var doSQL bool
+var testUseEncryption bool
+var testEncryptionKey []byte
 
 func TestMain(m *testing.M) {
+	var encryptionKey string
+
 	flag.BoolVar(&testFSDisableBufferWriters, "fs_no_buffer", false, "Disable use of buffer writers")
 	flag.BoolVar(&testFSSetFDsLimit, "fs_set_fds_limit", false, "Set some FDs limit")
 	flag.BoolVar(&doSQL, "sql", true, "Set this to false if you don't want SQL to be tested")
 	test.AddSQLFlags(flag.CommandLine, &testSQLDriver, &testSQLSource, &testSQLSourceAdmin, &testSQLDatabaseName)
+	flag.BoolVar(&testUseEncryption, "encrypt", false, "Use encryption")
+	flag.StringVar(&encryptionKey, "encryption_key", "testkey", "Encryption key")
 	flag.Parse()
+
+	testEncryptionKey = []byte(encryptionKey)
 
 	if doSQL {
 		defaultSources := make(map[string][]string)
@@ -458,7 +484,11 @@ func TestCSBasicCreate(t *testing.T) {
 
 			expectedName := st.name
 			if st.name == TypeRaft {
-				expectedName = TypeRaft + "_" + s.(*RaftStore).Store.Name()
+				if cs, ok := s.(*CryptoStore); ok {
+					expectedName = TypeRaft + "_" + cs.Store.(*RaftStore).Store.Name()
+				} else {
+					expectedName = TypeRaft + "_" + s.(*RaftStore).Store.Name()
+				}
 			}
 
 			if s.Name() != expectedName {
@@ -887,7 +917,7 @@ func TestCSFlush(t *testing.T) {
 				subID := storeSub(t, cs, "foo")
 				storeSubPending(t, cs, "foo", subID, msg.Sequence)
 				// Close the underlying file
-				ms := cs.Msgs.(*FileMsgStore)
+				ms := getFileMsgStore(cs.Msgs)
 				ms.Lock()
 				ms.writeSlice.file.handle.Close()
 				ms.Unlock()
@@ -914,7 +944,7 @@ func TestCSFlush(t *testing.T) {
 				// not expected to fail.
 				cs = getRecoveredChannel(t, state, "foo")
 				// Close the underlying file
-				ms = cs.Msgs.(*FileMsgStore)
+				ms = getFileMsgStore(cs.Msgs)
 				ms.Lock()
 				ms.writeSlice.file.handle.Close()
 				ms.Unlock()
@@ -988,6 +1018,9 @@ func TestCSPerChannelLimits(t *testing.T) {
 				SubStoreLimits{},
 				0,
 			}
+			if testUseEncryption {
+				noMaxMsgOverrideLimits.MaxBytes += int64(100 * getCryptoOverhead(s))
+			}
 			noMaxBytesOverrideLimits := ChannelLimits{
 				MsgStoreLimits{
 					MaxMsgs: 10,
@@ -1005,29 +1038,30 @@ func TestCSPerChannelLimits(t *testing.T) {
 				t.Fatalf("Unexpected error setting limits: %v", err)
 			}
 
-			checkLimitsForChannel := func(channelName string, maxMsgs, maxSubs int) {
+			checkLimitsForChannel := func(t *testing.T, channelName string, maxMsgs, maxSubs int) {
+				t.Helper()
 				cs := storeCreateChannel(t, s, channelName)
 				for i := 0; i < maxMsgs+10; i++ {
 					storeMsg(t, cs, channelName, uint64(i+1), []byte("hello"))
 				}
 				if n, _ := msgStoreState(t, cs.Msgs); n != maxMsgs {
-					stackFatalf(t, "Expected %v messages, got %v", maxMsgs, n)
+					t.Fatalf("Expected %v messages, got %v", maxMsgs, n)
 				}
 				for i := 0; i < maxSubs+1; i++ {
 					err := cs.Subs.CreateSub(&spb.SubState{})
 					if i < maxSubs && err != nil {
-						stackFatalf(t, "Unexpected error on create sub: %v", err)
+						t.Fatalf("Unexpected error on create sub: %v", err)
 					} else if i == maxSubs && err == nil {
-						stackFatalf(t, "Expected error on createSub, did not get one")
+						t.Fatalf("Expected error on createSub, did not get one")
 					}
 				}
 			}
-			checkLimitsForChannel("foo", fooLimits.MaxMsgs, fooLimits.MaxSubscriptions)
-			checkLimitsForChannel("bar", barLimits.MaxMsgs, barLimits.MaxSubscriptions)
-			checkLimitsForChannel("baz", noSubsOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
-			checkLimitsForChannel("abc", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
-			checkLimitsForChannel("def", noMaxBytesOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
-			checkLimitsForChannel("global", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+			checkLimitsForChannel(t, "foo", fooLimits.MaxMsgs, fooLimits.MaxSubscriptions)
+			checkLimitsForChannel(t, "bar", barLimits.MaxMsgs, barLimits.MaxSubscriptions)
+			checkLimitsForChannel(t, "baz", noSubsOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+			checkLimitsForChannel(t, "abc", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+			checkLimitsForChannel(t, "def", noMaxBytesOverrideLimits.MaxMsgs, storeLimits.MaxSubscriptions)
+			checkLimitsForChannel(t, "global", storeLimits.MaxMsgs, storeLimits.MaxSubscriptions)
 		})
 	}
 }

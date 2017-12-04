@@ -47,7 +47,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.11.2"
+	VERSION = "0.12.0"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -1118,6 +1118,8 @@ type Options struct {
 	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
 	SyslogName         string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
+	Encrypt            bool          // Specify if server should encrypt messages payload when storing them
+	EncryptionKey      []byte        // Encryption key. The environment NATS_STREAMING_ENCRYPTION_KEY takes precedence and is the preferred way to provide the key.
 	Clustering         ClusteringOptions
 }
 
@@ -1479,6 +1481,20 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		// data that we don't need because they are handled by the actual
 		// raft logs.
 		store = stores.NewRaftStore(store)
+	}
+	if sOpts.Encrypt || len(sOpts.EncryptionKey) > 0 {
+		// In clustering mode, RAFT is using its own logs (not the one above),
+		// so we need to keep the key intact until we call newRaftLog().
+		var key []byte
+		if s.isClustered && len(sOpts.EncryptionKey) > 0 {
+			key = append(key, sOpts.EncryptionKey...)
+		} else {
+			key = sOpts.EncryptionKey
+		}
+		store, err = stores.NewCryptoStore(store, key)
+		if err != nil {
+			return nil, err
+		}
 	}
 	s.store = store
 

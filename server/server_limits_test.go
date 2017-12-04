@@ -144,6 +144,9 @@ func TestMaxMsgs(t *testing.T) {
 }
 
 func TestMaxBytes(t *testing.T) {
+	if testUseEncryption {
+		t.SkipNow()
+	}
 	payload := []byte("hello")
 	m := pb.MsgProto{Data: payload, Subject: "foo", Sequence: 1, Timestamp: time.Now().UnixNano()}
 	msgSize := m.Size()

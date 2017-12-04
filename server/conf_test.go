@@ -254,6 +254,12 @@ func TestParseConfig(t *testing.T) {
 	if opts.SQLStoreOpts.MaxOpenConns != 5 {
 		t.Fatalf("Expected SQL MaxOpenConns to be 5, got %v", opts.SQLStoreOpts.MaxOpenConns)
 	}
+	if !opts.Encrypt {
+		t.Fatal("Expected Encrypt to be true")
+	}
+	if string(opts.EncryptionKey) != "key" {
+		t.Fatalf("Expected EncryptionKey to be %q, got %q", "key", opts.EncryptionKey)
+	}
 }
 
 func TestParsePermError(t *testing.T) {
@@ -456,6 +462,8 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "sql:{source:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{no_caching:123}", wrongTypeErr)
 	expectFailureFor(t, "sql:{max_open_conns:false}", wrongTypeErr)
+	expectFailureFor(t, "encrypt: 123", wrongTypeErr)
+	expectFailureFor(t, "encryption_key: 123", wrongTypeErr)
 }
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {

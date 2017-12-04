@@ -57,6 +57,8 @@ var (
 	errOnPurpose        = errors.New("On purpose")
 	benchStoreType      = stores.TypeMemory
 	persistentStoreType = stores.TypeFile
+	testUseEncryption   bool
+	testEncryptionKey   = "testkey"
 )
 
 // The SourceAdmin is used by the test setup to have access
@@ -97,6 +99,8 @@ func TestMain(m *testing.M) {
 	// Those 2 sql related flags are handled here, not in AddSQLFlags
 	flag.BoolVar(&sqlCreateDb, "sql_create_db", true, "create sql database on startup")
 	flag.BoolVar(&sqlDeleteDb, "sql_delete_db", true, "delete sql database on exit")
+	flag.BoolVar(&testUseEncryption, "encrypt", false, "use encryption")
+	flag.StringVar(&testEncryptionKey, "encryption_key", string(testEncryptionKey), "encryption key")
 	test.AddSQLFlags(flag.CommandLine, &testSQLDriver, &testSQLSource, &testSQLSourceAdmin, &testSQLDatabaseName)
 	flag.Parse()
 	bst = strings.ToUpper(bst)
@@ -460,19 +464,30 @@ func WaitTime(ch chan bool, timeout time.Duration) error {
 }
 
 func runServerWithOpts(t *testing.T, sOpts *Options, nOpts *natsd.Options) *StanServer {
+	if testUseEncryption {
+		if sOpts == nil {
+			sOpts = GetDefaultOptions()
+		}
+		sOpts.Encrypt = true
+		sOpts.EncryptionKey = []byte(testEncryptionKey)
+	}
 	s, err := RunServerWithOpts(sOpts, nOpts)
 	if err != nil {
 		stackFatalf(t, err.Error())
+	}
+	if testUseEncryption {
+		// Since the key was cleared when creating the crypto store,
+		// restore now for the rest of tests to work properly.
+		sOpts.EncryptionKey = []byte(testEncryptionKey)
 	}
 	return s
 }
 
 func runServer(t *testing.T, clusterName string) *StanServer {
-	s, err := RunServer(clusterName)
-	if err != nil {
-		stackFatalf(t, err.Error())
-	}
-	return s
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+	nOpts := DefaultNatsServerOptions
+	return runServerWithOpts(t, sOpts, &nOpts)
 }
 
 type testChannelStoreFailStore struct{ stores.Store }
