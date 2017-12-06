@@ -1370,7 +1370,7 @@ func TestFSReadRecord(t *testing.T) {
 	errReturned := fmt.Errorf("Fake error")
 	r.setErrToReturn(errReturned)
 	retBuf, recSize, recType, err = readRecord(r, buf, false, crc32.IEEETable, true)
-	if err != errReturned {
+	if !strings.Contains(err.Error(), errReturned.Error()) {
 		t.Fatalf("Expected error %v, got: %v", errReturned, err)
 	}
 	if !reflect.DeepEqual(retBuf, buf) {
@@ -1476,6 +1476,17 @@ func TestFSReadRecord(t *testing.T) {
 	}
 	if recType != recordType(1) {
 		t.Fatalf("Expected recType to be 1, got %v", recType)
+	}
+
+	// Append zeros to the end of buffer
+	for i := 0; i < recordHeaderSize+2; i++ {
+		b = append(b, 0)
+	}
+	// Don't call setContent since this would reset the read position
+	r.content = b
+	_, _, _, err = readRecord(r, buf, true, crc32.IEEETable, true)
+	if err != errNeedRewind {
+		t.Fatalf("Expected error %v, got %v", errNeedRewind, err)
 	}
 }
 
@@ -1776,4 +1787,76 @@ func TestFSFilesClosedOnRecovery(t *testing.T) {
 		}
 	}
 	s.fm.Unlock()
+}
+
+func TestFSClientFileWithExtraZeros(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	c1, err := s.AddClient("me", "hbInbox")
+	if err != nil {
+		t.Fatalf("Error adding client: %v", err)
+	}
+	s.RLock()
+	fname := s.clientsFile.name
+	s.RUnlock()
+
+	s.Close()
+
+	f, err := openFileWithFlags(fname, os.O_CREATE|os.O_RDWR|os.O_APPEND)
+	if err != nil {
+		t.Fatalf("Error opening file: %v", err)
+	}
+	defer f.Close()
+	b := make([]byte, recordHeaderSize)
+	if _, err := f.Write(b); err != nil {
+		t.Fatalf("Error adding zeros: %v", err)
+	}
+	f.Close()
+
+	// Reopen file store
+	s, rs := openDefaultFileStore(t)
+	defer s.Close()
+	if rs == nil {
+		t.Fatal("Expected to recover state")
+	}
+	if len(rs.Clients) != 1 {
+		t.Fatalf("Expected to recover 1 client, got %v", len(rs.Clients))
+	}
+	rc := rs.Clients[0]
+	if !reflect.DeepEqual(rc, c1) {
+		t.Fatalf("Expected client %v, got %v", c1, rc)
+	}
+	// Add one more client
+	c2, err := s.AddClient("me2", "hbInbox2")
+	if err != nil {
+		t.Fatalf("Error adding client: %v", err)
+	}
+	s.Close()
+
+	// Reopen file store
+	s, rs = openDefaultFileStore(t)
+	defer s.Close()
+	if rs == nil {
+		t.Fatal("Expected to recover state")
+	}
+	if len(rs.Clients) != 2 {
+		t.Fatalf("Expected to recover 2 client, got %v", len(rs.Clients))
+	}
+	for _, rc := range rs.Clients {
+		// rs.Clients is an array but created from a map, so order is
+		// not guaranteed.
+		var c *Client
+		if rc.ID == "me" {
+			c = c1
+		} else {
+			c = c2
+		}
+		if !reflect.DeepEqual(rc, c) {
+			t.Fatalf("Expected client %v, got %v", c, rc)
+		}
+	}
 }
