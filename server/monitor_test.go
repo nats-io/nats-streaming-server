@@ -636,6 +636,7 @@ func getChannelSubs(subs []*subState) []*Subscriptionz {
 func createSubz(sub *subState) *Subscriptionz {
 	sub.RLock()
 	subz := &Subscriptionz{
+		ClientID:     sub.ClientID,
 		Inbox:        sub.Inbox,
 		AckInbox:     sub.AckInbox,
 		DurableName:  sub.DurableName,

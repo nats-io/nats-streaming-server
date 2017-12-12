@@ -99,6 +99,7 @@ type Channelz struct {
 
 // Subscriptionz describes a NATS Streaming Subscription
 type Subscriptionz struct {
+	ClientID     string `json:"client_id"`
 	Inbox        string `json:"inbox"`
 	AckInbox     string `json:"ack_inbox"`
 	DurableName  string `json:"durable_name,omitempty"`
@@ -359,6 +360,7 @@ func getMonitorChannelSubs(ss *subStore) []*Subscriptionz {
 func createSubscriptionz(sub *subState) *Subscriptionz {
 	sub.RLock()
 	subz := &Subscriptionz{
+		ClientID:     sub.ClientID,
 		Inbox:        sub.Inbox,
 		AckInbox:     sub.AckInbox,
 		DurableName:  sub.DurableName,
