@@ -62,8 +62,11 @@ func (s *StanServer) ftStart() (retErr error) {
 		}
 		locked, err := s.ftGetStoreLock()
 		if err != nil {
-			// This is considered a fatal error and we exit
-			return err
+			// Log the error, but go back and wait for the next interval and
+			// try again. It is possible that the error resolves (for instance
+			// the connection to the database is restored - for SQL stores).
+			s.log.Errorf("ft: error attempting to get the store lock: %v", err)
+			continue
 		} else if locked {
 			break
 		}

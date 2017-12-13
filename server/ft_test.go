@@ -618,15 +618,23 @@ func TestFTGetStoreLockReturnsError(t *testing.T) {
 	delayFirstLockAttempt()
 	defer cancelFirstLockAttemptDelay()
 
+	dl := &dummyLogger{}
+
 	opts := getTestFTDefaultOptions()
+	opts.CustomLogger = dl
 	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 	replaceWithMockedStore(s, false, fmt.Errorf("on purpose"))
 	ftReleasePause()
-	checkState(t, s, Failed)
+	// Wait for the firs lock attempt
+	waitForGetLockAttempt()
+	checkState(t, s, FTStandby)
 	// We should get an error about not being able to get the store lock
-	if err := s.LastError(); err == nil || !strings.Contains(err.Error(), "store lock") {
-		t.Fatalf("Unexpected error: %v", err)
+	dl.Lock()
+	msg := dl.msg
+	dl.Unlock()
+	if msg == "" || !strings.Contains(msg, "store lock") {
+		t.Fatalf("Unexpected error: %v", msg)
 	}
 }
 
