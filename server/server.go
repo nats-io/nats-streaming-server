@@ -115,7 +115,7 @@ const (
 	// To prevent that, when checking if a client exists, in this particular
 	// mode we will possibly wait to be notified when the client has been
 	// registered. This is the default duration for this wait.
-	defaultClientCheckTimeout = 2 * time.Second
+	defaultClientCheckTimeout = 4 * time.Second
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
