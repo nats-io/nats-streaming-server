@@ -3,16 +3,18 @@
 package server
 
 import (
-	"github.com/nats-io/nats-streaming-server/stores"
 	"sync"
 	"time"
+
+	"github.com/nats-io/nats-streaming-server/stores"
 )
 
 // This is a proxy to the store interface.
 type clientStore struct {
 	sync.RWMutex
-	clients map[string]*client
-	store   stores.Store
+	clients        map[string]*client
+	waitOnRegister map[string]chan struct{}
+	store          stores.Store
 }
 
 // client has information needed by the server. A client is also
@@ -53,6 +55,13 @@ func (cs *clientStore) register(ID, hbInbox string) (*client, bool, error) {
 	}
 	c = &client{info: sc, subs: make([]*subState, 0, 4)}
 	cs.clients[ID] = c
+	if cs.waitOnRegister != nil {
+		ch := cs.waitOnRegister[ID]
+		if ch != nil {
+			ch <- struct{}{}
+			delete(cs.waitOnRegister, ID)
+		}
+	}
 	return c, true, nil
 }
 
@@ -71,6 +80,9 @@ func (cs *clientStore) unregister(ID string) (*client, error) {
 	}
 	c.Unlock()
 	delete(cs.clients, ID)
+	if cs.waitOnRegister != nil {
+		delete(cs.waitOnRegister, ID)
+	}
 	err := cs.store.DeleteClient(ID)
 	return c, err
 }
@@ -78,6 +90,38 @@ func (cs *clientStore) unregister(ID string) (*client, error) {
 // IsValid returns true if the client is registered, false otherwise.
 func (cs *clientStore) isValid(ID string) bool {
 	return cs.lookup(ID) != nil
+}
+
+// isValidWithTimeout will return true if the client is registered,
+// false if not.
+// When the client is not yet registered, this call sets up a go channel
+// and waits up to `timeout` for the register() call to send the newly
+// registered client to the channel.
+// On timeout, this call return false to indicate that the client
+// has still not registered.
+func (cs *clientStore) isValidWithTimeout(ID string, timeout time.Duration) bool {
+	cs.Lock()
+	c := cs.clients[ID]
+	if c != nil {
+		cs.Unlock()
+		return true
+	}
+	if cs.waitOnRegister == nil {
+		cs.waitOnRegister = make(map[string]chan struct{})
+	}
+	ch := make(chan struct{}, 1)
+	cs.waitOnRegister[ID] = ch
+	cs.Unlock()
+	select {
+	case <-ch:
+		return true
+	case <-time.After(timeout):
+		// We timed out, remove the entry in the map
+		cs.Lock()
+		delete(cs.waitOnRegister, ID)
+		cs.Unlock()
+		return false
+	}
 }
 
 // Lookup a client

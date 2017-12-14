@@ -4,6 +4,8 @@ package server
 
 import (
 	"fmt"
+	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nuid"
 	"strings"
 	"sync"
 	"testing"
@@ -619,5 +621,195 @@ func TestPartitionsWildcards(t *testing.T) {
 	// This one should timeout
 	if _, err := sc.Subscribe("foo.bar.baz", cb); err == nil {
 		t.Fatal("Expected error on subscribe, got none")
+	}
+}
+
+func checkWaitOnRegisterMap(t tLogger, s *StanServer, size int) {
+	var start time.Time
+	for {
+		s.clients.RLock()
+		m := s.clients.waitOnRegister
+		mlen := len(m)
+		s.clients.RUnlock()
+		if m != nil && mlen == size {
+			return
+		}
+		if start.IsZero() {
+			start = time.Now()
+		} else if time.Since(start) > clientCheckTimeout+50*time.Millisecond {
+			stackFatalf(t, "map should have been created and of size %d, got %v", size, mlen)
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+}
+
+func TestPartitionsRaceOnPub(t *testing.T) {
+	setPartitionsVarsForTest()
+	defer resetDefaultPartitionsVars()
+
+	clientCheckTimeout = 150 * time.Millisecond
+	defer func() { clientCheckTimeout = defaultClientCheckTimeout }()
+
+	opts := GetDefaultOptions()
+	opts.Partitioning = true
+	opts.AddPerChannel("foo", &stores.ChannelLimits{})
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	// stan.Connect() call blocks until it receives the response, so it is
+	// not possible to publish a message before the server has processed the
+	// connection request. However, with partitioning, it is possible that
+	// the Connect() call receives an OK from one of the server and immediately
+	// publishes a message. That message, although behind the connection request
+	// going to another server, may be dispatched before (due to use of different
+	// internal subscriptions for connection handling and client publish).
+	//
+	// To simulate this here, we use a NATS connection and send a PubMsg manually,
+	// followed by the regular stan.Connect(). Then we wait for the response on
+	// the PubMsg and we should not get any error in PubAck.
+
+	// Create a direct NATS connection
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unable to connect: %v", err)
+	}
+	defer nc.Close()
+
+	pubSubj := fmt.Sprintf("%s.foo", s.info.Publish)
+	pubReq := &pb.PubMsg{ClientID: clientName, Subject: "foo", Data: []byte("hello")}
+	pubNuid := nuid.New()
+
+	pubSub, err := nc.SubscribeSync(nats.NewInbox())
+	if err != nil {
+		t.Fatalf("Error creating sub on pub response: %v", err)
+	}
+
+	// Repeat the test, because even with bug, it would be possible
+	// that the connection request is still processed first, which
+	// would make the test pass.
+	for i := 0; i < 5; i++ {
+		func() {
+			pubReq.Guid = pubNuid.Next()
+			pubBytes, _ := pubReq.Marshal()
+
+			// First case is to make sure that we get the failure if
+			// no connection is processed.
+			resp, err := nc.Request(pubSubj, pubBytes, clientCheckTimeout+50*time.Millisecond)
+			if err != nil {
+				t.Fatalf("Error on request: %v", err)
+			}
+			pubResp := &pb.PubAck{}
+			pubResp.Unmarshal(resp.Data)
+			if pubResp.Error != ErrInvalidPubReq.Error() {
+				t.Fatalf("Expected error %q, got %q", ErrInvalidPubReq, pubResp.Error)
+			}
+			// Ensure that the notification map has been created, but is empty.
+			checkWaitOnRegisterMap(t, s, 0)
+
+			// Now resend a message, but this time don't wait for the response here,
+			// instead connect, which should cause the PubMsg to be processed correctly.
+			if err := nc.PublishRequest(pubSubj, pubSub.Subject, pubBytes); err != nil {
+				t.Fatalf("Error sending PubMsg: %v", err)
+			}
+			checkWaitOnRegisterMap(t, s, 1)
+			sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+			if err != nil {
+				t.Fatalf("Error on connect: %v", err)
+			}
+			defer sc.Close()
+
+			// Now we should get the OK for the PubMsg.
+			resp, err = pubSub.NextMsg(clientCheckTimeout + 100*time.Millisecond)
+			if err != nil {
+				t.Fatalf("Error waiting for pub response: %v", err)
+			}
+			pubResp = &pb.PubAck{}
+			pubResp.Unmarshal(resp.Data)
+			if pubResp.Error != "" {
+				t.Fatalf("Connection %d - Error on publish: %v", (i + 1), pubResp.Error)
+			}
+			checkWaitOnRegisterMap(t, s, 0)
+		}()
+	}
+}
+
+func TestPartitionsRaceOnSub(t *testing.T) {
+	setPartitionsVarsForTest()
+	defer resetDefaultPartitionsVars()
+
+	clientCheckTimeout = 150 * time.Millisecond
+	defer func() { clientCheckTimeout = defaultClientCheckTimeout }()
+
+	opts := GetDefaultOptions()
+	opts.Partitioning = true
+	opts.AddPerChannel("foo", &stores.ChannelLimits{})
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	// See description of the issue in TestPartitionsRaceOnPub.
+	// This is the same except that we are dealing with subscription requests
+	// here.
+
+	// Create a direct NATS connection
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unable to connect: %v", err)
+	}
+	defer nc.Close()
+
+	subSubj := s.info.Subscribe
+	subReq := &pb.SubscriptionRequest{ClientID: clientName, Subject: "foo", AckWaitInSecs: 30, MaxInFlight: 1}
+
+	subSub, err := nc.SubscribeSync(nats.NewInbox())
+	if err != nil {
+		t.Fatalf("Error creating sub on sub response: %v", err)
+	}
+
+	// Repeat the test, because even with bug, it would be possible
+	// that the connection request is still processed first, which
+	// would make the test pass.
+	for i := 0; i < 5; i++ {
+		func() {
+			subReq.Inbox = nats.NewInbox()
+			subBytes, _ := subReq.Marshal()
+
+			// First case is to make sure that we get the failure if
+			// no connection is processed.
+			resp, err := nc.Request(subSubj, subBytes, clientCheckTimeout+50*time.Millisecond)
+			if err != nil {
+				t.Fatalf("Error on request: %v", err)
+			}
+			subResp := &pb.SubscriptionResponse{}
+			subResp.Unmarshal(resp.Data)
+			if subResp.Error != ErrInvalidSubReq.Error() {
+				t.Fatalf("Expected error %q, got %q", ErrInvalidSubReq, subResp.Error)
+			}
+			// Ensure that the notification map has been created, but is empty.
+			checkWaitOnRegisterMap(t, s, 0)
+
+			// Now resend the subscription, but this time don't wait for the response here,
+			// instead connect, which should cause the SubscriptionRequest to be processed correctly.
+			if err := nc.PublishRequest(subSubj, subSub.Subject, subBytes); err != nil {
+				t.Fatalf("Error sending PubMsg: %v", err)
+			}
+			checkWaitOnRegisterMap(t, s, 1)
+			sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+			if err != nil {
+				t.Fatalf("Error on connect: %v", err)
+			}
+			defer sc.Close()
+
+			// Now we should get the OK for the PubMsg.
+			resp, err = subSub.NextMsg(clientCheckTimeout + 100*time.Millisecond)
+			if err != nil {
+				t.Fatalf("Error waiting for pub response: %v", err)
+			}
+			subResp = &pb.SubscriptionResponse{}
+			subResp.Unmarshal(resp.Data)
+			if subResp.Error != "" {
+				t.Fatalf("Connection %d - Error on subscribe: %v", (i + 1), subResp.Error)
+			}
+			checkWaitOnRegisterMap(t, s, 0)
+		}()
 	}
 }
