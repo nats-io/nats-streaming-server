@@ -1303,3 +1303,109 @@ func TestFSPanicOnStoreCloseWhileMsgsExpire(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	fs.Close()
 }
+
+func TestFSMsgIndexFileWithExtraZeros(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+	ms := c.Msgs
+	msg1 := storeMsg(t, c, "foo", 1, []byte("msg1"))
+	ms.(*FileMsgStore).RLock()
+	fname := ms.(*FileMsgStore).writeSlice.idxFile.name
+	ms.(*FileMsgStore).RUnlock()
+	s.Close()
+
+	f, err := openFileWithFlags(fname, os.O_CREATE|os.O_RDWR|os.O_APPEND)
+	if err != nil {
+		t.Fatalf("Error opening file: %v", err)
+	}
+	defer f.Close()
+	b := make([]byte, msgIndexRecSize)
+	if _, err := f.Write(b); err != nil {
+		t.Fatalf("Error adding zeros: %v", err)
+	}
+	f.Close()
+
+	// Reopen file store
+	s, rs := openDefaultFileStore(t)
+	defer s.Close()
+	rc := getRecoveredChannel(t, rs, "foo")
+	msg := msgStoreLookup(t, rc.Msgs, msg1.Sequence)
+	if !reflect.DeepEqual(msg, msg1) {
+		t.Fatalf("Expected message %v, got %v", msg1, msg)
+	}
+	// Add one more message
+	msg2 := storeMsg(t, rc, "foo", 2, []byte("msg2"))
+	s.Close()
+
+	// Reopen file store
+	s, rs = openDefaultFileStore(t)
+	defer s.Close()
+	rc = getRecoveredChannel(t, rs, "foo")
+	msgs := []*pb.MsgProto{msg1, msg2}
+	for _, omsg := range msgs {
+		msg := msgStoreLookup(t, rc.Msgs, omsg.Sequence)
+		if !reflect.DeepEqual(msg, omsg) {
+			t.Fatalf("Expected message %v, got %v", omsg, msg)
+		}
+	}
+}
+
+func TestFSMsgFileWithExtraZeros(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+	ms := c.Msgs
+	msg1 := storeMsg(t, c, "foo", 1, []byte("msg1"))
+	ms.(*FileMsgStore).RLock()
+	datname := ms.(*FileMsgStore).writeSlice.file.name
+	idxname := ms.(*FileMsgStore).writeSlice.idxFile.name
+	ms.(*FileMsgStore).RUnlock()
+	s.Close()
+
+	// Remove index file to make store use dat file on recovery
+	os.Remove(idxname)
+	// Add zeros at end of datafile
+	f, err := openFileWithFlags(datname, os.O_CREATE|os.O_RDWR|os.O_APPEND)
+	if err != nil {
+		t.Fatalf("Error opening file: %v", err)
+	}
+	defer f.Close()
+	b := make([]byte, recordHeaderSize)
+	if _, err := f.Write(b); err != nil {
+		t.Fatalf("Error adding zeros: %v", err)
+	}
+	f.Close()
+
+	// Reopen file store
+	s, rs := openDefaultFileStore(t)
+	defer s.Close()
+	rc := getRecoveredChannel(t, rs, "foo")
+	msg := msgStoreLookup(t, rc.Msgs, msg1.Sequence)
+	if !reflect.DeepEqual(msg, msg1) {
+		t.Fatalf("Expected message %v, got %v", msg1, msg)
+	}
+	// Add one more message
+	msg2 := storeMsg(t, rc, "foo", 2, []byte("msg2"))
+	s.Close()
+
+	// Reopen file store
+	s, rs = openDefaultFileStore(t)
+	defer s.Close()
+	rc = getRecoveredChannel(t, rs, "foo")
+	msgs := []*pb.MsgProto{msg1, msg2}
+	for _, omsg := range msgs {
+		msg := msgStoreLookup(t, rc.Msgs, omsg.Sequence)
+		if !reflect.DeepEqual(msg, omsg) {
+			t.Fatalf("Expected message %v, got %v", omsg, msg)
+		}
+	}
+}

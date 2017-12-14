@@ -103,6 +103,19 @@ const (
 
 	// Time to wait on starting a Raft operation.
 	raftApplyTimeout = 5 * time.Second
+
+	// In partitioning mode, when a client connects, the connect request
+	// may reach several servers, but the first response the client gets
+	// allows it to proceed with either publish or subscribe.
+	// So it is possible for a server running in partitioning mode to
+	// receives a connection request followed by a message or subscription.
+	// Although the conn request would be first in the tcp connection, it
+	// is then possible that the PubMsg or SubscriptionRequest be processed
+	// first due to the use of different nats subscriptions.
+	// To prevent that, when checking if a client exists, in this particular
+	// mode we will possibly wait to be notified when the client has been
+	// registered. This is the default duration for this wait.
+	defaultClientCheckTimeout = 2 * time.Second
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -139,7 +152,10 @@ var (
 // A Regexp is safe for concurrent use by multiple goroutines.
 var clientIDRegEx *regexp.Regexp
 
-var testAckWaitIsInMillisecond bool
+var (
+	testAckWaitIsInMillisecond bool
+	clientCheckTimeout         = defaultClientCheckTimeout
+)
 
 func computeAckWait(wait int32) time.Duration {
 	unit := time.Second
@@ -1395,7 +1411,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// Ensure store type option is in upper-case
 	sOpts.StoreType = strings.ToUpper(sOpts.StoreType)
 
-	// Create the store. So far either memory or file-based.
+	// Create the store.
 	switch sOpts.StoreType {
 	case stores.TypeFile:
 		store, err = stores.NewFileStore(s.log, sOpts.FilestoreDir, storeLimits,
@@ -2739,7 +2755,18 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	// TODO: there is a race where the connection might not be replicated yet
 	// on this server, resulting in an invalid client id. This causes the
 	// publish to fail, so the client must retry.
-	if !s.clients.isValid(pm.ClientID) {
+	// Make sure we have guid, valid channel name
+	valid := false
+	if s.partitions != nil {
+		// In partitioning  it is possible that we get there before
+		// the connect request is processed. If so, make sure we wait
+		// for conn request	to be processed first.
+		// Check clientCheckTimeout doc for details.
+		valid = s.clients.isValidWithTimeout(pm.ClientID, clientCheckTimeout)
+	} else {
+		valid = s.clients.isValid(pm.ClientID)
+	}
+	if !valid {
 		s.log.Errorf("Received invalid client publish message %v", pm)
 		s.sendPublishErr(m.Reply, pm.Guid, ErrInvalidPubReq)
 		return
@@ -4102,6 +4129,14 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// If not, the client will get a subscription request timeout.
 	if s.partitions != nil {
 		if r := s.partitions.sl.Match(sr.Subject); len(r) == 0 {
+			return
+		}
+		// Also check that the connection request has already
+		// been processed. Check clientCheckTimeout doc for details.
+		if !s.clients.isValidWithTimeout(sr.ClientID, clientCheckTimeout) {
+			s.log.Errorf("[Client:%s] Rejecting subscription on %q: connection not created yet",
+				sr.ClientID, sr.Subject)
+			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubReq)
 			return
 		}
 	}

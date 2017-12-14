@@ -550,8 +550,9 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.DurationVar(&sopts.Clustering.GossipInterval, "cluster_gossip_interval", DefaultGossipInterval, "stan.Clustering.Clustering.GossipInterval")
 	fs.StringVar(&sopts.SQLStoreOpts.Driver, "sql_driver", "", "SQL Driver")
 	fs.StringVar(&sopts.SQLStoreOpts.Source, "sql_source", "", "SQL Data Source")
-	fs.BoolVar(&sopts.SQLStoreOpts.NoCaching, "sql_no_caching", false, "Enable/Disable caching")
-	fs.IntVar(&sopts.SQLStoreOpts.MaxOpenConns, "sql_max_open_conns", 0, "Max opened connections to the database")
+	defSQLOpts := stores.DefaultSQLStoreOptions()
+	fs.BoolVar(&sopts.SQLStoreOpts.NoCaching, "sql_no_caching", defSQLOpts.NoCaching, "Enable/Disable caching")
+	fs.IntVar(&sopts.SQLStoreOpts.MaxOpenConns, "sql_max_open_conns", defSQLOpts.MaxOpenConns, "Max opened connections to the database")
 
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
 	// It will be augmented with NATS specific flags and call fs.Parse(args) for us.
