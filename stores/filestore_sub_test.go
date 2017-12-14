@@ -793,3 +793,78 @@ func TestFSCreateSubNotCountedOnError(t *testing.T) {
 		t.Fatalf("Expected subs map to be empty, got %v", lm)
 	}
 }
+
+func TestFSSubscriptionsFileWithExtraZeros(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+	ss := c.Subs
+	sub1 := &spb.SubState{
+		ClientID:      "me",
+		Inbox:         "inbox",
+		AckInbox:      "ackInbox",
+		AckWaitInSecs: 10,
+	}
+	if err := ss.CreateSub(sub1); err != nil {
+		t.Fatalf("Error creating sub: %v", err)
+	}
+	ss.(*FileSubStore).RLock()
+	fname := ss.(*FileSubStore).file.name
+	ss.(*FileSubStore).RUnlock()
+
+	s.Close()
+
+	f, err := openFileWithFlags(fname, os.O_CREATE|os.O_RDWR|os.O_APPEND)
+	if err != nil {
+		t.Fatalf("Error opening file: %v", err)
+	}
+	defer f.Close()
+	b := make([]byte, recordHeaderSize)
+	if _, err := f.Write(b); err != nil {
+		t.Fatalf("Error adding zeros: %v", err)
+	}
+	f.Close()
+
+	// Reopen file store
+	s, rs := openDefaultFileStore(t)
+	defer s.Close()
+	c = getRecoveredChannel(t, rs, "foo")
+	ss = c.Subs
+	subs := getRecoveredSubs(t, rs, "foo", 1)
+	sub := subs[0]
+	if !reflect.DeepEqual(sub.Sub, sub1) {
+		t.Fatalf("Expected subscription %v, got %v", sub1, sub.Sub)
+	}
+	// Add one more sub
+	sub2 := &spb.SubState{
+		ClientID:      "me2",
+		Inbox:         "inbox2",
+		AckInbox:      "ackInbox2",
+		AckWaitInSecs: 12,
+	}
+	if err := ss.CreateSub(sub2); err != nil {
+		t.Fatalf("Error creating sub: %v", err)
+	}
+	s.Close()
+
+	// Reopen file store
+	s, rs = openDefaultFileStore(t)
+	defer s.Close()
+	subs = getRecoveredSubs(t, rs, "foo", 2)
+	for _, sub := range subs {
+		// subs is an array but created from a map, so order is not guaranteed.
+		var osub *spb.SubState
+		if sub.Sub.ID == sub1.ID {
+			osub = sub1
+		} else {
+			osub = sub2
+		}
+		if !reflect.DeepEqual(sub.Sub, osub) {
+			t.Fatalf("Expected subscription %v, got %v", osub, sub.Sub)
+		}
+	}
+}
