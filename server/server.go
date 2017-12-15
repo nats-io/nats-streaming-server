@@ -115,7 +115,7 @@ const (
 	// To prevent that, when checking if a client exists, in this particular
 	// mode we will possibly wait to be notified when the client has been
 	// registered. This is the default duration for this wait.
-	defaultClientCheckTimeout = 2 * time.Second
+	defaultClientCheckTimeout = 4 * time.Second
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -2751,17 +2751,12 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 
 	// Check if the client is valid. We do this after the clustered check so
 	// that only the leader performs this check.
-	//
-	// TODO: there is a race where the connection might not be replicated yet
-	// on this server, resulting in an invalid client id. This causes the
-	// publish to fail, so the client must retry.
-	// Make sure we have guid, valid channel name
 	valid := false
-	if s.partitions != nil {
-		// In partitioning  it is possible that we get there before
-		// the connect request is processed. If so, make sure we wait
-		// for conn request	to be processed first.
-		// Check clientCheckTimeout doc for details.
+	if s.partitions != nil || s.isClustered() {
+		// In partitioning or clustering it is possible that we get there
+		// before the connect request is processed. If so, make sure we wait
+		// for conn request	to be processed first. Check clientCheckTimeout
+		// doc for details.
 		valid = s.clients.isValidWithTimeout(pm.ClientID, clientCheckTimeout)
 	} else {
 		valid = s.clients.isValid(pm.ClientID)
