@@ -160,7 +160,7 @@ message ChannelSnapshot {
 // SubscriptionSnaphot is the snapshot of a subscription
 message SubscriptionSnapshot {
   SubState        State       = 1; // Subscription data.
-  repeated uint64 AcksPending = 3; // Sequences of unacknowledged messages.
+  repeated uint64 AcksPending = 2; // Sequences of unacknowledged messages.
 }
 
 // ChannelGossip contains info about channels that is periodically gossiped

@@ -271,7 +271,7 @@ func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, err
 		return nil, err
 	}
 	subToAck := true
-	if s.isClustered() {
+	if s.isClustered {
 		if s.isLeader() {
 			if err := c.subToSnapshotRestoreRequests(); err != nil {
 				delete(cs.channels, name)
@@ -525,7 +525,9 @@ type StanServer struct {
 	log   *logger.StanLogger
 
 	// Raft group.
-	raft *raftNode
+	raft        *raftNode
+	raftLogging bool
+	isClustered bool
 
 	connectSub  *nats.Subscription
 	closeSub    *nats.Subscription
@@ -533,10 +535,6 @@ type StanServer struct {
 	subSub      *nats.Subscription
 	subCloseSub *nats.Subscription
 	subUnsubSub *nats.Subscription
-}
-
-func (s *StanServer) isClustered() bool {
-	return s.opts.Clustering.Clustered
 }
 
 func (s *StanServer) isLeader() bool {
@@ -583,13 +581,14 @@ type subState struct {
 	acksPending  map[uint64]int64 // key is message sequence, value is expiration time.
 	store        stores.SubStore  // for easy access to the store interface
 
+	savedClientID string // Used only for closed durables in Clustering mode.
+
 	// So far, compacting these booleans into a byte flag would not save space.
 	// May change if we need to add more.
 	initialized bool // false until the subscription response has been sent to prevent data to be sent too early.
 	stalled     bool
 	newOnHold   bool // Prevents delivery of new msgs until old are redelivered (on restart)
 	hasFailedHB bool // This is set when server sends heartbeat to this subscriber's client.
-	removed     bool // This is true when subStore.Remove() has been invoked for this subscription.
 }
 
 // Looks up, or create a new channel if it does not exist
@@ -724,13 +723,14 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	sub.Lock()
 	subject := sub.subject
 	clientID := sub.ClientID
-	sub.removed = true
 	sub.clearAckTimer()
 	durableKey := ""
 	// Do this before clearing the sub.ClientID since this is part of the key!!!
 	if sub.isDurableSubscriber() {
 		durableKey = sub.durableKey()
 	}
+	// This is needed when doing a snapshot in clustering mode.
+	sub.savedClientID = sub.ClientID
 	// Clear the subscriptions clientID
 	sub.ClientID = ""
 	ackInbox := sub.AckInbox
@@ -1160,7 +1160,7 @@ func (s *StanServer) createNatsConnections(sOpts *Options, nOpts *server.Options
 	if err == nil && sOpts.FTGroupName != "" {
 		s.ftnc, err = s.createNatsClientConn("ft", sOpts, nOpts)
 	}
-	if err == nil && s.isClustered() {
+	if err == nil && s.isClustered {
 		s.ncr, err = s.createNatsClientConn("raft", sOpts, nOpts)
 		if err == nil {
 			s.ncsr, err = s.createNatsClientConn("raft_snap", sOpts, nOpts)
@@ -1211,6 +1211,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		startTime:     time.Now(),
 		log:           logger.NewStanLogger(),
 		shutdownCh:    make(chan struct{}),
+		isClustered:   sOpts.Clustering.Clustered,
+		raftLogging:   sOpts.Clustering.RaftLogging,
 	}
 
 	// If a custom logger is provided, use this one, otherwise, check
@@ -1327,7 +1329,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		}()
 	} else {
 		state := Standalone
-		if s.isClustered() {
+		if s.isClustered {
 			state = Clustered
 		}
 		if err := s.start(state); err != nil {
@@ -1438,7 +1440,7 @@ func (s *StanServer) start(runningState State) error {
 		// previously not clustered, return an error. This is not allowed
 		// because there is preexisting state that is not represented in the
 		// Raft log.
-		if s.isClustered() && s.info.NodeID == "" {
+		if s.isClustered && s.info.NodeID == "" {
 			return ErrClusteredRestart
 		}
 		// Use recovered clustering node ID.
@@ -1497,7 +1499,7 @@ func (s *StanServer) start(runningState State) error {
 	}
 
 	// If clustered, start Raft group and start gossiping channels.
-	if s.isClustered() {
+	if s.isClustered {
 		// Default Raft log path to ./<cluster-id>/<node-id> if not set.
 		if s.opts.Clustering.RaftLogPath == "" {
 			s.opts.Clustering.RaftLogPath = filepath.Join(s.opts.ID, s.opts.Clustering.NodeID)
@@ -1542,7 +1544,7 @@ func (s *StanServer) start(runningState State) error {
 	// Execute (in a go routine) redelivery of unacknowledged messages,
 	// and release newOnHold. We only do this if not clustered. If
 	// clustered, the leader will handle redelivery upon election.
-	if !s.isClustered() {
+	if !s.isClustered {
 		s.wg.Add(1)
 		go s.performRedeliveryOnStartup(recoveredSubs)
 	}
@@ -1998,7 +2000,7 @@ func (s *StanServer) ensureRunningStandAlone() error {
 
 // Binds server's view of a client with stored Client objects.
 func (s *StanServer) processRecoveredClients(clients []*stores.Client) {
-	if !s.isClustered() {
+	if !s.isClustered {
 		s.clients.recoverClients(clients)
 	}
 }
@@ -2008,7 +2010,6 @@ func (s *StanServer) processRecoveredClients(clients []*stores.Client) {
 // with the NATS server and/or clients, so no chance that the state
 // changes while we are doing this.
 func (s *StanServer) processRecoveredChannels(channels map[string]*stores.RecoveredChannel) ([]*subState, error) {
-	// We will return the recovered subscriptions
 	allSubs := make([]*subState, 0, 16)
 
 	for channelName, recoveredChannel := range channels {
@@ -2016,11 +2017,13 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 		if err != nil {
 			return nil, err
 		}
-		// Get the recovered subscriptions for this channel.
-		for _, recSub := range recoveredChannel.Subscriptions {
-			sub := s.recoverOneSub(channel, recSub.Sub, recSub.Pending, nil)
-			if sub != nil {
-				allSubs = append(allSubs, sub)
+		if !s.isClustered {
+			// Get the recovered subscriptions for this channel.
+			for _, recSub := range recoveredChannel.Subscriptions {
+				sub := s.recoverOneSub(channel, recSub.Sub, recSub.Pending, nil)
+				if sub != nil {
+					allSubs = append(allSubs, sub)
+				}
 			}
 		}
 	}
@@ -2035,6 +2038,7 @@ func (s *StanServer) recoverOneSub(c *channel, recSub *spb.SubState, pendingAcks
 		c.ss.durables[sub.durableKey()] = sub
 		// Now that the key is computed, clear ClientID otherwise
 		// durable would not be able to be restarted.
+		sub.savedClientID = sub.ClientID
 		sub.ClientID = ""
 	}
 
@@ -2130,7 +2134,7 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 	// Go through the list of clients and ensure their Hb timer is set. Only do
 	// this for standalone mode. If clustered, timers will be setup on leader
 	// election.
-	if !s.isClustered() {
+	if !s.isClustered {
 		for _, sc := range recoveredClients {
 			// Because of the loop, we need to make copy for the closure
 			cID := sc.ID
@@ -2198,7 +2202,7 @@ func (s *StanServer) initSubscriptions() error {
 
 	// Do not create internal subscriptions in clustered mode,
 	// the leader will when it gets elected.
-	if !s.isClustered() {
+	if !s.isClustered {
 		createSubOnClientPublish := true
 
 		if s.partitions != nil {
@@ -2346,7 +2350,7 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 	}
 
 	// If clustered, thread operations through Raft.
-	if s.isClustered() {
+	if s.isClustered {
 		err = s.replicateConnect(req, refresh)
 	} else {
 		err = s.processConnect(req, refresh)
@@ -2458,7 +2462,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 
 	// If clustered and we lost leadership, we should stop
 	// heartbeating as the new leader will take over.
-	if s.isClustered() && !s.isLeader() {
+	if s.isClustered && !s.isLeader() {
 		s.clients.removeClientHB(client)
 		return
 	}
@@ -2491,7 +2495,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 			// client object internally so unlock here.
 			client.Unlock()
 			// If clustered, thread operations through Raft.
-			if s.isClustered() {
+			if s.isClustered {
 				if err := s.replicateConnClose(&pb.CloseRequest{ClientID: clientID}); err != nil {
 					s.log.Errorf("[Client:%s] Failed to replicate disconnect on heartbeat expiration: %v",
 						clientID, err)
@@ -2537,6 +2541,7 @@ func (s *StanServer) closeClient(clientID string) error {
 	// This would mean that the client was already unregistered or was never
 	// registered.
 	if client == nil {
+		s.log.Errorf("Unknown client %q in close request", clientID)
 		return ErrUnknownClient
 	}
 
@@ -2565,7 +2570,7 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	s.nc.Barrier(func() {
 		var err error
 		// If clustered, thread operations through Raft.
-		if s.isClustered() {
+		if s.isClustered {
 			err = s.replicateConnClose(req)
 		} else {
 			err = s.closeClient(req.ClientID)
@@ -2627,7 +2632,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	// Check if the client is valid. We do this after the clustered check so
 	// that only the leader performs this check.
 	valid := false
-	if s.partitions != nil || s.isClustered() {
+	if s.partitions != nil || s.isClustered {
 		// In partitioning or clustering it is possible that we get there
 		// before the connect request is processed. If so, make sure we wait
 		// for conn request	to be processed first. Check clientCheckTimeout
@@ -2885,7 +2890,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 	// In cluster mode we will always redeliver to the same queue member.
 	// This is to avoid to have to replicated sent/ack when a message would
 	// be redelivered (removed from one member to be sent to another member)
-	isClustered := s.isClustered()
+	isClustered := s.isClustered
 
 	now := time.Now().UnixNano()
 	// limit is now plus a buffer of 15ms to avoid repeated timer callbacks.
@@ -3102,7 +3107,7 @@ func (s *StanServer) sendMsgToSub(c *channel, sub *subState, m *pb.MsgProto, for
 
 	// If in cluster mode, trigger replication (but leader does
 	// not wait on quorum result).
-	if s.isClustered() {
+	if s.isClustered {
 		s.replicateSentMsg(c, sub, m.Sequence)
 	}
 
@@ -3184,7 +3189,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 			succeeded        []*ioPendingMsg
 			failed           []*ioPendingMsg
 		)
-		if s.isClustered() {
+		if s.isClustered {
 			futuresMap, err = s.replicate(iopms)
 			if err != nil {
 				failed = iopms
@@ -3268,7 +3273,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 			replicateFutures := storeIOPendingMsgs(batch)
 
 			// If clustered, wait on the result of replication.
-			if s.isClustered() {
+			if s.isClustered {
 				for i, future := range replicateFutures {
 					iopm = pendingMsgs[i]
 					if err := future.Error(); err != nil {
@@ -3499,7 +3504,7 @@ func (s *StanServer) performmUnsubOrCloseSubscription(m *nats.Msg, req *pb.Unsub
 
 	s.nc.Barrier(func() {
 		var err error
-		if s.isClustered() {
+		if s.isClustered {
 			if isSubClose {
 				err = s.replicateCloseSubscription(c, req.ClientID, req.Inbox)
 			} else {
@@ -3730,13 +3735,6 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string, c *
 		err error
 		ss  = c.ss
 	)
-	if s.isClustered() {
-		// We could be here as result of replay since last snapshot.
-		// If we already have the sub from the store recovery, we are done.
-		if sub := c.ss.LookupByAckInbox(ackInbox); sub != nil {
-			return sub, nil
-		}
-	}
 	// Will be true for durable queue subscribers and durable subscribers alike.
 	isDurable := false
 	// Will be set to false for en existing durable subscriber or existing
@@ -3811,8 +3809,7 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string, c *
 			sub.newOnHold = true
 			s.setupAckTimer(sub, sub.ackWait)
 		}
-		// Clear the removed and IsClosed flags that were set during a Close()
-		sub.removed = false
+		// Clear the IsClosed flags that were set during a Close()
 		sub.IsClosed = false
 		sub.Unlock()
 
@@ -3951,7 +3948,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	)
 
 	// If clustered, thread operations through Raft.
-	if s.isClustered() {
+	if s.isClustered {
 		sub, err = s.replicateSub(sr, ackInbox, c)
 	} else {
 		sub, err = s.processSub(sr, ackInbox, c)
@@ -4138,7 +4135,7 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 
 	// If in cluster mode, replicate the ack but leader
 	// does not wait on quorum result.
-	if s.isClustered() {
+	if s.isClustered {
 		s.replicateAck(c, sub.AckInbox, sequence)
 	}
 

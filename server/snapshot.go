@@ -151,7 +151,13 @@ func (s *serverSnapshot) snapshotChannels(snap *spb.RaftSnapshot, sink raft.Snap
 		for _, dur := range c.ss.durables {
 			dur.RLock()
 			if dur.IsClosed {
+				// We need to persist a SubState with a ClientID
+				// so that we can reconstruct the durable key
+				// on recovery. So set to the saved value here
+				// and then clear it after that.
+				dur.ClientID = dur.savedClientID
 				snapSubs = append(snapSubs, snapshotASub(dur))
+				dur.ClientID = ""
 			}
 			dur.RUnlock()
 		}

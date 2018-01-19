@@ -45,22 +45,6 @@ func cleanupRaftLog(t *testing.T) {
 	}
 }
 
-// Helper function to shutdown a set of servers, but shuting down
-// the leader (if any) last.
-func shutdownAllServersWithLeaderLast(servers ...*StanServer) {
-	var leader *StanServer
-	for _, s := range servers {
-		if s.isLeader() {
-			leader = s
-			continue
-		}
-		s.Shutdown()
-	}
-	if leader != nil {
-		leader.Shutdown()
-	}
-}
-
 func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
 	opts := GetDefaultOptions()
 	opts.StoreType = stores.TypeFile
@@ -71,7 +55,7 @@ func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
 	opts.Clustering.RaftLogPath = filepath.Join(defaultRaftLog, id)
 	opts.Clustering.LogCacheSize = DefaultLogCacheSize
 	opts.Clustering.LogSnapshots = 1
-	opts.Clustering.NodeID = id
+	opts.Clustering.RaftLogging = true
 	opts.NATSServerURL = "nats://localhost:4222"
 	return opts
 }
@@ -452,8 +436,6 @@ func TestClusteringBootstrapManualConfig(t *testing.T) {
 	if len(configServers) != 3 {
 		t.Fatalf("Expected 3 servers, got %d", len(configServers))
 	}
-
-	shutdownAllServersWithLeaderLast(s1, s2, s3)
 }
 
 // Ensure basic replication works as expected. This test starts three servers
@@ -621,7 +603,6 @@ func TestClusteringBasic(t *testing.T) {
 	verifyChannelConsistency(t, channel, 10*time.Second, 1, 12, expected, servers...)
 
 	sc.Close()
-	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringNoPanicOnShutdown(t *testing.T) {
@@ -744,9 +725,65 @@ func TestClusteringLeaderFlap(t *testing.T) {
 
 	// Ensure there is a new leader.
 	getLeader(t, 10*time.Second, servers...)
+}
 
+func TestClusteringDontRecoverFSClientsAndSubs(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.TrailingLogs = 0
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.TrailingLogs = 0
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+	getLeader(t, 10*time.Second, servers...)
+
+	sc, err := stan.Connect(clusterName, clientName, stan.ConnectWait(500*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc.Close()
+
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {},
+		stan.DurableName("du")); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	s1.Shutdown()
+	s2.Shutdown()
+
+	cleanupRaftLog(t)
+
+	s1 = runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	clients := s1.clients.getClients()
+	if len(clients) != 0 {
+		t.Fatalf("Should not have recovered clients from store, got %v", clients)
+	}
+
+	c := s1.channels.get("foo")
+	c.ss.RLock()
+	dur := c.ss.durables
+	c.ss.RUnlock()
+	if len(dur) != 0 {
+		t.Fatalf("Should not have recovered subscription from store, got %v", dur)
+	}
 	sc.Close()
-	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringLogSnapshotRestore(t *testing.T) {
@@ -836,6 +873,10 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 	if _, err := sc.Subscribe(channel, func(_ *stan.Msg) {}); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
+	// And a queue subscription
+	if _, err := sc.QueueSubscribe(channel, "queue", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
 
 	// Unsubscribe the previous subscription.
 	if err := sub.Unsubscribe(); err != nil {
@@ -875,7 +916,7 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 
 	// Verify subscriptions are consistent.
 	for _, srv := range servers {
-		waitForNumSubs(t, srv, clientName, 2)
+		waitForNumSubs(t, srv, clientName, 3)
 	}
 }
 
@@ -1102,8 +1143,6 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	waitForAcks(t, follower, clientName, 1, 2)
 
 	sc.Close()
-	// Kill all the servers.
-	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringLogSnapshotRestoreConnections(t *testing.T) {
@@ -1307,7 +1346,8 @@ func TestClusteringLogSnapshotDoNotRestoreMsgsFromOwnSnapshot(t *testing.T) {
 	}
 
 	// Shutdown both servers.
-	shutdownAllServersWithLeaderLast(servers...)
+	s1.Shutdown()
+	s2.Shutdown()
 
 	// If we are able to restart, it means that we were able to
 	// recover from our own snapshot without error (the issue
@@ -1372,7 +1412,8 @@ func TestClusteringLogSnapshotRestoreClosedDurables(t *testing.T) {
 		t.Fatalf("Error during snapshot: %v", err)
 	}
 
-	shutdownAllServersWithLeaderLast(servers...)
+	s1.Shutdown()
+	s2.Shutdown()
 
 	// Restart them
 	s1 = runServerWithOpts(t, s1sOpts, nil)
@@ -1417,7 +1458,6 @@ func TestClusteringLogSnapshotRestoreClosedDurables(t *testing.T) {
 	}
 
 	sc.Close()
-	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringLogSnapshotRestoreNoSubIDCollision(t *testing.T) {
@@ -1479,7 +1519,8 @@ func TestClusteringLogSnapshotRestoreNoSubIDCollision(t *testing.T) {
 		t.Fatalf("Error during snapshot: %v", err)
 	}
 
-	shutdownAllServersWithLeaderLast(servers...)
+	s1.Shutdown()
+	s2.Shutdown()
 
 	// Restart them
 	s1 = runServerWithOpts(t, s1sOpts, nil)
@@ -1512,7 +1553,6 @@ func TestClusteringLogSnapshotRestoreNoSubIDCollision(t *testing.T) {
 	}
 
 	sc.Close()
-	shutdownAllServersWithLeaderLast(servers...)
 }
 
 // Ensures subscriptions are replicated such that when a leader fails over, the
@@ -1637,7 +1677,7 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 			servers = removeServer(servers, leader)
 
 			// Wait for the new leader to be elected.
-			servers = append(servers, getLeader(t, 10*time.Second, servers...))
+			getLeader(t, 10*time.Second, servers...)
 
 			// Publish some more messages.
 			for i := 0; i < 5; i++ {
@@ -1663,7 +1703,6 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 
 			sc1.Close()
 			sc2.Close()
-			shutdownAllServersWithLeaderLast(servers...)
 		})
 	}
 }
@@ -1742,7 +1781,7 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	servers = append(servers, getLeader(t, 10*time.Second, servers...))
+	getLeader(t, 10*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -1771,7 +1810,6 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 	}
 
 	sc.Close()
-	shutdownAllServersWithLeaderLast(servers...)
 }
 
 // Ensure unsubscribes are replicated such that when a leader fails over, the
@@ -1848,7 +1886,7 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	servers = append(servers, getLeader(t, 10*time.Second, servers...))
+	getLeader(t, 10*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -1866,7 +1904,6 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 	}
 
 	sc.Close()
-	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringRaftLogReplay(t *testing.T) {
@@ -1937,7 +1974,7 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 	time.Sleep(time.Second)
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
-	servers = append(servers, getLeader(t, 10*time.Second, servers...))
+	getLeader(t, 10*time.Second, servers...)
 
 	atomic.StoreInt32(&doAckMsg, 1)
 	// Publish one more message and wait for message to be received
@@ -1983,7 +2020,6 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 	}
 
 	sc.Close()
-	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringConnClose(t *testing.T) {
@@ -2129,7 +2165,6 @@ func TestClusteringClientCrashAndReconnect(t *testing.T) {
 	servers = removeServer(servers, leader)
 	// Wait for new leader
 	leader = getLeader(t, 10*time.Second, servers...)
-	servers = append(servers, leader)
 	clients = leader.clients.getClients()
 	if cc := len(clients); cc != 1 {
 		t.Fatalf("There should be 1 client, got %v", cc)
@@ -2145,7 +2180,6 @@ func TestClusteringClientCrashAndReconnect(t *testing.T) {
 	}
 
 	sc.Close()
-	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringHeartbeatFailover(t *testing.T) {
@@ -2218,7 +2252,7 @@ func TestClusteringHeartbeatFailover(t *testing.T) {
 	servers = removeServer(servers, leader)
 
 	// Wait for leader to be elected.
-	leader = getLeader(t, 10*time.Second, servers...)
+	getLeader(t, 10*time.Second, servers...)
 
 	// Client should still be there
 	checkClientsInAllServers(t, 1, servers...)
@@ -2230,8 +2264,6 @@ func TestClusteringHeartbeatFailover(t *testing.T) {
 	checkClientsInAllServers(t, 0, servers...)
 
 	sc.Close()
-	servers = append(servers, leader)
-	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringChannelGossip(t *testing.T) {

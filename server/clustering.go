@@ -127,7 +127,7 @@ type raftLogger struct {
 }
 
 func (rl *raftLogger) Write(b []byte) (int, error) {
-	if !rl.opts.Clustering.RaftLogging {
+	if !rl.raftLogging {
 		return len(b), nil
 	}
 	levelStart := bytes.IndexByte(b, '[')
@@ -175,6 +175,7 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, bool,
 	config := raft.DefaultConfig()
 	// For tests
 	if runningInTests {
+		config.ElectionTimeout = 100 * time.Millisecond
 		config.HeartbeatTimeout = 100 * time.Millisecond
 		config.LeaderLeaseTimeout = 50 * time.Millisecond
 	}
