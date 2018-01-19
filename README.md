@@ -569,10 +569,10 @@ nats-streaming-server -m 8222
 you should see that the NATS Streaming server starts with the HTTP monitoring port enabled:
 
 ```
-[13285] 2017/10/24 16:54:30.402549 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.6.0
+[53359] 2017/12/18 17:44:31.592661 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.7.0
 (...)
-[13285] 2017/10/24 16:54:30.402906 [INF] Starting http monitor on 0.0.0.0:8222
-[13285] 2017/10/24 16:54:30.402945 [INF] Listening for client connections on 0.0.0.0:4222
+[53359] 2017/12/18 17:44:31.594407 [INF] Starting http monitor on 0.0.0.0:8222
+[53359] 2017/12/18 17:44:31.594462 [INF] Listening for client connections on 0.0.0.0:4222
 (...)
 ```
 You can then point your browser (or curl) to [http://localhost:8222/streaming](http://localhost:8222/streaming)
@@ -589,8 +589,8 @@ various general statistics.
 {
   "cluster_id": "test-cluster",
   "server_id": "J3Odi0wXYKWKFWz5D5uhH9",
-  "version": "0.6.0",
-  "go": "go1.9.1",
+  "version": "0.7.0",
+  "go": "go1.9.2",
   "state": "STANDALONE",
   "now": "2017-06-07T14:45:29.472535266+02:00",
   "start_time": "2017-06-07T14:44:49.936077607+02:00",
@@ -851,21 +851,23 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[13242] 2017/10/24 16:53:32.621030 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.6.0
-[13242] 2017/10/24 16:53:32.621108 [INF] STREAM: ServerID: MGIvFqj7Jq6MgLFogOr2HK
-[13242] 2017/10/24 16:53:32.621111 [INF] STREAM: Go version: go1.9.1
-[13242] 2017/10/24 16:53:32.621295 [INF] Starting nats-server version 1.0.4
-[13242] 2017/10/24 16:53:32.621369 [INF] Listening for client connections on 0.0.0.0:4222
-[13242] 2017/10/24 16:53:32.621373 [INF] Server is ready
-[13242] 2017/10/24 16:53:32.906984 [INF] STREAM: Message store is MEMORY
-[13242] 2017/10/24 16:53:32.907049 [INF] STREAM: ---------- Store Limits ----------
-[13242] 2017/10/24 16:53:32.907054 [INF] STREAM: Channels:                  100 *
-[13242] 2017/10/24 16:53:32.907057 [INF] STREAM: --------- Channels Limits --------
-[13242] 2017/10/24 16:53:32.907060 [INF] STREAM:   Subscriptions:          1000 *
-[13242] 2017/10/24 16:53:32.907062 [INF] STREAM:   Messages     :       1000000 *
-[13242] 2017/10/24 16:53:32.907065 [INF] STREAM:   Bytes        :     976.56 MB *
-[13242] 2017/10/24 16:53:32.907068 [INF] STREAM:   Age          :     unlimited *
-[13242] 2017/10/24 16:53:32.907071 [INF] STREAM: ----------------------------------
+[53359] 2017/12/18 17:44:31.592661 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.7.0
+[53359] 2017/12/18 17:44:31.592893 [INF] STREAM: ServerID: jQfdbn7EtFy406tcMNrZEv
+[53359] 2017/12/18 17:44:31.592898 [INF] STREAM: Go version: go1.9.2
+[53359] 2017/12/18 17:44:31.594084 [INF] Starting nats-server version 1.0.4
+[53359] 2017/12/18 17:44:31.594462 [INF] Listening for client connections on 0.0.0.0:4222
+[53359] 2017/12/18 17:44:31.594467 [INF] Server is ready
+[53359] 2017/12/18 17:44:31.621852 [INF] STREAM: Recovering the state...
+[53359] 2017/12/18 17:44:31.621873 [INF] STREAM: No recovered state
+[53359] 2017/12/18 17:44:31.880284 [INF] STREAM: Message store is MEMORY
+[53359] 2017/12/18 17:44:31.880345 [INF] STREAM: ---------- Store Limits ----------
+[53359] 2017/12/18 17:44:31.880349 [INF] STREAM: Channels:                  100 *
+[53359] 2017/12/18 17:44:31.880353 [INF] STREAM: --------- Channels Limits --------
+[53359] 2017/12/18 17:44:31.880356 [INF] STREAM:   Subscriptions:          1000 *
+[53359] 2017/12/18 17:44:31.880359 [INF] STREAM:   Messages     :       1000000 *
+[53359] 2017/12/18 17:44:31.880362 [INF] STREAM:   Bytes        :     976.56 MB *
+[53359] 2017/12/18 17:44:31.880365 [INF] STREAM:   Age          :     unlimited *
+[53359] 2017/12/18 17:44:31.880369 [INF] STREAM: ----------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
@@ -937,6 +939,8 @@ Streaming Server File Store Options:
 Streaming Server SQL Store Options:
     --sql_driver <string>            Name of the SQL Driver ("mysql" or "postgres")
     --sql_source <string>            Datasource used when opening an SQL connection to the database
+    --sql_no_caching <bool>          Enable/Disable caching for improved performance
+    --sql_max_open_conns <int>       Maximum number of opened connections to the database
 
 Streaming Server TLS Options:
     -secure <bool>                   Use a TLS connection to the NATS server without
