@@ -2065,12 +2065,13 @@ func TestClusteringConnClose(t *testing.T) {
 	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
+	checkClientsInAllServers(t, 1, servers...)
+
 	// Wait for subscription to be registered in all 3 servers
 	for _, srv := range servers {
 		waitForNumSubs(t, srv, clientName, 1)
 	}
 
-	checkClientsInAllServers(t, 1, servers...)
 	// Close client connection
 	sc.Close()
 	// Now clients should be removed from all nodes
