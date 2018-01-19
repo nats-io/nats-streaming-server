@@ -31,10 +31,10 @@
 			"repository": "https://github.com/circonus-labs/circonusllhist",
 			"vcs": "git",
 			"revision": "6e85b9352cf0c2bb969831347491388bb3ae9c69",
-            "branch": "master",
-            "notests": true
-        },
-        {
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/go-sql-driver/mysql",
 			"repository": "https://github.com/go-sql-driver/mysql",
 			"vcs": "git",
@@ -83,14 +83,6 @@
 			"repository": "https://github.com/hashicorp/go-cleanhttp",
 			"vcs": "git",
 			"revision": "3573b8b52aa7b37b9358d966a898feb387f62437",
-            "branch": "master",
-            "notests": true
-        },
-        {
-			"importpath": "github.com/lib/pq",
-			"repository": "https://github.com/lib/pq",
-			"vcs": "git",
-			"revision": "8c6ee72f3e6bcb1542298dd5f76cb74af9742cec",
 			"branch": "master",
 			"notests": true
 		},
@@ -145,6 +137,14 @@
 			"notests": true
 		},
 		{
+			"importpath": "github.com/lib/pq",
+			"repository": "https://github.com/lib/pq",
+			"vcs": "git",
+			"revision": "8c6ee72f3e6bcb1542298dd5f76cb74af9742cec",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/matttproud/golang_protobuf_extensions/pbutil",
 			"repository": "https://github.com/matttproud/golang_protobuf_extensions",
 			"vcs": "git",
@@ -165,7 +165,7 @@
 			"importpath": "github.com/nats-io/go-nats",
 			"repository": "https://github.com/nats-io/go-nats",
 			"vcs": "git",
-			"revision": "6f06d34c19fc8607adf14668b5bb2c9465d78348",
+			"revision": "78ec4b93936d7a00e59b7f3939d8116955916d1b",
 			"branch": "master",
 			"notests": true
 		},
@@ -262,9 +262,9 @@
 			"revision": "89d4068c4f4ccfd051a041f6088b8a7b8ecccb9c",
 			"branch": "master",
 			"path": "/unix",
-            "notests": true
-        },
-        {
+			"notests": true
+		},
+		{
 			"importpath": "google.golang.org/appengine/cloudsql",
 			"repository": "https://github.com/golang/appengine",
 			"vcs": "git",
