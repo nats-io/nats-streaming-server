@@ -275,6 +275,18 @@ func (gms *genericMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, e
 	return 0, nil
 }
 
+// Empty implements the MsgStore interface
+func (gms *genericMsgStore) Empty() error {
+	gms.Lock()
+	gms.empty()
+	gms.Unlock()
+	return nil
+}
+
+func (gms *genericMsgStore) empty() {
+	gms.first, gms.last, gms.totalCount, gms.totalBytes, gms.hitLimit = 0, 0, 0, 0, false
+}
+
 // Close closes this store.
 func (gms *genericMsgStore) Close() error {
 	return nil

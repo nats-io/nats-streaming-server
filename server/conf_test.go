@@ -207,6 +207,9 @@ func TestParseConfig(t *testing.T) {
 	if opts.Clustering.GossipInterval != 10*time.Second {
 		t.Fatalf("Expected GossipInterval to be %s, got %s", 10*time.Second, opts.Clustering.GossipInterval)
 	}
+	if !opts.Clustering.RaftLogging {
+		t.Fatal("Expected RaftLogging to be true")
+	}
 	if opts.SQLStoreOpts.Driver != "mysql" {
 		t.Fatalf("Expected SQL Driver to be %q, got %q", "mysql", opts.SQLStoreOpts.Driver)
 	}
@@ -403,6 +406,8 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "cluster:{trailing_logs:false}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{sync:1}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{gossip_interval:false}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{gossip_interval:\"1h:0m\"}", wrongTimeErr)
+	expectFailureFor(t, "cluster:{raft_logging:1}", wrongTypeErr)
 	expectFailureFor(t, "sql:{driver:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{source:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{no_caching:123}", wrongTypeErr)
@@ -585,5 +590,17 @@ func TestParseConfigureOptions(t *testing.T) {
 		if i == 0 && nopts.Logtime || i == 1 && !nopts.Logtime {
 			t.Fatalf("Unexpected logtime value: %v", nopts.Logtime)
 		}
+	}
+
+	sopts, _ = mustNotFail([]string{"-clustered", "-cluster_node_id", "a", "-cluster_peers", "b,c"})
+	if !sopts.Clustering.Clustered {
+		t.Fatal("Expected Clustering.Clustered to be true")
+	}
+	if sopts.Clustering.NodeID != "a" {
+		t.Fatalf("Expected Clustering.NodeID to be %q, got %q", "a", sopts.Clustering.NodeID)
+	}
+	expectedPeers := []string{"b", "c"}
+	if !reflect.DeepEqual(sopts.Clustering.Peers, expectedPeers) {
+		t.Fatalf("Expected Cluster.Peers to be %v, got %v", expectedPeers, sopts.Clustering.Peers)
 	}
 }

@@ -22,6 +22,10 @@ import (
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
+func init() {
+	clusterSetupForTest()
+}
+
 var defaultRaftLog string
 
 func init() {
@@ -41,6 +45,22 @@ func cleanupRaftLog(t *testing.T) {
 	}
 }
 
+// Helper function to shutdown a set of servers, but shuting down
+// the leader (if any) last.
+func shutdownAllServersWithLeaderLast(servers ...*StanServer) {
+	var leader *StanServer
+	for _, s := range servers {
+		if s.isLeader() {
+			leader = s
+			continue
+		}
+		s.Shutdown()
+	}
+	if leader != nil {
+		leader.Shutdown()
+	}
+}
+
 func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
 	opts := GetDefaultOptions()
 	opts.StoreType = stores.TypeFile
@@ -51,42 +71,12 @@ func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
 	opts.Clustering.RaftLogPath = filepath.Join(defaultRaftLog, id)
 	opts.Clustering.LogCacheSize = DefaultLogCacheSize
 	opts.Clustering.LogSnapshots = 1
+	opts.Clustering.NodeID = id
 	opts.NATSServerURL = "nats://localhost:4222"
 	return opts
 }
 
-func getChannelLeader(t *testing.T, channel string, timeout time.Duration, servers ...*StanServer) *StanServer {
-	var (
-		leader   *StanServer
-		deadline = time.Now().Add(timeout)
-	)
-	for time.Now().Before(deadline) {
-		for _, s := range servers {
-			if s.state == Shutdown {
-				continue
-			}
-			c := s.channels.get(channel)
-			if c == nil || c.raft == nil {
-				continue
-			}
-			if c.isLeader() {
-				if leader != nil {
-					stackFatalf(t, "Found more than one channel leader")
-				}
-				leader = s
-			}
-		}
-		if leader != nil {
-			break
-		}
-	}
-	if leader == nil {
-		stackFatalf(t, "Unable to find the channel leader")
-	}
-	return leader
-}
-
-func getMetadataLeader(t *testing.T, timeout time.Duration, servers ...*StanServer) *StanServer {
+func getLeader(t *testing.T, timeout time.Duration, servers ...*StanServer) *StanServer {
 	var (
 		leader   *StanServer
 		deadline = time.Now().Add(timeout)
@@ -96,9 +86,9 @@ func getMetadataLeader(t *testing.T, timeout time.Duration, servers ...*StanServ
 			if s.state == Shutdown || s.raft == nil {
 				continue
 			}
-			if s.isMetadataLeader() {
+			if s.isLeader() {
 				if leader != nil {
-					stackFatalf(t, "Found more than one metadata leader")
+					stackFatalf(t, "Found more than one leader")
 				}
 				leader = s
 			}
@@ -106,29 +96,31 @@ func getMetadataLeader(t *testing.T, timeout time.Duration, servers ...*StanServ
 		if leader != nil {
 			break
 		}
+		time.Sleep(15 * time.Millisecond)
 	}
 	if leader == nil {
-		stackFatalf(t, "Unable to find the metadata leader")
+		stackFatalf(t, "Unable to find the leader")
 	}
 	return leader
 }
 
-func verifyNoLeader(t *testing.T, channel string, timeout time.Duration, servers ...*StanServer) {
+func verifyNoLeader(t *testing.T, timeout time.Duration, servers ...*StanServer) {
 	deadline := time.Now().Add(timeout)
+	var leader *StanServer
 	for time.Now().Before(deadline) {
 		for _, server := range servers {
-			c := server.channels.get(channel)
-			if c == nil || c.raft == nil {
+			if server.raft == nil {
 				continue
 			}
-			if c.isLeader() {
+			if server.isLeader() {
+				leader = server
 				time.Sleep(100 * time.Millisecond)
 				break
 			}
 		}
 		return
 	}
-	stackFatalf(t, "Found unexpected leader for channel %s", channel)
+	stackFatalf(t, "Found unexpected leader %q", leader.info.NodeID)
 }
 
 func checkClientsInAllServers(t *testing.T, expected int, servers ...*StanServer) {
@@ -173,23 +165,31 @@ func verifyChannelConsistency(t *testing.T, channel string, timeout time.Duratio
 OUTER:
 	for time.Now().Before(deadline) {
 		for _, server := range servers {
-			store := server.channels.get(channel).store.Msgs
+			c := server.channels.get(channel)
+			if c == nil {
+				time.Sleep(15 * time.Millisecond)
+				continue OUTER
+			}
+			store := c.store.Msgs
 			first, last, err := store.FirstAndLastSequence()
 			if err != nil {
 				stackFatalf(t, "Error getting sequence numbers: %v", err)
 			}
 			if first != expectedFirstSeq {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(15 * time.Millisecond)
 				continue OUTER
 			}
 			if last != expectedLastSeq {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(15 * time.Millisecond)
 				continue OUTER
 			}
 			for i := first; i <= last; i++ {
 				msg, err := store.Lookup(i)
 				if err != nil {
-					t.Fatalf("Error getting message %d: %v", i, err)
+					stackFatalf(t, "Error getting message %d: %v", i, err)
+				}
+				if msg == nil {
+					stackFatalf(t, "No stored message for i=%v expected=%v", i, expectedMsgs[i])
 				}
 				assertMsg(t, *msg, expectedMsgs[i].data, expectedMsgs[i].sequence)
 			}
@@ -281,7 +281,7 @@ func TestClusteringAssignedDurableNodeID(t *testing.T) {
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 
 	// Wait to elect self as leader.
-	leader := getMetadataLeader(t, 10*time.Second, s1)
+	leader := getLeader(t, 10*time.Second, s1)
 
 	future := leader.raft.GetConfiguration()
 	if err := future.Error(); err != nil {
@@ -300,7 +300,7 @@ func TestClusteringAssignedDurableNodeID(t *testing.T) {
 	defer s1.Shutdown()
 
 	// Wait to elect self as leader.
-	leader = getMetadataLeader(t, 10*time.Second, s1)
+	leader = getLeader(t, 10*time.Second, s1)
 
 	future = leader.raft.GetConfiguration()
 	if err := future.Error(); err != nil {
@@ -329,7 +329,7 @@ func TestClusteringDurableNodeID(t *testing.T) {
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 
 	// Wait to elect self as leader.
-	leader := getMetadataLeader(t, 10*time.Second, s1)
+	leader := getLeader(t, 10*time.Second, s1)
 
 	future := leader.raft.GetConfiguration()
 	if err := future.Error(); err != nil {
@@ -348,7 +348,7 @@ func TestClusteringDurableNodeID(t *testing.T) {
 	defer s1.Shutdown()
 
 	// Wait to elect self as leader.
-	leader = getMetadataLeader(t, 10*time.Second, s1)
+	leader = getLeader(t, 10*time.Second, s1)
 
 	future = leader.raft.GetConfiguration()
 	if err := future.Error(); err != nil {
@@ -384,7 +384,7 @@ func TestClusteringBootstrapAutoConfig(t *testing.T) {
 
 	var (
 		servers = []*StanServer{s1, s2}
-		leader  = getMetadataLeader(t, 10*time.Second, servers...)
+		leader  = getLeader(t, 10*time.Second, servers...)
 	)
 
 	// Verify configuration.
@@ -426,7 +426,7 @@ func TestClusteringBootstrapManualConfig(t *testing.T) {
 
 	var (
 		servers = []*StanServer{s1, s2}
-		leader  = getMetadataLeader(t, 10*time.Second, servers...)
+		leader  = getLeader(t, 10*time.Second, servers...)
 	)
 
 	// Verify configuration.
@@ -452,6 +452,8 @@ func TestClusteringBootstrapManualConfig(t *testing.T) {
 	if len(configServers) != 3 {
 		t.Fatalf("Expected 3 servers, got %d", len(configServers))
 	}
+
+	shutdownAllServersWithLeaderLast(s1, s2, s3)
 }
 
 // Ensure basic replication works as expected. This test starts three servers
@@ -489,8 +491,8 @@ func TestClusteringBasic(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
-	// Wait for metadata leader to be elected.
-	getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	getLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -525,13 +527,13 @@ func TestClusteringBasic(t *testing.T) {
 	stopped := []*StanServer{}
 
 	// Take down the leader.
-	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
+	leader := getLeader(t, 10*time.Second, servers...)
 	leader.Shutdown()
 	stopped = append(stopped, leader)
 	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	leader = getChannelLeader(t, channel, 10*time.Second, servers...)
+	leader = getLeader(t, 10*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -569,8 +571,7 @@ func TestClusteringBasic(t *testing.T) {
 	stopped = append(stopped, leader)
 	servers = removeServer(servers, leader)
 
-	// Creating a new connection should fail since there should not be a
-	// metadata leader.
+	// Creating a new connection should fail since there should not be a leader.
 	_, err = stan.Connect(clusterName, clientName+"-2", stan.PubAckWait(time.Second), stan.ConnectWait(time.Second))
 	if err == nil {
 		t.Fatal("Expected error on connect")
@@ -584,7 +585,7 @@ func TestClusteringBasic(t *testing.T) {
 	defer s.Shutdown()
 
 	// Wait for the new leader to be elected.
-	getChannelLeader(t, channel, 10*time.Second, servers...)
+	getLeader(t, 10*time.Second, servers...)
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -600,7 +601,7 @@ func TestClusteringBasic(t *testing.T) {
 	defer s.Shutdown()
 
 	// Ensure there is still a leader.
-	getChannelLeader(t, channel, 10*time.Second, servers...)
+	getLeader(t, 10*time.Second, servers...)
 
 	// Publish one more message.
 	if err := sc.Publish(channel, []byte("goodbye")); err != nil {
@@ -618,6 +619,9 @@ func TestClusteringBasic(t *testing.T) {
 	}
 	expected[12] = msg{sequence: 12, data: []byte("goodbye")}
 	verifyChannelConsistency(t, channel, 10*time.Second, 1, 12, expected, servers...)
+
+	sc.Close()
+	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringNoPanicOnShutdown(t *testing.T) {
@@ -642,8 +646,8 @@ func TestClusteringNoPanicOnShutdown(t *testing.T) {
 
 	servers := []*StanServer{s1, s2}
 
-	// Wait for metadata leader to be elected.
-	getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
 
 	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(time.Second), stan.ConnectWait(10*time.Second))
 	if err != nil {
@@ -655,8 +659,6 @@ func TestClusteringNoPanicOnShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
-
-	leader := getChannelLeader(t, "foo", 10*time.Second, servers...)
 
 	// Unsubscribe since this is not about that
 	sub.Unsubscribe()
@@ -707,8 +709,8 @@ func TestClusteringLeaderFlap(t *testing.T) {
 
 	servers := []*StanServer{s1, s2}
 
-	// Wait for metadata leader to be elected.
-	getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
 
 	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(2*time.Second))
 	if err != nil {
@@ -722,9 +724,6 @@ func TestClusteringLeaderFlap(t *testing.T) {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
-	// Wait for leader to be elected.
-	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
-
 	// Kill the follower.
 	var follower *StanServer
 	if s1 == leader {
@@ -736,7 +735,7 @@ func TestClusteringLeaderFlap(t *testing.T) {
 	}
 
 	// Ensure there is no leader now.
-	verifyNoLeader(t, channel, 5*time.Second, s1, s2)
+	verifyNoLeader(t, 5*time.Second, s1, s2)
 
 	// Bring the follower back up.
 	follower = runServerWithOpts(t, follower.opts, nil)
@@ -744,7 +743,10 @@ func TestClusteringLeaderFlap(t *testing.T) {
 	defer follower.Shutdown()
 
 	// Ensure there is a new leader.
-	getChannelLeader(t, channel, 10*time.Second, servers...)
+	getLeader(t, 10*time.Second, servers...)
+
+	sc.Close()
+	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringLogSnapshotRestore(t *testing.T) {
@@ -780,8 +782,8 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
-	// Wait for metadata leader to be elected.
-	getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -790,7 +792,7 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 	}
 	defer sc.Close()
 
-	// Publish a message (this will create the channel and form the Raft group).
+	// Publish a message.
 	channel := "foo"
 	if err := sc.Publish(channel, []byte("1")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
@@ -809,9 +811,6 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 		}
 	}
 
-	// Wait for leader to be elected.
-	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
-
 	// Kill a follower.
 	var follower *StanServer
 	for _, s := range servers {
@@ -823,7 +822,8 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 	follower.Shutdown()
 
 	// Publish some more messages.
-	for i := 0; i < snapshotBatchSize; i++ {
+	moreMsgsCount := 200
+	for i := 0; i < moreMsgsCount; i++ {
 		if err := sc.Publish(channel, []byte(strconv.Itoa(i+7))); err != nil {
 			t.Fatalf("Unexpected error on publish: %v", err)
 		}
@@ -843,7 +843,7 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 	}
 
 	// Force a log compaction on the leader.
-	if err := leader.channels.get(channel).raft.Snapshot().Error(); err != nil {
+	if err := leader.raft.Snapshot().Error(); err != nil {
 		t.Fatalf("Unexpected error on snapshot: %v", err)
 	}
 
@@ -858,15 +858,15 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 	}
 
 	// Ensure there is a leader before publishing.
-	getChannelLeader(t, channel, 10*time.Second, servers...)
+	getLeader(t, 10*time.Second, servers...)
 
 	// Publish a message to force a timely catch up.
-	if err := sc.Publish(channel, []byte(strconv.Itoa(snapshotBatchSize+7))); err != nil {
+	if err := sc.Publish(channel, []byte(strconv.Itoa(moreMsgsCount+7))); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
 
 	// Verify the server stores are consistent.
-	totalMsgs := uint64(snapshotBatchSize + 7)
+	totalMsgs := uint64(moreMsgsCount + 7)
 	expected := make(map[uint64]msg, totalMsgs)
 	for i := uint64(0); i < totalMsgs; i++ {
 		expected[i+1] = msg{sequence: uint64(i + 1), data: []byte(strconv.Itoa(int(i + 1)))}
@@ -877,6 +877,116 @@ func TestClusteringLogSnapshotRestore(t *testing.T) {
 	for _, srv := range servers {
 		waitForNumSubs(t, srv, clientName, 2)
 	}
+}
+
+func TestClusteringLogSnapshotRestoreAfterChannelLimitHit(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.TrailingLogs = 0
+	s1sOpts.MaxMsgs = 20
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.TrailingLogs = 0
+	s2sOpts.MaxMsgs = 20
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.Clustering.TrailingLogs = 0
+	s3sOpts.MaxMsgs = 20
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	// Create a client connection.
+	sc, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	channel := "foo"
+	// Publish some messages.
+	for i := 0; i < 5; i++ {
+		if err := sc.Publish(channel, []byte(strconv.Itoa(i+1))); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+
+	// Kill a follower.
+	var follower *StanServer
+	for _, s := range servers {
+		if leader != s {
+			follower = s
+			break
+		}
+	}
+	follower.Shutdown()
+
+	// Publish 5 more messages before doing a raft log snapshot
+	for i := 0; i < 5; i++ {
+		if err := sc.Publish(channel, []byte(strconv.Itoa(i+6))); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+
+	// Force a log compaction on the leader.
+	if err := leader.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Unexpected error on snapshot: %v", err)
+	}
+
+	// Now publish more messages so that we cause the 10 first messages to be
+	// discarded due to channel limits
+	for i := 0; i < 30; i++ {
+		if err := sc.Publish(channel, []byte(strconv.Itoa(i+11))); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+
+	// At this point, the follower should only have messages 1..5 on its log,
+	// the leader snapshot will have 1..10, but the message log has 20..40.
+
+	// Bring the follower back up.
+	follower = runServerWithOpts(t, follower.opts, nil)
+	defer follower.Shutdown()
+	for i, server := range servers {
+		if server.opts.Clustering.NodeID == follower.opts.Clustering.NodeID {
+			servers[i] = follower
+			break
+		}
+	}
+	// Force another log compaction on the leader.
+	if err := leader.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Unexpected error on snapshot: %v", err)
+	}
+
+	// Verify the server stores are consistent.
+	totalMsgs := uint64(s1sOpts.MaxMsgs)
+	expected := make(map[uint64]msg, totalMsgs)
+	for i := uint64(0); i < totalMsgs; i++ {
+		expected[i+21] = msg{sequence: uint64(i + 21), data: []byte(strconv.Itoa(int(i + 21)))}
+	}
+	verifyChannelConsistency(t, channel, 10*time.Second, 21, 40, expected, servers...)
 }
 
 func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
@@ -912,8 +1022,8 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
-	// Wait for metadata leader to be elected.
-	getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -930,13 +1040,10 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	_, err = sc.Subscribe(channel, func(msg *stan.Msg) {
 		// Do not ack.
 		ch <- msg
-	}, stan.DeliverAllAvailable(), stan.SetManualAckMode(), stan.AckWait(time.Second), stan.MaxInflight(1))
+	}, stan.DeliverAllAvailable(), stan.SetManualAckMode(), stan.AckWait(time.Second)) //, stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
-
-	// Wait for leader to be elected.
-	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Kill a follower.
 	var follower *StanServer
@@ -962,7 +1069,7 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	}
 
 	// Force a log compaction on the leader.
-	if err := leader.channels.get(channel).raft.Snapshot().Error(); err != nil {
+	if err := leader.raft.Snapshot().Error(); err != nil {
 		t.Fatalf("Unexpected error on snapshot: %v", err)
 	}
 
@@ -977,7 +1084,7 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	}
 
 	// Ensure there is a leader before publishing.
-	getChannelLeader(t, channel, 10*time.Second, servers...)
+	getLeader(t, 10*time.Second, servers...)
 
 	// Publish a message to force a timely catch up.
 	if err := sc.Publish(channel, []byte("2")); err != nil {
@@ -992,51 +1099,14 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	}
 	verifyChannelConsistency(t, channel, 10*time.Second, 1, totalMsgs, expected, servers...)
 
+	waitForAcks(t, follower, clientName, 1, 2)
+
+	sc.Close()
 	// Kill all the servers.
-	for _, s := range servers {
-		s.Shutdown()
-	}
-
-	// Restart the follower who caught up in standalone mode.
-	follower.opts.Clustering.Clustered = false
-	follower = runServerWithOpts(t, follower.opts, nil)
-	defer follower.Shutdown()
-
-	// Verify the message is redelivered and, after acking, we receive the next
-	// message.
-	select {
-	case msg := <-ch:
-		msg.Ack()
-		assertMsg(t, msg.MsgProto, []byte("1"), 1)
-	case <-time.After(10 * time.Second):
-		t.Fatal("expected msg")
-	}
-	var (
-		deadline = time.Now().Add(10 * time.Second)
-		m        *stan.Msg
-	)
-LOOP:
-	for time.Now().Before(deadline) {
-		select {
-		case msg := <-ch:
-			msg.Ack()
-			// It's possible the first message was redelivered multiple times.
-			if msg.Sequence == 1 {
-				continue
-			}
-			assertMsg(t, msg.MsgProto, []byte("2"), 2)
-			m = msg
-			break LOOP
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	if m == nil {
-		t.Fatal("expected msg")
-	}
+	shutdownAllServersWithLeaderLast(servers...)
 }
 
-func TestClusteringLogSnapshotRestoreMetadata(t *testing.T) {
+func TestClusteringLogSnapshotRestoreConnections(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 	cleanupRaftLog(t)
@@ -1069,8 +1139,8 @@ func TestClusteringLogSnapshotRestoreMetadata(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
-	// Wait for metadata leader to be elected.
-	leader := getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc1, err := stan.Connect(clusterName, clientName)
@@ -1091,9 +1161,6 @@ func TestClusteringLogSnapshotRestoreMetadata(t *testing.T) {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 	defer sub1.Unsubscribe()
-
-	// Wait for channel leader to be elected.
-	getChannelLeader(t, channel, 10*time.Second, servers...)
 
 	// Publish a message.
 	if err := sc1.Publish(channel, []byte("1")); err != nil {
@@ -1153,7 +1220,7 @@ func TestClusteringLogSnapshotRestoreMetadata(t *testing.T) {
 		t.Fatalf("Unexpected error on close: %v", err)
 	}
 
-	// Force a log compaction on the metadata leader.
+	// Force a log compaction on the leader.
 	if err := leader.raft.Snapshot().Error(); err != nil {
 		t.Fatalf("Unexpected error on snapshot: %v", err)
 	}
@@ -1169,7 +1236,7 @@ func TestClusteringLogSnapshotRestoreMetadata(t *testing.T) {
 	}
 
 	// Ensure there is a leader.
-	getMetadataLeader(t, 10*time.Second, servers...)
+	getLeader(t, 10*time.Second, servers...)
 
 	// Create one last client connection to force a timely catch up.
 	sc4, err := stan.Connect(clusterName, "tyler")
@@ -1187,6 +1254,265 @@ func TestClusteringLogSnapshotRestoreMetadata(t *testing.T) {
 		waitForNumSubs(t, srv, "alice", 0)
 		waitForNumSubs(t, srv, "tyler", 0)
 	}
+}
+
+func TestClusteringLogSnapshotDoNotRestoreMsgsFromOwnSnapshot(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.TrailingLogs = 0
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.TrailingLogs = 0
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
+	follower := s1
+	if leader == s1 {
+		follower = s2
+	}
+
+	// Create a client connection.
+	sc, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	for i := 0; i < 100; i++ {
+		if err := sc.Publish("foo", []byte("msg")); err != nil {
+			t.Fatalf("Error on publish")
+		}
+	}
+	sc.Close()
+
+	// Cause a log compaction on the follower
+	if err := follower.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error during snapshot: %v", err)
+	}
+
+	// Shutdown both servers.
+	shutdownAllServersWithLeaderLast(servers...)
+
+	// If we are able to restart, it means that we were able to
+	// recover from our own snapshot without error (the issue
+	// would be if server was trying to recover through NATS
+	// the snapshot from a peer).
+	follower = runServerWithOpts(t, follower.opts, nil)
+	follower.Shutdown()
+}
+
+func TestClusteringLogSnapshotRestoreClosedDurables(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.GossipInterval = time.Second
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.GossipInterval = time.Second
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("1")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+
+	ch := make(chan bool, 2)
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) { ch <- true },
+		stan.DurableName("dur"), stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if _, err := sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) { ch <- true },
+		stan.DurableName("dur"), stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	// Wait for each to receive the message
+	for i := 0; i < 2; i++ {
+		if err := Wait(ch); err != nil {
+			t.Fatal("Did not receive our message")
+		}
+	}
+	// Close the subs by closing the connection
+	sc.Close()
+
+	// Force a snapshot
+	if err := leader.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error during snapshot: %v", err)
+	}
+
+	shutdownAllServersWithLeaderLast(servers...)
+
+	// Restart them
+	s1 = runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	s2 = runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers = []*StanServer{s1, s2}
+	getLeader(t, 10*time.Second, servers...)
+
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Send the second message
+	if err := sc.Publish("foo", []byte("2")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+
+	msgChan := make(chan *stan.Msg, 1)
+	// Re-open the durable
+	if _, err := sc.Subscribe("foo", func(m *stan.Msg) { msgChan <- m },
+		stan.DurableName("dur"), stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	select {
+	case m := <-msgChan:
+		assertMsg(t, m.MsgProto, []byte("2"), 2)
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Should have received a message")
+	}
+	// Re-open the queue durable
+	if _, err := sc.QueueSubscribe("foo", "queue", func(m *stan.Msg) { msgChan <- m },
+		stan.DurableName("dur"), stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	select {
+	case m := <-msgChan:
+		assertMsg(t, m.MsgProto, []byte("2"), 2)
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Should have received a message")
+	}
+
+	sc.Close()
+	shutdownAllServersWithLeaderLast(servers...)
+}
+
+func TestClusteringLogSnapshotRestoreNoSubIDCollision(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.GossipInterval = time.Second
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.GossipInterval = time.Second
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Create 1 regular and 1 durable subscriptions
+	sub1, err := sc.Subscribe("foo", func(_ *stan.Msg) {})
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	sub2, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	// Close them
+	sub1.Close() // this one will disappear since it was not durable
+	sub2.Close() // this one will stay (but closed)
+
+	sc.Close()
+
+	// Get the durable subscription ID
+	var durSubID uint64
+	c := leader.channels.get("foo")
+	c.ss.RLock()
+	for _, dur := range c.ss.durables {
+		dur.RLock()
+		durSubID = dur.ID
+		dur.RUnlock()
+	}
+	c.ss.RUnlock()
+
+	// Force a snapshot
+	if err := leader.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error during snapshot: %v", err)
+	}
+
+	shutdownAllServersWithLeaderLast(servers...)
+
+	// Restart them
+	s1 = runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	s2 = runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers = []*StanServer{s1, s2}
+	leader = getLeader(t, 10*time.Second, servers...)
+
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	// Create 2 new subscriptions
+	for i := 0; i < 2; i++ {
+		if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+	}
+
+	// Get these new subscriptions
+	subs := checkSubs(t, leader, clientName, 2)
+	for _, sub := range subs {
+		sub.RLock()
+		sid := sub.ID
+		sub.RUnlock()
+		if sid == durSubID {
+			t.Fatalf("One of the new subscription got an ID same as the closed durable: %v", sid)
+		}
+	}
+
+	sc.Close()
+	shutdownAllServersWithLeaderLast(servers...)
 }
 
 // Ensures subscriptions are replicated such that when a leader fails over, the
@@ -1275,8 +1601,8 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 				checkState(t, s, Clustered)
 			}
 
-			// Wait for metadata leader to be elected.
-			getMetadataLeader(t, 10*time.Second, servers...)
+			// Wait for leader to be elected.
+			leader := getLeader(t, 10*time.Second, servers...)
 
 			// Create client connections.
 			sc1, err = stan.Connect(clusterName, clientName)
@@ -1307,12 +1633,11 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 			}
 
 			// Take down the leader.
-			leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 			leader.Shutdown()
 			servers = removeServer(servers, leader)
 
 			// Wait for the new leader to be elected.
-			getChannelLeader(t, channel, 10*time.Second, servers...)
+			servers = append(servers, getLeader(t, 10*time.Second, servers...))
 
 			// Publish some more messages.
 			for i := 0; i < 5; i++ {
@@ -1335,6 +1660,10 @@ func TestClusteringSubscriberFailover(t *testing.T) {
 					t.Fatal("expected msg")
 				}
 			}
+
+			sc1.Close()
+			sc2.Close()
+			shutdownAllServersWithLeaderLast(servers...)
 		})
 	}
 }
@@ -1371,8 +1700,8 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
-	// Wait for metadata leader to be elected.
-	getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -1390,7 +1719,7 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 	ch := make(chan *stan.Msg, 100)
 	sub, err := sc.Subscribe(channel, func(msg *stan.Msg) {
 		ch <- msg
-	}, stan.DeliverAllAvailable(), stan.DurableName("durable"), stan.MaxInflight(1), stan.AckWait(2*time.Second))
+	}, stan.DeliverAllAvailable(), stan.DurableName("durable"), stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Error subscribing: %v", err)
 	}
@@ -1409,12 +1738,11 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 	}
 
 	// Take down the leader.
-	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	getChannelLeader(t, channel, 10*time.Second, servers...)
+	servers = append(servers, getLeader(t, 10*time.Second, servers...))
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -1426,7 +1754,7 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 	// Reopen subscription.
 	sub, err = sc.Subscribe(channel, func(msg *stan.Msg) {
 		ch <- msg
-	}, stan.DurableName("durable"), stan.MaxInflight(1), stan.AckWait(2*time.Second))
+	}, stan.DurableName("durable"), stan.MaxInflight(1))
 	if err != nil {
 		t.Fatalf("Error subscribing: %v", err)
 	}
@@ -1441,6 +1769,9 @@ func TestClusteringUpdateDurableSubscriber(t *testing.T) {
 			t.Fatal("expected msg")
 		}
 	}
+
+	sc.Close()
+	shutdownAllServersWithLeaderLast(servers...)
 }
 
 // Ensure unsubscribes are replicated such that when a leader fails over, the
@@ -1475,8 +1806,8 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
-	// Wait for metadata leader to be elected.
-	getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -1513,12 +1844,11 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 	}
 
 	// Take down the leader.
-	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
 
 	// Wait for the new leader to be elected.
-	getChannelLeader(t, channel, 10*time.Second, servers...)
+	servers = append(servers, getLeader(t, 10*time.Second, servers...))
 
 	// Publish some more messages.
 	for i := 0; i < 5; i++ {
@@ -1534,6 +1864,9 @@ func TestClusteringReplicateUnsubscribe(t *testing.T) {
 		t.Fatal("Unexpected msg")
 	default:
 	}
+
+	sc.Close()
+	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringRaftLogReplay(t *testing.T) {
@@ -1566,8 +1899,8 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
-	// Wait for metadata leader to be elected.
-	getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -1602,10 +1935,9 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 	}
 	// And for the ack to be replicated
 	time.Sleep(time.Second)
-	leader := getChannelLeader(t, channel, 10*time.Second, servers...)
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
-	getChannelLeader(t, channel, 10*time.Second, servers...)
+	servers = append(servers, getLeader(t, 10*time.Second, servers...))
 
 	atomic.StoreInt32(&doAckMsg, 1)
 	// Publish one more message and wait for message to be received
@@ -1649,6 +1981,9 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 	if acksPending != 0 {
 		t.Fatalf("Expected 0 pending msgs, got %v", acksPending)
 	}
+
+	sc.Close()
+	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringConnClose(t *testing.T) {
@@ -1681,8 +2016,8 @@ func TestClusteringConnClose(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
-	// Wait for metadata leader to be elected.
-	getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	getLeader(t, 10*time.Second, servers...)
 
 	// Create a client connection.
 	sc, err := stan.Connect(clusterName, clientName)
@@ -1736,8 +2071,8 @@ func TestClusteringClientCrashAndReconnect(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
-	// Wait for metadata leader to be elected.
-	leader := getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
 
 	// Create NATS connection so we can simulate client stopping
 	// responding to HBs.
@@ -1788,12 +2123,13 @@ func TestClusteringClientCrashAndReconnect(t *testing.T) {
 		t.Fatalf("Took too long to be able to connect: %v", duration)
 	}
 
-	// Now kill the metadata leader and ensure connection is known
+	// Now kill the leader and ensure connection is known
 	// to the new leader.
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
 	// Wait for new leader
-	leader = getMetadataLeader(t, 10*time.Second, servers...)
+	leader = getLeader(t, 10*time.Second, servers...)
+	servers = append(servers, leader)
 	clients = leader.clients.getClients()
 	if cc := len(clients); cc != 1 {
 		t.Fatalf("There should be 1 client, got %v", cc)
@@ -1807,6 +2143,9 @@ func TestClusteringClientCrashAndReconnect(t *testing.T) {
 	if hbInbox == cli.info.HbInbox {
 		t.Fatalf("Looks like restarted client was not properly registered")
 	}
+
+	sc.Close()
+	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringHeartbeatFailover(t *testing.T) {
@@ -1848,8 +2187,8 @@ func TestClusteringHeartbeatFailover(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
-	// Wait for metadata leader to be elected.
-	leader := getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
 
 	nc, err := nats.Connect(nats.DefaultURL)
 	if err != nil {
@@ -1878,8 +2217,8 @@ func TestClusteringHeartbeatFailover(t *testing.T) {
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
 
-	// Wait for metadata leader to be elected.
-	getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader = getLeader(t, 10*time.Second, servers...)
 
 	// Client should still be there
 	checkClientsInAllServers(t, 1, servers...)
@@ -1889,6 +2228,10 @@ func TestClusteringHeartbeatFailover(t *testing.T) {
 
 	// Check that the server closes the connection
 	checkClientsInAllServers(t, 0, servers...)
+
+	sc.Close()
+	servers = append(servers, leader)
+	shutdownAllServersWithLeaderLast(servers...)
 }
 
 func TestClusteringChannelGossip(t *testing.T) {
@@ -1924,8 +2267,8 @@ func TestClusteringChannelGossip(t *testing.T) {
 		checkState(t, s, Clustered)
 	}
 
-	// Wait for metadata leader to be elected.
-	leader := getMetadataLeader(t, 10*time.Second, servers...)
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
 
 	sc, err := stan.Connect(clusterName, clientName)
 	if err != nil {
@@ -1937,9 +2280,6 @@ func TestClusteringChannelGossip(t *testing.T) {
 	if err := sc.Publish("foo", []byte("hello")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
 	}
-
-	// Wait for channel leader to be elected.
-	getChannelLeader(t, "foo", 10*time.Second, servers...)
 
 	// Ensure channel is replicated.
 	checkChannelsInAllServers(t, []string{"foo"}, 10*time.Second, servers...)

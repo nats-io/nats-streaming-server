@@ -250,6 +250,11 @@ func parseCluster(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.Clustering.GossipInterval = dur
+		case "raft_logging":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.Clustering.RaftLogging = v.(bool)
 		}
 	}
 	return nil
@@ -547,6 +552,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&sopts.Clustering.LogSnapshots, "cluster_log_snapshots", DefaultLogSnapshots, "stan.Clustering.LogSnapshots")
 	fs.Int64Var(&sopts.Clustering.TrailingLogs, "cluster_trailing_logs", DefaultTrailingLogs, "stan.Clustering.TrailingLogs")
 	fs.BoolVar(&sopts.Clustering.Sync, "cluster_sync", false, "stan.Clustering.Sync")
+	fs.BoolVar(&sopts.Clustering.RaftLogging, "cluster_raft_logging", false, "")
 	fs.DurationVar(&sopts.Clustering.GossipInterval, "cluster_gossip_interval", DefaultGossipInterval, "stan.Clustering.Clustering.GossipInterval")
 	fs.StringVar(&sopts.SQLStoreOpts.Driver, "sql_driver", "", "SQL Driver")
 	fs.StringVar(&sopts.SQLStoreOpts.Source, "sql_source", "", "SQL Data Source")

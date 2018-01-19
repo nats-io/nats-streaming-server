@@ -213,6 +213,15 @@ func (ms *MemoryMsgStore) removeFirstMsg() {
 	ms.first++
 }
 
+// Empty implements the MsgStore interface
+func (ms *MemoryMsgStore) Empty() error {
+	ms.Lock()
+	ms.empty()
+	ms.msgs = make(map[uint64]*pb.MsgProto)
+	ms.Unlock()
+	return nil
+}
+
 // Close implements the MsgStore interface
 func (ms *MemoryMsgStore) Close() error {
 	ms.Lock()

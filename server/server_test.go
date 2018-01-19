@@ -311,7 +311,7 @@ func waitForAcks(t tLogger, s *StanServer, ID string, subID uint64, expected int
 	if sub == nil {
 		stackFatalf(t, "Subscription %v not found", subID)
 	}
-	waitForCount(t, 0, func() (string, int) {
+	waitForCount(t, expected, func() (string, int) {
 		sub.RLock()
 		count := len(sub.acksPending)
 		sub.RUnlock()

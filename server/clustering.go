@@ -3,7 +3,6 @@
 package server
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -15,9 +14,14 @@ import (
 	"github.com/hashicorp/raft-boltdb"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/nats-on-a-log"
-
 	"github.com/nats-io/nats-streaming-server/spb"
 )
+
+var runningInTests bool
+
+func clusterSetupForTest() {
+	runningInTests = true
+}
 
 // ClusteringOptions contains STAN Server options related to clustering.
 type ClusteringOptions struct {
@@ -31,10 +35,12 @@ type ClusteringOptions struct {
 	TrailingLogs   int64         // Number of logs left after a snapshot.
 	Sync           bool          // Do a file sync after every write to the Raft log and message store.
 	GossipInterval time.Duration // Interval in which to gossip channels to the cluster (plus some random delay).
+	RaftLogging    bool          // Enable logging of Raft library (disabled by default since really verbose).
 }
 
 // raftNode is a handle to a member in a Raft consensus group.
 type raftNode struct {
+	leader uint32
 	*raft.Raft
 	store     *raftboltdb.BoltStore
 	transport *raft.NetworkTransport
@@ -48,10 +54,10 @@ func (r *raftNode) shutdown() error {
 	if err := r.Raft.Shutdown().Error(); err != nil {
 		return err
 	}
-	if err := r.store.Close(); err != nil {
+	if err := r.transport.Close(); err != nil {
 		return err
 	}
-	if err := r.transport.Close(); err != nil {
+	if err := r.store.Close(); err != nil {
 		return err
 	}
 	if err := r.joinSub.Unsubscribe(); err != nil {
@@ -60,11 +66,10 @@ func (r *raftNode) shutdown() error {
 	return r.logInput.Close()
 }
 
-// createMetadataRaftNode creates and starts a new Raft node for the metadata
-// group.
-func (s *StanServer) createMetadataRaftNode(fsm raft.FSM) (*raftNode, error) {
+// createRaftNode creates and starts a new Raft node.
+func (s *StanServer) createServerRaftNode(fsm raft.FSM) (*raftNode, error) {
 	var (
-		name                     = "_metadata"
+		name                     = "stan"
 		addr                     = s.getClusteringAddr(name)
 		node, existingState, err = s.createRaftNode(name, fsm)
 	)
@@ -117,43 +122,33 @@ func (s *StanServer) createMetadataRaftNode(fsm raft.FSM) (*raftNode, error) {
 	return node, nil
 }
 
-// createChannelRaftNode creates and starts a new Raft node for the given
-// channel group.
-func (s *StanServer) createChannelRaftNode(channel string, fsm raft.FSM) (*raftNode, error) {
-	node, existingState, err := s.createRaftNode(channel, fsm)
-	if err != nil {
-		return nil, err
-	}
-	// Pull configuration from metadata group if there is no existing state.
-	if !existingState {
-		// If the metadata Raft node is nil, this indicates we're recovering a
-		// channel. If there is no existing state, it means we've recovered a
-		// channel without recovering any Raft state.
-		if s.raft == nil {
-			panic("Recovered channel but there was no recovered Raft state for it")
-		}
-		future := s.raft.GetConfiguration()
-		if err := future.Error(); err != nil {
-			node.shutdown()
-			return nil, fmt.Errorf("failed to get config from metadata Raft: %v", err)
-		}
-		servers := make([]raft.Server, len(future.Configuration().Servers))
-		for i, p := range future.Configuration().Servers {
-			servers[i] = raft.Server{
-				ID:       p.ID,
-				Address:  raft.ServerAddress(s.getClusteringPeerAddr(channel, string(p.ID))),
-				Suffrage: p.Suffrage,
-			}
-		}
-		s.log.Debugf("Bootstrapping Raft group %s using metadata configuration", channel)
-		config := raft.Configuration{Servers: servers}
-		if err := node.BootstrapCluster(config).Error(); err != nil {
-			node.Shutdown()
-			return nil, fmt.Errorf("failed to bootstrap Raft node: %v", err)
-		}
-	}
-	return node, nil
+type raftLogger struct {
+	*StanServer
 }
+
+func (rl *raftLogger) Write(b []byte) (int, error) {
+	if !rl.opts.Clustering.RaftLogging {
+		return len(b), nil
+	}
+	levelStart := bytes.IndexByte(b, '[')
+	if levelStart != -1 {
+		switch b[levelStart+1] {
+		case 'D': // [DEBUG]
+			rl.log.Tracef("%s", b[levelStart+8:])
+		case 'I': // [INFO]
+			rl.log.Noticef("%s", b[levelStart+7:])
+		case 'W': // [WARN]
+			rl.log.Noticef("%s", b[levelStart+7:])
+		case 'E': // [ERR]
+			rl.log.Errorf("%s", b[levelStart+6:])
+		default:
+			rl.log.Noticef("%s", b)
+		}
+	}
+	return len(b), nil
+}
+
+func (rl *raftLogger) Close() error { return nil }
 
 // createRaftNode creates and starts a new Raft node with the given name and FSM.
 func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, bool, error) {
@@ -178,45 +173,16 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, bool,
 
 	addr := s.getClusteringAddr(name)
 	config := raft.DefaultConfig()
+	// For tests
+	if runningInTests {
+		config.HeartbeatTimeout = 100 * time.Millisecond
+		config.LeaderLeaseTimeout = 50 * time.Millisecond
+	}
 	config.LocalID = raft.ServerID(s.opts.Clustering.NodeID)
 	config.TrailingLogs = uint64(s.opts.Clustering.TrailingLogs)
 
-	// FIXME: Send output of Raft logger
-	// Raft expects a *log.Logger so can not swap that with another one,
-	// but we can modify the outputs to which the Raft logger is writing.
-	//config.Logger = s.log
-	logReader, logWriter := io.Pipe()
+	logWriter := &raftLogger{s}
 	config.LogOutput = logWriter
-	bufr := bufio.NewReader(logReader)
-	go func() {
-		for {
-			line, _, err := bufr.ReadLine()
-			if err != nil {
-				if err != io.EOF {
-					s.log.Errorf("error while reading piped output from Raft log: %s", err)
-				}
-				return
-			}
-
-			fields := bytes.Fields(line)
-			level := string(fields[2])
-			raftLogFields := fields[4:]
-			raftLog := string(bytes.Join(raftLogFields, []byte(" ")))
-
-			switch level {
-			case "[DEBUG]":
-				s.log.Tracef("%v", raftLog)
-			case "[INFO]":
-				s.log.Noticef("%v", raftLog)
-			case "[WARN]":
-				s.log.Noticef("%v", raftLog)
-			case "[ERROR]":
-				s.log.Fatalf("%v", raftLog)
-			default:
-				s.log.Noticef("%v", raftLog)
-			}
-		}
-	}()
 
 	snapshotStore, err := raft.NewFileSnapshotStore(path, s.opts.Clustering.LogSnapshots, logWriter)
 	if err != nil {
@@ -230,6 +196,8 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, bool,
 		store.Close()
 		return nil, false, err
 	}
+	// Make the snapshot process never timeout... check (s *serverSnapshot).Persist() for details
+	transport.TimeoutScale = 1
 
 	// Set up a channel for reliable leader notifications.
 	raftNotifyCh := make(chan bool, 1)

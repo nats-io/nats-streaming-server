@@ -65,9 +65,9 @@ message ClientDelete {
 
 message CtrlMsg {
   enum Type {
-    SubUnsubscribe = 0; // Subscription Unsubscribe request.
-    SubClose       = 1; // Subscription Close request.
-    ConnClose      = 2; // Connection Close request.
+    SubUnsubscribe = 0; // DEPRECATED.
+    SubClose       = 1; // DEPRECATED.
+    ConnClose      = 2; // DEPRECATED.
     FTHeartbeat    = 3; // FT heartbeats.
     Partitioning   = 4; // When partitioning is enabled, server sends this to other servers with same cluster ID.
   }
@@ -75,9 +75,7 @@ message CtrlMsg {
   string  ServerID = 2; // Allows a server to detect if it is the intended receipient.
   bytes   Data     = 3; // Optional bytes that carries context information.    
 
-  // A control message may be sent multiple times (to different internal subscriptions).
-  // This field - if set - is used by the server to reference count all messages with same RefID.
-  string  RefID    = 4; 
+  string  RefID    = 4; // DEPRECATED.
 }
 
 // RaftJoinRequest is a request to join a Raft group.
@@ -104,14 +102,13 @@ message RaftOperation {
     Disconnect         = 7; // Client disconnect.
   }
   Type               OpType           = 1; // Log message type.
-  string             Leader           = 2; // The node that proposed the operation.
-  Batch              PublishBatch     = 3; // Publish operation data.
-  AddSubscription    Sub              = 4; // Subscribe operation data.
-  RemoveSubscription Unsub            = 5; // Close/Remove Subscription operation data.
-  AckMessage         AckMsg           = 6; // Ack operation data.
-  AckMessage         SendMsg          = 7; // Send operation data.
-  AddClient          ClientConnect    = 8; // Connect operation data.
-  RemoveClient       ClientDisconnect = 9; // Disconnect operation data.       
+  Batch              PublishBatch     = 2; // Publish operation data.
+  AddSubscription    Sub              = 3; // Subscribe operation data.
+  RemoveSubscription Unsub            = 4; // Close/Remove Subscription operation data.
+  AckMessage         AckMsg           = 5; // Ack operation data.
+  AckMessage         SendMsg          = 6; // Send operation data.
+  AddClient          ClientConnect    = 7; // Connect operation data.
+  pb.CloseRequest    ClientDisconnect = 8; // Disconnect operation data.
 }
 
 // Batch is a batch of messages for replication.
@@ -127,58 +124,43 @@ message AddSubscription {
 
 // RemoveSubscription is used to remove or close a client subscription.
 message RemoveSubscription {
-  string AckInbox = 1; // Subscription ack inbox.
-  string ClientID = 2; // Client ID of subscriber.
+  string Channel  = 1; // Subscription channel.
+  string AckInbox = 2; // Subscription ack inbox.
+  string ClientID = 3; // Client ID of subscriber.
 }
 
 // AckMessage is used to replicate a message ack.
 message AckMessage {
-  string AckInbox = 1; // Subscription ack inbox.
-  uint64 Sequence = 2; // Message sequence to ack.
+  string Channel  = 1; // Subscription channel.
+  string AckInbox = 2; // Subscription ack inbox.
+  uint64 Sequence = 3; // Message sequence to ack.
 }
 
 // AddClient is used to replicate a new client connection.
 message AddClient {
-  string ClientID       = 1; // Client ID of connection.
-  string HeartbeatInbox = 2; // Inbox to send heartbeats to.
-  bool   Refresh        = 3; // Whether or not this is an existing client being refreshed.
+  pb.ConnectRequest Request = 1; // Connection request to replicate
+  bool              Refresh = 2; // Whether or not this is an existing client being refreshed.
 }
 
-// RemoveClient is used to close a client connection.
-message RemoveClient {
-  string ClientID = 1; // Client to close.
-  string Reply    = 2; // Inbox to send client response to.
-  bool   Schedule = 3; // Whether to schedule the disconnect or do it immediately.
+// RaftSnapshot is a snapshot of the state of the server.
+message RaftSnapshot {
+  repeated ClientInfo      Clients  = 1;
+  repeated ChannelSnapshot Channels = 2;
+  bytes                    Padding  = 3;
 }
 
-// RaftSnapshotFragment is a part of a snapshot of a Raft log.
-message RaftSnapshotFragment {
-  enum Type {
-    Messages     = 0; // Channel messages.
-    Subscription = 1; // Channel subscription.
-    Conn         = 2; // Client connection.
-  }
-  Type             FragmentType = 1; // Snapshot fragment type.
-  MessagesSnapshot Msgs         = 2; // Messages fragment data.
-  SubSnapshot      Sub          = 3; // Subscription fragment data.
-  ClientSnapshot   Client       = 4; // Conn fragment data.
+// ChannelSnapshot is a snapshot of a channel
+message ChannelSnapshot {
+  string                        Channel       = 1;
+  uint64                        First         = 2;
+  uint64                        Last          = 3;
+  repeated SubscriptionSnapshot Subscriptions = 4;
 }
 
-// MessagesSnapshot is a snapshot of a portion of a channel's messages.
-message MessagesSnapshot {
-  Batch MessageBatch = 1; // Channel messages.
-}
-
-// SubSnapshot is a snapshot of a channel subscription.
-message SubSnapshot {
+// SubscriptionSnaphot is the snapshot of a subscription
+message SubscriptionSnapshot {
   SubState        State       = 1; // Subscription data.
-  string          Subject     = 2; // Subscription subject.
   repeated uint64 AcksPending = 3; // Sequences of unacknowledged messages.
-}
-
-// ClientSnapshot is a snapshot of a client connection.
-message ClientSnapshot {
-  ClientInfo           Info = 1; // Connection metadata.
 }
 
 // ChannelGossip contains info about channels that is periodically gossiped

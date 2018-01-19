@@ -3,25 +3,16 @@
 package server
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
-	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/hashicorp/raft"
+	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming/pb"
-
 	"github.com/nats-io/nats-streaming-server/spb"
-)
-
-const snapshotBatchSize = 200
-
-var (
-	fragmentPool       = &sync.Pool{New: func() interface{} { return &spb.RaftSnapshotFragment{} }}
-	batchPool          = &sync.Pool{New: func() interface{} { return &spb.Batch{} }}
-	msgsSnapshotPool   = &sync.Pool{New: func() interface{} { return &spb.MessagesSnapshot{} }}
-	subSnapshotPool    = &sync.Pool{New: func() interface{} { return &spb.SubSnapshot{} }}
-	clientSnapshotPool = &sync.Pool{New: func() interface{} { return &spb.ClientSnapshot{} }}
+	"github.com/nats-io/nats-streaming-server/util"
 )
 
 // serverSnapshot implements the raft.FSMSnapshot interface by snapshotting
@@ -43,25 +34,155 @@ func (s *serverSnapshot) Persist(sink raft.SnapshotSink) (err error) {
 		}
 	}()
 
-	// Snapshot clients. We are only snapshotting the client metadata here
-	// (heartbeat inbox and client ID). Subscriptions are replicated through
-	// the channel Raft groups, so upon snapshot restore, the server will
-	// load any of the client's subscriptions from the store.
-	var buf [4]byte
-	for _, client := range s.clients.getClients() {
-		fragment := newFragment()
-		fragment.FragmentType = spb.RaftSnapshotFragment_Conn
-		clientSnap := clientSnapshotPool.Get().(*spb.ClientSnapshot)
-		client.RLock()
-		clientSnap.Info = &client.info.ClientInfo
-		client.RUnlock()
-		fragment.Client = clientSnap
-		if err := writeFragment(sink, fragment, buf); err != nil {
+	snap := &spb.RaftSnapshot{}
+
+	s.snapshotClients(snap, sink)
+
+	if err := s.snapshotChannels(snap, sink); err != nil {
+		return err
+	}
+
+	var b []byte
+	for i := 0; i < 2; i++ {
+		b, err = snap.Marshal()
+		if err != nil {
 			return err
 		}
+		// Raft assumes that the follower will restore the snapshot from the leader using
+		// a timeout that is equal to:
+		// the transport timeout (we provide 2*time.Second) * (snapshot size / TimeoutScale).
+		// We can't provide an infinite timeout to the nats-log transport otherwise some
+		// Raft operations will block forever.
+		// However, we persist only the first/last sequence for a channel snapshot, however,
+		// the follower will request the leader to send all those messages as part of the
+		// restore. Since the snapshot size may be small compared to the amout of messages
+		// to recover, the timeout may be too small.
+		// To trick the system, we first set the transport's TimeoutScale to 1 (the default
+		// is 256KB). Then, if we want an overall timeout of 1 hour (3600 seconds), we need
+		// the size to be at least 1800 bytes. If it is less than that, then we add some
+		// padding to the snapshot.
+		if len(b) < 1800 {
+			snap.Padding = make([]byte, 1800-len(b))
+			continue
+		}
+		break
+	}
+
+	var sizeBuf [4]byte
+	util.ByteOrder.PutUint32(sizeBuf[:], uint32(len(b)))
+	if _, err := sink.Write(sizeBuf[:]); err != nil {
+		return err
+	}
+	if _, err := sink.Write(b); err != nil {
+		return err
 	}
 
 	return sink.Close()
+}
+
+func (s *serverSnapshot) snapshotClients(snap *spb.RaftSnapshot, sink raft.SnapshotSink) {
+	s.clients.RLock()
+	defer s.clients.RUnlock()
+
+	numClients := len(s.clients.clients)
+	if numClients == 0 {
+		return
+	}
+
+	snap.Clients = make([]*spb.ClientInfo, numClients)
+	i := 0
+	for _, client := range s.clients.clients {
+		// Make a copy
+		info := client.info.ClientInfo
+		snap.Clients[i] = &info
+		i++
+	}
+}
+
+func (s *serverSnapshot) snapshotChannels(snap *spb.RaftSnapshot, sink raft.SnapshotSink) error {
+	s.channels.RLock()
+	defer s.channels.RUnlock()
+
+	numChannels := len(s.channels.channels)
+	if numChannels == 0 {
+		return nil
+	}
+
+	snapshotASub := func(sub *subState) *spb.SubscriptionSnapshot {
+		// Make a copy
+		state := sub.SubState
+		snapSub := &spb.SubscriptionSnapshot{State: &state}
+		if len(sub.acksPending) > 0 {
+			snapSub.AcksPending = make([]uint64, len(sub.acksPending))
+			i := 0
+			for seq := range sub.acksPending {
+				snapSub.AcksPending[i] = seq
+				i++
+			}
+		}
+		return snapSub
+	}
+
+	snap.Channels = make([]*spb.ChannelSnapshot, numChannels)
+	numChannel := 0
+	for _, c := range s.channels.channels {
+		first, last, err := c.store.Msgs.FirstAndLastSequence()
+		if err != nil {
+			return err
+		}
+		snapChannel := &spb.ChannelSnapshot{
+			Channel: c.name,
+			First:   first,
+			Last:    last,
+		}
+		c.ss.RLock()
+
+		// Start with count of all plain subs...
+		snapSubs := make([]*spb.SubscriptionSnapshot, len(c.ss.psubs))
+		i := 0
+		for _, sub := range c.ss.psubs {
+			sub.RLock()
+			snapSubs[i] = snapshotASub(sub)
+			sub.RUnlock()
+			i++
+		}
+
+		// Now need to close durables
+		for _, dur := range c.ss.durables {
+			dur.RLock()
+			if dur.IsClosed {
+				snapSubs = append(snapSubs, snapshotASub(dur))
+			}
+			dur.RUnlock()
+		}
+
+		// Snapshot the queue subscriptions
+		for _, qsub := range c.ss.qsubs {
+			qsub.RLock()
+			for _, sub := range qsub.subs {
+				sub.RLock()
+				snapSubs = append(snapSubs, snapshotASub(sub))
+				sub.RUnlock()
+			}
+			// If all members of a durable queue group left the group,
+			// we need to persist the "shadow" queue member.
+			if qsub.shadow != nil {
+				qsub.shadow.RLock()
+				snapSubs = append(snapSubs, snapshotASub(qsub.shadow))
+				qsub.shadow.RUnlock()
+			}
+			qsub.RUnlock()
+		}
+		if len(snapSubs) > 0 {
+			snapChannel.Subscriptions = snapSubs
+		}
+
+		c.ss.RUnlock()
+		snap.Channels[numChannel] = snapChannel
+		numChannel++
+	}
+
+	return nil
 }
 
 // Release is a no-op.
@@ -72,319 +193,131 @@ func (s *serverSnapshot) Release() {}
 func (s *StanServer) restoreFromSnapshot(snapshot io.ReadCloser) error {
 	defer snapshot.Close()
 
-	// Drop all existing clients. These will be restored from the snapshot.
-	// However, keep a copy so we can recover subs.
-	oldClients := s.clients.getClients()
-	for _, client := range oldClients {
-		if _, err := s.clients.unregister(client.info.ID); err != nil {
+	restoreFromRaftInit := atomic.LoadInt64(&s.raftNodeCreated) == 0
+
+	// We need to drop current state. The server will recover from snapshot
+	// and all newer Raft entry logs (basically the entire state is being
+	// reconstructed from this point on).
+	for _, c := range s.channels.getAll() {
+		for _, sub := range c.ss.getAllSubs() {
+			if err := s.unsubscribe(c, sub.ClientID, sub, false); err != nil {
+				return err
+			}
+		}
+	}
+	for clientID := range s.clients.getClients() {
+		if _, err := s.clients.unregister(clientID); err != nil {
 			return err
 		}
 	}
 
 	sizeBuf := make([]byte, 4)
-	for {
-		// Read the fragment size.
-		if _, err := io.ReadFull(snapshot, sizeBuf); err != nil {
-			if err == io.EOF {
-				break
-			}
+	// Read the snapshot size.
+	if _, err := io.ReadFull(snapshot, sizeBuf); err != nil {
+		if err == io.EOF {
+			return nil
+		}
+		return err
+	}
+	// Read the snapshot.
+	size := util.ByteOrder.Uint32(sizeBuf)
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(snapshot, buf); err != nil {
+		return err
+	}
+
+	serverSnap := &spb.RaftSnapshot{}
+	if err := serverSnap.Unmarshal(buf); err != nil {
+		panic(err)
+	}
+	if err := s.restoreClientsFromSnapshot(serverSnap); err != nil {
+		return err
+	}
+	return s.restoreChannelsFromSnapshot(serverSnap, restoreFromRaftInit)
+}
+
+func (s *StanServer) restoreClientsFromSnapshot(serverSnap *spb.RaftSnapshot) error {
+	for _, sc := range serverSnap.Clients {
+		if _, err := s.clients.register(sc.ID, sc.HbInbox); err != nil {
 			return err
 		}
+	}
+	return nil
+}
 
-		// Read the fragment.
-		size := binary.BigEndian.Uint32(sizeBuf)
-		buf := make([]byte, size)
-		if _, err := io.ReadFull(snapshot, buf); err != nil {
+func (s *StanServer) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, restoreFromRaftInit bool) error {
+	for _, sc := range serverSnap.Channels {
+		c, err := s.lookupOrCreateChannel(sc.Channel)
+		if err != nil {
 			return err
 		}
-
-		// Unmarshal the fragment.
-		fragment := newFragment()
-		if err := fragment.Unmarshal(buf); err != nil {
-			return err
-		}
-
-		// Apply the fragment.
-		switch fragment.FragmentType {
-		case spb.RaftSnapshotFragment_Conn:
-			// Client.
-			err := s.restoreClientFromSnapshot(fragment.Client, oldClients)
-			clientSnapshotPool.Put(fragment.Client)
-			fragmentPool.Put(fragment)
-			if err != nil {
+		// Do not restore messages from snapshot if the server
+		// just started and is recovering from its own snapshot.
+		if !restoreFromRaftInit {
+			if err := s.restoreMsgsFromSnapshot(c, sc.First, sc.Last); err != nil {
 				return err
 			}
-		default:
-			panic(fmt.Sprintf("unknown snapshot fragment type %s", fragment.FragmentType))
+		}
+		for _, ss := range sc.Subscriptions {
+			s.recoverOneSub(c, ss.State, nil, ss.AcksPending)
 		}
 	}
 	return nil
 }
 
-func (s *StanServer) restoreClientFromSnapshot(clientSnapshot *spb.ClientSnapshot, oldClients map[string]*client) error {
-	client, _, err := s.clients.register(clientSnapshot.Info.ID, clientSnapshot.Info.HbInbox)
+func (s *StanServer) restoreMsgsFromSnapshot(c *channel, first, last uint64) error {
+	if err := c.store.Msgs.Empty(); err != nil {
+		return err
+	}
+	inbox := nats.NewInbox()
+	sub, err := c.stan.ncsr.SubscribeSync(inbox)
 	if err != nil {
 		return err
 	}
+	sub.SetPendingLimits(-1, -1)
+	defer sub.Unsubscribe()
 
-	// Restore any subscriptions.
-	// QUESTION: are there potential race conditions due to how subscriptions
-	// and clients are handled on different Raft groups?
-	oldClient, ok := oldClients[client.info.ID]
-	if ok {
-		oldClient.RLock()
-		subs := oldClient.getSubsCopy()
-		oldClient.RUnlock()
-		for _, sub := range subs {
-			s.clients.addSub(client.info.ID, sub)
-		}
-	}
-
-	return nil
-}
-
-// channelSnapshot implements the raft.FSMSnapshot interface by snapshotting
-// channel state.
-type channelSnapshot struct {
-	*channel
-}
-
-func newChannelSnapshot(c *channel) raft.FSMSnapshot {
-	return &channelSnapshot{channel: c}
-}
-
-// Persist should dump all necessary state to the WriteCloser 'sink',
-// and call sink.Close() when finished or call sink.Cancel() on error.
-func (c *channelSnapshot) Persist(sink raft.SnapshotSink) (err error) {
-	defer func() {
-		if err != nil {
-			sink.Cancel()
-		}
-	}()
-
-	if err := c.snapshotMessages(sink); err != nil {
-		return err
-	}
-
-	if err := c.snapshotSubscriptions(sink); err != nil {
-		return err
-	}
-
-	return sink.Close()
-}
-
-// Release is a no-op.
-func (c *channelSnapshot) Release() {}
-
-func (c *channelSnapshot) snapshotMessages(sink raft.SnapshotSink) error {
-	// TODO: this is very expensive and might repeatedly fail if messages are
-	// constantly being truncated. Is there a way we can optimize this, e.g.
-	// handling Restore() out-of-band from Raft?
-	// See issue #410.
-
-	first, last, err := c.store.Msgs.FirstAndLastSequence()
-	if err != nil {
-		return err
-	}
+	subject := fmt.Sprintf("%s.%s.%s", defaultSnapshotPrefix, c.stan.info.ClusterID, c.name)
 
 	var (
-		buf              [4]byte
-		batch            = batchPool.Get().(*spb.Batch)
-		writeMsgFragment = func(b *spb.Batch) error {
-			fragment := newFragment()
-			fragment.FragmentType = spb.RaftSnapshotFragment_Messages
-			msgsSnap := msgsSnapshotPool.Get().(*spb.MessagesSnapshot)
-			msgsSnap.MessageBatch = b
-			fragment.Msgs = msgsSnap
-			return writeFragment(sink, fragment, buf)
-		}
+		reqBuf   [16]byte
+		reqNext  = first
+		reqStart = first
+		reqEnd   uint64
 	)
-	batch.Messages = make([]*pb.MsgProto, 0, snapshotBatchSize)
-
 	for seq := first; seq <= last; seq++ {
-		msg, err := c.store.Msgs.Lookup(seq)
+		if seq == reqNext {
+			reqEnd = reqStart + uint64(100)
+			if reqEnd > last {
+				reqEnd = last
+			}
+			util.ByteOrder.PutUint64(reqBuf[:8], reqStart)
+			util.ByteOrder.PutUint64(reqBuf[8:16], reqEnd)
+			if err := c.stan.ncsr.PublishRequest(subject, inbox, reqBuf[:16]); err != nil {
+				return err
+			}
+			if reqEnd != last {
+				reqNext = reqEnd - reqStart/2
+				reqStart = reqEnd + 1
+			}
+		}
+		resp, err := sub.NextMsg(2 * time.Second)
 		if err != nil {
-			batchPool.Put(batch)
 			return err
 		}
-		// If msg is nil, channel truncation has occurred while snapshotting.
-		if msg == nil {
-			// Channel truncation has occurred while snapshotting.
-			batchPool.Put(batch)
-			return fmt.Errorf("channel %q was truncated while snapshotting", c.name)
+		// It is possible that the leader does not have this message because of
+		// channel limits. If resp.Data is empty, we are in this situation and
+		// we are done recovering snapshot.
+		if len(resp.Data) == 0 {
+			break
 		}
-
-		// Previous batch is full, ship it.
-		if len(batch.Messages) == snapshotBatchSize {
-			if err := writeMsgFragment(batch); err != nil {
-				return err
-			}
-
-			// Create a new batch.
-			batch = batchPool.Get().(*spb.Batch)
-			batch.Messages = make([]*pb.MsgProto, 0, snapshotBatchSize)
+		msg := &pb.MsgProto{}
+		if err := msg.Unmarshal(resp.Data); err != nil {
+			panic(err)
 		}
-
-		batch.Messages = append(batch.Messages, msg)
-	}
-
-	// Ship any partial batch.
-	if len(batch.Messages) > 0 {
-		if err := writeMsgFragment(batch); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (c *channelSnapshot) snapshotSubscriptions(sink raft.SnapshotSink) error {
-	var buf [4]byte
-	for _, sub := range c.ss.getAllSubs() {
-		fragment := newFragment()
-		fragment.FragmentType = spb.RaftSnapshotFragment_Subscription
-		subSnap := subSnapshotPool.Get().(*spb.SubSnapshot)
-		sub.Lock()
-		subSnap.Subject = sub.subject
-		subSnap.State = &sub.SubState
-		subSnap.AcksPending = make([]uint64, len(sub.acksPending))
-		i := 0
-		for seq, _ := range sub.acksPending {
-			subSnap.AcksPending[i] = seq
-			i++
-		}
-		sub.Unlock()
-		fragment.Sub = subSnap
-		if err := writeFragment(sink, fragment, buf); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// writeFragment writes the marshaled RaftSnapshotFragment to the
-// SnapshotSink. The fragment should not be used after this is called.
-func writeFragment(sink raft.SnapshotSink, fragment *spb.RaftSnapshotFragment, sizeBuf [4]byte) error {
-	data, err := fragment.Marshal()
-	if fragment.Msgs != nil {
-		batchPool.Put(fragment.Msgs.MessageBatch)
-		msgsSnapshotPool.Put(fragment.Msgs)
-	}
-	if fragment.Sub != nil {
-		subSnapshotPool.Put(fragment.Sub)
-	}
-	fragmentPool.Put(fragment)
-	if err != nil {
-		return err
-	}
-	binary.BigEndian.PutUint32(sizeBuf[:], uint32(len(data)))
-	_, err = sink.Write(sizeBuf[:])
-	if err != nil {
-		return err
-	}
-	_, err = sink.Write(data)
-	return err
-}
-
-func newFragment() *spb.RaftSnapshotFragment {
-	fragment := fragmentPool.Get().(*spb.RaftSnapshotFragment)
-	fragment.Msgs = nil
-	fragment.Sub = nil
-	return fragment
-}
-
-// restoreFromSnapshot restores a channel from a snapshot. This is not called
-// concurrently with any other Raft commands.
-func (c *channel) restoreFromSnapshot(snapshot io.ReadCloser) error {
-	defer snapshot.Close()
-
-	// Drop all existing subs. These will be restored from the snapshot.
-	for _, sub := range c.ss.getAllSubs() {
-		c.stan.unsubscribe(c, sub.ClientID, sub, true)
-	}
-
-	sizeBuf := make([]byte, 4)
-	for {
-		// Read the fragment size.
-		if _, err := io.ReadFull(snapshot, sizeBuf); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
-		}
-
-		// Read the fragment.
-		size := binary.BigEndian.Uint32(sizeBuf)
-		buf := make([]byte, size)
-		if _, err := io.ReadFull(snapshot, buf); err != nil {
-			return err
-		}
-
-		// Unmarshal the fragment.
-		fragment := newFragment()
-		if err := fragment.Unmarshal(buf); err != nil {
-			return err
-		}
-
-		// Apply the fragment.
-		switch fragment.FragmentType {
-		case spb.RaftSnapshotFragment_Messages:
-			// Channel messages.
-			err := c.restoreMsgsFromSnapshot(fragment.Msgs)
-			batchPool.Put(fragment.Msgs.MessageBatch)
-			msgsSnapshotPool.Put(fragment.Msgs)
-			fragmentPool.Put(fragment)
-			if err != nil {
-				return err
-			}
-		case spb.RaftSnapshotFragment_Subscription:
-			// Channel subscription.
-			err := c.restoreSubFromSnapshot(fragment.Sub)
-			subSnapshotPool.Put(fragment.Sub)
-			fragmentPool.Put(fragment)
-			if err != nil {
-				return err
-			}
-		default:
-			panic(fmt.Sprintf("unknown snapshot fragment type %s", fragment.FragmentType))
-		}
-	}
-	return c.store.Msgs.Flush()
-}
-
-func (c *channel) restoreMsgsFromSnapshot(msgsSnapshot *spb.MessagesSnapshot) error {
-	for _, msg := range msgsSnapshot.MessageBatch.Messages {
 		if _, err := c.store.Msgs.Store(msg); err != nil {
 			return err
 		}
 	}
-	return nil
-}
-
-func (c *channel) restoreSubFromSnapshot(subSnapshot *spb.SubSnapshot) error {
-	acksPending := make(map[uint64]int64, len(subSnapshot.AcksPending))
-	for _, seq := range subSnapshot.AcksPending {
-		// Set 0 for expiration time. This will be computed
-		// when the follower becomes leader and attempts to
-		// redeliver messages.
-		acksPending[seq] = 0
-	}
-	sub := &subState{
-		SubState:    *subSnapshot.State,
-		subject:     subSnapshot.Subject,
-		ackWait:     computeAckWait(subSnapshot.State.AckWaitInSecs),
-		acksPending: acksPending,
-		store:       c.store.Subs,
-	}
-	// Store the subscription.
-	if err := c.stan.addSubscription(c.ss, sub); err != nil {
-		return err
-	}
-	// Store pending acks for the subscription.
-	for seq, _ := range sub.acksPending {
-		if err := sub.store.AddSeqPending(sub.ID, seq); err != nil {
-			return err
-		}
-	}
-	return nil
+	return c.store.Msgs.Flush()
 }

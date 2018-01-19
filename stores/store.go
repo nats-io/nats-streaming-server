@@ -262,6 +262,9 @@ type MsgStore interface {
 	// Flush is for stores that may buffer operations and need them to be persisted.
 	Flush() error
 
+	// Empty removes all messages from the store
+	Empty() error
+
 	// Close closes the store.
 	Close() error
 }
