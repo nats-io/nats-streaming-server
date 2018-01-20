@@ -1384,7 +1384,7 @@ func TestSQLFirstSeqAfterMsgsExpireAndStoreRestart(t *testing.T) {
 
 	cs := storeCreateChannel(t, s, "foo")
 	for i := 0; i < 3; i++ {
-		storeMsg(t, cs, "foo", []byte("msg"))
+		storeMsg(t, cs, "foo", uint64(i+1), []byte("msg"))
 	}
 
 	time.Sleep(200 * time.Millisecond)
