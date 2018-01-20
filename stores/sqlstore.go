@@ -807,7 +807,7 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 		// the Channel table may contain a maxseq that we should use as starting
 		// point.
 		if msgStore.last == 0 {
-			msgStore.first = maxseq
+			msgStore.first = maxseq + 1
 			msgStore.last = maxseq
 		}
 
