@@ -1353,3 +1353,49 @@ func TestSQLGetExclusiveLock(t *testing.T) {
 	}
 	restoreDBConnection(t, s4)
 }
+
+func TestSQLFirstSeqAfterMsgsExpireAndStoreRestart(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	s := createDefaultSQLStore(t)
+	defer s.Close()
+
+	limits := StoreLimits{}
+	limits.MaxAge = 100 * time.Millisecond
+	s.SetLimits(&limits)
+
+	cs := storeCreateChannel(t, s, "foo")
+	for i := 0; i < 3; i++ {
+		storeMsg(t, cs, "foo", []byte("msg"))
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	count, size := msgStoreState(t, cs.Msgs)
+	if count != 0 || size != 0 {
+		t.Fatalf("Unexpected count and size: %v and %v", count, size)
+	}
+	first, last := msgStoreFirstAndLastSequence(t, cs.Msgs)
+	if first != 4 || last != 3 {
+		t.Fatalf("Unexpected first and/or last: %v, %v", first, last)
+	}
+
+	// Restart the store
+	s.Close()
+	s, state := openDefaultSQLStoreWithLimits(t, &limits)
+	defer s.Close()
+
+	cs = getRecoveredChannel(t, state, "foo")
+	count, size = msgStoreState(t, cs.Msgs)
+	if count != 0 || size != 0 {
+		t.Fatalf("Unexpected count and size: %v and %v", count, size)
+	}
+	first, last = msgStoreFirstAndLastSequence(t, cs.Msgs)
+	if first != 4 || last != 3 {
+		t.Fatalf("Unexpected first and/or last: %v, %v", first, last)
+	}
+}
