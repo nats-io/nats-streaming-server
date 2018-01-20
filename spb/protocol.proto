@@ -101,14 +101,14 @@ message RaftOperation {
     Connect            = 6; // Client connection.
     Disconnect         = 7; // Client disconnect.
   }
-  Type               OpType           = 1; // Log message type.
-  Batch              PublishBatch     = 2; // Publish operation data.
-  AddSubscription    Sub              = 3; // Subscribe operation data.
-  RemoveSubscription Unsub            = 4; // Close/Remove Subscription operation data.
-  AckMessage         AckMsg           = 5; // Ack operation data.
-  AckMessage         SendMsg          = 6; // Send operation data.
-  AddClient          ClientConnect    = 7; // Connect operation data.
-  pb.CloseRequest    ClientDisconnect = 8; // Disconnect operation data.
+  Type                  OpType           = 1; // Log message type.
+  Batch                 PublishBatch     = 2; // Publish operation data.
+  AddSubscription       Sub              = 3; // Subscribe operation data.
+  pb.UnsubscribeRequest Unsub            = 4; // Close/Remove Subscription operation data.
+  ChannelMessage        AckMsg           = 5; // Ack operation data.
+  ChannelMessage        SendMsg          = 6; // Send operation data.
+  AddClient             ClientConnect    = 7; // Connect operation data.
+  pb.CloseRequest       ClientDisconnect = 8; // Disconnect operation data.
 }
 
 // Batch is a batch of messages for replication.
@@ -122,15 +122,8 @@ message AddSubscription {
   string                 AckInbox = 2; // Ack inbox for the subscription.
 }
 
-// RemoveSubscription is used to remove or close a client subscription.
-message RemoveSubscription {
-  string Channel  = 1; // Subscription channel.
-  string AckInbox = 2; // Subscription ack inbox.
-  string ClientID = 3; // Client ID of subscriber.
-}
-
-// AckMessage is used to replicate a message ack.
-message AckMessage {
+// ChannelMessage is used to replicate a sent or ack message.
+message ChannelMessage {
   string Channel  = 1; // Subscription channel.
   string AckInbox = 2; // Subscription ack inbox.
   uint64 Sequence = 3; // Message sequence to ack.

@@ -206,7 +206,10 @@ func (s *StanServer) restoreFromSnapshot(snapshot io.ReadCloser) error {
 	// reconstructed from this point on).
 	for _, c := range s.channels.getAll() {
 		for _, sub := range c.ss.getAllSubs() {
-			if err := s.unsubscribe(c, sub.ClientID, sub, false); err != nil {
+			sub.RLock()
+			clientID := sub.ClientID
+			sub.RUnlock()
+			if err := s.unsubscribeSub(c, clientID, "unsub", sub, false); err != nil {
 				return err
 			}
 		}

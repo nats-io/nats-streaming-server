@@ -2994,7 +2994,7 @@ func (s *StanServer) getMsgForRedelivery(c *channel, sub *subState, seq uint64) 
 func (s *StanServer) replicateSentMsg(c *channel, sub *subState, sequence uint64) {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Send,
-		SendMsg: &spb.AckMessage{
+		SendMsg: &spb.ChannelMessage{
 			Channel:  c.name,
 			AckInbox: sub.AckInbox,
 			Sequence: sequence,
@@ -3011,13 +3011,18 @@ func (s *StanServer) replicateSentMsg(c *channel, sub *subState, sequence uint64
 // sequence number to subscription of given AckInbox. It updates the
 // sub (and queue state) LastSent value. It adds the sequence to the
 // map of acksPending.
-func (s *StanServer) processReplicatedSentMsg(c *channel, ackInbox string, sequence uint64) {
-	sub := c.ss.LookupByAckInbox(ackInbox)
+func (s *StanServer) processReplicatedSentMsg(msg *spb.ChannelMessage) {
+	c, err := s.lookupOrCreateChannel(msg.Channel)
+	if err != nil {
+		return
+	}
+	sub := c.ss.LookupByAckInbox(msg.AckInbox)
 	if sub == nil {
 		return
 	}
 	sub.Lock()
 	defer sub.Unlock()
+	sequence := msg.Sequence
 	// If sub.LastSent is higher than the sequence, it means we already have
 	// added it. We could be here after a restart when the raft log is replayed.
 	if sequence <= sub.LastSent {
@@ -3479,41 +3484,17 @@ func (s *StanServer) performmUnsubOrCloseSubscription(m *nats.Msg, req *pb.Unsub
 		}
 	}
 
-	action := "unsub"
-	if isSubClose {
-		action = "sub close"
-	}
-	c := s.channels.get(req.Subject)
-	if c == nil {
-		s.log.Errorf("[Client:%s] %s request missing subject %s",
-			req.ClientID, action, req.Subject)
-		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
-		return
-	}
-
-	// Get the subStore
-	ss := c.ss
-
-	sub := ss.LookupByAckInbox(req.Inbox)
-	if sub == nil {
-		s.log.Errorf("[Client:%s] %s request for missing inbox %s",
-			req.ClientID, action, req.Inbox)
-		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
-		return
-	}
-
 	s.nc.Barrier(func() {
 		var err error
 		if s.isClustered {
 			if isSubClose {
-				err = s.replicateCloseSubscription(c, req.ClientID, req.Inbox)
+				err = s.replicateCloseSubscription(req)
 			} else {
-				err = s.replicateRemoveSubscription(c, req.ClientID, req.Inbox)
+				err = s.replicateRemoveSubscription(req)
 			}
 		} else {
-			// Lock for the remainder of the function
 			s.closeMu.Lock()
-			err = s.unsubscribe(c, req.ClientID, sub, isSubClose)
+			err = s.unsubscribe(req, isSubClose)
 			s.closeMu.Unlock()
 		}
 		// If there was an error, it has been already logged.
@@ -3523,12 +3504,32 @@ func (s *StanServer) performmUnsubOrCloseSubscription(m *nats.Msg, req *pb.Unsub
 	})
 }
 
-func (s *StanServer) unsubscribe(c *channel, clientID string, sub *subState, isSubClose bool) error {
+func (s *StanServer) unsubscribe(req *pb.UnsubscribeRequest, isSubClose bool) error {
+	action := "unsub"
+	if isSubClose {
+		action = "sub close"
+	}
+	c := s.channels.get(req.Subject)
+	if c == nil {
+		s.log.Errorf("[Client:%s] %s request missing subject %s",
+			req.ClientID, action, req.Subject)
+		return ErrInvalidSub
+	}
+	sub := c.ss.LookupByAckInbox(req.Inbox)
+	if sub == nil {
+		s.log.Errorf("[Client:%s] %s request for missing inbox %s",
+			req.ClientID, action, req.Inbox)
+		return ErrInvalidSub
+	}
+	return s.unsubscribeSub(c, req.ClientID, action, sub, isSubClose)
+}
+
+func (s *StanServer) unsubscribeSub(c *channel, clientID, action string, sub *subState, isSubClose bool) error {
 	// Remove from Client
 	if !s.clients.removeSub(clientID, sub) {
+		s.log.Errorf("[Client:%s] %s request for missing client", clientID, action)
 		return ErrUnknownClient
 	}
-
 	// Remove the subscription
 	unsubscribe := !isSubClose
 	c.ss.Remove(c, sub, unsubscribe)
@@ -3538,22 +3539,18 @@ func (s *StanServer) unsubscribe(c *channel, clientID string, sub *subState, isS
 	return nil
 }
 
-func (s *StanServer) replicateRemoveSubscription(c *channel, clientID, ackInbox string) error {
-	return s.replicateUnsubscribe(c, clientID, ackInbox, spb.RaftOperation_RemoveSubscription)
+func (s *StanServer) replicateRemoveSubscription(req *pb.UnsubscribeRequest) error {
+	return s.replicateUnsubscribe(req, spb.RaftOperation_RemoveSubscription)
 }
 
-func (s *StanServer) replicateCloseSubscription(c *channel, clientID, ackInbox string) error {
-	return s.replicateUnsubscribe(c, clientID, ackInbox, spb.RaftOperation_CloseSubscription)
+func (s *StanServer) replicateCloseSubscription(req *pb.UnsubscribeRequest) error {
+	return s.replicateUnsubscribe(req, spb.RaftOperation_CloseSubscription)
 }
 
-func (s *StanServer) replicateUnsubscribe(c *channel, clientID, ackInbox string, opType spb.RaftOperation_Type) error {
+func (s *StanServer) replicateUnsubscribe(req *pb.UnsubscribeRequest, opType spb.RaftOperation_Type) error {
 	op := &spb.RaftOperation{
 		OpType: opType,
-		Unsub: &spb.RemoveSubscription{
-			AckInbox: ackInbox,
-			ClientID: clientID,
-			Channel:  c.name,
-		},
+		Unsub:  req,
 	}
 	data, err := op.Marshal()
 	if err != nil {
@@ -3667,7 +3664,7 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 
 // replicateSub replicates the SubscriptionRequest to nodes in the cluster via
 // Raft.
-func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string, c *channel) (*subState, error) {
+func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string) (*channel, *subState, error) {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Subscribe,
 		Sub: &spb.AddSubscription{
@@ -3689,9 +3686,10 @@ func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string, c
 	resp := future.Response()
 	err, ok := resp.(error)
 	if ok {
-		return nil, err
+		return nil, nil, err
 	}
-	return resp.(*subState), nil
+	rs := resp.(*replicatedSub)
+	return rs.c, rs.sub, nil
 }
 
 // addSubscription adds `sub` to the client and store.
@@ -3729,10 +3727,14 @@ func (s *StanServer) updateDurable(ss *subStore, sub *subState) error {
 }
 
 // processSub adds the subscription to the server.
-func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string, c *channel) (*subState, error) {
+func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string) (*channel, *subState, error) {
+	c, err := s.lookupOrCreateChannel(sr.Subject)
+	if err != nil {
+		s.log.Errorf("Unable to create channel for subscription on %q", sr.Subject)
+		return nil, nil, err
+	}
 	var (
 		sub *subState
-		err error
 		ss  = c.ss
 	)
 	// Will be true for durable queue subscribers and durable subscribers alike.
@@ -3748,7 +3750,7 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string, c *
 			if strings.Contains(sr.DurableName, ":") {
 				s.log.Errorf("[Client:%s] Invalid DurableName (%q) for queue subscriber from %s",
 					sr.ClientID, sr.DurableName, sr.Subject)
-				return nil, ErrInvalidDurName
+				return c, nil, ErrInvalidDurName
 			}
 			isDurable = true
 			// Make the queue group a compound name between durable name and q group.
@@ -3779,7 +3781,7 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string, c *
 			sub.RUnlock()
 			if clientID != "" {
 				s.log.Errorf("[Client:%s] Duplicate durable subscription registration", sr.ClientID)
-				return nil, ErrDupDurable
+				return c, nil, ErrDupDurable
 			}
 			setStartPos = false
 		}
@@ -3852,7 +3854,7 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string, c *
 		ss.Remove(c, sub, false)
 		s.closeMu.Unlock()
 		s.log.Errorf("Unable to add subscription for %s: %v", sr.Subject, err)
-		return nil, err
+		return c, nil, err
 	}
 	if s.debug {
 		traceCtx := subStateTraceCtx{clientID: sr.ClientID, isNew: subIsNew, startTrace: subStartTrace}
@@ -3863,7 +3865,7 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string, c *
 	s.numSubs++
 	s.monMu.Unlock()
 
-	return sub, nil
+	return c, sub, nil
 }
 
 // processSubscriptionRequest will process a subscription request.
@@ -3934,24 +3936,17 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 	}
 
-	// Grab channel state, create a new one if needed.
-	c, err := s.lookupOrCreateChannel(sr.Subject)
-	if err != nil {
-		s.log.Errorf("Unable to create store for subject %s", sr.Subject)
-		s.sendSubscriptionResponseErr(m.Reply, err)
-		return
-	}
-
 	var (
+		c        *channel
 		sub      *subState
-		ackInbox = fmt.Sprintf("%s.%s", c.getAckSubject(), nuid.Next())
+		ackInbox = fmt.Sprintf("%s.%s.%s", s.info.AcksSubs, sr.Subject, nuid.Next())
 	)
 
 	// If clustered, thread operations through Raft.
 	if s.isClustered {
-		sub, err = s.replicateSub(sr, ackInbox, c)
+		c, sub, err = s.replicateSub(sr, ackInbox)
 	} else {
-		sub, err = s.processSub(sr, ackInbox, c)
+		c, sub, err = s.processSub(sr, ackInbox)
 	}
 
 	if err != nil {
@@ -4084,7 +4079,7 @@ func (s *StanServer) processAckMsg(m *nats.Msg) {
 func (s *StanServer) replicateAck(c *channel, ackInbox string, sequence uint64) {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Ack,
-		AckMsg: &spb.AckMessage{
+		AckMsg: &spb.ChannelMessage{
 			Channel:  c.name,
 			AckInbox: ackInbox,
 			Sequence: sequence,
@@ -4101,8 +4096,12 @@ func (s *StanServer) replicateAck(c *channel, ackInbox string, sequence uint64) 
 // for a given subscription and removes the corresponding sequence
 // from the pending map.
 // No lock required.
-func (s *StanServer) processReplicatedAck(c *channel, ackInbox string, sequence uint64) {
-	sub := c.ss.LookupByAckInbox(ackInbox)
+func (s *StanServer) processReplicatedAck(ack *spb.ChannelMessage) {
+	c, err := s.lookupOrCreateChannel(ack.Channel)
+	if err != nil {
+		return
+	}
+	sub := c.ss.LookupByAckInbox(ack.AckInbox)
 	if sub == nil {
 		return
 	}
@@ -4111,12 +4110,12 @@ func (s *StanServer) processReplicatedAck(c *channel, ackInbox string, sequence 
 	// We cannot detect if the ACK was processed before the replay of
 	// the raft log (on restart). So the store has to be idempotent
 	// when it comes to storing the same ACK for a given sequence.
-	if err := sub.store.AckSeqPending(sub.ID, sequence); err != nil {
+	if err := sub.store.AckSeqPending(sub.ID, ack.Sequence); err != nil {
 		s.log.Errorf("[Client:%s] Unable to persist ack for subid=%d, subject=%s, seq=%d, err=%v",
-			sub.ClientID, sub.ID, sub.subject, sequence, err)
+			sub.ClientID, sub.ID, sub.subject, ack.Sequence, err)
 		return
 	}
-	delete(sub.acksPending, sequence)
+	delete(sub.acksPending, ack.Sequence)
 }
 
 // processAck processes an ack and if needed sends more messages.
@@ -4492,6 +4491,11 @@ func (s *StanServer) Shutdown() {
 	s.wg.Wait()
 }
 
+type replicatedSub struct {
+	c   *channel
+	sub *subState
+}
+
 // Apply log is invoked once a log entry is committed.
 // It returns a value which will be made available in the
 // ApplyFuture returned by Raft.Apply method if that
@@ -4523,48 +4527,28 @@ func (s *StanServer) Apply(l *raft.Log) interface{} {
 		return s.closeClient(op.ClientDisconnect.ClientID)
 	case spb.RaftOperation_Subscribe:
 		// Subscription replication.
-		c, err := s.lookupOrCreateChannel(op.Sub.Request.Subject)
+		c, sub, err := s.processSub(op.Sub.Request, op.Sub.AckInbox)
 		if err != nil {
 			return err
 		}
-		sub, err := s.processSub(op.Sub.Request, op.Sub.AckInbox, c)
-		if err != nil {
-			return err
-		}
-		return sub
+		return &replicatedSub{c: c, sub: sub}
 	case spb.RaftOperation_RemoveSubscription:
 		fallthrough
 	case spb.RaftOperation_CloseSubscription:
 		// Close/Unsub subscription replication.
-		c, err := s.lookupOrCreateChannel(op.Unsub.Channel)
-		if err != nil {
-			return err
-		}
-		sub := c.ss.LookupByAckInbox(op.Unsub.AckInbox)
-		if sub == nil {
-			return ErrInvalidSub
-		}
 		isSubClose := op.OpType == spb.RaftOperation_CloseSubscription
 		s.closeMu.Lock()
-		err = s.unsubscribe(c, op.Unsub.ClientID, sub, isSubClose)
+		err := s.unsubscribe(op.Unsub, isSubClose)
 		s.closeMu.Unlock()
 		return err
 	case spb.RaftOperation_Ack:
 		if !s.isLeader() {
-			c, err := s.lookupOrCreateChannel(op.AckMsg.Channel)
-			if err != nil {
-				return err
-			}
-			s.processReplicatedAck(c, op.AckMsg.AckInbox, op.AckMsg.Sequence)
+			s.processReplicatedAck(op.AckMsg)
 		}
 		return nil
 	case spb.RaftOperation_Send:
 		if !s.isLeader() {
-			c, err := s.lookupOrCreateChannel(op.SendMsg.Channel)
-			if err != nil {
-				return err
-			}
-			s.processReplicatedSentMsg(c, op.SendMsg.AckInbox, op.SendMsg.Sequence)
+			s.processReplicatedSentMsg(op.SendMsg)
 		}
 		return nil
 	default:
