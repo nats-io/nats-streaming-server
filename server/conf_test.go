@@ -204,9 +204,6 @@ func TestParseConfig(t *testing.T) {
 	if !opts.Clustering.Sync {
 		t.Fatal("Expected Sync to be true, got false")
 	}
-	if opts.Clustering.GossipInterval != 10*time.Second {
-		t.Fatalf("Expected GossipInterval to be %s, got %s", 10*time.Second, opts.Clustering.GossipInterval)
-	}
 	if !opts.Clustering.RaftLogging {
 		t.Fatal("Expected RaftLogging to be true")
 	}
@@ -405,8 +402,6 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "cluster:{log_snapshots:false}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{trailing_logs:false}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{sync:1}", wrongTypeErr)
-	expectFailureFor(t, "cluster:{gossip_interval:false}", wrongTypeErr)
-	expectFailureFor(t, "cluster:{gossip_interval:\"1h:0m\"}", wrongTimeErr)
 	expectFailureFor(t, "cluster:{raft_logging:1}", wrongTypeErr)
 	expectFailureFor(t, "sql:{driver:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{source:false}", wrongTypeErr)

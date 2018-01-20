@@ -918,7 +918,7 @@ Streaming Server Clustering Options:
     --cluster_log_snapshots <int>        Number of log snapshots to retain (default: 2)
     --cluster_trailing_logs <int>        Number of log entries to leave after a snapshot and compaction
     --cluster_sync <bool>                Do a file sync after every write to the replication log and message store
-    --cluster_gossip_interval <duration> Interval in which to gossip channels to the cluster (plus some random delay) (default: 30s)
+    --cluster_raft_logging <bool>        Enable logging from the Raft library (disabled by default)
 
 Streaming Server File Store Options:
     --file_compact_enabled <bool>        Enable file compaction
@@ -1136,7 +1136,7 @@ Cluster Configuration:
 | log_snapshots | Number of log snapshots to retain | Number >= 0 | `log_snapshots: 1` |
 | trailing_logs | Number of log entries to leave after a snapshot and compaction | Number >= 0 | `trailing_logs: 256` |
 | sync | Do a file sync after every write to the replication log and message store | `true` or `false` | `sync: true` |
-| gossip_interval | Interval in which to gossip channels to the cluster (plus some random delay) | Duration | `gossip_interval: "10s"` |
+| raft_logging | Enable logging from the Raft library (disabled by default) | `true` or `false` | `raft_logging: true` |
 
 SQL Options Configuration:
 

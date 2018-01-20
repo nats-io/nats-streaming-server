@@ -1369,13 +1369,11 @@ func TestClusteringLogSnapshotRestoreClosedDurables(t *testing.T) {
 
 	// Configure first server
 	s1sOpts := getTestDefaultOptsForClustering("a", true)
-	s1sOpts.Clustering.GossipInterval = time.Second
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
 	s2sOpts := getTestDefaultOptsForClustering("b", false)
-	s2sOpts.Clustering.GossipInterval = time.Second
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
@@ -1472,13 +1470,11 @@ func TestClusteringLogSnapshotRestoreNoSubIDCollision(t *testing.T) {
 
 	// Configure first server
 	s1sOpts := getTestDefaultOptsForClustering("a", true)
-	s1sOpts.Clustering.GossipInterval = time.Second
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
 	s2sOpts := getTestDefaultOptsForClustering("b", false)
-	s2sOpts.Clustering.GossipInterval = time.Second
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
@@ -2267,7 +2263,7 @@ func TestClusteringHeartbeatFailover(t *testing.T) {
 	sc.Close()
 }
 
-func TestClusteringChannelGossip(t *testing.T) {
+func TestClusteringChannelCreatedOnLogReplay(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 	cleanupRaftLog(t)
@@ -2279,19 +2275,16 @@ func TestClusteringChannelGossip(t *testing.T) {
 
 	// Configure first server
 	s1sOpts := getTestDefaultOptsForClustering("a", true)
-	s1sOpts.Clustering.GossipInterval = time.Second
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
 	// Configure second server.
 	s2sOpts := getTestDefaultOptsForClustering("b", false)
-	s2sOpts.Clustering.GossipInterval = time.Second
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
 	// Configure third server.
 	s3sOpts := getTestDefaultOptsForClustering("c", false)
-	s3sOpts.Clustering.GossipInterval = time.Second
 	s3 := runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
 
