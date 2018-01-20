@@ -275,8 +275,26 @@ func (s *StanServer) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, r
 }
 
 func (s *StanServer) restoreMsgsFromSnapshot(c *channel, first, last uint64) error {
-	if err := c.store.Msgs.Empty(); err != nil {
+	storeFirst, storeLast, err := c.store.Msgs.FirstAndLastSequence()
+	if err != nil {
 		return err
+	}
+	// If the leader's first sequence is more than our lastSequence+1,
+	// then we need to empty the store. We don't want to have gaps.
+	// Same if our first is strictly greater than the leader, or our
+	// last sequence is more than the leader
+	if first > storeLast+1 || storeFirst > first || storeLast > last {
+		if err := c.store.Msgs.Empty(); err != nil {
+			return err
+		}
+	} else if storeLast == last {
+		// We may have a message with lower sequence than the leader,
+		// but our last sequence is the same, so nothing to do.
+		return nil
+	} else if storeLast > 0 {
+		// first is less than what we already have, just started
+		// at our next sequence.
+		first = storeLast + 1
 	}
 	inbox := nats.NewInbox()
 	sub, err := c.stan.ncsr.SubscribeSync(inbox)
