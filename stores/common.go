@@ -277,9 +277,6 @@ func (gms *genericMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, e
 
 // Empty implements the MsgStore interface
 func (gms *genericMsgStore) Empty() error {
-	gms.Lock()
-	gms.empty()
-	gms.Unlock()
 	return nil
 }
 

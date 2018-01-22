@@ -174,12 +174,11 @@ func (ms *MemoryMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, err
 // limit's MaxAge.
 func (ms *MemoryMsgStore) expireMsgs() {
 	ms.Lock()
+	defer ms.Unlock()
 	if ms.closed {
-		ms.Unlock()
 		ms.wg.Done()
 		return
 	}
-	defer ms.Unlock()
 
 	now := time.Now().UnixNano()
 	maxAge := int64(ms.limits.MaxAge)
@@ -216,6 +215,12 @@ func (ms *MemoryMsgStore) removeFirstMsg() {
 // Empty implements the MsgStore interface
 func (ms *MemoryMsgStore) Empty() error {
 	ms.Lock()
+	if ms.ageTimer != nil {
+		if ms.ageTimer.Stop() {
+			ms.wg.Done()
+		}
+		ms.ageTimer = nil
+	}
 	ms.empty()
 	ms.msgs = make(map[uint64]*pb.MsgProto)
 	ms.Unlock()

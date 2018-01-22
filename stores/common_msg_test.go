@@ -658,9 +658,6 @@ func TestCSMsgStoreEmpty(t *testing.T) {
 	for _, st := range testStores {
 		st := st
 		t.Run(st.name, func(t *testing.T) {
-			if !st.recoverable {
-				return
-			}
 			t.Parallel()
 			defer endTest(t, st)
 

@@ -384,6 +384,7 @@ func TestGSNoOps(t *testing.T) {
 		msgStoreLastMsg(t, gms) != nil ||
 		gms.Flush() != nil ||
 		msgStoreGetSequenceFromTimestamp(t, gms, 0) != 0 ||
+		gms.Empty() != nil ||
 		gms.Close() != nil {
 		t.Fatal("Expected no value since these should not be implemented for generic store")
 	}

@@ -5,6 +5,7 @@ package stores
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func createDefaultMemStore(t tLogger) *MemoryStore {
@@ -49,4 +50,38 @@ func TestMSNegativeLimitsOnCreate(t *testing.T) {
 		}
 		t.Fatal("Should have failed to create store with a negative limit")
 	}
+}
+
+func TestMSMsgStoreEmpty(t *testing.T) {
+	s := createDefaultMemStore(t)
+	defer s.Close()
+
+	limits := StoreLimits{}
+	limits.MaxAge = 250 * time.Millisecond
+	if err := s.SetLimits(&limits); err != nil {
+		t.Fatalf("Error setting limits: %v", err)
+	}
+
+	cs := storeCreateChannel(t, s, "foo")
+
+	// Send some messages
+	for i := 0; i < 3; i++ {
+		storeMsg(t, cs, "foo", uint64(i+1), []byte("hello"))
+	}
+	// Then empty the message store
+	if err := cs.Msgs.Empty(); err != nil {
+		t.Fatalf("Error on Empty(): %v", err)
+	}
+
+	ms := cs.Msgs.(*MemoryMsgStore)
+	ms.RLock()
+	if ms.ageTimer != nil {
+		ms.RUnlock()
+		t.Fatal("AgeTimer not nil")
+	}
+	if ms.first != 0 || ms.last != 0 {
+		ms.RUnlock()
+		t.Fatalf("First and/or Last not reset")
+	}
+	ms.RUnlock()
 }
