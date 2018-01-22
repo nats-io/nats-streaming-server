@@ -58,6 +58,14 @@ NATS Streaming provides the following high-level feature set.
 
 # Important Changes
 
+## Version `1.0.0-beta`
+
+The Store interface has been slightly changed to accommodate the clustering feature.
+
+* Changed `MstStore.Store()` API to accept a `*pb.MsgProto` instead of a byte array. This is because the server is now assigning the sequence number.
+The store implementation should ignore the call if the given sequence number is below or equal to what has been already stored.
+* Added `MsgStore.Empty()` API to empty a given channel message store.
+
 ## Version `0.6.0`
 
 The Store interface has been heavily modified. Some of the responsibilities have been moved into the server

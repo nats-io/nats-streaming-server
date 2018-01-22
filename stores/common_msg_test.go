@@ -3,6 +3,7 @@
 package stores
 
 import (
+	"fmt"
 	"reflect"
 	"runtime"
 	"testing"
@@ -649,6 +650,102 @@ func TestCSLimitsOnRecovery(t *testing.T) {
 				t.Fatalf("Expected bytes less than %v, got %v", limits.MaxBytes, n)
 			}
 			s.Close()
+		})
+	}
+}
+
+func TestCSMsgStoreEmpty(t *testing.T) {
+	for _, st := range testStores {
+		st := st
+		t.Run(st.name, func(t *testing.T) {
+			if !st.recoverable {
+				return
+			}
+			t.Parallel()
+			defer endTest(t, st)
+
+			s := startTest(t, st)
+			defer s.Close()
+
+			limits := &StoreLimits{}
+			limits.MaxAge = 500 * time.Millisecond
+			s.SetLimits(limits)
+
+			cs := storeCreateChannel(t, s, "foo")
+			for i := 0; i < 10; i++ {
+				storeMsg(t, cs, "foo", uint64(i+1), []byte(fmt.Sprintf("msg%d", (i+1))))
+			}
+
+			first, last := msgStoreFirstAndLastSequence(t, cs.Msgs)
+			if first != 1 || last != 10 {
+				t.Fatalf("Expected first to be 1 and last to be 10, got %v and %v", first, last)
+			}
+			firstMsg := msgStoreFirstMsg(t, cs.Msgs)
+			if firstMsg.Sequence != 1 {
+				t.Fatalf("Expected first message sequence to be 1, got %v", firstMsg.Sequence)
+			}
+			if !reflect.DeepEqual(firstMsg.Data, []byte("msg1")) {
+				t.Fatalf("Expected first message data to be msg1, got %s", firstMsg.Data)
+			}
+			lastMsg := msgStoreLastMsg(t, cs.Msgs)
+			if lastMsg.Sequence != 10 {
+				t.Fatalf("Expected last message sequence to be 10, got %v", lastMsg.Sequence)
+			}
+			if !reflect.DeepEqual(lastMsg.Data, []byte("msg10")) {
+				t.Fatalf("Expected last message data to be msg10, got %s", lastMsg.Data)
+			}
+			count, size := msgStoreState(t, cs.Msgs)
+			if count != 10 || size == 0 {
+				t.Fatalf("Unexpected count and size: %v and %v", count, size)
+			}
+
+			if err := cs.Msgs.Empty(); err != nil {
+				t.Fatalf("Error on Empty(): %v", err)
+			}
+			// Check that we can't lookup existing messages
+			for i := 0; i < 10; i++ {
+				if m, _ := cs.Msgs.Lookup(uint64(i + 1)); m != nil {
+					t.Fatalf("Should not have been able to lookup msg seq=%v, got %v", i+1, m)
+				}
+			}
+
+			count, size = msgStoreState(t, cs.Msgs)
+			if count != 0 || size != 0 {
+				t.Fatalf("Unexpected count and size: %v and %v", count, size)
+			}
+			first, last = msgStoreFirstAndLastSequence(t, cs.Msgs)
+			if first != 0 || last != 0 {
+				t.Fatalf("Expected first and last to be 0, got %v and %v", first, last)
+			}
+			firstMsg = msgStoreFirstMsg(t, cs.Msgs)
+			if firstMsg != nil {
+				t.Fatalf("Expected no first message, got %v", firstMsg)
+			}
+			lastMsg = msgStoreLastMsg(t, cs.Msgs)
+			if lastMsg != nil {
+				t.Fatalf("Expected no last message, got %v", lastMsg)
+			}
+
+			// Wait past message expiration and ensure that we don't crash.
+			time.Sleep(750 * time.Millisecond)
+
+			// Add a new message
+			storeMsg(t, cs, "foo", 20, []byte("msg20"))
+			first, last = msgStoreFirstAndLastSequence(t, cs.Msgs)
+			if first != 20 || last != 20 {
+				t.Fatalf("Expected first and last to be 20, got %v and %v", first, last)
+			}
+			firstMsg = msgStoreFirstMsg(t, cs.Msgs)
+			if firstMsg.Sequence != 20 {
+				t.Fatalf("Expected first message sequence to be 20, got %v", firstMsg.Sequence)
+			}
+			if !reflect.DeepEqual(firstMsg.Data, []byte("msg20")) {
+				t.Fatalf("Expected first message data to be msg1, got %s", firstMsg.Data)
+			}
+			lastMsg = msgStoreLastMsg(t, cs.Msgs)
+			if !reflect.DeepEqual(firstMsg, lastMsg) {
+				t.Fatalf("Expected first and last message to be the same, got %v and %v", firstMsg, lastMsg)
+			}
 		})
 	}
 }

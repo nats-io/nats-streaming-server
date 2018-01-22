@@ -1450,6 +1450,37 @@ func (ms *SQLMsgStore) flush() error {
 	return nil
 }
 
+// Empty implements the MsgStore interface
+func (ms *SQLMsgStore) Empty() error {
+	ms.Lock()
+	tx, err := ms.sqlStore.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(sqlStmts[sqlDeletedMsgsWithSeqLowerThan], ms.channelID, ms.last); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(sqlStmts[sqlUpdateChannelMaxSeq], 0, ms.channelID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	ms.empty()
+	if ms.expireTimer != nil {
+		if ms.expireTimer.Stop() {
+			ms.wg.Done()
+		}
+		ms.expireTimer = nil
+	}
+	if ms.writeCache != nil {
+		ms.writeCache.transferToFreeList()
+	}
+	ms.Unlock()
+	return err
+}
+
 // Flush implements the MsgStore interface
 func (ms *SQLMsgStore) Flush() error {
 	ms.Lock()

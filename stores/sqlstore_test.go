@@ -1413,3 +1413,70 @@ func TestSQLFirstSeqAfterMsgsExpireAndStoreRestart(t *testing.T) {
 		t.Fatalf("Unexpected first and/or last: %v, %v", first, last)
 	}
 }
+
+func TestSQLMsgStoreEmpty(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	defer cleanupSQLDatastore(t)
+
+	cachingModes := []bool{true, false}
+	for _, caching := range cachingModes {
+		cleanupSQLDatastore(t)
+
+		s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(caching))
+		if err != nil {
+			t.Fatalf("Error creating sql store: %v", err)
+		}
+		defer s.Close()
+
+		limits := StoreLimits{}
+		limits.MaxAge = 250 * time.Millisecond
+		if err := s.SetLimits(&limits); err != nil {
+			t.Fatalf("Error setting limits: %v", err)
+		}
+
+		cs := storeCreateChannel(t, s, "foo")
+		storeMsg(t, cs, "foo", 1, []byte("hello"))
+		// Wait for this to expire
+		time.Sleep(300 * time.Millisecond)
+
+		// Send more messages
+		for i := 0; i < 3; i++ {
+			storeMsg(t, cs, "foo", uint64(i+2), []byte("hello"))
+		}
+		// Then empty the message store
+		if err := cs.Msgs.Empty(); err != nil {
+			t.Fatalf("Error on Empty(): %v", err)
+		}
+
+		ms := cs.Msgs.(*SQLMsgStore)
+		ms.RLock()
+		if ms.writeCache != nil && (ms.writeCache.head != nil || ms.writeCache.tail != nil) {
+			ms.RUnlock()
+			t.Fatal("WriteCache not empty")
+		}
+		if ms.expireTimer != nil {
+			ms.RUnlock()
+			t.Fatal("ExpireTimer not nil")
+		}
+		if ms.first != 0 || ms.last != 0 {
+			ms.RUnlock()
+			t.Fatalf("First and/or Last not reset")
+		}
+		channelID := ms.channelID
+		ms.RUnlock()
+
+		db := getDBConnection(t)
+		defer db.Close()
+		maxSeq := uint64(0)
+		r := db.QueryRow(fmt.Sprintf("SELECT maxseq FROM Channels WHERE id=%v", channelID))
+		if err := r.Scan(&maxSeq); err != nil {
+			t.Fatalf("Error on scan: %v", err)
+		}
+		if maxSeq != 0 {
+			t.Fatalf("MaxSeq should have been reset, got %v", maxSeq)
+		}
+		s.Close()
+	}
+}
