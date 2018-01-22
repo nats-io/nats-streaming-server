@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	natsd "github.com/nats-io/gnatsd/server"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
@@ -55,16 +54,16 @@ type partitions struct {
 	quitCh          chan struct{}
 }
 
-// Creates the subscription for partitioning communication, sends
-// the initial request (in case there are other servers listening) and
-// starts the go routines handling HBs and cleanup of servers map.
-func (s *StanServer) initPartitions(sOpts *Options, nOpts *natsd.Options, storeChannels map[string]*stores.ChannelLimits) error {
+// Initialize the channels partitions objects and issue the first
+// request to check if other servers in the cluster incorrectly have
+// any of the channel that this server is supposed to handle.
+func (s *StanServer) initPartitions() error {
 	// The option says that the server should only use the pre-defined channels,
 	// but none was specified. Don't see the point in continuing...
-	if len(storeChannels) == 0 {
+	if len(s.opts.StoreLimits.PerChannel) == 0 {
 		return ErrNoChannel
 	}
-	nc, err := s.createNatsClientConn("pc", sOpts, nOpts)
+	nc, err := s.createNatsClientConn("pc")
 	if err != nil {
 		return err
 	}
@@ -75,8 +74,8 @@ func (s *StanServer) initPartitions(sOpts *Options, nOpts *natsd.Options, storeC
 	// Now that the connection is created, we need to set s.partitioning to cp
 	// so that server shutdown can properly close this connection.
 	s.partitions = p
-	p.createChannelsMapAndSublist(storeChannels)
-	p.sendListSubject = partitionsPrefix + "." + sOpts.ID
+	p.createChannelsMapAndSublist(s.opts.StoreLimits.PerChannel)
+	p.sendListSubject = partitionsPrefix + "." + s.opts.ID
 	// Use the partitions' own connection for channels list requests
 	p.processChanSub, err = p.nc.Subscribe(p.sendListSubject, p.processChannelsListRequests)
 	if err != nil {

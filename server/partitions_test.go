@@ -812,3 +812,40 @@ func TestPartitionsRaceOnSub(t *testing.T) {
 		}()
 	}
 }
+
+func TestPartitionsAndFT(t *testing.T) {
+	cleanupFTDatastore(t)
+	defer cleanupFTDatastore(t)
+
+	setPartitionsVarsForTest()
+	defer resetDefaultPartitionsVars()
+
+	// For this test, both server will connect to same NATS Server
+	ncOpts := natsdTest.DefaultTestOptions
+	ns := natsdTest.RunServer(&ncOpts)
+	defer ns.Shutdown()
+
+	opts := getTestFTDefaultOptions()
+	opts.Partitioning = true
+	opts.AddPerChannel("foo", &stores.ChannelLimits{})
+	opts.NATSServerURL = "nats://localhost:4222"
+
+	ft1 := runServerWithOpts(t, opts, nil)
+	defer ft1.Shutdown()
+
+	// The standby should be able to start
+	ft2 := runServerWithOpts(t, opts, nil)
+	defer ft2.Shutdown()
+
+	ft1.Shutdown()
+
+	// Wait for ft2 to activate
+	checkState(t, ft2, FTActive)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+}
