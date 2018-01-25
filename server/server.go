@@ -296,7 +296,7 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 	if err != nil {
 		return nil, err
 	}
-	c.nextSequence = lastSequence + 1
+	atomic.StoreUint64(&c.nextSequence, lastSequence+1)
 	cs.channels[name] = c
 	return c, nil
 }
@@ -912,11 +912,13 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	}
 	ss.Unlock()
 
-	// Calling this will sort current pending messages and ensure
-	// that the ackTimer is properly set. It does not necessarily
-	// mean that messages are going to be redelivered on the spot.
-	for _, qsub := range qsubs {
-		ss.stan.performAckExpirationRedelivery(qsub, false)
+	if !ss.stan.isClustered || ss.stan.isLeader() {
+		// Calling this will sort current pending messages and ensure
+		// that the ackTimer is properly set. It does not necessarily
+		// mean that messages are going to be redelivered on the spot.
+		for _, qsub := range qsubs {
+			ss.stan.performAckExpirationRedelivery(qsub, false)
+		}
 	}
 
 	if log != nil {
@@ -1678,6 +1680,13 @@ func (s *StanServer) leadershipLost() {
 	// heartbeat would be automatically removed when it fires.
 	for _, client := range s.clients.getClients() {
 		s.clients.removeClientHB(client)
+		// Ensure subs ackTimer is stopped
+		subs := client.getSubsCopy()
+		for _, sub := range subs {
+			sub.Lock()
+			sub.clearAckTimer()
+			sub.Unlock()
+		}
 	}
 
 	// Unsubscribe to the snapshot request per channel since we are no longer
@@ -3665,7 +3674,9 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string) (*c
 			// We have a durable with pending messages, set newOnHold
 			// until we have performed the initial redelivery.
 			sub.newOnHold = true
-			s.setupAckTimer(sub, sub.ackWait)
+			if !s.isClustered || s.isLeader() {
+				s.setupAckTimer(sub, sub.ackWait)
+			}
 		}
 		// Clear the IsClosed flags that were set during a Close()
 		sub.IsClosed = false
