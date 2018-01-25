@@ -1,4 +1,5 @@
 // Copyright 2016-2017 Apcera Inc. All rights reserved.
+// Copyright 2018 Synadia Communications Inc. All rights reserved.
 //
 // Uses https://github.com/gogo/protobuf
 // compiled via `protoc -I=. -I=$GOPATH/src  --gogofaster_out=. protocol.proto`
@@ -96,8 +97,7 @@ message RaftOperation {
     Subscribe          = 1; // Create client subscription.
     RemoveSubscription = 2; // Remove client subscription.
     CloseSubscription  = 3; // Close durable client subscription.
-    Ack                = 4; // Ack a message.
-    Send               = 5; // Message send on a client subscription.
+    SendAndAck         = 4; // Messages send or ack'ed.
     Connect            = 6; // Client connection.
     Disconnect         = 7; // Client disconnect.
   }
@@ -105,8 +105,7 @@ message RaftOperation {
   Batch                 PublishBatch     = 2; // Publish operation data.
   AddSubscription       Sub              = 3; // Subscribe operation data.
   pb.UnsubscribeRequest Unsub            = 4; // Close/Remove Subscription operation data.
-  ChannelMessage        AckMsg           = 5; // Ack operation data.
-  ChannelMessage        SendMsg          = 6; // Send operation data.
+  SubSentAndAck         SubSentAck       = 5; // Send and/or Ack operation data.
   AddClient             ClientConnect    = 7; // Connect operation data.
   pb.CloseRequest       ClientDisconnect = 8; // Disconnect operation data.
 }
@@ -122,11 +121,12 @@ message AddSubscription {
   string                 AckInbox = 2; // Ack inbox for the subscription.
 }
 
-// ChannelMessage is used to replicate a sent or ack message.
-message ChannelMessage {
-  string Channel  = 1; // Subscription channel.
-  string AckInbox = 2; // Subscription ack inbox.
-  uint64 Sequence = 3; // Message sequence to ack.
+// SubSentAndAck is used to replicate a sent and/or ack messages.
+message SubSentAndAck {
+  string          Channel  = 1; // Subscription channel.
+  string          AckInbox = 2; // Subscription ack inbox.
+  repeated uint64 Sent     = 3; // Message sequences that were sent.
+  repeated uint64 Ack      = 4; // Message sequences that were ack'ed.
 }
 
 // AddClient is used to replicate a new client connection.

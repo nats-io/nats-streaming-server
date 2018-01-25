@@ -1,4 +1,5 @@
 // Copyright 2017 Apcera Inc. All rights reserved.
+// Copyright 2018 Synadia Communications Inc. All rights reserved.
 
 package server
 
@@ -22,10 +23,6 @@ import (
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
-func init() {
-	clusterSetupForTest()
-}
-
 var defaultRaftLog string
 
 func init() {
@@ -37,6 +34,7 @@ func init() {
 		panic(fmt.Errorf("Error removing temp dir: %v", err))
 	}
 	defaultRaftLog = tmpDir
+	clusterSetupForTest()
 }
 
 func cleanupRaftLog(t *testing.T) {
@@ -1081,7 +1079,7 @@ func TestClusteringLogSnapshotRestoreSubAcksPending(t *testing.T) {
 	_, err = sc.Subscribe(channel, func(msg *stan.Msg) {
 		// Do not ack.
 		ch <- msg
-	}, stan.DeliverAllAvailable(), stan.SetManualAckMode(), stan.AckWait(time.Second)) //, stan.MaxInflight(1))
+	}, stan.DeliverAllAvailable(), stan.SetManualAckMode(), stan.AckWait(time.Second))
 	if err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
@@ -1942,7 +1940,7 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 	}
 	defer sc.Close()
 
-	// Publish a message (this will create the channel and form the Raft group).
+	// Publish a message.
 	channel := "foo"
 	if err := sc.Publish(channel, []byte("hello")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
@@ -1966,13 +1964,11 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our message")
 	}
-	// And for the ack to be replicated
-	time.Sleep(time.Second)
+	atomic.StoreInt32(&doAckMsg, 1)
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
 	getLeader(t, 10*time.Second, servers...)
 
-	atomic.StoreInt32(&doAckMsg, 1)
 	// Publish one more message and wait for message to be received
 	if err := sc.Publish(channel, []byte("hello")); err != nil {
 		t.Fatalf("Unexpected error on publish: %v", err)
@@ -2000,7 +1996,7 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 			sub.RUnlock()
 			if lastSent == 2 && acksPending == 0 {
 				// All is as expected, we are done
-				return
+				break
 			}
 		}
 		time.Sleep(50 * time.Millisecond)

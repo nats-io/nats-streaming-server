@@ -1,4 +1,5 @@
 // Copyright 2017 Apcera Inc. All rights reserved.
+// Copyright 2018 Synadia Communications Inc. All rights reserved.
 
 package server
 
@@ -21,6 +22,7 @@ var runningInTests bool
 
 func clusterSetupForTest() {
 	runningInTests = true
+	lazyReplicationInterval = 250 * time.Millisecond
 }
 
 // ClusteringOptions contains STAN Server options related to clustering.

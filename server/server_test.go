@@ -1,4 +1,5 @@
 // Copyright 2016-2017 Apcera Inc. All rights reserved.
+// Copyright 2018 Synadia Communications Inc. All rights reserved.
 
 package server
 
@@ -983,7 +984,7 @@ func TestDontSendEmptyMsgProto(t *testing.T) {
 
 	m := &pb.MsgProto{}
 	sub.Lock()
-	s.sendMsgToSub(nil, sub, m, false)
+	s.sendMsgToSub(sub, m, false)
 	sub.Unlock()
 }
 
