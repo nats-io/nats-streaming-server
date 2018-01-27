@@ -21,8 +21,6 @@ const (
 	partitionsDefaultRequestTimeout = time.Second
 	// This is the value that is stored in the sublist for a given subject
 	channelInterest = 1
-	// Messages channel size
-	partitionsMsgChanSize = 65536
 	// Default wait before checking for channels when notified
 	// that the NATS cluster topology has changed. This gives a chance
 	// for the new server joining the cluster to send its subscriptions
@@ -44,12 +42,9 @@ type partitions struct {
 	sl              *util.Sublist
 	nc              *nats.Conn
 	sendListSubject string
-	ctrlMsgSubject  string // send to this subject when processing close/unsub requests
 	processChanSub  *nats.Subscription
 	inboxSub        *nats.Subscription
-	msgsCh          chan *nats.Msg
 	isShutdown      bool
-	quitCh          chan struct{}
 }
 
 // Initialize the channels partitions objects and issue the first
@@ -97,10 +92,6 @@ func (s *StanServer) initPartitions() error {
 		return err
 	}
 	p.Unlock()
-	p.msgsCh = make(chan *nats.Msg, partitionsMsgChanSize)
-	p.quitCh = make(chan struct{}, 1)
-	s.wg.Add(1)
-	go p.postClientPublishIncomingMsgs()
 	return nil
 }
 
@@ -143,38 +134,14 @@ func (p *partitions) topologyChanged(_ *nats.Conn) {
 	}
 }
 
-// We use a channel subscription in order to minimize the number
-// of go routines for all the explicit pub subscriptions.
-// This go routine simply pulls a message from the channel and
-// invokes processClientPublish(). We may have slow consumer issues,
-// if so, will have to figure out another way.
-func (p *partitions) postClientPublishIncomingMsgs() {
-	defer p.s.wg.Done()
-	for {
-		select {
-		case <-p.quitCh:
-			return
-		case m := <-p.msgsCh:
-			p.s.processClientPublish(m)
-		}
-	}
-}
-
 // Create the internal subscriptions on the list of channels.
 func (p *partitions) initSubscriptions() error {
 	// NOTE: Use the server's nc connection here, not the partitions' one.
 	for _, channelName := range p.channels {
 		pubSubject := fmt.Sprintf("%s.%s", p.s.info.Publish, channelName)
-		if _, err := p.s.nc.ChanSubscribe(pubSubject, p.msgsCh); err != nil {
+		if _, err := p.s.nc.Subscribe(pubSubject, p.s.processClientPublish); err != nil {
 			return fmt.Errorf("could not subscribe to publish subject %q, %v", channelName, err)
 		}
-	}
-	// Add a dedicated subject for when we try to schedule a control
-	// message to be processed after all messages from a given client
-	// have been processed.
-	p.ctrlMsgSubject = fmt.Sprintf("%s.%s", p.s.info.Publish, nats.NewInbox())
-	if _, err := p.s.nc.ChanSubscribe(p.ctrlMsgSubject, p.msgsCh); err != nil {
-		return fmt.Errorf("could not subscribe to subject %q, %v", p.ctrlMsgSubject, err)
 	}
 	return nil
 }
@@ -274,15 +241,11 @@ func (p *partitions) processChannelsListRequests(m *nats.Msg) {
 // server is shuting down and closes the internal NATS connection.
 func (p *partitions) shutdown() {
 	p.Lock()
+	defer p.Unlock()
 	if p.isShutdown {
-		p.Unlock()
 		return
 	}
 	p.isShutdown = true
-	p.Unlock()
-	if p.quitCh != nil {
-		p.quitCh <- struct{}{}
-	}
 	if p.nc != nil {
 		p.nc.Close()
 	}
