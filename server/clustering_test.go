@@ -2448,3 +2448,23 @@ func TestClusteringAckTimerOnlyOnLeader(t *testing.T) {
 	defer s.Shutdown()
 	sc.Close()
 }
+
+func TestClusteringAndChannelsPartitioning(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	opts := getTestDefaultOptsForClustering("a", true)
+	opts.Partitioning = true
+	opts.AddPerChannel("foo", &stores.ChannelLimits{})
+	s, err := RunServerWithOpts(opts, nil)
+	if err == nil {
+		s.Shutdown()
+		t.Fatal("Expected error, got none")
+	}
+}
