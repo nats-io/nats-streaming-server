@@ -458,6 +458,7 @@ type StanServer struct {
 	info       spb.ServerInfo // Contains cluster ID and subjects
 	natsServer *server.Server
 	opts       *Options
+	natsOpts   *server.Options
 	startTime  time.Time
 
 	// For scalability, a dedicated connection is used to publish
@@ -1060,9 +1061,10 @@ func (s *StanServer) stanErrorHandler(nc *nats.Conn, sub *nats.Subscription, err
 		nc.Opts.Name, sub.Subject, err)
 }
 
-func (s *StanServer) buildServerURLs(sOpts *Options, opts *server.Options) ([]string, error) {
+func (s *StanServer) buildServerURLs() ([]string, error) {
 	var hostport string
-	natsURL := sOpts.NATSServerURL
+	natsURL := s.opts.NATSServerURL
+	opts := s.natsOpts
 	// If the URL to an external NATS is provided...
 	if natsURL != "" {
 		// If it has user/pwd info or is a list of urls...
@@ -1117,15 +1119,15 @@ func (s *StanServer) buildServerURLs(sOpts *Options, opts *server.Options) ([]st
 // createNatsClientConn creates a connection to the NATS server, using
 // TLS if configured.  Pass in the NATS server options to derive a
 // connection url, and for other future items (e.g. auth)
-func (s *StanServer) createNatsClientConn(name string, sOpts *Options, nOpts *server.Options) (*nats.Conn, error) {
+func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 	var err error
 	ncOpts := nats.DefaultOptions
 
-	ncOpts.Servers, err = s.buildServerURLs(sOpts, nOpts)
+	ncOpts.Servers, err = s.buildServerURLs()
 	if err != nil {
 		return nil, err
 	}
-	ncOpts.Name = fmt.Sprintf("_NSS-%s-%s", sOpts.ID, name)
+	ncOpts.Name = fmt.Sprintf("_NSS-%s-%s", s.opts.ID, name)
 
 	if err = nats.ErrorHandler(s.stanErrorHandler)(&ncOpts); err != nil {
 		return nil, err
@@ -1139,18 +1141,18 @@ func (s *StanServer) createNatsClientConn(name string, sOpts *Options, nOpts *se
 	if err = nats.DisconnectHandler(s.stanDisconnectedHandler)(&ncOpts); err != nil {
 		return nil, err
 	}
-	if sOpts.Secure {
+	if s.opts.Secure {
 		if err = nats.Secure()(&ncOpts); err != nil {
 			return nil, err
 		}
 	}
-	if sOpts.ClientCA != "" {
-		if err = nats.RootCAs(sOpts.ClientCA)(&ncOpts); err != nil {
+	if s.opts.ClientCA != "" {
+		if err = nats.RootCAs(s.opts.ClientCA)(&ncOpts); err != nil {
 			return nil, err
 		}
 	}
-	if sOpts.ClientCert != "" {
-		if err = nats.ClientCert(sOpts.ClientCert, sOpts.ClientKey)(&ncOpts); err != nil {
+	if s.opts.ClientCert != "" {
+		if err = nats.ClientCert(s.opts.ClientCert, s.opts.ClientKey)(&ncOpts); err != nil {
 			return nil, err
 		}
 	}
@@ -1175,19 +1177,19 @@ func (s *StanServer) createNatsClientConn(name string, sOpts *Options, nOpts *se
 	return nc, err
 }
 
-func (s *StanServer) createNatsConnections(sOpts *Options, nOpts *server.Options) error {
+func (s *StanServer) createNatsConnections() error {
 	var err error
-	s.ncs, err = s.createNatsClientConn("send", sOpts, nOpts)
+	s.ncs, err = s.createNatsClientConn("send")
 	if err == nil {
-		s.nc, err = s.createNatsClientConn("general", sOpts, nOpts)
+		s.nc, err = s.createNatsClientConn("general")
 	}
-	if err == nil && sOpts.FTGroupName != "" {
-		s.ftnc, err = s.createNatsClientConn("ft", sOpts, nOpts)
+	if err == nil && s.opts.FTGroupName != "" {
+		s.ftnc, err = s.createNatsClientConn("ft")
 	}
 	if err == nil && s.isClustered {
-		s.ncr, err = s.createNatsClientConn("raft", sOpts, nOpts)
+		s.ncr, err = s.createNatsClientConn("raft")
 		if err == nil {
-			s.ncsr, err = s.createNatsClientConn("raft_snap", sOpts, nOpts)
+			s.ncsr, err = s.createNatsClientConn("raft_snap")
 		}
 	}
 	return err
@@ -1226,6 +1228,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	s := StanServer{
 		serverID:      nuid.Next(),
 		opts:          sOpts,
+		natsOpts:      nOpts,
 		dupCIDTimeout: defaultCheckDupCIDTimeout,
 		ioChannelQuit: make(chan struct{}, 1),
 		trace:         sOpts.Trace,
@@ -1244,7 +1247,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	if sOpts.CustomLogger != nil {
 		s.log.SetLogger(sOpts.CustomLogger, sOpts.Debug, sOpts.Trace)
 	} else if sOpts.EnableLogging {
-		s.configureLogger(nOpts)
+		s.configureLogger()
 	}
 
 	s.log.Noticef("Starting nats-streaming-server[%s] version %s", sOpts.ID, VERSION)
@@ -1316,7 +1319,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 
 	// If no NATS server url is provided, it means that we embed the NATS Server
 	if sOpts.NATSServerURL == "" {
-		if err := s.startNATSServer(nOpts); err != nil {
+		if err := s.startNATSServer(); err != nil {
 			return nil, err
 		}
 	}
@@ -1327,16 +1330,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		}
 	}
 	// Create our connections
-	if err := s.createNatsConnections(sOpts, nOpts); err != nil {
+	if err := s.createNatsConnections(); err != nil {
 		return nil, err
-	}
-
-	// If using partitioning, try our best to find out that on startup that
-	// no other server with same cluster ID has any channel that we own.
-	if sOpts.Partitioning {
-		if err := s.initPartitions(sOpts, nOpts, storeLimits.PerChannel); err != nil {
-			return nil, err
-		}
 	}
 
 	// In FT mode, server cannot recover the store until it is elected leader.
@@ -1376,10 +1371,11 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 // trace/debug if the local STAN debug/trace flags are set.  NATS will do
 // the same with it's logger flags.  This enables us to use the same logger,
 // but differentiate between STAN and NATS debug/trace.
-func (s *StanServer) configureLogger(nOpts *server.Options) {
+func (s *StanServer) configureLogger() {
 	var newLogger logger.Logger
 
 	sOpts := s.opts
+	nOpts := s.natsOpts
 
 	enableDebug := nOpts.Debug || sOpts.Debug
 	enableTrace := nOpts.Trace || sOpts.Trace
@@ -1415,6 +1411,14 @@ func (s *StanServer) start(runningState State) error {
 	defer s.mu.Unlock()
 	if s.shutdown {
 		return nil
+	}
+
+	// If using partitioning, send our list and start go routines handling
+	// channels list requests.
+	if s.opts.Partitioning {
+		if err := s.initPartitions(); err != nil {
+			return err
+		}
 	}
 
 	s.state = runningState
@@ -1740,7 +1744,8 @@ func (s *StanServer) leadershipLost() {
 }
 
 // TODO:  Explore parameter passing in gnatsd.  Keep separate for now.
-func (s *StanServer) configureClusterOpts(opts *server.Options) error {
+func (s *StanServer) configureClusterOpts() error {
+	opts := s.natsOpts
 	// If we don't have cluster defined in the configuration
 	// file and no cluster listen string override, but we do
 	// have a routes override, we need to report misconfiguration.
@@ -1800,7 +1805,8 @@ func (s *StanServer) configureClusterOpts(opts *server.Options) error {
 // configureNATSServerTLS sets up TLS for the NATS Server.
 // Additional TLS parameters (e.g. cipher suites) will need to be placed
 // in a configuration file specified through the -config parameter.
-func (s *StanServer) configureNATSServerTLS(opts *server.Options) error {
+func (s *StanServer) configureNATSServerTLS() error {
+	opts := s.natsOpts
 	tlsSet := false
 	tc := server.TLSConfigOpts{}
 	if opts.TLSCert != "" {
@@ -1831,15 +1837,16 @@ func (s *StanServer) configureNATSServerTLS(opts *server.Options) error {
 	return nil
 }
 
-// startNATSServer massages options as necessary, and starts the embedded
-// NATS server.
-func (s *StanServer) startNATSServer(opts *server.Options) error {
-	if err := s.configureClusterOpts(opts); err != nil {
+// startNATSServer starts the embedded NATS server, possibly updating
+// the NATS Server's clustering and/or TLS options.
+func (s *StanServer) startNATSServer() error {
+	if err := s.configureClusterOpts(); err != nil {
 		return err
 	}
-	if err := s.configureNATSServerTLS(opts); err != nil {
+	if err := s.configureNATSServerTLS(); err != nil {
 		return err
 	}
+	opts := s.natsOpts
 	s.natsServer = server.New(opts)
 	if s.natsServer == nil {
 		return fmt.Errorf("no NATS Server object returned")
