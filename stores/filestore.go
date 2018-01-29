@@ -1,4 +1,5 @@
 // Copyright 2016-2017 Apcera Inc. All rights reserved.
+// Copyright 2018 Synadia Communications Inc. All rights reserved.
 
 package stores
 
@@ -1420,8 +1421,18 @@ func (fs *FileStore) Init(info *spb.ServerInfo) error {
 	fs.Lock()
 	defer fs.Unlock()
 
-	if _, err := fs.fm.lockFile(fs.serverFile); err != nil {
-		return err
+	if fs.serverFile == nil {
+		var err error
+		// Open/Create the server file (note that this file must not be opened,
+		// in APPEND mode to allow truncate to work).
+		fs.serverFile, err = fs.fm.createFile(serverFileName, os.O_RDWR|os.O_CREATE, nil)
+		if err != nil {
+			return err
+		}
+	} else {
+		if _, err := fs.fm.lockFile(fs.serverFile); err != nil {
+			return err
+		}
 	}
 	f := fs.serverFile.handle
 	// defer is ok for this function...

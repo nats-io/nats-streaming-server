@@ -1,4 +1,5 @@
 // Copyright 2016-2017 Apcera Inc. All rights reserved.
+// Copyright 2018 Synadia Communications Inc. All rights reserved.
 
 package stores
 
@@ -426,7 +427,24 @@ func TestCSInit(t *testing.T) {
 		t.Run(st.name, func(t *testing.T) {
 			t.Parallel()
 			defer endTest(t, st)
-			s := startTest(t, st)
+
+			var (
+				s   Store
+				err error
+			)
+			switch st.name {
+			case TypeMemory:
+				s, err = NewMemoryStore(testLogger, nil)
+			case TypeFile:
+				s, err = NewFileStore(testLogger, testFSDefaultDatastore, nil)
+			case TypeSQL:
+				s, err = NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil)
+			default:
+				panic(fmt.Errorf("Add store type %q in this test", st.name))
+			}
+			if err != nil {
+				t.Fatalf("Error creating store: %v", err)
+			}
 			defer s.Close()
 
 			info := spb.ServerInfo{
