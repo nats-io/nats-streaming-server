@@ -1316,6 +1316,12 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// We would need to use reflection such as reflect.ValueOf(s.store).IsNil().
 	// So to not do that, we simply delay the setting of s.store when we know
 	// that it was successful.
+	if s.isClustered {
+		// Wrap our store with a RaftStore instance that avoids persisting
+		// data that we don't need because they are handled by the actual
+		// raft logs.
+		store = stores.NewRaftStore(store)
+	}
 	s.store = store
 
 	s.clients = newClientStore(s.store)

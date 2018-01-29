@@ -54,6 +54,7 @@ var (
 		&testStore{TypeMemory, false},
 		&testStore{TypeFile, true},
 		&testStore{TypeSQL, true},
+		&testStore{TypeRaft, false},
 	}
 )
 
@@ -275,6 +276,9 @@ func startTest(t tLogger, ts *testStore) Store {
 	case TypeSQL:
 		cleanupSQLDatastore(t)
 		return createDefaultSQLStore(t)
+	case TypeRaft:
+		cleanupRaftDatastore(t)
+		return createDefaultRaftStore(t)
 	default:
 		// This is used with testStores table. If a store type has been
 		// added there, it needs to be added here.
@@ -288,6 +292,8 @@ func endTest(t tLogger, ts *testStore) {
 		cleanupFSDatastore(t)
 	case TypeSQL:
 		cleanupSQLDatastore(t)
+	case TypeRaft:
+		cleanupRaftDatastore(t)
 	}
 }
 
@@ -304,6 +310,17 @@ func testReOpenStore(t tLogger, ts *testStore, limits *StoreLimits) (Store, *Rec
 		// This is used with testStores table. If a recoverable
 		// store type has been added there, it needs to be added here.
 		panic(fmt.Sprintf("Add new store type %q in testReopenStore", ts.name))
+	}
+}
+
+func isStorageBasedOnFile(s Store) bool {
+	switch s.(type) {
+	case *FileStore:
+		return true
+	case *RaftStore:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -414,8 +431,13 @@ func TestCSBasicCreate(t *testing.T) {
 			s := startTest(t, st)
 			defer s.Close()
 
-			if s.Name() != st.name {
-				t.Fatalf("Expecting name to be %q, got %q", st.name, s.Name())
+			expectedName := st.name
+			if st.name == TypeRaft {
+				expectedName = TypeRaft + "_" + s.(*RaftStore).Store.Name()
+			}
+
+			if s.Name() != expectedName {
+				t.Fatalf("Expecting name to be %q, got %q", expectedName, s.Name())
 			}
 		})
 	}
@@ -439,6 +461,11 @@ func TestCSInit(t *testing.T) {
 				s, err = NewFileStore(testLogger, testFSDefaultDatastore, nil)
 			case TypeSQL:
 				s, err = NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil)
+			case TypeRaft:
+				s, err = NewFileStore(testLogger, testRSDefaultDatastore, nil)
+				if err == nil {
+					s = NewRaftStore(s)
+				}
 			default:
 				panic(fmt.Errorf("Add store type %q in this test", st.name))
 			}
@@ -520,7 +547,7 @@ func TestCSBasicRecovery(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Recover should not return an error, got %v", err)
 				}
-				if state != nil {
+				if st.name != TypeRaft && state != nil {
 					t.Fatalf("State should be nil, got %v", state)
 				}
 				// We are done for non recoverable stores.

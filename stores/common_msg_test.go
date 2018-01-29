@@ -95,7 +95,7 @@ func TestCSBasicMsgStore(t *testing.T) {
 				t.Fatalf("Unexpected error getting state: %v", err)
 			}
 			expectedBytes := uint64(m1.Size() + m2.Size())
-			if _, ok := s.(*FileStore); ok {
+			if isStorageBasedOnFile(s) {
 				// FileStore counts more toward the number of bytes
 				expectedBytes += 2 * (msgRecordOverhead)
 			}
@@ -130,7 +130,7 @@ func TestCSMsgsState(t *testing.T) {
 			m1 := storeMsg(t, cs1, "foo", 1, payload)
 			m2 := storeMsg(t, cs2, "bar", 1, payload)
 
-			_, isFileStore := s.(*FileStore)
+			isFileStore := isStorageBasedOnFile(s)
 
 			count, bytes := msgStoreState(t, cs1.Msgs)
 			expectedBytes := uint64(m1.Size())
@@ -164,7 +164,7 @@ func TestCSMaxMsgs(t *testing.T) {
 
 			payload := []byte("hello")
 
-			_, isFileStore := s.(*FileStore)
+			isFileStore := isStorageBasedOnFile(s)
 
 			limitCount := 0
 			stopBytes := uint64(500)
@@ -545,6 +545,8 @@ func TestCSFirstAndLastMsg(t *testing.T) {
 					lastMsg = ms.msgs[ms.last]
 					ms.RUnlock()
 				case TypeFile:
+					fallthrough
+				case TypeRaft:
 					ms := cs.Msgs.(*FileMsgStore)
 					ms.RLock()
 					firstMsg = ms.firstMsg
