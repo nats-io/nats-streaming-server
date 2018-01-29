@@ -1,6 +1,6 @@
-FROM golang:1.9.2
+FROM golang:1.9.3
 
-MAINTAINER Ivan Kozlovic <ivan.kozlovic@apcera.com>
+MAINTAINER Ivan Kozlovic <ivan@synadia.com>
 
 COPY . /go/src/github.com/nats-io/nats-streaming-server
 WORKDIR /go/src/github.com/nats-io/nats-streaming-server
