@@ -596,12 +596,12 @@ various general statistics.
 ```
 {
   "cluster_id": "test-cluster",
-  "server_id": "J3Odi0wXYKWKFWz5D5uhH9",
-  "version": "0.7.0",
-  "go": "go1.9.2",
+  "server_id": "zRppEjOtLOrbbl8dQob8xe",
+  "version": "0.7.2",
+  "go": "go1.9.3",
   "state": "STANDALONE",
-  "now": "2017-06-07T14:45:29.472535266+02:00",
-  "start_time": "2017-06-07T14:44:49.936077607+02:00",
+  "now": "2018-01-29T09:36:14.902851-07:00",
+  "start_time": "2018-01-29T09:35:59.079744-07:00",
   "uptime": "39s",
   "clients": 11,
   "subscriptions": 10,
@@ -859,23 +859,23 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[53359] 2017/12/18 17:44:31.592661 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.7.0
-[53359] 2017/12/18 17:44:31.592893 [INF] STREAM: ServerID: jQfdbn7EtFy406tcMNrZEv
-[53359] 2017/12/18 17:44:31.592898 [INF] STREAM: Go version: go1.9.2
-[53359] 2017/12/18 17:44:31.594084 [INF] Starting nats-server version 1.0.4
-[53359] 2017/12/18 17:44:31.594462 [INF] Listening for client connections on 0.0.0.0:4222
-[53359] 2017/12/18 17:44:31.594467 [INF] Server is ready
-[53359] 2017/12/18 17:44:31.621852 [INF] STREAM: Recovering the state...
-[53359] 2017/12/18 17:44:31.621873 [INF] STREAM: No recovered state
-[53359] 2017/12/18 17:44:31.880284 [INF] STREAM: Message store is MEMORY
-[53359] 2017/12/18 17:44:31.880345 [INF] STREAM: ---------- Store Limits ----------
-[53359] 2017/12/18 17:44:31.880349 [INF] STREAM: Channels:                  100 *
-[53359] 2017/12/18 17:44:31.880353 [INF] STREAM: --------- Channels Limits --------
-[53359] 2017/12/18 17:44:31.880356 [INF] STREAM:   Subscriptions:          1000 *
-[53359] 2017/12/18 17:44:31.880359 [INF] STREAM:   Messages     :       1000000 *
-[53359] 2017/12/18 17:44:31.880362 [INF] STREAM:   Bytes        :     976.56 MB *
-[53359] 2017/12/18 17:44:31.880365 [INF] STREAM:   Age          :     unlimited *
-[53359] 2017/12/18 17:44:31.880369 [INF] STREAM: ----------------------------------
+[59641] 2018/01/29 09:35:37.294159 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.7.2
+[59641] 2018/01/29 09:35:37.294253 [INF] STREAM: ServerID: pqF3OFH1mzh1zqmKYTJ4m0
+[59641] 2018/01/29 09:35:37.294257 [INF] STREAM: Go version: go1.9.3
+[59641] 2018/01/29 09:35:37.294451 [INF] Starting nats-server version 1.0.4
+[59641] 2018/01/29 09:35:37.294647 [INF] Listening for client connections on 0.0.0.0:4222
+[59641] 2018/01/29 09:35:37.294653 [INF] Server is ready
+[59641] 2018/01/29 09:35:37.323606 [INF] STREAM: Recovering the state...
+[59641] 2018/01/29 09:35:37.323634 [INF] STREAM: No recovered state
+[59641] 2018/01/29 09:35:37.578419 [INF] STREAM: Message store is MEMORY
+[59641] 2018/01/29 09:35:37.578520 [INF] STREAM: ---------- Store Limits ----------
+[59641] 2018/01/29 09:35:37.578529 [INF] STREAM: Channels:                  100 *
+[59641] 2018/01/29 09:35:37.578536 [INF] STREAM: --------- Channels Limits --------
+[59641] 2018/01/29 09:35:37.578543 [INF] STREAM:   Subscriptions:          1000 *
+[59641] 2018/01/29 09:35:37.578549 [INF] STREAM:   Messages     :       1000000 *
+[59641] 2018/01/29 09:35:37.578556 [INF] STREAM:   Bytes        :     976.56 MB *
+[59641] 2018/01/29 09:35:37.578562 [INF] STREAM:   Age          :     unlimited *
+[59641] 2018/01/29 09:35:37.578569 [INF] STREAM: ----------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
@@ -1465,7 +1465,7 @@ if you want to ensure that each operation is immediately committed to the databa
 
 ## Clients
 
-Here is the list of NATS Streaming clients, supported by Apcera. We may add additional supported streaming clients in the future, and encourage community-contributed clients.
+Here is the list of NATS Streaming clients, supported by Synadia. We may add additional supported streaming clients in the future, and encourage community-contributed clients.
 
 - [C#](https://github.com/nats-io/csharp-nats-streaming)
 - [Go](https://github.com/nats-io/go-nats-streaming)
@@ -1476,7 +1476,8 @@ Here is the list of NATS Streaming clients, supported by Apcera. We may add addi
 
 The MIT License (MIT)
 
-Copyright (c) 2016-2017 Apcera Inc.
+Copyright (c) 2016-2017 Apcera Inc.<br>
+Copyright (c) 2018 Synadia Communications Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in
