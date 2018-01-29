@@ -58,7 +58,7 @@ NATS Streaming provides the following high-level feature set.
 
 # Important Changes
 
-## Version `1.0.0-beta`
+## Version `0.8.0-beta`
 
 The Store interface has been slightly changed to accommodate the clustering feature.
 
@@ -595,14 +595,14 @@ The endpoint [http://localhost:8222/streaming/serverz](http://localhost:8222/str
 various general statistics.
 ```
 {
-  "cluster_id": "test-cluster",
-  "server_id": "zRppEjOtLOrbbl8dQob8xe",
-  "version": "0.7.2",
+"cluster_id": "test-cluster",
+  "server_id": "aSY5CGBQR85UKHuiW825Wd",
+  "version": "0.8.0-beta",
   "go": "go1.9.3",
   "state": "STANDALONE",
-  "now": "2018-01-29T09:36:14.902851-07:00",
-  "start_time": "2018-01-29T09:35:59.079744-07:00",
-  "uptime": "39s",
+  "now": "2018-01-29T14:09:48.795815-07:00",
+  "start_time": "2018-01-29T14:09:31.7136-07:00",
+  "uptime": "17s",
   "clients": 11,
   "subscriptions": 10,
   "channels": 1,
@@ -859,23 +859,23 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[59641] 2018/01/29 09:35:37.294159 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.7.2
-[59641] 2018/01/29 09:35:37.294253 [INF] STREAM: ServerID: pqF3OFH1mzh1zqmKYTJ4m0
-[59641] 2018/01/29 09:35:37.294257 [INF] STREAM: Go version: go1.9.3
-[59641] 2018/01/29 09:35:37.294451 [INF] Starting nats-server version 1.0.4
-[59641] 2018/01/29 09:35:37.294647 [INF] Listening for client connections on 0.0.0.0:4222
-[59641] 2018/01/29 09:35:37.294653 [INF] Server is ready
-[59641] 2018/01/29 09:35:37.323606 [INF] STREAM: Recovering the state...
-[59641] 2018/01/29 09:35:37.323634 [INF] STREAM: No recovered state
-[59641] 2018/01/29 09:35:37.578419 [INF] STREAM: Message store is MEMORY
-[59641] 2018/01/29 09:35:37.578520 [INF] STREAM: ---------- Store Limits ----------
-[59641] 2018/01/29 09:35:37.578529 [INF] STREAM: Channels:                  100 *
-[59641] 2018/01/29 09:35:37.578536 [INF] STREAM: --------- Channels Limits --------
-[59641] 2018/01/29 09:35:37.578543 [INF] STREAM:   Subscriptions:          1000 *
-[59641] 2018/01/29 09:35:37.578549 [INF] STREAM:   Messages     :       1000000 *
-[59641] 2018/01/29 09:35:37.578556 [INF] STREAM:   Bytes        :     976.56 MB *
-[59641] 2018/01/29 09:35:37.578562 [INF] STREAM:   Age          :     unlimited *
-[59641] 2018/01/29 09:35:37.578569 [INF] STREAM: ----------------------------------
+[73011] 2018/01/29 14:09:12.343989 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.8.0-beta
+[73011] 2018/01/29 14:09:12.344093 [INF] STREAM: ServerID: C17M0xJqB9xi6pGjvkSQPo
+[73011] 2018/01/29 14:09:12.344097 [INF] STREAM: Go version: go1.9.3
+[73011] 2018/01/29 14:09:12.344279 [INF] Starting nats-server version 1.0.4
+[73011] 2018/01/29 14:09:12.344450 [INF] Listening for client connections on 0.0.0.0:4222
+[73011] 2018/01/29 14:09:12.344457 [INF] Server is ready
+[73011] 2018/01/29 14:09:12.372298 [INF] STREAM: Recovering the state...
+[73011] 2018/01/29 14:09:12.372329 [INF] STREAM: No recovered state
+[73011] 2018/01/29 14:09:12.628023 [INF] STREAM: Message store is MEMORY
+[73011] 2018/01/29 14:09:12.628088 [INF] STREAM: ---------- Store Limits ----------
+[73011] 2018/01/29 14:09:12.628094 [INF] STREAM: Channels:                  100 *
+[73011] 2018/01/29 14:09:12.628098 [INF] STREAM: --------- Channels Limits --------
+[73011] 2018/01/29 14:09:12.628102 [INF] STREAM:   Subscriptions:          1000 *
+[73011] 2018/01/29 14:09:12.628106 [INF] STREAM:   Messages     :       1000000 *
+[73011] 2018/01/29 14:09:12.628110 [INF] STREAM:   Bytes        :     976.56 MB *
+[73011] 2018/01/29 14:09:12.628114 [INF] STREAM:   Age          :     unlimited *
+[73011] 2018/01/29 14:09:12.628118 [INF] STREAM: ----------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
@@ -913,7 +913,6 @@ Streaming Server Options:
     -hbi, --hb_interval <duration>   Interval at which server sends heartbeat to a client
     -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
     -hbf, --hb_fail_count <int>      Number of failed heartbeats before server closes the client connection
-          --ack_subs <int>           Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription)
           --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 
 Streaming Server Clustering Options:
@@ -1068,7 +1067,6 @@ In general the configuration parameters are the same as the command line argumen
 | hb_interval | Interval at which the server sends an heartbeat to a client | Duration | `hb_interval: "10s"` |
 | hb_timeout | How long the server waits for a heartbeat response from the client before considering it a failed heartbeat | Duration | `hb_timeout: "10s"` |
 | hb_fail_count | Count of failed heartbeats before server closes the client connection. The actual total wait is: (fail count + 1) * (hb interval + hb timeout) | Number | `hb_fail_count: 2` |
-| ack_subs_pool_size | Normally, when a client creates a subscription, the server creates an internal subscription to receive its ACKs. If lots of subscriptions are created, the number of internal subscriptions in the server could be very high. To curb this growth, use this parameter to configure a pool of internal ACKs subscriptions | Number | `ack_subs_pool_size: 10` |
 | ft_group | In Fault Tolerance mode, you can start a group of streaming servers with only one server being active while others are running in standby mode. This is the name of this FT group | String | `ft_group: "my_ft_group"` |
 | partitioning | If set to true, a list of channels must be defined in store_limits/channels section. This section then serves two purposes, overriding limits for a given channel or adding it to the partition | `true` or `false` | `partitioning: true` |
 | cluster | Cluster Configuration | Map: `cluster: { ... }` | **See details below** |
