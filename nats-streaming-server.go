@@ -1,4 +1,6 @@
-// Copyright 2016 Apcera Inc. All rights reserved.
+// Copyright 2017 Apcera Inc. All rights reserved.
+
+//go:generate protoc -I=. -I=$GOPATH/src  --gofast_out=. ./spb/protocol.proto
 
 package main
 
@@ -29,8 +31,19 @@ Streaming Server Options:
     -hbi, --hb_interval <duration>   Interval at which server sends heartbeat to a client
     -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
     -hbf, --hb_fail_count <int>      Number of failed heartbeats before server closes the client connection
-          --ack_subs <int>           Number of internal subscriptions handling incoming ACKs (0 means one per client's subscription)
           --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+
+Streaming Server Clustering Options:
+    --clustered <bool>                   Run the server in a clustered configuration (default: false)
+    --cluster_node_id <string>           ID of the node within the cluster if there is no stored ID (default: random UUID)
+    --cluster_bootstrap <bool>           Bootstrap the cluster if there is no existing state by electing self as leader (default: false)
+    --cluster_peers <string>             List of cluster peer node IDs to bootstrap cluster state.
+    --cluster_log_path <string>          Directory to store log replication data
+    --cluster_log_cache_size <int>       Number of log entries to cache in memory to reduce disk IO (default: 512)
+    --cluster_log_snapshots <int>        Number of log snapshots to retain (default: 2)
+    --cluster_trailing_logs <int>        Number of log entries to leave after a snapshot and compaction
+    --cluster_sync <bool>                Do a file sync after every write to the replication log and message store
+    --cluster_raft_logging <bool>        Enable logging from the Raft library (disabled by default)
 
 Streaming Server File Store Options:
     --file_compact_enabled <bool>        Enable file compaction

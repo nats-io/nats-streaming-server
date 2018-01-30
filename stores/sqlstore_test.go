@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/go-nats-streaming/pb"
+
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/test"
 )
@@ -274,7 +276,7 @@ func TestSQLErrorsDueToFailDBConnection(t *testing.T) {
 	s.SetLimits(&sl)
 
 	cs := storeCreateChannel(t, s, "foo")
-	storeMsg(t, cs, "foo", []byte("msg"))
+	storeMsg(t, cs, "foo", 1, []byte("msg"))
 	subID1 := storeSub(t, cs, "foo")
 	subID2 := storeSub(t, cs, "foo")
 
@@ -303,7 +305,12 @@ func TestSQLErrorsDueToFailDBConnection(t *testing.T) {
 	})
 	expectToFail(func() error { return s.DeleteClient("me") })
 	expectToFail(func() error {
-		_, err := cs.Msgs.Store([]byte("hello"))
+		_, err := cs.Msgs.Store(&pb.MsgProto{
+			Sequence:  2,
+			Data:      []byte("hello"),
+			Subject:   "foo",
+			Timestamp: time.Now().UnixNano(),
+		})
 		return err
 	})
 	expectToFail(func() error {
@@ -342,7 +349,7 @@ func TestSQLErrorOnMsgExpiration(t *testing.T) {
 	s.SetLimits(&sl)
 
 	cs := storeCreateChannel(t, s, "foo")
-	storeMsg(t, cs, "foo", []byte("msg"))
+	storeMsg(t, cs, "foo", 1, []byte("msg"))
 
 	failDBConnection(t, s)
 
@@ -376,10 +383,18 @@ func TestSQLRandomFailureDuringStore(t *testing.T) {
 	cs := storeCreateChannel(t, s, "foo")
 	goodCount := make(chan int, 1)
 	go func() {
+		seq := uint64(1)
 		for count := 0; ; count++ {
-			if _, err := cs.Msgs.Store([]byte("hello")); err != nil {
+			if _, err := cs.Msgs.Store(&pb.MsgProto{
+				Sequence:  seq,
+				Data:      []byte("hello"),
+				Subject:   "foo",
+				Timestamp: time.Now().UnixNano(),
+			}); err != nil {
 				goodCount <- count
 				return
+			} else {
+				seq++
 			}
 		}
 	}()
@@ -433,7 +448,7 @@ func TestSQLCloseOnMsgExpiration(t *testing.T) {
 	for i := 0; i < limits.MaxChannels; i++ {
 		cname := fmt.Sprintf("foo.%d", i)
 		cs := storeCreateChannel(t, s, cname)
-		storeMsg(t, cs, cname, []byte("hello"))
+		storeMsg(t, cs, cname, uint64(i+1), []byte("hello"))
 	}
 	durSend := time.Since(beforeSend)
 	time.Sleep(limits.MaxAge - durSend)
@@ -469,9 +484,9 @@ func TestSQLExpireMsgsForChannelsWithDifferentMaxAge(t *testing.T) {
 	barCS := storeCreateChannel(t, s, "bar")
 
 	// First, store message in the channel with the highest max age
-	storeMsg(t, fooCS, "foo", []byte("foo"))
+	storeMsg(t, fooCS, "foo", 1, []byte("foo"))
 	// Then in the store with the loweest
-	storeMsg(t, barCS, "bar", []byte("bar"))
+	storeMsg(t, barCS, "bar", 1, []byte("bar"))
 
 	// Wait for message in bar to expire
 	time.Sleep(30 * time.Millisecond)
@@ -506,7 +521,7 @@ func TestSQLExpireMsgsOnRecovery(t *testing.T) {
 		t.Fatalf("Error setting limits: %v", err)
 	}
 	cs := storeCreateChannel(t, s, "foo")
-	storeMsg(t, cs, "foo", []byte("hello"))
+	storeMsg(t, cs, "foo", 1, []byte("hello"))
 	// Close the store before msg expires.
 	s.Close()
 	// Sleep for longer than the max age
@@ -557,7 +572,7 @@ func TestSQLExpiredMsgsOnLookup(t *testing.T) {
 	s.SetLimits(&limits)
 
 	cs := storeCreateChannel(t, s, "foo")
-	m := storeMsg(t, cs, "foo", []byte("hello"))
+	m := storeMsg(t, cs, "foo", 1, []byte("hello"))
 
 	time.Sleep(150 * time.Millisecond)
 
@@ -654,7 +669,7 @@ func TestSQLPurgeSubsPending(t *testing.T) {
 	subID := storeSub(t, cs, "foo")
 	smallestThatShouldBeRecovered := uint64(0)
 	for i := 0; i < 15; i++ {
-		m := storeMsg(t, cs, "foo", []byte("msg"))
+		m := storeMsg(t, cs, "foo", uint64(i+1), []byte("msg"))
 		if i == 10 {
 			smallestThatShouldBeRecovered = m.Sequence
 		}
@@ -705,10 +720,10 @@ func TestSQLNoCachingOption(t *testing.T) {
 	// Store some messages (more than what is allowed so we test
 	// applying limits with caching).
 	msg := []byte("hello")
+	seq := uint64(1)
 	for i := 0; i < 10; i++ {
-		if _, err := cs.Msgs.Store(msg); err != nil {
-			t.Fatalf("Error storing message: %v", err)
-		}
+		storeMsg(t, cs, "foo", seq, msg)
+		seq++
 	}
 
 	// It should not be in database unless we call flush.
@@ -751,9 +766,8 @@ func TestSQLNoCachingOption(t *testing.T) {
 
 	// Send more messages
 	for i := 0; i < 10; i++ {
-		if _, err := cs.Msgs.Store(msg); err != nil {
-			t.Fatalf("Error storing message: %v", err)
-		}
+		storeMsg(t, cs, "foo", seq, msg)
+		seq++
 	}
 	totalSize = 0
 	for i := 16; i <= 20; i++ {
@@ -801,7 +815,7 @@ func TestSQLCachingWithExpirationOnClose(t *testing.T) {
 	defer s.Close()
 
 	cs := storeCreateChannel(t, s, "foo")
-	m := storeMsg(t, cs, "foo", []byte("msg"))
+	m := storeMsg(t, cs, "foo", 1, []byte("msg"))
 	doneCh := make(chan struct{}, 1)
 	go func() {
 		s.Close()
@@ -1037,7 +1051,7 @@ func TestSQLSubStoreCachingAndRecovery(t *testing.T) {
 	channel := "foo"
 	cs := storeCreateChannel(t, s, channel)
 	for i := 0; i < 2; i++ {
-		storeMsg(t, cs, channel, []byte("msg"))
+		storeMsg(t, cs, channel, uint64(i+1), []byte("msg"))
 	}
 
 	subID := storeSub(t, cs, channel)
@@ -1184,7 +1198,7 @@ func TestSQLMaxConnections(t *testing.T) {
 	for i := 0; i < limits.MaxChannels; i++ {
 		channel := fmt.Sprintf("foo.%d", i)
 		cs := storeCreateChannel(t, s, channel)
-		storeMsg(t, cs, channel, []byte("msg"))
+		storeMsg(t, cs, channel, uint64(i+1), []byte("msg"))
 		css = append(css, cs)
 	}
 
@@ -1370,7 +1384,7 @@ func TestSQLFirstSeqAfterMsgsExpireAndStoreRestart(t *testing.T) {
 
 	cs := storeCreateChannel(t, s, "foo")
 	for i := 0; i < 3; i++ {
-		storeMsg(t, cs, "foo", []byte("msg"))
+		storeMsg(t, cs, "foo", uint64(i+1), []byte("msg"))
 	}
 
 	time.Sleep(200 * time.Millisecond)
@@ -1397,5 +1411,72 @@ func TestSQLFirstSeqAfterMsgsExpireAndStoreRestart(t *testing.T) {
 	first, last = msgStoreFirstAndLastSequence(t, cs.Msgs)
 	if first != 4 || last != 3 {
 		t.Fatalf("Unexpected first and/or last: %v, %v", first, last)
+	}
+}
+
+func TestSQLMsgStoreEmpty(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	defer cleanupSQLDatastore(t)
+
+	cachingModes := []bool{true, false}
+	for _, caching := range cachingModes {
+		cleanupSQLDatastore(t)
+
+		s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(caching))
+		if err != nil {
+			t.Fatalf("Error creating sql store: %v", err)
+		}
+		defer s.Close()
+
+		limits := StoreLimits{}
+		limits.MaxAge = 250 * time.Millisecond
+		if err := s.SetLimits(&limits); err != nil {
+			t.Fatalf("Error setting limits: %v", err)
+		}
+
+		cs := storeCreateChannel(t, s, "foo")
+		storeMsg(t, cs, "foo", 1, []byte("hello"))
+		// Wait for this to expire
+		time.Sleep(300 * time.Millisecond)
+
+		// Send more messages
+		for i := 0; i < 3; i++ {
+			storeMsg(t, cs, "foo", uint64(i+2), []byte("hello"))
+		}
+		// Then empty the message store
+		if err := cs.Msgs.Empty(); err != nil {
+			t.Fatalf("Error on Empty(): %v", err)
+		}
+
+		ms := cs.Msgs.(*SQLMsgStore)
+		ms.RLock()
+		if ms.writeCache != nil && (ms.writeCache.head != nil || ms.writeCache.tail != nil) {
+			ms.RUnlock()
+			t.Fatal("WriteCache not empty")
+		}
+		if ms.expireTimer != nil {
+			ms.RUnlock()
+			t.Fatal("ExpireTimer not nil")
+		}
+		if ms.first != 0 || ms.last != 0 {
+			ms.RUnlock()
+			t.Fatalf("First and/or Last not reset")
+		}
+		channelID := ms.channelID
+		ms.RUnlock()
+
+		db := getDBConnection(t)
+		defer db.Close()
+		maxSeq := uint64(0)
+		r := db.QueryRow(fmt.Sprintf("SELECT maxseq FROM Channels WHERE id=%v", channelID))
+		if err := r.Scan(&maxSeq); err != nil {
+			t.Fatalf("Error on scan: %v", err)
+		}
+		if maxSeq != 0 {
+			t.Fatalf("MaxSeq should have been reset, got %v", maxSeq)
+		}
+		s.Close()
 	}
 }

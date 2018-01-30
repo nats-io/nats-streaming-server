@@ -506,7 +506,7 @@ func TestSendMsgToSubStoreFailure(t *testing.T) {
 }
 
 func TestClientStoreError(t *testing.T) {
-	logger := &checkErrorLogger{checkErrorStr: "deleting client"}
+	logger := &checkErrorLogger{checkErrorStr: "unregistering client"}
 	opts := GetDefaultOptions()
 	opts.CustomLogger = logger
 	s, err := RunServerWithOpts(opts, nil)

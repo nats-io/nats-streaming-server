@@ -40,18 +40,17 @@ func (c *client) getSubsCopy() []*subState {
 	return subs
 }
 
-// Register a client if new, otherwise returns the client already registered
-// and `false` to indicate that the client is not new.
-func (cs *clientStore) register(ID, hbInbox string) (*client, bool, error) {
+// Register a new client. Returns ErrInvalidClient if client is already registered.
+func (cs *clientStore) register(ID, hbInbox string) (*client, error) {
 	cs.Lock()
 	defer cs.Unlock()
 	c := cs.clients[ID]
 	if c != nil {
-		return c, false, nil
+		return nil, ErrInvalidClient
 	}
 	sc, err := cs.store.AddClient(ID, hbInbox)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	c = &client{info: sc, subs: make([]*subState, 0, 4)}
 	cs.clients[ID] = c
@@ -62,7 +61,7 @@ func (cs *clientStore) register(ID, hbInbox string) (*client, bool, error) {
 			delete(cs.waitOnRegister, ID)
 		}
 	}
-	return c, true, nil
+	return c, nil
 }
 
 // Unregister a client.
@@ -203,6 +202,20 @@ func (cs *clientStore) setClientHB(ID string, interval time.Duration, f func()) 
 	c.Lock()
 	if c.hbt == nil {
 		c.hbt = time.AfterFunc(interval, f)
+	}
+	c.Unlock()
+}
+
+// removeClientHB will stop and remove the client's heartbeat timer, if
+// present.
+func (cs *clientStore) removeClientHB(c *client) {
+	if c == nil {
+		return
+	}
+	c.Lock()
+	if c.hbt != nil {
+		c.hbt.Stop()
+		c.hbt = nil
 	}
 	c.Unlock()
 }

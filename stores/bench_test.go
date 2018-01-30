@@ -59,9 +59,7 @@ func BenchmarkStore____StoreMsgs(b *testing.B) {
 
 			b.StartTimer()
 			for i := 0; i < b.N; i++ {
-				if _, err := cs.Msgs.Store(msg); err != nil {
-					b.Fatalf("Error storing message: %v", err)
-				}
+				storeMsg(b, cs, "foo", uint64(i+1), msg)
 			}
 			cs.Msgs.Flush()
 			b.StopTimer()
@@ -87,9 +85,7 @@ func BenchmarkStore___LookupMsgs(b *testing.B) {
 			}
 
 			for i := 0; i < b.N; i++ {
-				if _, err := cs.Msgs.Store(msg); err != nil {
-					b.Fatalf("Error storing message: %v", err)
-				}
+				storeMsg(b, cs, "foo", uint64(i+1), msg)
 			}
 			cs.Msgs.Flush()
 
@@ -252,12 +248,11 @@ func BenchmarkStore__RecoverMsgs(b *testing.B) {
 			setToUnlimited(b, s)
 
 			for i := 0; i < benchChannelsCount; i++ {
-				cs := storeCreateChannel(b, s, fmt.Sprintf("foo_%d", (i+1)))
+				name := fmt.Sprintf("foo_%d", (i + 1))
+				cs := storeCreateChannel(b, s, name)
 				hw := []byte("Hello World")
 				for i := 0; i < msgsCount; i++ {
-					if _, err := cs.Msgs.Store(hw); err != nil {
-						b.Fatalf("Error storing message: %v", err)
-					}
+					storeMsg(b, cs, name, uint64(i+1), hw)
 				}
 				cs.Msgs.Flush()
 			}

@@ -77,15 +77,19 @@ func (ms *MemoryStore) CreateChannel(channel string) (*Channel, error) {
 ////////////////////////////////////////////////////////////////////////////
 
 // Store a given message.
-func (ms *MemoryMsgStore) Store(data []byte) (uint64, error) {
+func (ms *MemoryMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 	ms.Lock()
 	defer ms.Unlock()
 
-	if ms.first == 0 {
-		ms.first = 1
+	if m.Sequence <= ms.last {
+		// We've already seen this message.
+		return m.Sequence, nil
 	}
-	ms.last++
-	m := ms.genericMsgStore.createMsg(ms.last, data)
+
+	if ms.first == 0 {
+		ms.first = m.Sequence
+	}
+	ms.last = m.Sequence
 	ms.msgs[ms.last] = m
 	ms.totalCount++
 	ms.totalBytes += uint64(m.Size())
@@ -170,12 +174,11 @@ func (ms *MemoryMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, err
 // limit's MaxAge.
 func (ms *MemoryMsgStore) expireMsgs() {
 	ms.Lock()
+	defer ms.Unlock()
 	if ms.closed {
-		ms.Unlock()
 		ms.wg.Done()
 		return
 	}
-	defer ms.Unlock()
 
 	now := time.Now().UnixNano()
 	maxAge := int64(ms.limits.MaxAge)
@@ -207,6 +210,21 @@ func (ms *MemoryMsgStore) removeFirstMsg() {
 	ms.totalCount--
 	delete(ms.msgs, ms.first)
 	ms.first++
+}
+
+// Empty implements the MsgStore interface
+func (ms *MemoryMsgStore) Empty() error {
+	ms.Lock()
+	if ms.ageTimer != nil {
+		if ms.ageTimer.Stop() {
+			ms.wg.Done()
+		}
+		ms.ageTimer = nil
+	}
+	ms.empty()
+	ms.msgs = make(map[uint64]*pb.MsgProto)
+	ms.Unlock()
+	return nil
 }
 
 // Close implements the MsgStore interface

@@ -84,6 +84,16 @@ func TestClientCrashAndReconnect(t *testing.T) {
 		t.Fatalf("Expected to connect correctly, got err %v", err)
 	}
 	defer sc.Close()
+	// Get the connected client's inbox
+	clients := s.clients.getClients()
+	if cc := len(clients); cc != 1 {
+		t.Fatalf("There should be 1 client, got %v", cc)
+	}
+	cli := clients[clientName]
+	if cli == nil {
+		t.Fatalf("Expected client %q to exist, did not", clientName)
+	}
+	hbInbox := cli.info.HbInbox
 
 	// should get a duplicate clientID error
 	if sc2, err := stan.Connect(clusterName, clientName); err == nil {
@@ -108,6 +118,20 @@ func TestClientCrashAndReconnect(t *testing.T) {
 	duration := time.Since(start)
 	if duration > 5*time.Second {
 		t.Fatalf("Took too long to be able to connect: %v", duration)
+	}
+
+	clients = s.clients.getClients()
+	if cc := len(clients); cc != 1 {
+		t.Fatalf("There should be 1 client, got %v", cc)
+	}
+	cli = clients[clientName]
+	if cli == nil {
+		t.Fatalf("Expected client %q to exist, did not", clientName)
+	}
+	// Check we have registered the "new" client which should have
+	// a different HbInbox
+	if hbInbox == cli.info.HbInbox {
+		t.Fatalf("Looks like restarted client was not properly registered")
 	}
 }
 
@@ -225,8 +249,7 @@ func TestClientsWithDupCID(t *testing.T) {
 
 	// Not too small to avoid flapping tests.
 	s.dupCIDTimeout = 1 * time.Second
-	s.dupMaxCIDRoutines = 5
-	total := int(s.dupMaxCIDRoutines)
+	total := 5
 
 	nc, err := nats.Connect(nats.DefaultURL)
 	if err != nil {
@@ -330,97 +353,6 @@ func TestClientsWithDupCID(t *testing.T) {
 
 	// Wait for all other connects to complete
 	wg.Wait()
-
-	// Report possible errors
-	if errs := getErrors(); errs != "" {
-		t.Fatalf("Test failed: %v", errs)
-	}
-
-	// We don't need those anymore.
-	newConn.Close()
-	replaceConn.Close()
-
-	// Now, let's create (total + 1) connections with different CIDs
-	// and close their NATS connection. Then try to "reconnect".
-	// The first (total) connections should each take about dupCIDTimeout to
-	// complete.
-	// The last (total + 1) connection should be delayed waiting for
-	// a go routine to finish. So the expected duration - assuming that
-	// they all start roughly at the same time - would be 2 * dupCIDTimeout.
-	for i := 0; i < total+1; i++ {
-		nc, err := nats.Connect(nats.DefaultURL)
-		if err != nil {
-			t.Fatalf("Unexpected error on connect: %v", err)
-		}
-		defer nc.Close()
-
-		cid := fmt.Sprintf("%s_%d", dupCIDName, i)
-		sc, err := stan.Connect(clusterName, cid, stan.NatsConn(nc))
-		if err != nil {
-			t.Fatalf("Expected to connect correctly, got err %v", err)
-		}
-		defer sc.Close()
-
-		// Close the nc connection
-		nc.Close()
-	}
-
-	wg.Add(total + 1)
-
-	// Need to close the connections only after the test is done
-	conns := make([]stan.Conn, total+1)
-
-	// Cleanup function
-	cleanupConns := func() {
-		wg.Wait()
-		for _, c := range conns {
-			c.Close()
-		}
-	}
-
-	var delayedGuard sync.Mutex
-	delayed := false
-
-	// Connect 1 more than the max number of allowed go routines.
-	for i := 0; i < total+1; i++ {
-		go func(idx int) {
-			defer wg.Done()
-			cid := fmt.Sprintf("%s_%d", dupCIDName, idx)
-			c, duration, err := connect(cid, false)
-			if err != nil {
-				errors <- err
-				return
-			}
-			conns[idx] = c
-			ok := false
-			if duration >= dupTimeoutMin && duration <= dupTimeoutMax {
-				ok = true
-			}
-			if !ok && duration >= 2*dupTimeoutMin && duration <= 2*dupTimeoutMax {
-				delayedGuard.Lock()
-				if delayed {
-					delayedGuard.Unlock()
-					errors <- fmt.Errorf("Failing %q, only one connection should take that long", cid)
-					return
-				}
-				delayed = true
-				delayedGuard.Unlock()
-				return
-			}
-			if !ok {
-				if duration < dupTimeoutMin || duration > dupTimeoutMax {
-					errors <- fmt.Errorf("Connect with cid %q expected in the range [%v-%v], took %v",
-						cid, dupTimeoutMin, dupTimeoutMax, duration)
-				}
-			}
-		}(i)
-	}
-
-	// Wait for all routines to return
-	wg.Wait()
-
-	// Wait for other connects to complete, and close them.
-	cleanupConns()
 
 	// Report possible errors
 	if errs := getErrors(); errs != "" {

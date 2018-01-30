@@ -1,4 +1,5 @@
 // Copyright 2016-2017 Apcera Inc. All rights reserved.
+// Copyright 2018 Synadia Communications Inc. All rights reserved.
 //
 // Uses https://github.com/gogo/protobuf
 // compiled via `protoc -I=. -I=$GOPATH/src  --gogofaster_out=. protocol.proto`
@@ -7,6 +8,7 @@ syntax = "proto3";
 package spb;
 
 import "github.com/gogo/protobuf/gogoproto/gogo.proto";
+import "github.com/nats-io/go-nats-streaming/pb/protocol.proto";
 
 option (gogoproto.marshaler_all) = true;
 option (gogoproto.sizer_all) = true;
@@ -49,6 +51,7 @@ message ServerInfo {
   string Close       = 6; // Subject server receives close requests on.
   string SubClose    = 7; // Subject server receives subscription close requests on.
   string AcksSubs    = 8; // Subject prefix server receives subscription acks when using pool of ack subscribers.
+  string NodeID      = 9; // Clustering node ID.
 }
 
 // ClientInfo contains information related to a Client
@@ -63,9 +66,9 @@ message ClientDelete {
 
 message CtrlMsg {
   enum Type {
-    SubUnsubscribe = 0; // Subscription Unsubscribe request.
-    SubClose       = 1; // Subscription Close request.
-    ConnClose      = 2; // Connection Close request.
+    SubUnsubscribe = 0; // DEPRECATED.
+    SubClose       = 1; // DEPRECATED.
+    ConnClose      = 2; // DEPRECATED.
     FTHeartbeat    = 3; // FT heartbeats.
     Partitioning   = 4; // When partitioning is enabled, server sends this to other servers with same cluster ID.
   }
@@ -73,7 +76,82 @@ message CtrlMsg {
   string  ServerID = 2; // Allows a server to detect if it is the intended receipient.
   bytes   Data     = 3; // Optional bytes that carries context information.    
 
-  // A control message may be sent multiple times (to different internal subscriptions).
-  // This field - if set - is used by the server to reference count all messages with same RefID.
-  string  RefID    = 4; 
+  string  RefID    = 4; // DEPRECATED.
+}
+
+// RaftJoinRequest is a request to join a Raft group.
+message RaftJoinRequest {
+  string NodeID   = 1; // ID of the joining node.
+  string NodeAddr = 2; // Address of the joining node.
+}
+
+// RaftJoinResponse is a response to a RaftJoinRequest.
+message RaftJoinResponse {
+  string Error = 1; // Error string, omitted if no error. 
+}
+
+// RaftOperation is a Raft log message.
+message RaftOperation {
+  enum Type {
+    Publish            = 0; // Message publish.
+    Subscribe          = 1; // Create client subscription.
+    RemoveSubscription = 2; // Remove client subscription.
+    CloseSubscription  = 3; // Close durable client subscription.
+    SendAndAck         = 4; // Messages send or ack'ed.
+    Connect            = 6; // Client connection.
+    Disconnect         = 7; // Client disconnect.
+  }
+  Type                  OpType           = 1; // Log message type.
+  Batch                 PublishBatch     = 2; // Publish operation data.
+  AddSubscription       Sub              = 3; // Subscribe operation data.
+  pb.UnsubscribeRequest Unsub            = 4; // Close/Remove Subscription operation data.
+  SubSentAndAck         SubSentAck       = 5; // Send and/or Ack operation data.
+  AddClient             ClientConnect    = 7; // Connect operation data.
+  pb.CloseRequest       ClientDisconnect = 8; // Disconnect operation data.
+}
+
+// Batch is a batch of messages for replication.
+message Batch {
+  repeated pb.MsgProto Messages = 1; // Serialized MsgProtos to replicate.
+}
+
+// AddSubscription is used to replicate a new client subscription.
+message AddSubscription {
+  pb.SubscriptionRequest Request  = 1; // Subscription request to replicate.
+  string                 AckInbox = 2; // Ack inbox for the subscription.
+}
+
+// SubSentAndAck is used to replicate a sent and/or ack messages.
+message SubSentAndAck {
+  string          Channel  = 1; // Subscription channel.
+  string          AckInbox = 2; // Subscription ack inbox.
+  repeated uint64 Sent     = 3; // Message sequences that were sent.
+  repeated uint64 Ack      = 4; // Message sequences that were ack'ed.
+}
+
+// AddClient is used to replicate a new client connection.
+message AddClient {
+  pb.ConnectRequest Request = 1; // Connection request to replicate
+  bool              Refresh = 2; // Whether or not this is an existing client being refreshed.
+}
+
+// RaftSnapshot is a snapshot of the state of the server.
+message RaftSnapshot {
+  repeated ClientInfo      Clients  = 1;
+  repeated ChannelSnapshot Channels = 2;
+  bytes                    Padding  = 3;
+}
+
+// ChannelSnapshot is a snapshot of a channel
+message ChannelSnapshot {
+  string                        Channel       = 1;
+  uint64                        First         = 2;
+  uint64                        Last          = 3;
+  repeated SubscriptionSnapshot Subscriptions = 4;
+}
+
+// SubscriptionSnaphot is the snapshot of a subscription
+message SubscriptionSnapshot {
+  SubState        State       = 1; // Subscription data.
+  repeated uint64 AcksPending = 2; // Sequences of unacknowledged messages.
 }

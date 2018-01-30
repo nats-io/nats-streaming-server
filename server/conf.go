@@ -129,11 +129,6 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.ClientHBFailCount = int(v.(int64))
-		case "ack_subs_pool_size", "ack_subscriptions_pool_size":
-			if err := checkType(k, reflect.Int64, v); err != nil {
-				return err
-			}
-			opts.AckSubsPoolSize = int(v.(int64))
 		case "ft_group", "ft_group_name":
 			if err := checkType(k, reflect.String, v); err != nil {
 				return err
@@ -144,6 +139,10 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.Partitioning = v.(bool)
+		case "cluster":
+			if err := parseCluster(v, opts); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -183,6 +182,70 @@ func parseTLS(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.ClientCA = v.(string)
+		}
+	}
+	return nil
+}
+
+// parseCluster updates `opts` with cluster config
+func parseCluster(itf interface{}, opts *Options) error {
+	m, ok := itf.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("expected cluster to be a map/struct, got %v", itf)
+	}
+	opts.Clustering.Clustered = true
+	for k, v := range m {
+		name := strings.ToLower(k)
+		switch name {
+		case "node_id":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.Clustering.NodeID = v.(string)
+		case "bootstrap":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.Clustering.Bootstrap = v.(bool)
+		case "peers":
+			if err := checkType(k, reflect.Slice, v); err != nil {
+				return err
+			}
+			peers := make([]string, len(v.([]interface{})))
+			for i, p := range v.([]interface{}) {
+				peers[i] = p.(string)
+			}
+			opts.Clustering.Peers = peers
+		case "log_path":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.Clustering.RaftLogPath = v.(string)
+		case "log_cache_size":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.Clustering.LogCacheSize = int(v.(int64))
+		case "log_snapshots":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.Clustering.LogSnapshots = int(v.(int64))
+		case "trailing_logs":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.Clustering.TrailingLogs = v.(int64)
+		case "sync":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.Clustering.Sync = v.(bool)
+		case "raft_logging":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.Clustering.RaftLogging = v.(bool)
 		}
 	}
 	return nil
@@ -417,6 +480,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	var (
 		stanConfigFile string
 		natsConfigFile string
+		clusterPeers   string
 	)
 
 	fs.StringVar(&sopts.ID, "cluster_id", DefaultClusterID, "stan.ID")
@@ -453,7 +517,6 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.StringVar(&sopts.NATSServerURL, "ns", "", "stan.NATSServerURL")
 	fs.StringVar(&stanConfigFile, "sc", "", "")
 	fs.StringVar(&stanConfigFile, "stan_config", "", "")
-	fs.IntVar(&sopts.AckSubsPoolSize, "ack_subs", 0, "stan.AckSubsPoolSize")
 	fs.BoolVar(&sopts.FileStoreOpts.CompactEnabled, "file_compact_enabled", stores.DefaultFileStoreOptions.CompactEnabled, "stan.FileStoreOpts.CompactEnabled")
 	fs.IntVar(&sopts.FileStoreOpts.CompactFragmentation, "file_compact_frag", stores.DefaultFileStoreOptions.CompactFragmentation, "stan.FileStoreOpts.CompactFragmentation")
 	fs.IntVar(&sopts.FileStoreOpts.CompactInterval, "file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "stan.FileStoreOpts.CompactInterval")
@@ -471,6 +534,16 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&sopts.IOBatchSize, "io_batch_size", DefaultIOBatchSize, "stan.IOBatchSize")
 	fs.Int64Var(&sopts.IOSleepTime, "io_sleep_time", DefaultIOSleepTime, "stan.IOSleepTime")
 	fs.StringVar(&sopts.FTGroupName, "ft_group", "", "stan.FTGroupName")
+	fs.BoolVar(&sopts.Clustering.Clustered, "clustered", false, "stan.Clustering.Clustered")
+	fs.StringVar(&sopts.Clustering.NodeID, "cluster_node_id", "", "stan.Clustering.NodeID")
+	fs.BoolVar(&sopts.Clustering.Bootstrap, "cluster_bootstrap", false, "stan.Clustering.Bootstrap")
+	fs.StringVar(&clusterPeers, "cluster_peers", "", "stan.Clustering.Peers")
+	fs.StringVar(&sopts.Clustering.RaftLogPath, "cluster_log_path", "", "stan.Clustering.RaftLogPath")
+	fs.IntVar(&sopts.Clustering.LogCacheSize, "cluster_log_cache_size", DefaultLogCacheSize, "stan.Clustering.LogCacheSize")
+	fs.IntVar(&sopts.Clustering.LogSnapshots, "cluster_log_snapshots", DefaultLogSnapshots, "stan.Clustering.LogSnapshots")
+	fs.Int64Var(&sopts.Clustering.TrailingLogs, "cluster_trailing_logs", DefaultTrailingLogs, "stan.Clustering.TrailingLogs")
+	fs.BoolVar(&sopts.Clustering.Sync, "cluster_sync", false, "stan.Clustering.Sync")
+	fs.BoolVar(&sopts.Clustering.RaftLogging, "cluster_raft_logging", false, "")
 	fs.StringVar(&sopts.SQLStoreOpts.Driver, "sql_driver", "", "SQL Driver")
 	fs.StringVar(&sopts.SQLStoreOpts.Source, "sql_source", "", "SQL Data Source")
 	defSQLOpts := stores.DefaultSQLStoreOptions()
@@ -486,6 +559,13 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	// At this point, if NATS config file was specified in the command line (-c of -config)
 	// nopts.ConfigFile will not be empty.
 	natsConfigFile = nopts.ConfigFile
+
+	if clusterPeers != "" {
+		sopts.Clustering.Peers = []string{}
+		for _, p := range strings.Split(clusterPeers, ",") {
+			sopts.Clustering.Peers = append(sopts.Clustering.Peers, strings.TrimSpace(p))
+		}
+	}
 
 	// If both nats and streaming configuration files are used, then
 	// we only use the config file for the corresponding module.

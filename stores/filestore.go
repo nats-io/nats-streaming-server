@@ -2303,9 +2303,14 @@ func (ms *FileMsgStore) readIndex(r io.Reader) (uint64, *msgIndex, error) {
 }
 
 // Store a given message.
-func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
+func (ms *FileMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 	ms.Lock()
 	defer ms.Unlock()
+
+	if m.Sequence <= ms.last {
+		// We've already seen this message.
+		return m.Sequence, nil
+	}
 
 	fslice := ms.writeSlice
 	if fslice != nil {
@@ -2377,8 +2382,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	//    goto processErr
 	// }
 
-	seq := ms.last + 1
-	m := ms.genericMsgStore.createMsg(seq, data)
+	seq := m.Sequence
 
 	msgInBuffer := false
 
@@ -2449,7 +2453,7 @@ func (ms *FileMsgStore) Store(data []byte) (uint64, error) {
 	}
 	ms.last = seq
 	ms.lastMsg = m
-	ms.addToCache(seq, m, true)
+	ms.cache.add(seq, m, true)
 	ms.wOffset += int64(recSize)
 
 	// For size, add the message record size, the record header and the size
@@ -2519,6 +2523,10 @@ func (ms *FileMsgStore) processBufferedMsgs(fslice *fileSlice) error {
 // Returns the time of the next expiration (possibly 0 if no message left)
 // The store's lock is assumed to be held on entry
 func (ms *FileMsgStore) expireMsgs(now, maxAge int64) int64 {
+	if ms.first == 0 {
+		ms.expiration = 0
+		return ms.expiration
+	}
 	var m *msgIndex
 	var slice *fileSlice
 	for {
@@ -2824,7 +2832,7 @@ func (ms *FileMsgStore) backgroundTasks() {
 			if tryEvict == 1 {
 				ms.Lock()
 				// Possibly remove some/all cached messages
-				ms.evictFromCache(timeTick)
+				ms.cache.evict(timeTick)
 				ms.Unlock()
 			}
 			lastCacheCheck = timeTick
@@ -2853,13 +2861,13 @@ func (ms *FileMsgStore) lookup(seq uint64) (*pb.MsgProto, error) {
 		return nil, nil
 	}
 	// Check first if it's in the cache.
-	msg := ms.getFromCache(seq)
+	msg := ms.cache.get(seq)
 	if msg == nil && ms.bufferedMsgs != nil {
 		// Possibly in bufferedMsgs
 		bm := ms.bufferedMsgs[seq]
 		if bm != nil {
 			msg = bm.msg
-			ms.addToCache(seq, msg, false)
+			ms.cache.add(seq, msg, false)
 		}
 	}
 	// If not, we need to read it from disk...
@@ -2891,7 +2899,7 @@ func (ms *FileMsgStore) lookup(seq uint64) (*pb.MsgProto, error) {
 		if err != nil {
 			return nil, err
 		}
-		ms.addToCache(seq, msg, false)
+		ms.cache.add(seq, msg, false)
 	}
 	return msg, nil
 }
@@ -2991,10 +2999,9 @@ func (ms *FileMsgStore) initCache() {
 	}
 }
 
-// addToCache adds a message to the cache.
+// add adds a message to the cache.
 // Store write lock is assumed held on entry
-func (ms *FileMsgStore) addToCache(seq uint64, msg *pb.MsgProto, isNew bool) {
-	c := ms.cache
+func (c *msgsCache) add(seq uint64, msg *pb.MsgProto, isNew bool) {
 	exp := cacheTTL
 	if isNew {
 		exp += msg.Timestamp
@@ -3022,10 +3029,9 @@ func (ms *FileMsgStore) addToCache(seq uint64, msg *pb.MsgProto, isNew bool) {
 	}
 }
 
-// getFromCache returns a message if available in the cache.
+// get returns a message if available in the cache.
 // Store write lock is assumed held on entry
-func (ms *FileMsgStore) getFromCache(seq uint64) *pb.MsgProto {
-	c := ms.cache
+func (c *msgsCache) get(seq uint64) *pb.MsgProto {
 	cMsg := c.seqMaps[seq]
 	if cMsg == nil {
 		return nil
@@ -3055,10 +3061,12 @@ func (ms *FileMsgStore) getFromCache(seq uint64) *pb.MsgProto {
 	return cMsg.msg
 }
 
-// evictFromCache move down the cache maps, evicting the last one.
+// evict move down the cache maps, evicting the last one.
 // Store write lock is assumed held on entry
-func (ms *FileMsgStore) evictFromCache(now int64) {
-	c := ms.cache
+func (c *msgsCache) evict(now int64) {
+	if c.head == nil {
+		return
+	}
 	if now >= c.tail.expiration {
 		// Bulk remove
 		c.seqMaps = make(map[uint64]*cachedMsg)
@@ -3076,6 +3084,13 @@ func (ms *FileMsgStore) evictFromCache(now int64) {
 		cMsg.prev = nil
 		c.head = cMsg
 	}
+}
+
+// empty empties the cache
+func (c *msgsCache) empty() {
+	atomic.StoreInt32(&c.tryEvict, 0)
+	c.head, c.tail = nil, nil
+	c.seqMaps = make(map[uint64]*cachedMsg)
 }
 
 // Close closes the store.
@@ -3158,6 +3173,49 @@ func (ms *FileMsgStore) Flush() error {
 		}
 	}
 	ms.Unlock()
+	return err
+}
+
+// Empty implements the MsgStore interface
+func (ms *FileMsgStore) Empty() error {
+	ms.Lock()
+	defer ms.Unlock()
+
+	var err error
+	// Remove/close all file slices
+	for sliceID, slice := range ms.files {
+		ms.fm.remove(slice.file)
+		ms.fm.remove(slice.idxFile)
+		if slice.file.handle != nil {
+			err = util.CloseFile(err, slice.file.handle)
+		}
+		if lerr := os.Remove(slice.file.name); lerr != nil && err == nil {
+			err = lerr
+		}
+		if slice.idxFile.handle != nil {
+			err = util.CloseFile(err, slice.idxFile.handle)
+		}
+		if lerr := os.Remove(slice.idxFile.name); lerr != nil && err == nil {
+			err = lerr
+		}
+		delete(ms.files, sliceID)
+	}
+	// Reset generic counters
+	ms.empty()
+	// FileMsgStore specific
+	ms.writer = nil
+	ms.writeSlice = nil
+	ms.cache.empty()
+	ms.wOffset = 0
+	ms.firstMsg, ms.lastMsg = nil, nil
+	ms.expiration = 0
+	ms.firstFSlSeq, ms.lastFSlSeq = 0, 0
+	// If we are running in buffered mode...
+	if ms.bw != nil {
+		ms.bw = newBufferWriter(msgBufMinShrinkSize, ms.fstore.opts.BufferSize)
+		ms.bufferedSeqs = make([]uint64, 0, 1)
+		ms.bufferedMsgs = make(map[uint64]*bufferedMsg)
+	}
 	return err
 }
 

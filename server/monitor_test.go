@@ -19,6 +19,7 @@ import (
 	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
+	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
@@ -223,7 +224,9 @@ func TestMonitorServerz(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	sub.Unsubscribe()
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
 	waitForNumSubs(t, s, clientName, 0)
 
 	resp, body = getBody(t, ServerPath, expectedJSON)
@@ -846,7 +849,7 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 	for _, c := range channels {
 		cs := channelsLookupOrCreate(t, s, c)
 		for i := 0; i < rand.Intn(10)+1; i++ {
-			cs.store.Msgs.Store([]byte("hello"))
+			cs.store.Msgs.Store(&pb.MsgProto{Data: []byte("hello")})
 		}
 		numSubs := rand.Intn(4) + 1
 		totalSubs += numSubs
@@ -982,7 +985,7 @@ func TestMonitorChannelz(t *testing.T) {
 	for _, c := range channels {
 		cs := channelsLookupOrCreate(t, s, c)
 		for i := 0; i < rand.Intn(10)+1; i++ {
-			cs.store.Msgs.Store([]byte("hello"))
+			cs.store.Msgs.Store(&pb.MsgProto{Data: []byte("hello")})
 		}
 		if _, err := sc.Subscribe(c, func(_ *stan.Msg) {}); err != nil {
 			t.Fatalf("Error on subscribe: %v", err)

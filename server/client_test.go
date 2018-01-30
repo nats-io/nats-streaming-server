@@ -3,15 +3,14 @@
 package server
 
 import (
-	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nuid"
-	"time"
 )
 
 func createClientStore() *clientStore {
@@ -33,9 +32,12 @@ func TestClientRegister(t *testing.T) {
 	clientID, hbInbox := createClientInfo()
 
 	// Register a new one
-	sc, isNew, _ := cs.register(clientID, hbInbox)
-	if sc == nil || !isNew {
-		t.Fatal("Expected client to be new")
+	sc, err := cs.register(clientID, hbInbox)
+	if err != nil {
+		t.Fatalf("Error on register: %v", err)
+	}
+	if sc == nil {
+		t.Fatal("Unable to register client")
 	}
 	// Verify it's in the list of clients
 	c := cs.lookup(clientID)
@@ -63,57 +65,10 @@ func TestClientRegister(t *testing.T) {
 		}
 	}()
 
-	// Register with same info
-	secondCli, isNew, _ := cs.register(clientID, hbInbox)
-	if secondCli != sc || isNew {
-		t.Fatal("Expected to get the same client")
-	}
-}
-
-func TestClientParallelRegister(t *testing.T) {
-	cs := createClientStore()
-
-	_, hbInbox := createClientInfo()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	totalClients := 100
-	errors := make(chan error, 2)
-
-	for i := 0; i < 2; i++ {
-		go func() {
-			defer wg.Done()
-
-			for j := 0; j < totalClients; j++ {
-				clientID := fmt.Sprintf("clientID-%v", j)
-				c, isNew, _ := cs.register(clientID, hbInbox)
-				if c == nil {
-					errors <- fmt.Errorf("client should not be nil")
-					return
-				}
-				if !isNew && cs.lookup(clientID) == nil {
-					errors <- fmt.Errorf("Register returned isNew false, but clientID %v can't be found", clientID)
-				}
-				runtime.Gosched()
-			}
-
-		}()
-	}
-
-	wg.Wait()
-
-	// Fail with the first error found.
-	select {
-	case e := <-errors:
-		t.Fatalf("%v", e)
-	default:
-	}
-
-	// We should not get more than totalClients
-	count := cs.count()
-	if count != totalClients {
-		t.Fatalf("Expected %v clients, got %v", totalClients, count)
+	// Try to register with same clientID, should get an error
+	secondCli, err := cs.register(clientID, hbInbox)
+	if secondCli != nil || err != ErrInvalidClient {
+		t.Fatalf("Expected to get no client and an error, got %v err=%v", secondCli, err)
 	}
 }
 
@@ -213,7 +168,7 @@ func TestClientAddSub(t *testing.T) {
 	}
 
 	// Now register the client
-	sc, _, _ := cs.register(clientID, hbInbox)
+	sc, _ := cs.register(clientID, hbInbox)
 
 	// Now this should work
 	if !cs.addSub(clientID, sub) {
@@ -441,7 +396,7 @@ func TestClientStoreErrors(t *testing.T) {
 	cs := createClientStore()
 
 	// Register a client
-	rc, _, err := cs.register("me", "hbInbox")
+	rc, err := cs.register("me", "hbInbox")
 	if err != nil {
 		t.Fatalf("Error during registration: %v", err)
 	}
@@ -456,7 +411,7 @@ func TestClientStoreErrors(t *testing.T) {
 	cs.Unlock()
 
 	// Register: store will fail the AddClient call
-	if _, _, err := cs.register("me2", "hbInbox"); err == nil {
+	if _, err := cs.register("me2", "hbInbox"); err == nil {
 		t.Fatal("Expected register to fail")
 	}
 	// Make sure client is not registered

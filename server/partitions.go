@@ -21,10 +21,6 @@ const (
 	partitionsDefaultRequestTimeout = time.Second
 	// This is the value that is stored in the sublist for a given subject
 	channelInterest = 1
-	// Messages channel size
-	partitionsMsgChanSize = 65536
-	// Number of bytes used to encode a channel name
-	partitionsEncodedChannelLen = 2
 	// Default wait before checking for channels when notified
 	// that the NATS cluster topology has changed. This gives a chance
 	// for the new server joining the cluster to send its subscriptions
@@ -46,12 +42,9 @@ type partitions struct {
 	sl              *util.Sublist
 	nc              *nats.Conn
 	sendListSubject string
-	ctrlMsgSubject  string // send to this subject when processing close/unsub requests
 	processChanSub  *nats.Subscription
 	inboxSub        *nats.Subscription
-	msgsCh          chan *nats.Msg
 	isShutdown      bool
-	quitCh          chan struct{}
 }
 
 // Initialize the channels partitions objects and issue the first
@@ -99,10 +92,6 @@ func (s *StanServer) initPartitions() error {
 		return err
 	}
 	p.Unlock()
-	p.msgsCh = make(chan *nats.Msg, partitionsMsgChanSize)
-	p.quitCh = make(chan struct{}, 1)
-	s.wg.Add(1)
-	go p.postClientPublishIncomingMsgs()
 	return nil
 }
 
@@ -145,38 +134,14 @@ func (p *partitions) topologyChanged(_ *nats.Conn) {
 	}
 }
 
-// We use a channel subscription in order to minimize the number
-// of go routines for all the explicit pub subscriptions.
-// This go routine simply pulls a message from the channel and
-// invokes processClientPublish(). We may have slow consumer issues,
-// if so, will have to figure out another way.
-func (p *partitions) postClientPublishIncomingMsgs() {
-	defer p.s.wg.Done()
-	for {
-		select {
-		case <-p.quitCh:
-			return
-		case m := <-p.msgsCh:
-			p.s.processClientPublish(m)
-		}
-	}
-}
-
 // Create the internal subscriptions on the list of channels.
 func (p *partitions) initSubscriptions() error {
 	// NOTE: Use the server's nc connection here, not the partitions' one.
 	for _, channelName := range p.channels {
 		pubSubject := fmt.Sprintf("%s.%s", p.s.info.Publish, channelName)
-		if _, err := p.s.nc.ChanSubscribe(pubSubject, p.msgsCh); err != nil {
+		if _, err := p.s.nc.Subscribe(pubSubject, p.s.processClientPublish); err != nil {
 			return fmt.Errorf("could not subscribe to publish subject %q, %v", channelName, err)
 		}
-	}
-	// Add a dedicated subject for when we try to schedule a control
-	// message to be processed after all messages from a given client
-	// have been processed.
-	p.ctrlMsgSubject = fmt.Sprintf("%s.%s", p.s.info.Publish, nats.NewInbox())
-	if _, err := p.s.nc.ChanSubscribe(p.ctrlMsgSubject, p.msgsCh); err != nil {
-		return fmt.Errorf("could not subscribe to subject %q, %v", p.ctrlMsgSubject, err)
 	}
 	return nil
 }
@@ -187,7 +152,7 @@ func (p *partitions) initSubscriptions() error {
 func (p *partitions) checkChannelsUniqueInCluster() error {
 	// We use the subscription on an inbox to get the replies.
 	// Send our list
-	if err := p.sendChannelsList(p.inboxSub.Subject); err != nil {
+	if err := util.SendChannelsList(p.channels, p.sendListSubject, p.inboxSub.Subject, p.nc, p.s.serverID); err != nil {
 		return fmt.Errorf("unable to send channels list: %v", err)
 	}
 	// Since we don't know how many servers are out there, keep
@@ -209,85 +174,6 @@ func (p *partitions) checkChannelsUniqueInCluster() error {
 				string(resp.Data), resp.ServerID)
 		}
 	}
-}
-
-// Sends the list of channels to a known subject, possibly splitting the list
-// in several requests if it cannot fit in a single message.
-func (p *partitions) sendChannelsList(replyInbox string) error {
-	// Since the NATS message payload is limited, we need to repeat
-	// requests if all channels can't fit in a request.
-	maxPayload := int(p.nc.MaxPayload())
-	// Reuse this request object to send the (possibly many) protocol message(s).
-	header := &spb.CtrlMsg{
-		ServerID: p.s.serverID,
-		MsgType:  spb.CtrlMsg_Partitioning,
-	}
-	// The Data field (a byte array) will require 1+len(array)+(encoded size of array).
-	// To be conservative, let's just use a 8 bytes integer
-	headerSize := header.Size() + 1 + 8
-	var (
-		bytes []byte // Reused buffer in which the request is to marshal info
-		n     int    // Size of the serialized request in the above buffer
-		count int    // Number of channels added to the request
-	)
-	for start := 0; start != len(p.channels); start += count {
-		bytes, n, count = p.encodeRequest(header, bytes, headerSize, maxPayload, start)
-		if count == 0 {
-			return fmt.Errorf("message payload too small to send partitioning channels list")
-		}
-		if err := p.nc.PublishRequest(p.sendListSubject, replyInbox, bytes[:n]); err != nil {
-			return err
-		}
-	}
-	return p.nc.Flush()
-}
-
-// Adds as much channels as possible (based on the NATS max message payload) and
-// returns a serialized request. The buffer `reqBytes` is passed (and returned) so
-// that it can be reused if more than one request is needed. This call will
-// expand the size as needed. The number of bytes used in this buffer is returned
-// along with the number of encoded channels.
-func (p *partitions) encodeRequest(request *spb.CtrlMsg, reqBytes []byte, headerSize, maxPayload, start int) ([]byte, int, int) {
-	// Each string will be encoded in the form:
-	// - length (2 bytes)
-	// - string as a byte array.
-	var _encodedSize = [partitionsEncodedChannelLen]byte{}
-	encodedSize := _encodedSize[:]
-	// We are going to encode the channels in this buffer
-	chanBuf := make([]byte, 0, maxPayload)
-	var (
-		count         int          // Number of encoded channels
-		estimatedSize = headerSize // This is not an overestimation of the total size
-		numBytes      int          // This is what is returned by MarshalTo
-	)
-	for i := start; i < len(p.channels); i++ {
-		c := []byte(p.channels[i])
-		cl := len(c)
-		needed := partitionsEncodedChannelLen + cl
-		// Check if adding this channel to current buffer makes us go over
-		if estimatedSize+needed > maxPayload {
-			// Special case if we cannot even encode 1 channel
-			if count == 0 {
-				return reqBytes, 0, 0
-			}
-			break
-		}
-		// Encoding the channel here. First the size, then the channel name as byte array.
-		util.ByteOrder.PutUint16(encodedSize, uint16(cl))
-		chanBuf = append(chanBuf, encodedSize...)
-		chanBuf = append(chanBuf, c...)
-		count++
-		estimatedSize += needed
-	}
-	if count > 0 {
-		request.Data = chanBuf
-		reqBytes = util.EnsureBufBigEnough(reqBytes, estimatedSize)
-		numBytes, _ = request.MarshalTo(reqBytes)
-		if numBytes > maxPayload {
-			panic(fmt.Errorf("partitioning: request size is %v (max payload is %v)", numBytes, maxPayload))
-		}
-	}
-	return reqBytes, numBytes, count
 }
 
 // Decode the incoming partitioning protocol message.
@@ -312,7 +198,7 @@ func (p *partitions) processChannelsListRequests(m *nats.Msg) {
 	if req.ServerID == p.s.serverID {
 		return
 	}
-	channels, err := decodeChannels(req.Data)
+	channels, err := util.DecodeChannels(req.Data)
 	if err != nil {
 		p.s.log.Errorf("Error processing partitioning request: %v", err)
 		return
@@ -351,42 +237,15 @@ func (p *partitions) processChannelsListRequests(m *nats.Msg) {
 	}
 }
 
-// decodes from the given by array the list of channel names and return
-// them as an array of strings.
-func decodeChannels(data []byte) ([]string, error) {
-	channels := []string{}
-	pos := 0
-	for pos < len(data) {
-		if pos+2 > len(data) {
-			return nil, fmt.Errorf("partitioning: unable to decode size, pos=%v len=%v", pos, len(data))
-		}
-		cl := int(util.ByteOrder.Uint16(data[pos:]))
-		pos += partitionsEncodedChannelLen
-		end := pos + cl
-		if end > len(data) {
-			return nil, fmt.Errorf("partitioning: unable to decode channel, pos=%v len=%v max=%v (string=%v)",
-				pos, cl, len(data), string(data[pos:]))
-		}
-		c := string(data[pos:end])
-		channels = append(channels, c)
-		pos = end
-	}
-	return channels, nil
-}
-
 // Notifies all go-routines used by partitioning code that the
 // server is shuting down and closes the internal NATS connection.
 func (p *partitions) shutdown() {
 	p.Lock()
+	defer p.Unlock()
 	if p.isShutdown {
-		p.Unlock()
 		return
 	}
 	p.isShutdown = true
-	p.Unlock()
-	if p.quitCh != nil {
-		p.quitCh <- struct{}{}
-	}
 	if p.nc != nil {
 		p.nc.Close()
 	}
