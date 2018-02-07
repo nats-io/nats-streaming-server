@@ -15,6 +15,7 @@ import (
 	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
+	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
@@ -729,4 +730,76 @@ func TestPersistentStoreRunServer(t *testing.T) {
 	if r := atomic.LoadInt32(&redelivered); r != 0 {
 		t.Fatalf("There should be no redelivered message, got %v", r)
 	}
+}
+
+type captureWarnGhostQSubLogger struct {
+	dummyLogger
+	notices []string
+}
+
+func (l *captureWarnGhostQSubLogger) Noticef(format string, args ...interface{}) {
+	l.Lock()
+	n := fmt.Sprintf(format, args...)
+	l.notices = append(l.notices, fmt.Sprintf("%s\n", n))
+	l.Unlock()
+}
+
+func TestGhostDurableSubs(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	opts := getTestDefaultOptsForPersistentStore()
+	s := runServerWithOpts(t, opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	c, err := s.lookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Error creating channel: %v", err)
+	}
+	badDurableQueueSub := &spb.SubState{
+		ClientID:      "me",
+		IsDurable:     true,
+		QGroup:        "myqueue",
+		Inbox:         "inbox",
+		AckInbox:      "myack",
+		AckWaitInSecs: 30,
+		MaxInFlight:   1,
+	}
+	if err := c.store.Subs.CreateSub(badDurableQueueSub); err != nil {
+		t.Fatalf("Error creating bad sub: %v", err)
+	}
+	s.Shutdown()
+
+	// Re-open
+	l := &captureWarnGhostQSubLogger{}
+	opts.EnableLogging = true
+	opts.CustomLogger = l
+	s = runServerWithOpts(t, opts, nil)
+
+	// Check if the error message appeared or not
+	check := func(expected bool) {
+		present := false
+		l.Lock()
+		for _, n := range l.notices {
+			if strings.Contains(n, "ghost") {
+				present = true
+				break
+			}
+		}
+		notices := l.notices
+		// clear the logger notices
+		l.notices = nil
+		l.Unlock()
+		if expected && !present {
+			stackFatalf(t, "No sign of ghost warning in the log:\n%v", notices)
+		} else if !expected && present {
+			stackFatalf(t, "The warning should no longer be in the log:\n%v", notices)
+		}
+	}
+	s.Shutdown()
+	check(true)
+
+	// Re-open, this time, there should not be the warning anymore.
+	s = runServerWithOpts(t, opts, nil)
+	check(false)
 }
