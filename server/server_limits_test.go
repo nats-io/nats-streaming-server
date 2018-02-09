@@ -2,6 +2,7 @@
 package server
 
 import (
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -428,5 +429,42 @@ func TestUnlimitedPerChannelLimits(t *testing.T) {
 	s.mu.RUnlock()
 	if n != 0 {
 		t.Fatalf("Expected 0 messages, store reports %v", n)
+	}
+}
+
+func TestPerChannelLimitsSetToUnlimitedPrintedCorrectly(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.MaxSubscriptions = 10
+	opts.MaxMsgs = 10
+	opts.MaxBytes = 64 * 1024
+	opts.MaxAge = time.Hour
+
+	clfoo := stores.ChannelLimits{}
+	clfoo.MaxSubscriptions = -1
+	clfoo.MaxMsgs = -1
+	clfoo.MaxBytes = -1
+	clfoo.MaxAge = -1
+
+	sl := &opts.StoreLimits
+	sl.AddPerChannel("foo", &clfoo)
+
+	l := &captureNoticesLogger{}
+	opts.EnableLogging = true
+	opts.CustomLogger = l
+
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	var notices []string
+	l.Lock()
+	for _, line := range l.notices {
+		if strings.Contains(line, "-1") {
+			notices = l.notices
+			break
+		}
+	}
+	l.Unlock()
+	if notices != nil {
+		t.Fatalf("There should not be -1 values, got %v", notices)
 	}
 }

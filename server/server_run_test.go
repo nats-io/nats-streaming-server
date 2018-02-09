@@ -732,12 +732,12 @@ func TestPersistentStoreRunServer(t *testing.T) {
 	}
 }
 
-type captureWarnGhostQSubLogger struct {
+type captureNoticesLogger struct {
 	dummyLogger
 	notices []string
 }
 
-func (l *captureWarnGhostQSubLogger) Noticef(format string, args ...interface{}) {
+func (l *captureNoticesLogger) Noticef(format string, args ...interface{}) {
 	l.Lock()
 	n := fmt.Sprintf(format, args...)
 	l.notices = append(l.notices, fmt.Sprintf("%s\n", n))
@@ -771,7 +771,7 @@ func TestGhostDurableSubs(t *testing.T) {
 	s.Shutdown()
 
 	// Re-open
-	l := &captureWarnGhostQSubLogger{}
+	l := &captureNoticesLogger{}
 	opts.EnableLogging = true
 	opts.CustomLogger = l
 	s = runServerWithOpts(t, opts, nil)
