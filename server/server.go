@@ -1574,6 +1574,11 @@ func (s *StanServer) start(runningState State) error {
 	}
 
 	s.log.Noticef("Message store is %s", s.store.Name())
+	// The store has a copy of the limits and the inheritance
+	// was not applied to our limits. To have them displayed correctly,
+	// call Build() on them (we know that this is not going to fail,
+	// otherwise we would not have been able to create the store).
+	s.opts.StoreLimits.Build()
 	storeLimitsLines := (&s.opts.StoreLimits).Print()
 	for _, l := range storeLimitsLines {
 		s.log.Noticef(l)
