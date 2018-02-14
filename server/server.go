@@ -2315,14 +2315,7 @@ func (s *StanServer) replicateConnect(req *pb.ConnectRequest, refresh bool) erro
 		panic(err)
 	}
 	// Wait on result of replication.
-	err = s.raft.Apply(data, raftApplyTimeout).Error()
-
-	// Perform a barrier to ensure the connect replication is applied before
-	// returning. This prevents a race where a client connects and then makes a
-	// request before the connect has been applied.
-	s.raft.Barrier(raftApplyTimeout).Error()
-
-	return err
+	return s.raft.Apply(data, raftApplyTimeout).Error()
 }
 
 func (s *StanServer) processConnect(req *pb.ConnectRequest, refresh bool) error {
@@ -2518,13 +2511,7 @@ func (s *StanServer) replicateConnClose(req *pb.CloseRequest) error {
 		panic(err)
 	}
 	// Wait on result of replication.
-	err = s.raft.Apply(data, raftApplyTimeout).Error()
-
-	// Wait for RAFT replication to be applied to server before returning.
-	// See replicateConnect for details.
-	s.raft.Barrier(raftApplyTimeout).Error()
-
-	return err
+	return s.raft.Apply(data, raftApplyTimeout).Error()
 }
 
 func (s *StanServer) sendCloseResponse(subj string, closeErr error) {
@@ -3586,13 +3573,7 @@ func (s *StanServer) replicateUnsubscribe(req *pb.UnsubscribeRequest, opType spb
 		panic(err)
 	}
 	// Wait on result of replication.
-	err = s.raft.Apply(data, raftApplyTimeout).Error()
-
-	// Wait for RAFT replication to be applied to server before returning.
-	// See replicateConnect for details.
-	s.raft.Barrier(raftApplyTimeout).Error()
-
-	return err
+	return s.raft.Apply(data, raftApplyTimeout).Error()
 }
 
 func (s *StanServer) sendSubscriptionResponseErr(reply string, err error) {
@@ -3707,17 +3688,10 @@ func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string) (
 	}
 	// Replicate operation and wait on result.
 	future := s.raft.Apply(data, raftApplyTimeout)
-
-	// Wait for RAFT replication to be applied to server before returning.
-	// See replicateConnect for details.
-	s.raft.Barrier(raftApplyTimeout).Error()
-
-	resp := future.Response()
-	err, ok := resp.(error)
-	if ok {
+	if err := future.Error(); err != nil {
 		return nil, nil, err
 	}
-	rs := resp.(*replicatedSub)
+	rs := future.Response().(*replicatedSub)
 	return rs.c, rs.sub, nil
 }
 
