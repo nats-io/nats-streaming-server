@@ -158,7 +158,7 @@ func TestBackoffTimeCheck(t *testing.T) {
 	// Repeat calls until frequency is increased to the max
 	freqs := make([]time.Duration, 0)
 	last := time.Now()
-	timeout := time.Now().Add(350 * time.Millisecond)
+	timeout := time.Now().Add(400 * time.Millisecond)
 	for time.Now().Before(timeout) {
 		if print.Ok() {
 			freqs = append(freqs, time.Since(last))
