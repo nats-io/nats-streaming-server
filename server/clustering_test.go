@@ -1964,7 +1964,15 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get our message")
 	}
+
+	// Make sure that the message is pending in leader
+	waitForAcks(t, leader, clientName, 1, 1)
+	subs := leader.clients.getSubs(clientName)
+	// Flush the replication of SentMsg
+	leader.flushReplicatedSentAndAckSeqs(subs[0], true)
+
 	atomic.StoreInt32(&doAckMsg, 1)
+	servers = removeServer(servers, leader)
 	leader.Shutdown()
 	servers = removeServer(servers, leader)
 	getLeader(t, 10*time.Second, servers...)
@@ -1980,6 +1988,19 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 	// Restart original leader
 	rs := runServerWithOpts(t, leader.opts, nil)
 	defer rs.Shutdown()
+
+	// Make sure we have a new leader before publishing a new
+	// message to speed up the replay
+	servers = append(servers, rs)
+	getLeader(t, 5*time.Second, servers...)
+	// Speed up the replay
+	if err := sc.Publish(channel, []byte("hello")); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+
 	numSubs := 0
 	lastSent := uint64(0)
 	acksPending := 0
@@ -1994,7 +2015,7 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 			lastSent = sub.LastSent
 			acksPending = len(sub.acksPending)
 			sub.RUnlock()
-			if lastSent == 2 && acksPending == 0 {
+			if lastSent == 3 && acksPending == 0 {
 				// All is as expected, we are done
 				break
 			}
@@ -2004,8 +2025,8 @@ func TestClusteringRaftLogReplay(t *testing.T) {
 	if numSubs != 1 {
 		t.Fatalf("Expected 1 sub, got %v", numSubs)
 	}
-	if lastSent != 2 {
-		t.Fatalf("Expected lastSent to be 2, got %v", lastSent)
+	if lastSent != 3 {
+		t.Fatalf("Expected lastSent to be 3, got %v", lastSent)
 	}
 	if acksPending != 0 {
 		t.Fatalf("Expected 0 pending msgs, got %v", acksPending)
