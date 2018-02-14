@@ -454,7 +454,7 @@ func TestChannelStore(t *testing.T) {
 	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
-	cs := newChannelStore(s.store)
+	cs := newChannelStore(s, s.store)
 	if cs.get("foo") != nil {
 		t.Fatal("Nothing should be returned")
 	}

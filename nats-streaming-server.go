@@ -21,20 +21,21 @@ var usageStr = `
 Usage: nats-streaming-server [options]
 
 Streaming Server Options:
-    -cid, --cluster_id  <string>     Cluster ID (default: test-cluster)
-    -st,  --store <string>           Store type: MEMORY|FILE (default: MEMORY)
-          --dir <string>             For FILE store type, this is the root directory
-    -mc,  --max_channels <int>       Max number of channels (0 for unlimited)
-    -msu, --max_subs <int>           Max number of subscriptions per channel (0 for unlimited)
-    -mm,  --max_msgs <int>           Max number of messages per channel (0 for unlimited)
-    -mb,  --max_bytes <size>         Max messages total size per channel (0 for unlimited)
-    -ma,  --max_age <duration>       Max duration a message can be stored ("0s" for unlimited)
-    -ns,  --nats_server <string>     Connect to this external NATS Server URL (embedded otherwise)
-    -sc,  --stan_config <string>     Streaming server configuration file
-    -hbi, --hb_interval <duration>   Interval at which server sends heartbeat to a client
-    -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
-    -hbf, --hb_fail_count <int>      Number of failed heartbeats before server closes the client connection
-          --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+    -cid, --cluster_id  <string>      Cluster ID (default: test-cluster)
+    -st,  --store <string>            Store type: MEMORY|FILE (default: MEMORY)
+          --dir <string>              For FILE store type, this is the root directory
+    -mc,  --max_channels <int>        Max number of channels (0 for unlimited)
+    -msu, --max_subs <int>            Max number of subscriptions per channel (0 for unlimited)
+    -mm,  --max_msgs <int>            Max number of messages per channel (0 for unlimited)
+    -mb,  --max_bytes <size>          Max messages total size per channel (0 for unlimited)
+    -ma,  --max_age <duration>        Max duration a message can be stored ("0s" for unlimited)
+    -mi,  --max_inactivity <duration> Max inactivity (no new message, no subscription) after which a channel can be garbage collected (0 for unlimited)
+    -ns,  --nats_server <string>      Connect to this external NATS Server URL (embedded otherwise)
+    -sc,  --stan_config <string>      Streaming server configuration file
+    -hbi, --hb_interval <duration>    Interval at which server sends heartbeat to a client
+    -hbt, --hb_timeout <duration>     How long server waits for a heartbeat response
+    -hbf, --hb_fail_count <int>       Number of failed heartbeats before server closes the client connection
+          --ft_group <string>         Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 
 Streaming Server Clustering Options:
     --clustered <bool>                   Run the server in a clustered configuration (default: false)

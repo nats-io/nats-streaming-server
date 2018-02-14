@@ -121,6 +121,9 @@ func TestParseConfig(t *testing.T) {
 	if opts.MaxSubscriptions != 15 {
 		t.Fatalf("Expected MaxSubscriptions to be 15, got %v", opts.MaxSubscriptions)
 	}
+	if opts.MaxInactivity != 16*time.Second {
+		t.Fatalf("Expected MaxInactivity to be 16s, got %v", opts.MaxInactivity)
+	}
 	if len(opts.PerChannel) != 2 {
 		t.Fatalf("Expected PerChannel map to have 2 elements, got %v", len(opts.PerChannel))
 	}
@@ -140,6 +143,9 @@ func TestParseConfig(t *testing.T) {
 	if cl.MaxSubscriptions != 4 {
 		t.Fatalf("Expected MaxSubscriptions to be 4, got %v", cl.MaxSubscriptions)
 	}
+	if cl.MaxInactivity != 5*time.Second {
+		t.Fatalf("Expected MaxInactivity to be 5s, got %v", cl.MaxInactivity)
+	}
 	cl, ok = opts.PerChannel["bar"]
 	if !ok {
 		t.Fatal("Expected channel bar to be found")
@@ -155,6 +161,9 @@ func TestParseConfig(t *testing.T) {
 	}
 	if cl.MaxSubscriptions != 8 {
 		t.Fatalf("Expected MaxSubscriptions to be 8, got %v", cl.MaxSubscriptions)
+	}
+	if cl.MaxInactivity != 9*time.Second {
+		t.Fatalf("Expected MaxInactivity to be 9s, got %v", cl.MaxInactivity)
 	}
 	if opts.ClientHBInterval != 10*time.Second {
 		t.Fatalf("Expected ClientHBInterval to be 10s, got %v", opts.ClientHBInterval)
@@ -310,7 +319,7 @@ func TestParsePerChannelLimitsSetToZero(t *testing.T) {
 	confFile := "config.conf"
 	defer os.Remove(confFile)
 	if err := ioutil.WriteFile(confFile,
-		[]byte("store_limits: {channels: {foo: {max_msgs: 0, max_bytes: 0, max_age: \"0\", max_subs: 0}}}"), 0660); err != nil {
+		[]byte("store_limits: {channels: {foo: {max_msgs: 0, max_bytes: 0, max_age: \"0\", max_subs: 0, max_inactivity: \"0\"}}}"), 0660); err != nil {
 		t.Fatalf("Unexpected error creating conf file: %v", err)
 	}
 	opts := Options{}
@@ -328,6 +337,7 @@ func TestParsePerChannelLimitsSetToZero(t *testing.T) {
 	expected.MaxBytes = -1
 	expected.MaxAge = -1
 	expected.MaxSubscriptions = -1
+	expected.MaxInactivity = -1
 	if !reflect.DeepEqual(*cl, expected) {
 		t.Fatalf("Expected channel limits for foo to be %v, got %v", expected, *cl)
 	}
@@ -367,11 +377,15 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "store_limits:{max_age:false}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_age:\"foo\"}", wrongTimeErr)
 	expectFailureFor(t, "store_limits:{max_subs:false}", wrongTypeErr)
+	expectFailureFor(t, "store_limits:{max_inactivity:false}", wrongTypeErr)
+	expectFailureFor(t, "store_limits:{max_inactivity:\"foo\"}", wrongTimeErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_msgs:false}}}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_bytes:false}}}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_age:\"1h:0m\"}}}", wrongTimeErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_age:false}}}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_subs:false}}}", wrongTypeErr)
+	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_inactivity:false}}}", wrongTypeErr)
+	expectFailureFor(t, "store_limits:{channels:{\"foo\":{max_inactivity:\"1L0m\"}}}", wrongTimeErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo.*bar\":{}}}", wrongChanErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo.>.>\":{}}}", wrongChanErr)
 	expectFailureFor(t, "store_limits:{channels:{\"foo..bar\":{}}}", wrongChanErr)

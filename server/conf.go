@@ -318,6 +318,18 @@ func parseChannelLimits(cl *stores.ChannelLimits, k, name string, v interface{},
 		if !isGlobal && cl.MaxAge == 0 {
 			cl.MaxAge = -1
 		}
+	case "mi", "max_inactivity", "maxinactivity":
+		if err := checkType(k, reflect.String, v); err != nil {
+			return err
+		}
+		dur, err := time.ParseDuration(v.(string))
+		if err != nil {
+			return err
+		}
+		cl.MaxInactivity = dur
+		if !isGlobal && cl.MaxInactivity == 0 {
+			cl.MaxInactivity = -1
+		}
 	}
 	return nil
 }
@@ -498,6 +510,8 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.String("mb", fmt.Sprintf("%v", stores.DefaultStoreLimits.MaxBytes), "stan.MaxBytes")
 	fs.DurationVar(&sopts.MaxAge, "max_age", stores.DefaultStoreLimits.MaxAge, "stan.MaxAge")
 	fs.DurationVar(&sopts.MaxAge, "ma", stores.DefaultStoreLimits.MaxAge, "stan.MaxAge")
+	fs.DurationVar(&sopts.MaxInactivity, "max_inactivity", stores.DefaultStoreLimits.MaxInactivity, "Maximum inactivity (no new message, no subscription) after which a channel can be garbage collected")
+	fs.DurationVar(&sopts.MaxInactivity, "mi", stores.DefaultStoreLimits.MaxInactivity, "Maximum inactivity (no new message, no subscription) after which a channel can be garbage collected")
 	fs.DurationVar(&sopts.ClientHBInterval, "hbi", DefaultHeartBeatInterval, "stan.ClientHBInterval")
 	fs.DurationVar(&sopts.ClientHBInterval, "hb_interval", DefaultHeartBeatInterval, "stan.ClientHBInterval")
 	fs.DurationVar(&sopts.ClientHBTimeout, "hbt", DefaultClientHBTimeout, "stan.ClientHBTimeout")

@@ -27,6 +27,7 @@ var (
 	ErrTooManySubs     = errors.New("too many subscriptions per channel")
 	ErrNotSupported    = errors.New("not supported")
 	ErrAlreadyExists   = errors.New("already exists")
+	ErrNotFound        = errors.New("not found")
 )
 
 // StoreLimits define limits for a store.
@@ -47,6 +48,9 @@ type ChannelLimits struct {
 	MsgStoreLimits
 	// Limits for subscriptions stores
 	SubStoreLimits
+	// How long without any active subscription and no new message
+	// before this channel can be deleted.
+	MaxInactivity time.Duration
 }
 
 // MsgStoreLimits defines limits for a MsgStore.
@@ -81,6 +85,7 @@ var DefaultStoreLimits = StoreLimits{
 		SubStoreLimits{
 			MaxSubscriptions: 1000,
 		},
+		0,
 	},
 	nil,
 }
@@ -179,12 +184,27 @@ type Store interface {
 	// This call may return an error due to limits validation errors.
 	SetLimits(limits *StoreLimits) error
 
+	// GetChannelLimits returns the limit for this channel. If the channel
+	// does not exist, returns nil.
+	GetChannelLimits(name string) *ChannelLimits
+
 	// CreateChannel creates a Channel.
 	// Implementations should return ErrAlreadyExists if the channel was
 	// already created.
 	// Limits defined for this channel in StoreLimits.PeChannel map, if present,
 	// will apply. Otherwise, the global limits in StoreLimits will apply.
 	CreateChannel(channel string) (*Channel, error)
+
+	// DeleteChannel deletes a Channel.
+	// Implementations should make sure that if no error is returned, the
+	// channel would not be recovered after a restart, unless CreateChannel()
+	// with the same channel is invoked.
+	// If processing is expecting to be time consuming, work should be done
+	// in the background as long as the above condition is guaranteed.
+	// It is also acceptable for an implementation to have CreateChannel()
+	// return an error if background deletion is still happening for a
+	// channel of the same name.
+	DeleteChannel(channel string) error
 
 	// AddClient stores information about the client identified by `clientID`.
 	AddClient(clientID, hbInbox string) (*Client, error)

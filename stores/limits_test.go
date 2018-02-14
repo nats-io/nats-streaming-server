@@ -20,6 +20,7 @@ func TestLimitsAddPerChannel(t *testing.T) {
 		SubStoreLimits{
 			MaxSubscriptions: 10,
 		},
+		2000,
 	}
 	sl.AddPerChannel("foo", cl)
 	if len(sl.PerChannel) != 1 {
@@ -76,12 +77,21 @@ func TestLimitsBuildErrors(t *testing.T) {
 	sl.MaxAge = -1
 	expectError("Max age")
 
+	sl.MaxChannels = 1
+	sl.MaxSubscriptions = 1
+	sl.MaxMsgs = 1
+	sl.MaxBytes = 1
+	sl.MaxAge = 1
+	sl.MaxInactivity = -1
+	expectError("Max inactivity")
+
 	// Reset sl
 	sl.MaxChannels = 1
 	sl.MaxSubscriptions = 1
 	sl.MaxMsgs = 1
 	sl.MaxBytes = 1
 	sl.MaxAge = 1
+	sl.MaxInactivity = 1
 
 	// Adding a second channel should cause build failures, AddPerChannel itself
 	// does not fail.
@@ -145,6 +155,7 @@ func TestLimitsPerChannelOverride(t *testing.T) {
 	sl.MaxBytes = 20
 	sl.MaxSubscriptions = 30
 	sl.MaxAge = time.Second
+	sl.MaxInactivity = time.Minute
 
 	cl := &ChannelLimits{}
 	cl.MaxMsgs = 5
@@ -166,6 +177,14 @@ func TestLimitsPerChannelOverride(t *testing.T) {
 	cl.MaxAge = time.Second
 	cl2 = *cl
 	cl2.MaxAge = time.Hour
+	sl.AddPerChannel("foo", cl)
+	sl.AddPerChannel("bar", &cl2)
+	expectNoError("bar", &cl2)
+
+	cl = &ChannelLimits{}
+	cl.MaxInactivity = time.Minute
+	cl2 = *cl
+	cl2.MaxInactivity = time.Hour
 	sl.AddPerChannel("foo", cl)
 	sl.AddPerChannel("bar", &cl2)
 	expectNoError("bar", &cl2)
@@ -235,6 +254,17 @@ func TestLimitsPerChannelOverride(t *testing.T) {
 	cl2 = sl.ChannelLimits
 	cl2.MaxAge = 0
 	expectNoError("foo.*", &cl2)
+
+	cl = &ChannelLimits{}
+	cl.MaxInactivity = -1
+	sl.AddPerChannel("foo.*", cl)
+	// Check that we get what we expect
+	// After Build, we should get foo.*'s cl be equal
+	// to this (in value). The MaxSubscriptions should have
+	// been set to 0 after inheritance is applied.
+	cl2 = sl.ChannelLimits
+	cl2.MaxInactivity = 0
+	expectNoError("foo.*", &cl2)
 }
 
 func TestLimitsInheritance(t *testing.T) {
@@ -243,18 +273,20 @@ func TestLimitsInheritance(t *testing.T) {
 	sl.MaxBytes = 12
 	sl.MaxAge = 13
 	sl.MaxSubscriptions = 14
+	sl.MaxInactivity = 15
 
-	addPerChannel := func(channel string, maxMsgs int, maxBytes, maxAge int64, maxSubs int) {
+	addPerChannel := func(channel string, maxMsgs int, maxBytes, maxAge int64, maxSubs int, MaxInactivity int64) {
 		cl := &ChannelLimits{}
 		cl.MaxMsgs = maxMsgs
 		cl.MaxBytes = maxBytes
 		cl.MaxAge = time.Duration(maxAge)
 		cl.MaxSubscriptions = maxSubs
+		cl.MaxInactivity = time.Duration(MaxInactivity)
 		sl.AddPerChannel(channel, cl)
 	}
-	checkPerChannel := func(channel string, maxMsgs int, maxBytes, maxAge int64, maxSubs int) {
+	checkPerChannel := func(channel string, maxMsgs int, maxBytes, maxAge int64, maxSubs int, MaxInactivity int64) {
 		sl.PerChannel = nil
-		addPerChannel(channel, maxMsgs, maxBytes, maxAge, maxSubs)
+		addPerChannel(channel, maxMsgs, maxBytes, maxAge, maxSubs, MaxInactivity)
 		if err := sl.Build(); err != nil {
 			stackFatalf(t, "Unexpected error on build: %v", err)
 		}
@@ -269,27 +301,32 @@ func TestLimitsInheritance(t *testing.T) {
 		if maxAge == 0 && builtCl.MaxAge != sl.MaxAge {
 			t.Fatalf("Max age from global limit not inherited: %v", builtCl)
 		}
+		if MaxInactivity == 0 && builtCl.MaxInactivity != sl.MaxInactivity {
+			t.Fatalf("MaxInactivity from global limit not inherited: %v", builtCl)
+		}
 		if maxSubs == 0 && builtCl.MaxSubscriptions != sl.MaxSubscriptions {
 			t.Fatalf("Max messages from global limit not inherited: %v", builtCl)
 		}
 	}
-	checkPerChannel("foo", 10, 0, 0, 0)
-	checkPerChannel("foo", 0, 10, 0, 0)
-	checkPerChannel("foo", 0, 0, 10, 0)
-	checkPerChannel("foo", 0, 0, 0, 10)
+	checkPerChannel("foo", 10, 0, 0, 0, 0)
+	checkPerChannel("foo", 0, 10, 0, 0, 0)
+	checkPerChannel("foo", 0, 0, 10, 0, 0)
+	checkPerChannel("foo", 0, 0, 0, 10, 0)
+	checkPerChannel("foo", 0, 0, 0, 0, 10)
 	// Should be the same even if the channel has wildcards
-	checkPerChannel("foo.*", 10, 0, 0, 0)
-	checkPerChannel("foo.*", 0, 10, 0, 0)
-	checkPerChannel("foo.*", 0, 0, 10, 0)
-	checkPerChannel("foo.*", 0, 0, 0, 10)
+	checkPerChannel("foo.*", 10, 0, 0, 0, 0)
+	checkPerChannel("foo.*", 0, 10, 0, 0, 0)
+	checkPerChannel("foo.*", 0, 0, 10, 0, 0)
+	checkPerChannel("foo.*", 0, 0, 0, 10, 0)
+	checkPerChannel("foo.*", 0, 0, 0, 0, 10)
 	// Check inheritance between wildcard channels.
 	// We start with global limits as:
-	//             Msgs Bytes Age Subs
-	// Global        11    12  13   14
+	//             Msgs Bytes Age Subs MaxInactivity
+	// Global        11    12  13   14      15
 	//
 	// Say we have the following channels
 	//
-	//             Msgs Bytes Age Subs
+	//             Msgs Bytes Age Subs MaxInactivity
 	// *.*                  2
 	// *.>                          5
 	// foo.>         10
@@ -299,57 +336,65 @@ func TestLimitsInheritance(t *testing.T) {
 	// foo.d.e.f     50        60
 	// foo.baz             70       80
 	// bar.*.>       90
-	// bar.baz.>          100
+	// bar.baz.>          100              110
+	// bar.baz.boz                         120
 	//
 	// After build we should have:
 	//
-	//             Msgs Bytes Age Subs
-	// *.>           11    12  13    5
-	// *.*           11     2  13    5
-	// foo.>         10     2  13    5
-	// foo.*.>       10    20  13    5
-	// foo.*.*.>     10    20  30    5
-	// foo.a.b.c     10    20  30   40
-	// foo.d.e.f     50    20  60    5
-	// foo.baz       10    70  13   80
-	// bar.*.>       90    12  13    5
-	// bar.baz.>     90   100  13    5
+	//             Msgs Bytes Age Subs MaxInactivity
+	// *.>           11    12  13    5      15
+	// *.*           11     2  13    5      15
+	// foo.>         10     2  13    5      15
+	// foo.*.>       10    20  13    5      15
+	// foo.*.*.>     10    20  30    5      15
+	// foo.a.b.c     10    20  30   40      15
+	// foo.d.e.f     50    20  60    5      15
+	// foo.baz       10    70  13   80      15
+	// bar.*.>       90    12  13    5      15
+	// bar.baz.>     90   100  13    5     110
+	// bar.baz.boz   90   100  13    5     120
+	// bar.baz.bat   90   100  13    5     110
 	sl.PerChannel = nil
-	addPerChannel("*.*", 0, 2, 0, 0)
-	addPerChannel("*.>", 0, 0, 0, 5)
-	addPerChannel("foo.>", 10, 0, 0, 0)
-	addPerChannel("foo.*.>", 0, 20, 0, 0)
-	addPerChannel("foo.*.*.>", 0, 0, 30, 0)
-	addPerChannel("foo.a.b.c", 0, 0, 0, 40)
-	addPerChannel("foo.d.e.f", 50, 0, 60, 0)
-	addPerChannel("foo.baz", 0, 70, 0, 80)
-	addPerChannel("bar.*.>", 90, 0, 0, 0)
-	addPerChannel("bar.baz.>", 0, 100, 0, 0)
+	addPerChannel("*.*", 0, 2, 0, 0, 0)
+	addPerChannel("*.>", 0, 0, 0, 5, 0)
+	addPerChannel("foo.>", 10, 0, 0, 0, 0)
+	addPerChannel("foo.*.>", 0, 20, 0, 0, 0)
+	addPerChannel("foo.*.*.>", 0, 0, 30, 0, 0)
+	addPerChannel("foo.a.b.c", 0, 0, 0, 40, 0)
+	addPerChannel("foo.d.e.f", 50, 0, 60, 0, 0)
+	addPerChannel("foo.baz", 0, 70, 0, 80, 0)
+	addPerChannel("bar.*.>", 90, 0, 0, 0, 0)
+	addPerChannel("bar.baz.>", 0, 100, 0, 0, 110)
+	addPerChannel("bar.baz.boz", 0, 0, 0, 0, 120)
+	addPerChannel("bar.baz.bat", 0, 0, 0, 0, 110)
 	if err := sl.Build(); err != nil {
 		t.Fatalf("Unexpected error on build: %v", err)
 	}
-	checkChannel := func(channel string, maxMsgs int, maxBytes, maxAge int64, maxSubs int) {
+	checkChannel := func(channel string, maxMsgs int, maxBytes, maxAge int64, maxSubs int, MaxInactivity int64) {
 		expectedLimit := &ChannelLimits{}
 		expectedLimit.MaxMsgs = maxMsgs
 		expectedLimit.MaxBytes = maxBytes
 		expectedLimit.MaxAge = time.Duration(maxAge)
 		expectedLimit.MaxSubscriptions = maxSubs
+		expectedLimit.MaxInactivity = time.Duration(MaxInactivity)
 		builtCl := sl.PerChannel[channel]
 		if !reflect.DeepEqual(*builtCl, *expectedLimit) {
 			stackFatalf(t, "Expected limits for %q to be %v, got %v",
 				channel, *expectedLimit, *builtCl)
 		}
 	}
-	checkChannel("*.>", 11, 12, 13, 5)
-	checkChannel("*.*", 11, 2, 13, 5)
-	checkChannel("foo.>", 10, 2, 13, 5)
-	checkChannel("foo.*.>", 10, 20, 13, 5)
-	checkChannel("foo.*.*.>", 10, 20, 30, 5)
-	checkChannel("foo.a.b.c", 10, 20, 30, 40)
-	checkChannel("foo.d.e.f", 50, 20, 60, 5)
-	checkChannel("foo.baz", 10, 70, 13, 80)
-	checkChannel("bar.*.>", 90, 12, 13, 5)
-	checkChannel("bar.baz.>", 90, 100, 13, 5)
+	checkChannel("*.>", 11, 12, 13, 5, 15)
+	checkChannel("*.*", 11, 2, 13, 5, 15)
+	checkChannel("foo.>", 10, 2, 13, 5, 15)
+	checkChannel("foo.*.>", 10, 20, 13, 5, 15)
+	checkChannel("foo.*.*.>", 10, 20, 30, 5, 15)
+	checkChannel("foo.a.b.c", 10, 20, 30, 40, 15)
+	checkChannel("foo.d.e.f", 50, 20, 60, 5, 15)
+	checkChannel("foo.baz", 10, 70, 13, 80, 15)
+	checkChannel("bar.*.>", 90, 12, 13, 5, 15)
+	checkChannel("bar.baz.>", 90, 100, 13, 5, 110)
+	checkChannel("bar.baz.boz", 90, 100, 13, 5, 120)
+	checkChannel("bar.baz.bat", 90, 100, 13, 5, 110)
 }
 
 func TestLimitsWildcardsDontCountForMaxChannels(t *testing.T) {
@@ -390,7 +435,7 @@ func TestLimitsWildcardsDontCountForMaxChannels(t *testing.T) {
 func TestLimitsPrint(t *testing.T) {
 	sl := testDefaultStoreLimits
 	sl.AddPerChannel(">", &ChannelLimits{MsgStoreLimits: MsgStoreLimits{MaxMsgs: 10}})
-	sl.AddPerChannel("foo.>", &ChannelLimits{MsgStoreLimits: MsgStoreLimits{MaxBytes: 1024}})
+	sl.AddPerChannel("foo.>", &ChannelLimits{MsgStoreLimits: MsgStoreLimits{MaxBytes: 1024}, MaxInactivity: 5 * time.Second})
 	sl.AddPerChannel("foo.bar.>", &ChannelLimits{MsgStoreLimits: MsgStoreLimits{MaxAge: time.Second}})
 	sl.AddPerChannel("foo.bar.baz.>", &ChannelLimits{SubStoreLimits: SubStoreLimits{MaxSubscriptions: 20}})
 	sl.AddPerChannel("bar", &ChannelLimits{SubStoreLimits: SubStoreLimits{MaxSubscriptions: 30}})
@@ -415,13 +460,14 @@ func TestLimitsPrint(t *testing.T) {
 			ok++
 		} else if l == " foo.>" {
 			if lines[i+1] != "  |-> Bytes                  1.00 KB" ||
-				lines[i+2] != "  foo.bar.>" ||
-				lines[i+3] != "   |-> Age                        1s" ||
-				lines[i+4] != "   foo.bar.baz.>" ||
-				lines[i+5] != "    |-> Subscriptions             20" {
+				lines[i+2] != "  |-> Inactivity                  5s" ||
+				lines[i+3] != "  foo.bar.>" ||
+				lines[i+4] != "   |-> Age                        1s" ||
+				lines[i+5] != "   foo.bar.baz.>" ||
+				lines[i+6] != "    |-> Subscriptions             20" {
 				t.Fatalf("Unexpected content for %v", l)
 			}
-			i += 5
+			i += 6
 			ok++
 		}
 	}
@@ -436,6 +482,8 @@ func TestLimitsClone(t *testing.T) {
 	cl := &ChannelLimits{}
 	cl.MaxMsgs = 100
 	cl.MaxSubscriptions = 20
+	cl.MaxAge = time.Second
+	cl.MaxInactivity = time.Second
 	sl.AddPerChannel("foo", cl)
 
 	clone := sl.Clone()
