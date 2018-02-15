@@ -591,7 +591,7 @@ type subState struct {
 	acksPending  map[uint64]int64 // key is message sequence, value is expiration time.
 	store        stores.SubStore  // for easy access to the store interface
 
-	savedClientID string // Used only for closed durables in Clustering mode.
+	savedClientID string // Used only for closed durables in Clustering mode and monitoring endpoints.
 
 	replicate *subSentAndAck // Used in Clustering mode
 
@@ -752,7 +752,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	if sub.isDurableSubscriber() {
 		durableKey = sub.durableKey()
 	}
-	// This is needed when doing a snapshot in clustering mode.
+	// This is needed when doing a snapshot in clustering mode or for monitoring endpoints
 	sub.savedClientID = sub.ClientID
 	// Clear the subscriptions clientID
 	sub.ClientID = ""
