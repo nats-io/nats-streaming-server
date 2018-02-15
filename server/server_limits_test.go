@@ -73,19 +73,39 @@ func TestTooManySubs(t *testing.T) {
 	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
+	check := func() {
+		cs := channelsGet(t, s.channels, "foo")
+		ss := cs.ss
+		ss.RLock()
+		if ss.psubs == nil || len(ss.psubs) != 1 {
+			stackFatalf(t, "Expected only one subscription, got %v", len(ss.psubs))
+		}
+		ss.RUnlock()
+		subs := s.clients.getSubs(clientName)
+		if len(subs) != 1 {
+			stackFatalf(t, "Expected 1 subscription for client %q, got %+v", clientName, subs)
+		}
+	}
 	// We should get an error here
 	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err == nil {
 		t.Fatal("Expected error on subscribe, go none")
 	}
-	cs := channelsGet(t, s.channels, "foo")
-	ss := cs.ss
-	func() {
-		ss.RLock()
-		defer ss.RUnlock()
-		if ss.psubs == nil || len(ss.psubs) != 1 {
-			t.Fatalf("Expected only one subscription, got %v", len(ss.psubs))
-		}
-	}()
+	check()
+	// Try with a durable
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur")); err == nil {
+		t.Fatal("Expected error on subscribe, go none")
+	}
+	check()
+	// And a queue sub
+	if _, err := sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}); err == nil {
+		t.Fatal("Expected error on subscribe, go none")
+	}
+	check()
+	// Finally a durable queue sub
+	if _, err := sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}, stan.DurableName("dur")); err == nil {
+		t.Fatal("Expected error on subscribe, go none")
+	}
+	check()
 }
 
 func TestMaxMsgs(t *testing.T) {

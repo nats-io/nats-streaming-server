@@ -3702,7 +3702,11 @@ func (s *StanServer) addSubscription(ss *subStore, sub *subState) error {
 		return fmt.Errorf("can't find clientID: %v", sub.ClientID)
 	}
 	// Store this subscription in subStore
-	return ss.Store(sub)
+	if err := ss.Store(sub); err != nil {
+		s.clients.removeSub(sub.ClientID, sub)
+		return err
+	}
+	return nil
 }
 
 // updateDurable adds back `sub` to the client and updates the store.
