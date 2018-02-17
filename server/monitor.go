@@ -373,6 +373,10 @@ func createSubscriptionz(sub *subState) *Subscriptionz {
 		PendingCount: len(sub.acksPending),
 		IsStalled:    sub.stalled,
 	}
+	// Case of offline durable (queue) subscriptions
+	if sub.ClientID == "" {
+		subz.ClientID = sub.savedClientID
+	}
 	sub.RUnlock()
 	return subz
 }

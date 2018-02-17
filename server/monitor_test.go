@@ -1101,6 +1101,10 @@ func TestMonitorDurableSubs(t *testing.T) {
 					if sub.IsOffline != expectedOffline {
 						stackFatalf(t, "Unexpected IsOffline, wants %v, got %v", expectedOffline, sub.IsOffline)
 					}
+					// ClientID are now always reported, even when the durables are offline
+					if sub.ClientID == "" {
+						stackFatalf(t, "ClientID should always have a value")
+					}
 				}
 			}
 			// There should be 1 sub

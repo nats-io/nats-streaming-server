@@ -676,9 +676,11 @@ For example: [http://localhost:8222/streaming/clientsz?limit=1&offset=1&subs=1](
       "subscriptions": {
         "foo": [
           {
+            "client_id": "benchmark-sub-0",
             "inbox": "_INBOX.jAHSY3hcL5EGFQGYmfayvC",
             "ack_inbox": "_INBOX.J3Odi0wXYKWKFWz5D5uhem",
             "is_durable": false,
+            "is_offline": false,
             "max_inflight": 1024,
             "ack_wait": 30,
             "last_sent": 505597,
@@ -700,9 +702,11 @@ For example: [http://localhost:8222/streaming/clientsz?client=me&subs=1](http://
   "subscriptions": {
     "foo": [
       {
+        "client_id": "me",
         "inbox": "_INBOX.HG0uDuNtAPxJQ1lVjIC389",
         "ack_inbox": "_INBOX.Q9iH2gsDPN57ZEvqswiYSL",
         "is_durable": false,
+        "is_offline": false,
         "max_inflight": 1024,
         "ack_wait": 30,
         "last_sent": 0,
@@ -771,9 +775,11 @@ For example: [http://localhost:8222/streaming/channelsz?limit=1&offset=0&subs=1]
       "last_seq": 0,
       "subscriptions": [
         {
+          "client_id": "me",
           "inbox": "_INBOX.S7kTJjOcToXiJAzGWgINit",
           "ack_inbox": "_INBOX.Y04G5pZxlint3yPXrSTjTV",
           "is_durable": false,
+          "is_offline": false,
           "max_inflight": 1024,
           "ack_wait": 30,
           "last_sent": 0,
@@ -807,9 +813,11 @@ For example: [http://localhost:8222/streaming/channelsz?channel=foo&subs=1](http
   "last_seq": 704770,
   "subscriptions": [
     {
+      "client_id": "me",
       "inbox": "_INBOX.jAHSY3hcL5EGFQGYmfayvC",
       "ack_inbox": "_INBOX.J3Odi0wXYKWKFWz5D5uhem",
       "is_durable": false,
+      "is_offline": false,
       "max_inflight": 1024,
       "ack_wait": 30,
       "last_sent": 704770,
@@ -817,9 +825,11 @@ For example: [http://localhost:8222/streaming/channelsz?channel=foo&subs=1](http
       "is_stalled": false
     },
     {
+      "client_id": "me2",
       "inbox": "_INBOX.jAHSY3hcL5EGFQGYmfaywG",
       "ack_inbox": "_INBOX.J3Odi0wXYKWKFWz5D5uhjV",
       "is_durable": false,
+      "is_offline": false,
       "max_inflight": 1024,
       "ack_wait": 30,
       "last_sent": 704770,
@@ -830,6 +840,59 @@ For example: [http://localhost:8222/streaming/channelsz?channel=foo&subs=1](http
   ]
 }
 ```
+
+For durables that are currently running, the `is_offline` field is set to `false`. Here is an example:
+```
+{
+  "name": "foo",
+  "msgs": 0,
+  "bytes": 0,
+  "first_seq": 0,
+  "last_seq": 0,
+  "subscriptions": [
+    {
+      "client_id": "me",
+      "inbox": "_INBOX.P23kNGFnwC7KRg3jIMB3IL",
+      "ack_inbox": "_STAN.ack.pLyMpEyg7dgGZBS7jGXC02.foo.pLyMpEyg7dgGZBS7jGXCaw",
+      "durable_name": "dur",
+      "is_durable": true,
+      "is_offline": false,
+      "max_inflight": 1024,
+      "ack_wait": 30,
+      "last_sent": 0,
+      "pending_count": 0,
+      "is_stalled": false
+    }
+  ]
+}
+```
+
+When that same durable goes offline, `is_offline` is be set to `true`. Although the client is possibly no longer connected (and would not appear in the `clientsz` endpoint), the `client_id` field is still displayed here.
+```
+{
+  "name": "foo",
+  "msgs": 0,
+  "bytes": 0,
+  "first_seq": 0,
+  "last_seq": 0,
+  "subscriptions": [
+    {
+      "client_id": "me",
+      "inbox": "_INBOX.P23kNGFnwC7KRg3jIMB3IL",
+      "ack_inbox": "_STAN.ack.pLyMpEyg7dgGZBS7jGXC02.foo.pLyMpEyg7dgGZBS7jGXCaw",
+      "durable_name": "dur",
+      "is_durable": true,
+      "is_offline": true,
+      "max_inflight": 1024,
+      "ack_wait": 30,
+      "last_sent": 0,
+      "pending_count": 0,
+      "is_stalled": false
+    }
+  ]
+}
+```
+
 
 # Getting Started
 
