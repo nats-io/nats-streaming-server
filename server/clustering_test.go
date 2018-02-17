@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/raft"
 	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
@@ -628,7 +629,7 @@ func TestClusteringNoPanicOnShutdown(t *testing.T) {
 	// Wait for leader to be elected.
 	leader := getLeader(t, 10*time.Second, servers...)
 
-	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(time.Second), stan.ConnectWait(10*time.Second))
+	sc, err := stan.Connect(clusterName, clientName, stan.PubAckWait(time.Second))
 	if err != nil {
 		t.Fatalf("Error on connect: %v", err)
 	}
@@ -658,12 +659,21 @@ func TestClusteringNoPanicOnShutdown(t *testing.T) {
 	time.Sleep(time.Duration(rand.Intn(500)+100) * time.Millisecond)
 
 	// We shutdown the follower, it should not panic.
+	follower := s1
 	if s1 == leader {
-		s2.Shutdown()
-	} else {
-		s1.Shutdown()
+		follower = s2
 	}
+	follower.Shutdown()
 	wg.Wait()
+
+	// Restart follower to speed up client disconnect.
+	follower = runServerWithOpts(t, follower.opts, nil)
+	defer follower.Shutdown()
+
+	// Close client explicitly otherwise follower will be shutdown
+	// first and then client close will timeout since only 1 node
+	// in cluster (no leader)
+	sc.Close()
 }
 
 func TestClusteringLeaderFlap(t *testing.T) {
@@ -2488,4 +2498,255 @@ func TestClusteringAndChannelsPartitioning(t *testing.T) {
 		s.Shutdown()
 		t.Fatal("Expected error, got none")
 	}
+}
+
+func TestClusteringGetProperErrorFromFSMApply(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	sc1, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc1.Close()
+
+	if _, err := sc1.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur")); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	// This one should fail
+	if _, err := sc1.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur")); err == nil {
+		t.Fatal("Creation of durable should have failed")
+	}
+
+	// We will send crafted unsubscribe protocol with wrong clientID
+	waitForNumSubs(t, leader, clientName, 1)
+	// Get the sub, so we can get required info for unsub request
+	sub := leader.clients.getSubs(clientName)[0]
+	unsubReq := &pb.UnsubscribeRequest{
+		Inbox:       sub.Inbox,
+		Subject:     sub.subject,
+		DurableName: sub.DurableName,
+		ClientID:    "wrongcid",
+	}
+	data, _ := unsubReq.Marshal()
+	reply, err := sc1.NatsConn().Request(leader.info.Unsubscribe, data, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Error on request: %v", err)
+	}
+	unsubReply := &pb.SubscriptionResponse{}
+	unsubReply.Unmarshal(reply.Data)
+	if unsubReply.Error == "" {
+		t.Fatal("Unsubscribe should have returned an error")
+	}
+
+	leader.clients.Lock()
+	orgClientStore := leader.clients.store
+	leader.clients.store = &clientStoreErrorsStore{Store: orgClientStore}
+	leader.clients.Unlock()
+
+	// These operations should fail
+
+	// Server should fail to store client
+	sc2, err := stan.Connect(clusterName, clientName+"2")
+	if err == nil {
+		sc2.Close()
+		t.Fatal("Second connect should have failed")
+	}
+	// Server should fail to delete this unknown client
+	closeReq := &pb.CloseRequest{ClientID: "wrongid"}
+	data, _ = closeReq.Marshal()
+	reply, err = sc1.NatsConn().Request(leader.info.Close, data, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Error on request: %v", err)
+	}
+	closeReply := &pb.CloseResponse{}
+	closeReply.Unmarshal(reply.Data)
+	if closeReply.Error == "" {
+		t.Fatal("Close should have returned an error")
+	}
+	// Restore client store to speed up end of test
+	leader.clients.Lock()
+	leader.clients.store = orgClientStore
+	leader.clients.Unlock()
+}
+
+func TestClusteringNoMsgSeqGapOnApplyError(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	sc, err := stan.Connect(clusterName, clientName,
+		stan.MaxPubAcksInflight(100),
+		stan.PubAckWait(500*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc.Close()
+
+	follower := s2
+	if s2 == leader {
+		follower = s1
+	}
+
+	stopCh := make(chan struct{}, 1)
+	errCount := uint32(0)
+	errLeadeshipLost := uint32(0)
+	okCount := uint32(0)
+	sent := uint32(0)
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 1
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+				if _, err := sc.PublishAsync("foo", []byte(fmt.Sprintf("%d", i)), func(guid string, err error) {
+					if err != nil {
+						atomic.AddUint32(&errCount, 1)
+						if err.Error() == raft.ErrLeadershipLost.Error() {
+							atomic.AddUint32(&errLeadeshipLost, 1)
+						}
+					} else {
+						atomic.AddUint32(&okCount, 1)
+					}
+				}); err != nil {
+					return
+				}
+				atomic.AddUint32(&sent, 1)
+				i++
+			}
+		}
+	}()
+	// Wait so that go-routine is in middle of sending messages
+	time.Sleep(time.Duration(rand.Intn(500)+100) * time.Millisecond)
+	// Shutdow follower
+	follower.Shutdown()
+	// The leader should step down since there is only 1 node
+	verifyNoLeader(t, 2*time.Second, servers...)
+	// stop the publisher loop
+	stopCh <- struct{}{}
+	wg.Wait()
+
+	timeout := time.Now().Add(5 * time.Second)
+	ok := false
+	for time.Now().Before(timeout) {
+		total := atomic.LoadUint32(&okCount) + atomic.LoadUint32(&errCount)
+		if total == atomic.LoadUint32(&sent) {
+			ok = true
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatalf("Timedout waiting for total sent messages")
+	}
+
+	okInStore := uint64(atomic.LoadUint32(&okCount))
+
+	ch := make(chan struct{}, 1)
+	leader.ioChannel <- &ioPendingMsg{sc: ch}
+	<-ch
+	// Get the old leader's store first/last sequence
+	c := leader.channels.get("foo")
+	first, last := msgStoreFirstAndLastSequence(t, c.store.Msgs)
+	if first != 1 || last != okInStore {
+		t.Fatalf("Expected first/last to be %v/%v got %v/%v", 1, okInStore, first, last)
+	}
+	if c.nextSequence != last+1 {
+		t.Fatalf("Expected channel nextSequence to be %v, got %v", last+1, c.nextSequence)
+	}
+	close(ch)
+
+	// Restart the follower
+	servers = removeServer(servers, follower)
+	follower = runServerWithOpts(t, follower.opts, nil)
+	defer follower.Shutdown()
+	servers = append(servers, follower)
+
+	leader = getLeader(t, 10*time.Second, servers...)
+
+	// Publish last message
+	if err := sc.Publish("foo", []byte("last")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+
+	leader.raft.Barrier(0).Error()
+
+	okInStore = uint64(atomic.LoadUint32(&okCount) + atomic.LoadUint32(&errLeadeshipLost) + 1)
+	c = leader.channels.get("foo")
+	timeout = time.Now().Add(10 * time.Second)
+	ok = false
+	for time.Now().Before(timeout) {
+		first, last = msgStoreFirstAndLastSequence(t, c.store.Msgs)
+		if first == 1 && last == okInStore {
+			ok = true
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatalf("Timedout wait for all messages to be stored... expected %v, got %v", okInStore, last)
+	}
+	for i := first; i <= last; i++ {
+		m, err := c.store.Msgs.Lookup(i)
+		if err != nil {
+			t.Fatalf("Error on lookup for seq=%v: %v", i, err)
+		}
+		if m == nil {
+			t.Fatalf("Nil message for seq: %v", i)
+		}
+		if i != last {
+			mi, _ := strconv.Atoi(string(m.Data))
+			if i != uint64(mi) {
+				t.Fatalf("Expected seq %v, got %v (m=%v)", i, mi, m)
+			}
+		} else if string(m.Data) != "last" {
+			t.Fatalf("Unexpected last message: %v", m)
+		}
+	}
+	sc.Close()
 }
