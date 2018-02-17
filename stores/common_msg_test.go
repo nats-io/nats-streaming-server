@@ -300,6 +300,44 @@ func TestCSMaxMsgs(t *testing.T) {
 	}
 }
 
+func dumpFSState(t *testing.T, s Store, format string, args ...interface{}) {
+	fs, ok := s.(*FileStore)
+	if !ok {
+		t.Fatalf(format, args...)
+		return
+	}
+	fs.RLock()
+	channels := fs.channels
+	fs.RUnlock()
+	for name, c := range channels {
+		fmt.Printf("== Channel %q ==\n", name)
+		ms := c.Msgs.(*FileMsgStore)
+		ms.RLock()
+		nextExp := ms.expiration
+		totalCount := ms.totalCount
+		first := ms.first
+		last := ms.last
+		lenWakeChan := len(ms.bkgTasksWake)
+		timeTick := ms.timeTick
+		ms.RUnlock()
+		fmt.Printf(" Now             : %v\n", time.Now())
+		fmt.Printf(" TimeTick        : %v\n", time.Unix(0, timeTick))
+		fmt.Printf(" Next Expiration : %v\n", time.Unix(0, nextExp))
+		fmt.Printf(" Total Count     : %v\n", totalCount)
+		fmt.Printf(" First           : %v\n", first)
+		fmt.Printf(" Last            : %v\n", last)
+		fmt.Printf(" Len wakeup chan : %v\n", lenWakeChan)
+		for idx := first; idx < last; idx++ {
+			m, _ := ms.Lookup(idx)
+			fmt.Printf("   Msg %2d : %v\n", idx, time.Unix(0, m.Timestamp))
+		}
+	}
+	buf := make([]byte, 1024*1024)
+	n := runtime.Stack(buf, true)
+	fmt.Printf("Go-routines:\n%s\n", string(buf[:n]))
+	t.Fatalf(format, args...)
+}
+
 func TestCSMaxAge(t *testing.T) {
 	for _, st := range testStores {
 		st := st
@@ -334,13 +372,13 @@ func TestCSMaxAge(t *testing.T) {
 			expectedLast := uint64(15)
 			first, last := msgStoreFirstAndLastSequence(t, cs.Msgs)
 			if first != expectedFirst || last != expectedLast {
-				t.Fatalf("Expected first/last to be %v/%v, got %v/%v",
+				dumpFSState(t, s, "Expected first/last to be %v/%v, got %v/%v",
 					expectedFirst, expectedLast, first, last)
 			}
 			// Wait more and all should be gone.
 			time.Sleep(250 * time.Millisecond)
 			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
-				t.Fatalf("All messages should have expired, got %v", n)
+				dumpFSState(t, s, "All messages should have expired, got %v", n)
 			}
 
 			// We are going to set a limit of MaxMsgs to 1 on top
@@ -363,14 +401,14 @@ func TestCSMaxAge(t *testing.T) {
 			time.Sleep(60 * time.Millisecond)
 			// Ensure there is still 1 message...
 			if n, _ := msgStoreState(t, cs.Msgs); n != 1 {
-				t.Fatalf("There should be 1 message, got %v", n)
+				dumpFSState(t, s, "There should be 1 message, got %v", n)
 			}
 			// ...which should be m2: this should not fail
 			msgStoreLookup(t, cs.Msgs, m2.Sequence)
 			// Again, wait more and second message should not be gone
 			time.Sleep(100 * time.Millisecond)
 			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
-				t.Fatalf("All messages should have expired, got %v", n)
+				dumpFSState(t, s, "All messages should have expired, got %v", n)
 			}
 
 			if st.name == TypeMemory {

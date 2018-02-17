@@ -192,6 +192,7 @@ type SQLStoreOptions struct {
 	MaxOpenConns int
 }
 
+// DefaultSQLStoreOptions returns default store options for an SQL Store
 func DefaultSQLStoreOptions() *SQLStoreOptions {
 	return &SQLStoreOptions{
 		NoCaching:    false,

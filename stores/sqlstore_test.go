@@ -393,9 +393,8 @@ func TestSQLRandomFailureDuringStore(t *testing.T) {
 			}); err != nil {
 				goodCount <- count
 				return
-			} else {
-				seq++
 			}
+			seq++
 		}
 	}()
 	time.Sleep(time.Duration(rand.Intn(400)+100) * time.Millisecond)
