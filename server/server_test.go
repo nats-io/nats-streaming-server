@@ -291,6 +291,13 @@ func waitForNumSubs(t tLogger, s *StanServer, ID string, expected int) {
 		// We avoid getting a copy of the subscriptions array here
 		// by directly returning the length of the array.
 		c := s.clients.lookup(ID)
+		if c == nil {
+			// Could happen in clustering mode when creation
+			// of channel did not happen yet in a node and test
+			// if checking that node. Just return something different
+			// from expected to cause waitForCount to try again.
+			return "subscriptions", -1
+		}
 		c.RLock()
 		defer c.RUnlock()
 		return "subscriptions", len(c.subs)

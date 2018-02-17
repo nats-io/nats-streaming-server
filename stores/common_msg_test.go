@@ -338,7 +338,7 @@ func TestCSMaxAge(t *testing.T) {
 					expectedFirst, expectedLast, first, last)
 			}
 			// Wait more and all should be gone.
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
 				t.Fatalf("All messages should have expired, got %v", n)
 			}
