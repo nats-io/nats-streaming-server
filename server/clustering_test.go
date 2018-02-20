@@ -2750,3 +2750,40 @@ func TestClusteringNoMsgSeqGapOnApplyError(t *testing.T) {
 	}
 	sc.Close()
 }
+
+func TestClusteringDifferentClusters(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+
+	// Wait for leader to be elected.
+	getLeader(t, 10*time.Second, servers...)
+
+	// Configure this server but to be part of another cluster.
+	// It should not be joining the above cluster and since it
+	// is started with boostrap false, it should fail to start.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.ID = s1sOpts.ID + "2"
+	s3, err := RunServerWithOpts(s3sOpts, nil)
+	if err == nil {
+		s3.Shutdown()
+		t.Fatal("Server s3 should have failed to start")
+	}
+}

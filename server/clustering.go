@@ -18,11 +18,19 @@ import (
 	"github.com/nats-io/nats-streaming-server/spb"
 )
 
-var runningInTests bool
+const (
+	defaultJoinRaftGroupTimeout = time.Second
+)
+
+var (
+	runningInTests       bool
+	joinRaftGroupTimeout = defaultJoinRaftGroupTimeout
+)
 
 func clusterSetupForTest() {
 	runningInTests = true
 	lazyReplicationInterval = 250 * time.Millisecond
+	joinRaftGroupTimeout = 250 * time.Millisecond
 }
 
 // ClusteringOptions contains STAN Server options related to clustering.
@@ -70,7 +78,7 @@ func (r *raftNode) shutdown() error {
 // createRaftNode creates and starts a new Raft node.
 func (s *StanServer) createServerRaftNode(fsm raft.FSM) (*raftNode, error) {
 	var (
-		name                     = "stan"
+		name                     = s.info.ClusterID
 		addr                     = s.getClusteringAddr(name)
 		node, existingState, err = s.createRaftNode(name, fsm)
 	)
@@ -99,7 +107,7 @@ func (s *StanServer) createServerRaftNode(fsm raft.FSM) (*raftNode, error) {
 		s.log.Debugf("Joining Raft group %s", name)
 		// Attempt to join up to 5 times before giving up.
 		for i := 0; i < 5; i++ {
-			r, err := s.ncr.Request(fmt.Sprintf("raft.%s.join", name), req, time.Second)
+			r, err := s.ncr.Request(fmt.Sprintf("%s.%s.join", defaultRaftPrefix, name), req, joinRaftGroupTimeout)
 			if err != nil {
 				time.Sleep(20 * time.Millisecond)
 				continue
@@ -222,7 +230,7 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, bool,
 	}
 
 	// Handle requests to join the cluster.
-	sub, err := s.ncr.Subscribe(fmt.Sprintf("raft.%s.join", name), func(msg *nats.Msg) {
+	sub, err := s.ncr.Subscribe(fmt.Sprintf("%s.%s.join", defaultRaftPrefix, name), func(msg *nats.Msg) {
 		// Drop the request if we're not the leader. There's no race condition
 		// after this check because even if we proceed with the cluster add, it
 		// will fail if the node is not the leader as cluster changes go

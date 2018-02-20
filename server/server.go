@@ -49,6 +49,7 @@ const (
 	DefaultClosePrefix    = "_STAN.close"
 	defaultAcksPrefix     = "_STAN.ack"
 	defaultSnapshotPrefix = "_STAN.snap"
+	defaultRaftPrefix     = "_STAN.raft"
 	DefaultStoreType      = stores.TypeMemory
 
 	// Prefix of subject active server is sending HBs to
@@ -1543,6 +1544,7 @@ func (s *StanServer) start(runningState State) error {
 		if s.opts.Clustering.RaftLogPath == "" {
 			s.opts.Clustering.RaftLogPath = filepath.Join(s.opts.ID, s.opts.Clustering.NodeID)
 		}
+		s.log.Noticef("Cluster Node ID: %s", s.info.NodeID)
 		if err := s.startRaftNode(); err != nil {
 			return err
 		}
