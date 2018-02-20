@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,6 +57,8 @@ var (
 		&testStore{TypeSQL, true},
 		&testStore{TypeRaft, false},
 	}
+	testTimestampMu   sync.Mutex
+	testLastTimestamp int64
 )
 
 func init() {
@@ -181,12 +184,19 @@ func storeDeleteClient(t tLogger, s Store, clientID string) {
 }
 
 func storeMsg(t tLogger, cs *Channel, channel string, seq uint64, data []byte) *pb.MsgProto {
+	testTimestampMu.Lock()
+	tm := time.Now().UnixNano()
+	if testLastTimestamp > 0 && tm < testLastTimestamp {
+		tm = testLastTimestamp
+	}
+	testLastTimestamp = tm
+	testTimestampMu.Unlock()
 	ms := cs.Msgs
 	seq, err := ms.Store(&pb.MsgProto{
 		Sequence:  seq,
 		Data:      data,
 		Subject:   channel,
-		Timestamp: time.Now().UnixNano(),
+		Timestamp: tm,
 	})
 	if err != nil {
 		stackFatalf(t, "Error storing message into channel [%v]: %v", channel, err)
