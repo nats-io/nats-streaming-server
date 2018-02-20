@@ -97,9 +97,6 @@ const (
 	// Name of the file to store Raft log.
 	raftLogFile = "raft.log"
 
-	// Time to wait on starting a Raft operation.
-	raftApplyTimeout = 5 * time.Second
-
 	// In partitioning mode, when a client connects, the connect request
 	// may reach several servers, but the first response the client gets
 	// allows it to proceed with either publish or subscribe.
@@ -186,6 +183,7 @@ type ioPendingMsg struct {
 	pm pb.PubMsg
 	pa pb.PubAck
 	c  *channel
+	sc chan struct{}
 }
 
 // Constant that defines the size of the channel that feeds the IO thread.
@@ -304,7 +302,7 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 	if err != nil {
 		return nil, err
 	}
-	atomic.StoreUint64(&c.nextSequence, lastSequence+1)
+	c.nextSequence = lastSequence + 1
 	cs.channels[name] = c
 	return c, nil
 }
@@ -1234,7 +1232,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		opts:          sOpts,
 		natsOpts:      nOpts,
 		dupCIDTimeout: defaultCheckDupCIDTimeout,
-		ioChannelQuit: make(chan struct{}, 1),
+		ioChannelQuit: make(chan struct{}),
 		trace:         sOpts.Trace,
 		debug:         sOpts.Debug,
 		subStartCh:    make(chan *subStartInfo, defaultSubStartChanLen),
@@ -1660,6 +1658,23 @@ func (s *StanServer) leadershipAcquired() error {
 	s.log.Noticef("server became leader, performing leader promotion actions")
 	defer s.log.Noticef("finished leader promotion actions")
 
+	// If we were not the leader, there should be nothing in the ioChannel
+	// (processing of client publishes). However, since a node could go
+	// from leader to follower to leader again, let's make sure that we
+	// synchronize with the ioLoop before we touch the channels' nextSequence.
+	ch := make(chan struct{}, 1)
+	iopm := &ioPendingMsg{sc: ch}
+	s.ioChannel <- iopm
+	// Wait for the ioLoop to reach that special iopm and notifies us (or
+	// give up if server is shutting down).
+	select {
+	case <-ch:
+	case <-s.ioChannelQuit:
+		return nil
+	}
+	// Then, we will notify it back to unlock it when were are done here.
+	defer close(ch)
+
 	// Use a barrier to ensure all preceding operations are applied to the FSM
 	if err := s.raft.Barrier(0).Error(); err != nil {
 		return err
@@ -1672,7 +1687,7 @@ func (s *StanServer) leadershipAcquired() error {
 		if err != nil {
 			return err
 		}
-		atomic.StoreUint64(&c.nextSequence, lastSequence+1)
+		c.nextSequence = lastSequence + 1
 	}
 
 	// Setup client heartbeats.
@@ -2302,6 +2317,25 @@ func (s *StanServer) isDuplicateConnect(client *client) bool {
 	return err == nil
 }
 
+// When calling ApplyFuture.Error(), if we get an error it means
+// that raft failed to commit to its log.
+// But if we also want the result of FSM.Apply(), which in this
+// case is StanServer.Apply(), we need to check the Response().
+// So we first check error from future.Error(). If nil, then we
+// check the Response.
+func waitForReplicationErrResponse(f raft.ApplyFuture) error {
+	err := f.Error()
+	if err == nil {
+		resp := f.Response()
+		// We call this function when we know that FutureApply's
+		// Response is an error object.
+		if resp != nil {
+			err = f.Response().(error)
+		}
+	}
+	return err
+}
+
 func (s *StanServer) replicateConnect(req *pb.ConnectRequest, refresh bool) error {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Connect,
@@ -2315,7 +2349,7 @@ func (s *StanServer) replicateConnect(req *pb.ConnectRequest, refresh bool) erro
 		panic(err)
 	}
 	// Wait on result of replication.
-	return s.raft.Apply(data, raftApplyTimeout).Error()
+	return waitForReplicationErrResponse(s.raft.Apply(data, 0))
 }
 
 func (s *StanServer) processConnect(req *pb.ConnectRequest, refresh bool) error {
@@ -2511,7 +2545,7 @@ func (s *StanServer) replicateConnClose(req *pb.CloseRequest) error {
 		panic(err)
 	}
 	// Wait on result of replication.
-	return s.raft.Apply(data, raftApplyTimeout).Error()
+	return waitForReplicationErrResponse(s.raft.Apply(data, 0))
 }
 
 func (s *StanServer) sendCloseResponse(subj string, closeErr error) {
@@ -2949,7 +2983,7 @@ func (s *StanServer) replicateSentAndAckSeqs(sub *subState) {
 	if err != nil {
 		panic(err)
 	}
-	s.raft.Apply(data, raftApplyTimeout)
+	s.raft.Apply(data, 0)
 	sub.replicate.reset()
 }
 
@@ -3176,16 +3210,6 @@ func (s *StanServer) startIOLoop() {
 func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 	defer s.ioChannelWG.Done()
 
-	////////////////////////////////////////////////////////////////////////////
-	// This is where we will store the message and wait for others in the
-	// potential cluster to do so as well, once we have a quorom someone can
-	// ack the publisher. We simply do so here for now.
-	////////////////////////////////////////////////////////////////////////////
-	////////////////////////////////////////////////////////////////////////////
-	// Once we have ack'd the publisher, we need to assign this a sequence ID.
-	// This will be done by a master election within the cluster, for now we
-	// assume we are the master and assign the sequence ID here.
-	////////////////////////////////////////////////////////////////////////////
 	storesToFlush := make(map[*channel]struct{}, 64)
 
 	var (
@@ -3193,42 +3217,74 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 		pendingMsgs  = _pendingMsgs[:0]
 	)
 
-	storeIOPendingMsgs := func(iopms []*ioPendingMsg) []raft.Future {
+	storeIOPendingMsgs := func(iopms []*ioPendingMsg) {
 		var (
-			futuresMap       map[*channel]raft.Future
-			replicateFutures []raft.Future
-			err              error
-			succeeded        []*ioPendingMsg
-			failed           []*ioPendingMsg
+			futuresMap map[*channel]raft.Future
+			err        error
 		)
 		if s.isClustered {
 			futuresMap, err = s.replicate(iopms)
+			// If replicate() returns an error, it means that no future
+			// was applied, so we can fail all published messages.
 			if err != nil {
-				failed = iopms
-			} else {
-				succeeded = iopms
-				replicateFutures = make([]raft.Future, len(iopms))
-
-				for c := range futuresMap {
-					storesToFlush[c] = struct{}{}
+				for _, iopm := range iopms {
+					s.logErrAndSendPublishErr(iopm, err)
 				}
-				for i, iopm := range iopms {
-					replicateFutures[i] = futuresMap[iopm.c]
+			} else {
+				for c, f := range futuresMap {
+					// Wait for the replication result.
+					// We know that we panic in StanServer.Apply() if storing
+					// of messages fail. So the only reason f.Error() would
+					// return an error (we are not using timeout in Apply())
+					// is if raft fails to store its log, but it would have
+					// then switched follower state. On leadership acquisition
+					// we do reet nextSequence based on lastSequence on store.
+					// Regardless, do reset here in case of error.
+
+					// Note that each future contains a batch of messages for
+					// a given channel. All futures in the map are for different
+					// channels.
+					if err := f.Error(); err != nil {
+						lastSeq, lerr := c.store.Msgs.LastSequence()
+						if lerr != nil {
+							panic(fmt.Errorf("Error during message replication (%v), unable to get store last sequence: %v", err, lerr))
+						}
+						c.nextSequence = lastSeq + 1
+					} else {
+						storesToFlush[c] = struct{}{}
+					}
+				}
+				// We have 1 future per channel. However, the array of iopms
+				// may be from different channels. For each iopm we look
+				// up its corresponding future and if there was an error
+				// (same for all iopms of the same channel) we fail the
+				// corresponding publishers.
+				for _, iopm := range iopms {
+					// We can call Error() again, this is not a problem.
+					if err := futuresMap[iopm.c].Error(); err != nil {
+						s.logErrAndSendPublishErr(iopm, err)
+					} else {
+						pendingMsgs = append(pendingMsgs, iopm)
+					}
 				}
 			}
 		} else {
-			succeeded, failed, err = s.assignAndStore(iopms, storesToFlush)
-		}
-		if err != nil {
-			for _, iopm := range failed {
-				s.log.Errorf("[Client:%s] Error processing message for subject %q: %v",
-					iopm.pm.ClientID, iopm.m.Subject, err)
-				s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, err)
+			for _, iopm := range iopms {
+				pm := &iopm.pm
+				c, err := s.lookupOrCreateChannel(pm.Subject)
+				if err == nil {
+					msg := c.pubMsgToMsgProto(pm, c.nextSequence)
+					_, err = c.store.Msgs.Store(msg)
+				}
+				if err != nil {
+					s.logErrAndSendPublishErr(iopm, err)
+				} else {
+					c.nextSequence++
+					pendingMsgs = append(pendingMsgs, iopm)
+					storesToFlush[c] = struct{}{}
+				}
 			}
 		}
-		pendingMsgs = append(pendingMsgs, succeeded...)
-
-		return replicateFutures
 	}
 
 	var (
@@ -3239,11 +3295,20 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 		batch     = make([]*ioPendingMsg, 0, batchSize)
 	)
 
+	leadershipAcquiredSync := func(iopm *ioPendingMsg) {
+		iopm.sc <- struct{}{}
+		<-iopm.sc
+	}
+
 	ready.Done()
 	for {
 		batch = batch[:0]
 		select {
 		case iopm := <-s.ioChannel:
+			if iopm.sc != nil {
+				leadershipAcquiredSync(iopm)
+				continue
+			}
 			batch = append(batch, iopm)
 
 			remaining := batchSize - 1
@@ -3272,7 +3337,12 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 				}
 
 				for i := 0; i < ioChanLen; i++ {
-					batch = append(batch, <-s.ioChannel)
+					iopm = <-s.ioChannel
+					if iopm.sc != nil {
+						leadershipAcquiredSync(iopm)
+					} else {
+						batch = append(batch, iopm)
+					}
 				}
 				// Keep track of max number of messages in a batch
 				if ioChanLen > max {
@@ -3282,20 +3352,8 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 				remaining -= ioChanLen
 			}
 
-			replicateFutures := storeIOPendingMsgs(batch)
-
 			// If clustered, wait on the result of replication.
-			if s.isClustered {
-				for i, future := range replicateFutures {
-					iopm = pendingMsgs[i]
-					if err := future.Error(); err != nil {
-						s.log.Errorf("[Client:%s] Error replicating message for subject %q: %v",
-							iopm.pm.ClientID, iopm.m.Subject, err)
-						s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, fmt.Errorf("replication error: %s", err))
-						pendingMsgs[i] = nil
-					}
-				}
-			}
+			storeIOPendingMsgs(batch)
 
 			// flush all the stores with messages written to them...
 			for c := range storesToFlush {
@@ -3316,10 +3374,6 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 			// Ack our messages back to the publisher
 			for i := range pendingMsgs {
 				iopm := pendingMsgs[i]
-				if iopm == nil {
-					// Was removed because replication failed.
-					continue
-				}
 				s.ackPublisher(iopm)
 				pendingMsgs[i] = nil
 			}
@@ -3333,23 +3387,10 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 	}
 }
 
-// assignAndStore will assign a sequence ID and then store the message. This
-// should not be called if running in clustered mode.
-func (s *StanServer) assignAndStore(iopms []*ioPendingMsg, storesToFlush map[*channel]struct{}) ([]*ioPendingMsg, []*ioPendingMsg, error) {
-	for i, iopm := range iopms {
-		pm := &iopm.pm
-		c, err := s.lookupOrCreateChannel(pm.Subject)
-		if err != nil {
-			return iopms[:i], iopms[i:], err
-		}
-		msg := c.pubMsgToMsgProto(pm, c.nextSequence)
-		if _, err := c.store.Msgs.Store(msg); err != nil {
-			return iopms[:i], iopms[i:], err
-		}
-		c.nextSequence++
-		storesToFlush[c] = struct{}{}
-	}
-	return iopms, nil, nil
+func (s *StanServer) logErrAndSendPublishErr(iopm *ioPendingMsg, err error) {
+	s.log.Errorf("[Client:%s] Error processing message for subject %q: %v",
+		iopm.pm.ClientID, iopm.m.Subject, err)
+	s.sendPublishErr(iopm.m.Reply, iopm.pm.Guid, err)
 }
 
 // replicate will replicate the batch of messages to followers and return
@@ -3367,7 +3408,7 @@ func (s *StanServer) replicate(iopms []*ioPendingMsg) (map[*channel]raft.Future,
 		if err != nil {
 			return nil, err
 		}
-		msg := c.pubMsgToMsgProto(pm, atomic.LoadUint64(&c.nextSequence))
+		msg := c.pubMsgToMsgProto(pm, c.nextSequence)
 		batch := batches[c]
 		if batch == nil {
 			batch = &spb.Batch{}
@@ -3375,7 +3416,7 @@ func (s *StanServer) replicate(iopms []*ioPendingMsg) (map[*channel]raft.Future,
 		}
 		batch.Messages = append(batch.Messages, msg)
 		iopm.c = c
-		atomic.AddUint64(&c.nextSequence, 1)
+		c.nextSequence++
 	}
 	for c, batch := range batches {
 		op := &spb.RaftOperation{
@@ -3386,7 +3427,7 @@ func (s *StanServer) replicate(iopms []*ioPendingMsg) (map[*channel]raft.Future,
 		if err != nil {
 			panic(err)
 		}
-		futures[c] = s.raft.Apply(data, raftApplyTimeout)
+		futures[c] = s.raft.Apply(data, 0)
 	}
 	return futures, nil
 }
@@ -3573,7 +3614,7 @@ func (s *StanServer) replicateUnsubscribe(req *pb.UnsubscribeRequest, opType spb
 		panic(err)
 	}
 	// Wait on result of replication.
-	return s.raft.Apply(data, raftApplyTimeout).Error()
+	return waitForReplicationErrResponse(s.raft.Apply(data, 0))
 }
 
 func (s *StanServer) sendSubscriptionResponseErr(reply string, err error) {
@@ -3687,12 +3728,12 @@ func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string) (
 		panic(err)
 	}
 	// Replicate operation and wait on result.
-	future := s.raft.Apply(data, raftApplyTimeout)
+	future := s.raft.Apply(data, 0)
 	if err := future.Error(); err != nil {
 		return nil, nil, err
 	}
 	rs := future.Response().(*replicatedSub)
-	return rs.c, rs.sub, nil
+	return rs.c, rs.sub, rs.err
 }
 
 // addSubscription adds `sub` to the client and store.
@@ -4402,7 +4443,7 @@ func (s *StanServer) Shutdown() {
 
 	if s.ioChannel != nil {
 		// Notify the IO channel that we are shutting down
-		s.ioChannelQuit <- struct{}{}
+		close(s.ioChannelQuit)
 	} else {
 		waitForIOStoreLoop = false
 	}
@@ -4460,6 +4501,7 @@ func (s *StanServer) Shutdown() {
 type replicatedSub struct {
 	c   *channel
 	sub *subState
+	err error
 }
 
 // Apply log is invoked once a log entry is committed.
@@ -4474,12 +4516,19 @@ func (s *StanServer) Apply(l *raft.Log) interface{} {
 	switch op.OpType {
 	case spb.RaftOperation_Publish:
 		// Message replication.
+		var (
+			c   *channel
+			err error
+		)
 		for _, msg := range op.PublishBatch.Messages {
-			c, err := s.lookupOrCreateChannel(msg.Subject)
-			if err != nil {
-				return err
+			// This is a batch for a given channel, so lookup channel once.
+			if c == nil {
+				c, err = s.lookupOrCreateChannel(msg.Subject)
 			}
-			if _, err := c.store.Msgs.Store(msg); err != nil {
+			if err == nil {
+				_, err = c.store.Msgs.Store(msg)
+			}
+			if err != nil {
 				panic(fmt.Errorf("failed to store replicated message %d on channel %s: %v",
 					msg.Sequence, c.name, err))
 			}
@@ -4494,10 +4543,7 @@ func (s *StanServer) Apply(l *raft.Log) interface{} {
 	case spb.RaftOperation_Subscribe:
 		// Subscription replication.
 		c, sub, err := s.processSub(op.Sub.Request, op.Sub.AckInbox)
-		if err != nil {
-			return err
-		}
-		return &replicatedSub{c: c, sub: sub}
+		return &replicatedSub{c: c, sub: sub, err: err}
 	case spb.RaftOperation_RemoveSubscription:
 		fallthrough
 	case spb.RaftOperation_CloseSubscription:
