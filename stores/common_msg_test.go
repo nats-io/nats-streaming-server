@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -303,7 +304,7 @@ func TestCSMaxMsgs(t *testing.T) {
 func dumpFSState(t *testing.T, s Store, format string, args ...interface{}) {
 	fs, ok := s.(*FileStore)
 	if !ok {
-		t.Fatalf(format, args...)
+		stackFatalf(t, format, args...)
 		return
 	}
 	fs.RLock()
@@ -318,24 +319,33 @@ func dumpFSState(t *testing.T, s Store, format string, args ...interface{}) {
 		first := ms.first
 		last := ms.last
 		lenWakeChan := len(ms.bkgTasksWake)
-		timeTick := ms.timeTick
+		timeTick := atomic.LoadInt64(&ms.timeTick)
 		ms.RUnlock()
 		fmt.Printf(" Now             : %v\n", time.Now())
 		fmt.Printf(" TimeTick        : %v\n", time.Unix(0, timeTick))
 		fmt.Printf(" Next Expiration : %v\n", time.Unix(0, nextExp))
+		fmt.Printf(" Sleep interval  : %v\n", bkgTasksSleepDuration)
 		fmt.Printf(" Total Count     : %v\n", totalCount)
 		fmt.Printf(" First           : %v\n", first)
 		fmt.Printf(" Last            : %v\n", last)
 		fmt.Printf(" Len wakeup chan : %v\n", lenWakeChan)
-		for idx := first; idx < last; idx++ {
-			m, _ := ms.Lookup(idx)
-			fmt.Printf("   Msg %2d : %v\n", idx, time.Unix(0, m.Timestamp))
+		fmt.Printf(" -- Messages --\n")
+		for idx := first; idx <= last; idx++ {
+			m, err := ms.Lookup(idx)
+			if err != nil {
+				fmt.Printf("   Msg %2d : Error during lookup: %v\n", idx, err)
+			} else if m == nil {
+				fmt.Printf("   Msg %2d : Lookup returned nil\n", idx)
+			} else {
+				fmt.Printf("   Msg %2d : %v\n", idx, time.Unix(0, m.Timestamp))
+			}
 		}
+		fmt.Printf(" --------------\n")
 	}
 	buf := make([]byte, 1024*1024)
 	n := runtime.Stack(buf, true)
 	fmt.Printf("Go-routines:\n%s\n", string(buf[:n]))
-	t.Fatalf(format, args...)
+	stackFatalf(t, format, args...)
 }
 
 func TestCSMaxAge(t *testing.T) {
