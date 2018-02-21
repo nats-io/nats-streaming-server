@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"github.com/nats-io/go-nats-streaming/pb"
-
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/test"
+
+	_ "github.com/go-sql-driver/mysql" // mysql driver
+	_ "github.com/lib/pq"              // postgres driver
 )
 
 // The SourceAdmin is used by the test setup to have access
