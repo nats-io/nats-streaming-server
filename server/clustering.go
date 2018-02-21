@@ -128,7 +128,48 @@ func (s *StanServer) createServerRaftNode(fsm raft.FSM) (*raftNode, error) {
 			return nil, fmt.Errorf("failed to join Raft group %s", name)
 		}
 	}
+	if s.opts.Clustering.Bootstrap {
+		// If node is started with bootstrap, regardless if state exist or not, try to
+		// detect (and report) other nodes in same cluster started with bootstrap=true.
+		s.wg.Add(1)
+		go func() {
+			s.detectBootstrapMisconfig(name)
+			s.wg.Done()
+		}()
+	}
 	return node, nil
+}
+
+func (s *StanServer) detectBootstrapMisconfig(name string) {
+	srvID := []byte(s.serverID)
+	subj := fmt.Sprintf("%s.%s.bootstrap", defaultRaftPrefix, name)
+	s.ncr.Subscribe(subj, func(m *nats.Msg) {
+		if m.Data != nil && m.Reply != "" {
+			// Ignore message to ourself
+			if string(m.Data) != s.serverID {
+				s.ncr.Publish(m.Reply, srvID)
+				s.log.Fatalf("Server %s was also started with -cluster_bootstrap", string(m.Data))
+			}
+		}
+	})
+	inbox := nats.NewInbox()
+	s.ncr.Subscribe(inbox, func(m *nats.Msg) {
+		s.log.Fatalf("Server %s was also started with -cluster_bootstrap", string(m.Data))
+	})
+	if err := s.ncr.Flush(); err != nil {
+		s.log.Errorf("Error setting up bootstrap misconfiguration detection: %v", err)
+		return
+	}
+	ticker := time.NewTicker(time.Second)
+	for {
+		select {
+		case <-s.shutdownCh:
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			s.ncr.PublishRequest(subj, inbox, srvID)
+		}
+	}
 }
 
 type raftLogger struct {

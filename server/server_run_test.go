@@ -744,6 +744,21 @@ func (l *captureNoticesLogger) Noticef(format string, args ...interface{}) {
 	l.Unlock()
 }
 
+type captureFatalLogger struct {
+	dummyLogger
+	fatal string
+}
+
+func (l *captureFatalLogger) Fatalf(format string, args ...interface{}) {
+	l.Lock()
+	// Normally the server would stop after first fatal error.
+	// So capture only one.
+	if l.fatal == "" {
+		l.fatal = fmt.Sprintf(format, args...)
+	}
+	l.Unlock()
+}
+
 func TestGhostDurableSubs(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)

@@ -11,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/raft"
+	natsd "github.com/nats-io/gnatsd/server"
 	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
@@ -434,6 +436,77 @@ func TestClusteringBootstrapManualConfig(t *testing.T) {
 	configServers = future.Configuration().Servers
 	if len(configServers) != 3 {
 		t.Fatalf("Expected 3 servers, got %d", len(configServers))
+	}
+}
+
+func TestClusteringBootstrapMisconfiguration(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// The first server will create route to second server.
+	// This is to test that a server may not be able to detect
+	// the misconfiguration right away.
+
+	// Configure first server as a seed.
+	n1Opts := natsdTest.DefaultTestOptions
+	n1Opts.Host = "127.0.0.1"
+	n1Opts.Port = 4222
+	n1Opts.Cluster.Host = "127.0.0.1"
+	n1Opts.Cluster.Port = 6222
+	n1Opts.Routes = natsd.RoutesFromStr("nats://127.0.0.1:6223")
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.NATSServerURL = ""
+	s1Logger := &captureFatalLogger{}
+	s1sOpts.CustomLogger = s1Logger
+	s1sOpts.EnableLogging = true
+	s1 := runServerWithOpts(t, s1sOpts, &n1Opts)
+	defer s1.Shutdown()
+
+	getLeader(t, 10*time.Second, s1)
+
+	// Configure second server on same cluster as a seed too.
+	// Servers should stop.
+	n2Opts := natsdTest.DefaultTestOptions
+	n2Opts.Host = "127.0.0.1"
+	n2Opts.Port = 4223
+	n2Opts.Cluster.Host = "localhost"
+	n2Opts.Cluster.Port = 6223
+	s2sOpts := getTestDefaultOptsForClustering("b", true)
+	s2sOpts.NATSServerURL = ""
+	s2Logger := &captureFatalLogger{}
+	s2sOpts.CustomLogger = s2Logger
+	s2sOpts.EnableLogging = true
+	s2 := runServerWithOpts(t, s2sOpts, &n2Opts)
+	defer s2.Shutdown()
+
+	// After a little while, servers should detect that they were
+	// both started with the bootstrap flag and exit.
+	ok := false
+	timeout := time.Now().Add(5 * time.Second)
+	for time.Now().Before(timeout) {
+		check := func(otherServer *StanServer, l *captureFatalLogger) bool {
+			l.Lock()
+			defer l.Unlock()
+			if l.fatal != "" {
+				if strings.Contains(l.fatal, otherServer.serverID) {
+					return true
+				}
+			}
+			return false
+		}
+		ok = check(s1, s2Logger)
+		if ok {
+			ok = check(s2, s1Logger)
+		}
+		if ok {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatal("Servers should have reported fatal error")
 	}
 }
 
