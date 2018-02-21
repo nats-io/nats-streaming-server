@@ -12,9 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql" // mysql driver
-	_ "github.com/lib/pq"              // postgres driver
-
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
