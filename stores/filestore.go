@@ -1585,6 +1585,17 @@ func (fs *FileStore) CreateChannel(channel string) (*Channel, error) {
 	return c, nil
 }
 
+// DeleteChannel implements the Store interface
+func (fs *FileStore) DeleteChannel(channel string) error {
+	fs.Lock()
+	defer fs.Unlock()
+	err := fs.deleteChannel(channel)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Join(fs.fm.rootDir, channel))
+}
+
 // AddClient implements the Store interface
 func (fs *FileStore) AddClient(clientID, hbInbox string) (*Client, error) {
 	fs.Lock()

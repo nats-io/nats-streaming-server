@@ -38,7 +38,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.8.0-beta"
+	VERSION = "0.9.0"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -121,8 +121,20 @@ const (
 const (
 	forceDelivery    = true
 	honorMaxInFlight = false
-	replicateSent    = true
-	replicateAck     = false
+)
+
+// Constants to indicate if we are replicating a Sent or an Ack
+const (
+	replicateSent = true
+	replicateAck  = false
+)
+
+// In some situations, a function executes code that need to be protected
+// by a lock. However, the caller may already hold that lock. These
+// constants are to indicate if the function should acquire the lock or not.
+const (
+	useLocking     = true
+	dontUseLocking = false
 )
 
 // Errors.
@@ -185,6 +197,7 @@ type ioPendingMsg struct {
 	pa pb.PubAck
 	c  *channel
 	sc chan struct{}
+	dc bool // if true, this is a request to delete this channel.
 }
 
 // Constant that defines the size of the channel that feeds the IO thread.
@@ -233,15 +246,26 @@ func (state State) String() string {
 
 type channelStore struct {
 	sync.RWMutex
-	channels map[string]*channel
-	store    stores.Store
+	delMu        sync.Mutex
+	channels     map[string]*channel
+	store        stores.Store
+	stan         *StanServer
+	delWatchList []*channel
+	delWatchCh   chan struct{}
+	delWatchQuit chan struct{}
+	wg           sync.WaitGroup
 }
 
-func newChannelStore(s stores.Store) *channelStore {
+func newChannelStore(srv *StanServer, s stores.Store) *channelStore {
 	cs := &channelStore{
-		channels: make(map[string]*channel),
-		store:    s,
+		channels:     make(map[string]*channel),
+		store:        s,
+		stan:         srv,
+		delWatchCh:   make(chan struct{}, 1),
+		delWatchQuit: make(chan struct{}, 1),
 	}
+	cs.wg.Add(1)
+	go cs.watchForInactiveChannels()
 	return cs
 }
 
@@ -271,7 +295,7 @@ func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, err
 	if err != nil {
 		return nil, err
 	}
-	subToAck := true
+	isStandaloneOrLeader := true
 	if s.isClustered {
 		if s.isLeader() {
 			if err := c.subToSnapshotRestoreRequests(); err != nil {
@@ -279,10 +303,10 @@ func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, err
 				return nil, err
 			}
 		} else {
-			subToAck = false
+			isStandaloneOrLeader = false
 		}
 	}
-	if subToAck {
+	if isStandaloneOrLeader {
 		err := c.subToAcks()
 		if err == nil {
 			err = c.stan.nc.Flush()
@@ -290,6 +314,9 @@ func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, err
 		if err != nil {
 			delete(cs.channels, name)
 			return nil, err
+		}
+		if c.activity != nil {
+			cs.addToDeleteWatchList(c, dontUseLocking)
 		}
 	}
 	return c, nil
@@ -305,6 +332,10 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 	}
 	c.nextSequence = lastSequence + 1
 	cs.channels[name] = c
+	cl := cs.store.GetChannelLimits(name)
+	if cl.MaxInactivity > 0 {
+		c.activity = &channelActivity{interval: cl.MaxInactivity}
+	}
 	return c, nil
 }
 
@@ -350,6 +381,187 @@ func (cs *channelStore) count() int {
 	return count
 }
 
+// checks if a channel can be deleted (no active sub and no activity for at least maxInactivity).
+func (cs *channelStore) canDelete(c *channel, locking bool) bool {
+	if locking {
+		cs.RLock()
+		defer cs.RUnlock()
+	}
+	if c.ss.hasActiveSubs(useLocking) {
+		return false
+	}
+	if atomic.LoadInt64(&c.activity.last)+int64(c.activity.interval) > time.Now().UnixNano() {
+		return false
+	}
+	return true
+}
+
+func (cs *channelStore) lockDelete() {
+	cs.delMu.Lock()
+}
+
+func (cs *channelStore) unlockDelete() {
+	cs.delMu.Unlock()
+}
+
+// Adds this channel to the list of channels being watched for
+// inactivity allowing the server to delete the channel.
+func (cs *channelStore) addToDeleteWatchList(c *channel, locking bool) {
+	if locking {
+		cs.Lock()
+		defer cs.Unlock()
+	}
+	atomic.StoreInt64(&c.activity.last, time.Now().UnixNano())
+	// If there is a check in progress for this channel, do nothing.
+	// The go-routine checking for inactivity will deal with it.
+	if c.activity.checkInProgress {
+		return
+	}
+	c.activity.nextCheck = time.Now().Add(c.activity.interval)
+	notify := cs.insertInDelChanList(c)
+	if notify {
+		select {
+		case cs.delWatchCh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// Removes this channel from the list of channels being watched for
+// inactivity.
+func (cs *channelStore) removeFromDeleteWatchList(c *channel) {
+	cs.Lock()
+	defer cs.Unlock()
+	atomic.StoreInt64(&c.activity.last, time.Now().UnixNano())
+	// If there is a check in progress for this channel, do nothing.
+	// The go-routine checking for inactivity will deal with it.
+	if c.activity.checkInProgress {
+		return
+	}
+	notify := cs.removeFromDelChanList(c)
+	if notify {
+		select {
+		case cs.delWatchCh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// Inserts a channel from the delete watch list.
+// ChannelStore's lock held on entry.
+func (cs *channelStore) insertInDelChanList(wc *channel) bool {
+	first := len(cs.delWatchList) == 0
+	cs.delWatchList = append(cs.delWatchList, wc)
+	if !first {
+		// Need to put in correct order
+		for i, inList := range cs.delWatchList {
+			if inList.activity.nextCheck.After(wc.activity.nextCheck) {
+				copy(cs.delWatchList[i+1:], cs.delWatchList[i:])
+				cs.delWatchList[i] = wc
+				if i == 0 {
+					first = true
+				}
+				break
+			}
+		}
+	}
+	return first
+}
+
+// Removes a channel from the delete watch list.
+// ChannelStore's lock held on entry.
+func (cs *channelStore) removeFromDelChanList(wc *channel) bool {
+	// Likely to be called while channel was in first position.
+	if cs.delWatchList[0] == wc {
+		cs.delWatchList = cs.delWatchList[1:]
+		return true
+	}
+	// Remove from somewhere in the list
+	for i, inList := range cs.delWatchList {
+		// Shift all others to the left
+		if inList == wc {
+			copy(cs.delWatchList[i:], cs.delWatchList[i+1:])
+			cs.delWatchList = cs.delWatchList[0 : len(cs.delWatchList)-1]
+			break
+		}
+	}
+	return false
+}
+
+func (cs *channelStore) watchForInactiveChannels() {
+	defer cs.wg.Done()
+
+	refresh := func() (*channel, time.Duration) {
+		cs.RLock()
+		defer cs.RUnlock()
+		if len(cs.delWatchList) > 0 {
+			wc := cs.delWatchList[0]
+			dur := time.Until(wc.activity.nextCheck)
+			if dur < 0 {
+				dur = 0
+			}
+			return wc, dur
+		}
+		return nil, time.Hour
+	}
+
+	t := time.NewTimer(time.Hour)
+
+	for {
+		wc, dur := refresh()
+		t.Reset(dur)
+		select {
+		case <-t.C:
+			if wc == nil {
+				continue
+			}
+			cs.Lock()
+			// Prevent this channel to be removed/added back while
+			// we check.
+			wc.activity.checkInProgress = true
+			// We will have to release the lock and there is no
+			// guarantee when comes to checking deletion status
+			// that the first channel in the list is the one we
+			// were trying to delete. So remove now. Will add back
+			// later if needed.
+			cs.removeFromDelChanList(wc)
+			cs.Unlock()
+
+			deleted := false
+			// It can be expensive to schedule the delete request
+			// to the ioLoop, so first do a quick check.
+			if cs.canDelete(wc, useLocking) {
+				wc.activity.ch = make(chan bool, 1)
+				iopm := &ioPendingMsg{c: wc, dc: true}
+				// Schedule to ioLoop
+				cs.stan.ioChannel <- iopm
+				// Wait for result
+				deleted = <-wc.activity.ch
+			}
+			// Between the code above and below, it is possible that
+			// subscription(s) were added/removed. However, we have
+			// prevented the channel to be removed/added back to the list.
+			cs.Lock()
+			if deleted {
+				cs.stan.log.Noticef("Channel %q has been deleted", wc.name)
+			} else if !wc.ss.hasActiveSubs(useLocking) {
+				// If still no active subscription, put it back
+				last := atomic.LoadInt64(&wc.activity.last)
+				wc.activity.nextCheck = time.Unix(0, last+int64(wc.activity.interval))
+				cs.insertInDelChanList(wc)
+				wc.activity.ch = nil
+				wc.activity.checkInProgress = false
+			}
+			cs.Unlock()
+		case <-cs.delWatchCh:
+			// variables will be refreshed at top of the loop
+			continue
+		case <-cs.delWatchQuit:
+			return
+		}
+	}
+}
+
 type channel struct {
 	nextSequence uint64
 	name         string
@@ -359,6 +571,15 @@ type channel struct {
 	acksSub      *nats.Subscription
 	snapshotSub  *nats.Subscription
 	stan         *StanServer
+	activity     *channelActivity
+}
+
+type channelActivity struct {
+	last            int64
+	interval        time.Duration
+	nextCheck       time.Time
+	ch              chan bool
+	checkInProgress bool
 }
 
 // pubMsgToMsgProto converts a PubMsg to a MsgProto and assigns a timestamp
@@ -735,6 +956,27 @@ func (ss *subStore) getAllSubs() []*subState {
 	return subs
 }
 
+// hasSubs returns true if there is any active subscription for this subStore.
+// That is, offline durable subscriptions are ignored.
+func (ss *subStore) hasActiveSubs(locking bool) bool {
+	if locking {
+		ss.RLock()
+		defer ss.RUnlock()
+	}
+	if len(ss.psubs) > 0 {
+		return true
+	}
+	for _, qsub := range ss.qsubs {
+		// For a durable queue group, when the group is offline,
+		// qsub.shadow is not nil, but the qsub.subs array should be
+		// empty.
+		if len(qsub.subs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Remove a subscriber from the subscription store, leaving durable
 // subscriptions unless `unsubscribe` is true.
 func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
@@ -938,6 +1180,16 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 			sub.Unlock()
 		}
 	}
+
+	var addToDeleteWatchList bool
+	if c.activity != nil {
+		addToDeleteWatchList = !ss.hasActiveSubs(dontUseLocking)
+		if addToDeleteWatchList {
+			// Prevent addition of a new subscription until we have
+			// added the channel to the list
+			ss.stan.channels.lockDelete()
+		}
+	}
 	ss.Unlock()
 
 	if !ss.stan.isClustered || ss.stan.isLeader() {
@@ -947,6 +1199,15 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 		for _, qsub := range qsubs {
 			ss.stan.performAckExpirationRedelivery(qsub, false)
 		}
+		// If there is a MaxInactivity defined, now that it is known
+		// that this channel has no active subscription, add it to
+		// the delete watch list.
+		if addToDeleteWatchList {
+			ss.stan.channels.addToDeleteWatchList(c, useLocking)
+		}
+	}
+	if addToDeleteWatchList {
+		ss.stan.channels.unlockDelete()
 	}
 
 	if log != nil {
@@ -1323,8 +1584,13 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	}
 	s.store = store
 
+	// Start the IO Loop before creating the channel store since the
+	// go routine watching for channel inactivity may schedule events
+	// to the IO loop.
+	s.startIOLoop()
+
 	s.clients = newClientStore(s.store)
-	s.channels = newChannelStore(s.store)
+	s.channels = newChannelStore(&s, s.store)
 
 	// If no NATS server url is provided, it means that we embed the NATS Server
 	if sOpts.NATSServerURL == "" {
@@ -1725,6 +1991,11 @@ func (s *StanServer) leadershipAcquired() error {
 			sub.Unlock()
 			s.performAckExpirationRedelivery(sub, true)
 		}
+		// If this channel has a MaxInactivity and currently no active
+		// subscription, add it to the delete watch list.
+		if c.activity != nil && !c.ss.hasActiveSubs(useLocking) {
+			s.channels.addToDeleteWatchList(c, useLocking)
+		}
 	}
 
 	if err := s.nc.Flush(); err != nil {
@@ -1766,6 +2037,9 @@ func (s *StanServer) leadershipLost() {
 		if c.snapshotSub != nil {
 			c.snapshotSub.Unsubscribe()
 			c.snapshotSub = nil
+		}
+		if c.activity != nil {
+			s.channels.removeFromDeleteWatchList(c)
 		}
 	}
 
@@ -1941,9 +2215,6 @@ func (s *StanServer) processRecoveredClients(clients []*stores.Client) {
 }
 
 // Reconstruct the subscription state on restart.
-// We don't use locking in there because there is no communication
-// with the NATS server and/or clients, so no chance that the state
-// changes while we are doing this.
 func (s *StanServer) processRecoveredChannels(channels map[string]*stores.RecoveredChannel) ([]*subState, error) {
 	allSubs := make([]*subState, 0, 16)
 
@@ -1959,6 +2230,12 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 				if sub != nil {
 					allSubs = append(allSubs, sub)
 				}
+			}
+			// Now that we have recovered possible subscriptions for this channel,
+			// if it has a MaxInactivity limit, and no active subscription,
+			// add it to the delete watch list.
+			if channel.activity != nil && !channel.ss.hasActiveSubs(useLocking) {
+				s.channels.addToDeleteWatchList(channel, useLocking)
 			}
 		}
 	}
@@ -2133,8 +2410,6 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 
 // initSubscriptions will setup initial subscriptions for discovery etc.
 func (s *StanServer) initSubscriptions() error {
-
-	s.startIOLoop()
 
 	// Do not create internal subscriptions in clustered mode,
 	// the leader will when it gets elected.
@@ -2336,6 +2611,66 @@ func waitForReplicationErrResponse(f raft.ApplyFuture) error {
 		}
 	}
 	return err
+}
+
+// Leader invokes this to replicate the command to delete a channel.
+// Returns a boolean indicating if the channel was actually deleted.
+func (s *StanServer) replicateDeleteChannel(channel string) bool {
+	op := &spb.RaftOperation{
+		OpType:  spb.RaftOperation_DeleteChannel,
+		Channel: channel,
+	}
+	data, err := op.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	// Wait on result of replication.
+	future := s.raft.Apply(data, 0)
+	if future.Error() != nil {
+		return false
+	}
+	return future.Response().(bool)
+}
+
+// This is called by the leader once the go routine watching for
+// channel inactivity thinks that a channel should be deleted and
+// a special ioPendingMsg was scheduled to ioLoop to ensure ordering.
+// So this is called from the ioLoop. At this point, a check is done
+// again and if successful, the command to delete the channel is
+// performed. The result is sent back to a go-channel in which the
+// go routine is receiving.
+func (s *StanServer) handleChannelDelete(c *channel) {
+	cs := s.channels
+	cs.delMu.Lock()
+	defer cs.delMu.Unlock()
+	cs.Lock()
+	defer cs.Unlock()
+	deleted := false
+	if cs.canDelete(c, dontUseLocking) {
+		if s.isClustered {
+			deleted = s.replicateDeleteChannel(c.name)
+		} else {
+			deleted = s.processDeleteChannel(c.name, dontUseLocking)
+		}
+	}
+	c.activity.ch <- deleted
+}
+
+// Actual deletetion of the channel.
+func (s *StanServer) processDeleteChannel(channel string, locking bool) bool {
+	cs := s.channels
+	if locking {
+		cs.Lock()
+		defer cs.Unlock()
+	}
+	deleted := false
+	// Delete from store
+	if err := s.store.DeleteChannel(channel); err == nil {
+		// If no error, remove channel
+		delete(s.channels.channels, channel)
+		deleted = true
+	}
+	return deleted
 }
 
 func (s *StanServer) replicateConnect(req *pb.ConnectRequest, refresh bool) error {
@@ -3295,6 +3630,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 		sleepDur  = time.Duration(sleepTime) * time.Microsecond
 		max       = 0
 		batch     = make([]*ioPendingMsg, 0, batchSize)
+		dciopm    *ioPendingMsg
 	)
 
 	leadershipAcquiredSync := func(iopm *ioPendingMsg) {
@@ -3307,13 +3643,18 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 		batch = batch[:0]
 		select {
 		case iopm := <-s.ioChannel:
-			if iopm.sc != nil {
+			// Is this a request to delete a channel?
+			if iopm.dc {
+				s.handleChannelDelete(iopm.c)
+				continue
+			} else if iopm.sc != nil {
 				leadershipAcquiredSync(iopm)
 				continue
 			}
 			batch = append(batch, iopm)
 
 			remaining := batchSize - 1
+		FILL_BATCH_LOOP:
 			// fill the message batch slice with at most our batch size,
 			// unless the channel is empty.
 			for remaining > 0 {
@@ -3340,7 +3681,10 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 
 				for i := 0; i < ioChanLen; i++ {
 					iopm = <-s.ioChannel
-					if iopm.sc != nil {
+					if iopm.dc {
+						dciopm = iopm
+						break FILL_BATCH_LOOP
+					} else if iopm.sc != nil {
 						leadershipAcquiredSync(iopm)
 					} else {
 						batch = append(batch, iopm)
@@ -3371,6 +3715,10 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 				}
 				// Remove entry from map (this is safe in Go)
 				delete(storesToFlush, c)
+				// When relevant, update the last activity
+				if c.activity != nil {
+					atomic.StoreInt64(&c.activity.last, c.lTimestamp)
+				}
 			}
 
 			// Ack our messages back to the publisher
@@ -3382,6 +3730,12 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 
 			// clear out pending messages
 			pendingMsgs = pendingMsgs[:0]
+
+			// If there was a request to delete a channel, try now
+			if dciopm != nil {
+				s.handleChannelDelete(dciopm.c)
+				dciopm = nil
+			}
 
 		case <-s.ioChannelQuit:
 			return
@@ -3908,6 +4262,12 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string) (*c
 		s.log.Errorf("Unable to add subscription for %s: %v", sr.Subject, err)
 		return c, nil, err
 	}
+	// If there is a MaxInactivity limit then this channel should
+	// be removed from the delete watch list (since we just created
+	// an active subscription).
+	if c.activity != nil && (!s.isClustered || s.isLeader()) {
+		s.channels.removeFromDeleteWatchList(c)
+	}
 	if s.debug {
 		traceCtx := subStateTraceCtx{clientID: sr.ClientID, isNew: subIsNew, startTrace: subStartTrace}
 		traceSubState(s.log, sub, &traceCtx)
@@ -3987,6 +4347,11 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			return
 		}
 	}
+
+	// Keep the channel delete mutex to ensure that channel cannot be
+	// deleted while we are about to add a subscription.
+	s.channels.lockDelete()
+	defer s.channels.unlockDelete()
 
 	var (
 		c        *channel
@@ -4457,6 +4822,10 @@ func (s *StanServer) Shutdown() {
 	if s.partitions != nil {
 		s.partitions.shutdown()
 	}
+	// Kill the go-routine watching for channel inactivity
+	if s.channels != nil {
+		close(s.channels.delWatchQuit)
+	}
 	s.mu.Unlock()
 
 	// Make sure the StoreIOLoop returns before closing the Store
@@ -4560,6 +4929,13 @@ func (s *StanServer) Apply(l *raft.Log) interface{} {
 			s.processReplicatedSendAndAck(op.SubSentAck)
 		}
 		return nil
+	case spb.RaftOperation_DeleteChannel:
+		// If we are replicating and this node is the leader,
+		// the function we call must not grab a lock since the
+		// caller has it. So grab the lock in case of replay
+		// or if this node is not the leader.
+		useLocking := !s.isLeader()
+		return s.processDeleteChannel(op.Channel, useLocking)
 	default:
 		panic(fmt.Sprintf("unknown op type %s", op.OpType))
 	}

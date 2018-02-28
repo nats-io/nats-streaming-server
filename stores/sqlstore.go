@@ -71,6 +71,13 @@ const (
 	sqlRecoverGetChannelTotalSize
 	sqlRecoverGetSeqFloorForMaxBytes
 	sqlRecoverUpdateChannelLimits
+	sqlDeleteChannelFast
+	sqlDeleteChannelGetSubIds
+	sqlDeleteChannelDelSubsPending
+	sqlDeleteChannelDelSubscriptions
+	sqlDeleteChannelGetSomeMessagesSeq
+	sqlDeleteChannelDelSomeMessages
+	sqlDeleteChannelDelChannel
 )
 
 var sqlStmts = []string{
@@ -120,6 +127,13 @@ var sqlStmts = []string{
 	"SELECT COALESCE(SUM(size), 0) FROM Messages WHERE id=?",                                                                                                                         // sqlRecoverGetChannelTotalSize
 	"SELECT COALESCE(MIN(seq), 0) FROM (SELECT seq, (SELECT SUM(size) FROM Messages WHERE id=? AND seq<=t.seq) AS total FROM Messages t WHERE id=? ORDER BY seq)t2 WHERE t2.total>?", // sqlRecoverGetSeqFloorForMaxBytes
 	"UPDATE Channels SET maxmsgs=?, maxbytes=?, maxage=? WHERE id=?",                                                                                                                 // sqlRecoverUpdateChannelLimits
+	"UPDATE Channels SET deleted=true WHERE id=?",                                                                                                                                    // sqlDeleteChannelFast
+	"SELECT DISTINCT(SubsPending.subid) FROM SubsPending INNER JOIN Subscriptions ON Subscriptions.id=? AND Subscriptions.subid=SubsPending.subid LIMIT ?",                           // sqlDeleteChannelGetSubIds
+	"DELETE FROM SubsPending WHERE subid=?",                                                                                                                                          // sqlDeleteChannelDelSubsPending
+	"DELETE FROM Subscriptions WHERE id=?",                                                                                                                                           // sqlDeleteChannelDelSubscriptions
+	"SELECT COALESCE(MAX(seq), 0) FROM (SELECT seq FROM Messages WHERE id=? ORDER BY seq LIMIT ?) AS t1",                                                                             // sqlDeleteChannelGetSomeMessagesSeq
+	"DELETE FROM Messages WHERE id=? AND seq<=?",                                                                                                                                     // sqlDeleteChannelDelSomeMessages
+	"DELETE FROM Channels WHERE id=?",                                                                                                                                                // sqlDeleteChannelDelChannel
 }
 
 var initSQLStmts = sync.Once{}
@@ -1016,6 +1030,112 @@ func (s *SQLStore) CreateChannel(channel string) (*Channel, error) {
 	s.channels[channel] = c
 
 	return c, nil
+}
+
+// DeleteChannel implements the Store interface
+func (s *SQLStore) DeleteChannel(channel string) error {
+	s.Lock()
+	defer s.Unlock()
+	c := s.channels[channel]
+	if c == nil {
+		return ErrNotFound
+	}
+	// Get the channel ID from Msgs store
+	cid := c.Msgs.(*SQLMsgStore).channelID
+	// Fast delete just marks the channel row as deleted
+	if _, err := s.preparedStmts[sqlDeleteChannelFast].Exec(cid); err != nil {
+		return err
+	}
+
+	// If that succeeds, proceed with deletion of channel
+	delete(s.channels, channel)
+
+	// Close the messages and subs stores
+	c.Msgs.Close()
+	c.Subs.Close()
+
+	// Now trigger in a go routine the longer deletion of entries
+	// in all other tables.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+
+		if err := s.deepChannelDelete(cid); err != nil {
+			s.log.Errorf("Unable to completely delete channel %q: %v", channel, err)
+		}
+	}()
+
+	return nil
+}
+
+// This function is called after a channel has been marked
+// as deleted. It will do a "deep" delete of the channel,
+// which means removing all rows from any table that has
+// a reference to the deleted channel. It is executed in
+// a separate go-routine (as to not block DeleteChannel()
+// call). It will run to completion possibly delaying
+// the closing of the store.
+func (s *SQLStore) deepChannelDelete(channelID int64) error {
+	// On Store.Close(), the prepared statements and DB
+	// won't be closed until after this call returns,
+	// so we don't need explicit store locking.
+
+	// We start by removing from SubsPending.
+	limit := 1000
+	for {
+		// This will get us a set of subscription ids. We need
+		// to repeat since we have a limit in the query
+		rows, err := s.preparedStmts[sqlDeleteChannelGetSubIds].Query(channelID, limit)
+
+		// If no more row, we are done, continue with other tables.
+		if err == sql.ErrNoRows {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		count := 0
+		for rows.Next() {
+			var subid uint64
+			if err := rows.Scan(&subid); err != nil {
+				return err
+			}
+			_, err := s.preparedStmts[sqlDeleteChannelDelSubsPending].Exec(subid)
+			if err != nil {
+				return err
+			}
+			count++
+		}
+		rows.Close()
+		if count < limit {
+			break
+		}
+	}
+	// Same for messages, we will get a certain number of messages
+	// to delete and repeat the operation.
+	for {
+		var maxSeq uint64
+
+		row := s.preparedStmts[sqlDeleteChannelGetSomeMessagesSeq].QueryRow(channelID, limit)
+		if err := row.Scan(&maxSeq); err != nil {
+			return err
+		}
+		if maxSeq == 0 {
+			break
+		}
+		_, err := s.preparedStmts[sqlDeleteChannelDelSomeMessages].Exec(channelID, maxSeq)
+		if err != nil {
+			return err
+		}
+	}
+	// Now with the subscriptions and channel
+	_, err := s.preparedStmts[sqlDeleteChannelDelSubscriptions].Exec(channelID)
+	if err == nil {
+		_, err = s.preparedStmts[sqlDeleteChannelDelChannel].Exec(channelID)
+	}
+	return err
 }
 
 // AddClient implements the Store interface

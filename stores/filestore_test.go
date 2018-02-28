@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -1868,4 +1869,39 @@ func TestFSClientFileWithExtraZeros(t *testing.T) {
 			t.Fatalf("Expected client %v, got %v", c, rc)
 		}
 	}
+}
+
+func TestFSDeleteChannel(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	checkDir := func(channelName string, shouldExist bool) {
+		_, err := os.Stat(path.Join(testFSDefaultDatastore, channelName))
+		if shouldExist && err != nil {
+			stackFatalf(t, "Directory %q should exist", channelName)
+		} else if !shouldExist && err == nil {
+			stackFatalf(t, "Directory %q should not exist", channelName)
+		}
+	}
+
+	// Create 2 channels
+	storeCreateChannel(t, s, "foo")
+	checkDir("foo", true)
+	storeCreateChannel(t, s, "bar")
+	checkDir("bar", true)
+
+	if err := s.DeleteChannel("foo"); err != nil {
+		t.Fatalf("Error deleting channel: %v", err)
+	}
+	// Directory "foo" should no longer exist
+	checkDir("foo", false)
+	// But bar should still be there
+	checkDir("bar", true)
+
+	// Should be able to recreate same channel
+	storeCreateChannel(t, s, "foo")
+	checkDir("foo", true)
 }

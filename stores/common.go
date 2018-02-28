@@ -136,6 +136,19 @@ func (gs *genericStore) getChannelLimits(channel string) *ChannelLimits {
 	return r[len(r)-1].(*ChannelLimits)
 }
 
+// GetChannelLimits implements the Store interface
+func (gs *genericStore) GetChannelLimits(channel string) *ChannelLimits {
+	gs.RLock()
+	defer gs.RUnlock()
+	c := gs.channels[channel]
+	if c == nil {
+		return nil
+	}
+	// Return a copy
+	cl := *gs.getChannelLimits(channel)
+	return &cl
+}
+
 // SetLimits sets limits for this store
 func (gs *genericStore) SetLimits(limits *StoreLimits) error {
 	gs.Lock()
@@ -147,6 +160,30 @@ func (gs *genericStore) SetLimits(limits *StoreLimits) error {
 // CreateChannel implements the Store interface
 func (gs *genericStore) CreateChannel(channel string) (*Channel, error) {
 	return nil, nil
+}
+
+// DeleteChannel implements the Store interface
+func (gs *genericStore) DeleteChannel(channel string) error {
+	gs.Lock()
+	err := gs.deleteChannel(channel)
+	gs.Unlock()
+	return err
+}
+
+func (gs *genericStore) deleteChannel(channel string) error {
+	c := gs.channels[channel]
+	if c == nil {
+		return ErrNotFound
+	}
+	err := c.Msgs.Close()
+	if lerr := c.Subs.Close(); lerr != nil && err == nil {
+		err = lerr
+	}
+	if err != nil {
+		return err
+	}
+	delete(gs.channels, channel)
+	return nil
 }
 
 // canAddChannel returns true if the current number of channels is below the limit.
@@ -315,7 +352,7 @@ func (gss *genericSubStore) UpdateSub(sub *spb.SubState) error {
 	return nil
 }
 
-// createSubLocked checks that the number of subscriptions is below the max
+// createSub checks that the number of subscriptions is below the max
 // and if so, assigns a new subscription ID and keep track of it in a map.
 // Lock is assumed to be held on entry.
 func (gss *genericSubStore) createSub(sub *spb.SubState) error {

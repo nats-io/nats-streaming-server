@@ -58,6 +58,15 @@ NATS Streaming provides the following high-level feature set.
 
 # Important Changes
 
+## Version `0.9.0`
+
+Additions to the Store interface to support deletion of channels.
+
+* Added `Store.GetChannelLimits()` API to return the store limits for a given channel.
+* Added `Store.DeleteChannel()` API to delete a channel.
+
+Protocol was added to support replication of deletion of a channel in the cluster.
+
 ## Version `0.8.0-beta`
 
 The Store interface has been slightly changed to accommodate the clustering feature.
@@ -603,19 +612,19 @@ The endpoint [http://localhost:8222/streaming/serverz](http://localhost:8222/str
 various general statistics.
 ```
 {
-"cluster_id": "test-cluster",
-  "server_id": "aSY5CGBQR85UKHuiW825Wd",
-  "version": "0.8.0-beta",
-  "go": "go1.9.3",
+  "cluster_id": "test-cluster",
+  "server_id": "R6fCMoA3SUvY0egIJJ1WtO",
+  "version": "0.9.0",
+  "go": "go1.9.4",
   "state": "STANDALONE",
-  "now": "2018-01-29T14:09:48.795815-07:00",
-  "start_time": "2018-01-29T14:09:31.7136-07:00",
-  "uptime": "17s",
+  "now": "2018-02-21T13:23:34.18688-07:00",
+  "start_time": "2018-02-21T13:23:28.828869-07:00",
+  "uptime": "5s",
   "clients": 11,
   "subscriptions": 10,
   "channels": 1,
-  "total_msgs": 85350,
-  "total_bytes": 12785990
+  "total_msgs": 56465,
+  "total_bytes": 8453240
 }
 ```
 
@@ -930,23 +939,24 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[73011] 2018/01/29 14:09:12.343989 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.8.0-beta
-[73011] 2018/01/29 14:09:12.344093 [INF] STREAM: ServerID: C17M0xJqB9xi6pGjvkSQPo
-[73011] 2018/01/29 14:09:12.344097 [INF] STREAM: Go version: go1.9.3
-[73011] 2018/01/29 14:09:12.344279 [INF] Starting nats-server version 1.0.4
-[73011] 2018/01/29 14:09:12.344450 [INF] Listening for client connections on 0.0.0.0:4222
-[73011] 2018/01/29 14:09:12.344457 [INF] Server is ready
-[73011] 2018/01/29 14:09:12.372298 [INF] STREAM: Recovering the state...
-[73011] 2018/01/29 14:09:12.372329 [INF] STREAM: No recovered state
-[73011] 2018/01/29 14:09:12.628023 [INF] STREAM: Message store is MEMORY
-[73011] 2018/01/29 14:09:12.628088 [INF] STREAM: ---------- Store Limits ----------
-[73011] 2018/01/29 14:09:12.628094 [INF] STREAM: Channels:                  100 *
-[73011] 2018/01/29 14:09:12.628098 [INF] STREAM: --------- Channels Limits --------
-[73011] 2018/01/29 14:09:12.628102 [INF] STREAM:   Subscriptions:          1000 *
-[73011] 2018/01/29 14:09:12.628106 [INF] STREAM:   Messages     :       1000000 *
-[73011] 2018/01/29 14:09:12.628110 [INF] STREAM:   Bytes        :     976.56 MB *
-[73011] 2018/01/29 14:09:12.628114 [INF] STREAM:   Age          :     unlimited *
-[73011] 2018/01/29 14:09:12.628118 [INF] STREAM: ----------------------------------
+[8310] 2018/02/21 13:19:44.466385 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.9.0
+[8310] 2018/02/21 13:19:44.466448 [INF] STREAM: ServerID: MyisKRRxGmSj8sNPC6PGRE
+[8310] 2018/02/21 13:19:44.466451 [INF] STREAM: Go version: go1.9.4
+[8310] 2018/02/21 13:19:44.466812 [INF] Starting nats-server version 1.0.4
+[8310] 2018/02/21 13:19:44.467006 [INF] Listening for client connections on 0.0.0.0:4222
+[8310] 2018/02/21 13:19:44.467013 [INF] Server is ready
+[8310] 2018/02/21 13:19:44.494711 [INF] STREAM: Recovering the state...
+[8310] 2018/02/21 13:19:44.494743 [INF] STREAM: No recovered state
+[8310] 2018/02/21 13:19:44.750606 [INF] STREAM: Message store is MEMORY
+[8310] 2018/02/21 13:19:44.750698 [INF] STREAM: ---------- Store Limits ----------
+[8310] 2018/02/21 13:19:44.750707 [INF] STREAM: Channels:                  100 *
+[8310] 2018/02/21 13:19:44.750714 [INF] STREAM: --------- Channels Limits --------
+[8310] 2018/02/21 13:19:44.750721 [INF] STREAM:   Subscriptions:          1000 *
+[8310] 2018/02/21 13:19:44.750728 [INF] STREAM:   Messages     :       1000000 *
+[8310] 2018/02/21 13:19:44.750734 [INF] STREAM:   Bytes        :     976.56 MB *
+[8310] 2018/02/21 13:19:44.750741 [INF] STREAM:   Age          :     unlimited *
+[8310] 2018/02/21 13:19:44.750747 [INF] STREAM:   Inactivity   :     unlimited *
+[8310] 2018/02/21 13:19:44.750754 [INF] STREAM: ----------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
@@ -971,20 +981,21 @@ The NATS Streaming Server accepts command line arguments to control its behavior
 Usage: nats-streaming-server [options]
 
 Streaming Server Options:
-    -cid, --cluster_id  <string>     Cluster ID (default: test-cluster)
-    -st,  --store <string>           Store type: MEMORY|FILE (default: MEMORY)
-          --dir <string>             For FILE store type, this is the root directory
-    -mc,  --max_channels <int>       Max number of channels (0 for unlimited)
-    -msu, --max_subs <int>           Max number of subscriptions per channel (0 for unlimited)
-    -mm,  --max_msgs <int>           Max number of messages per channel (0 for unlimited)
-    -mb,  --max_bytes <size>         Max messages total size per channel (0 for unlimited)
-    -ma,  --max_age <duration>       Max duration a message can be stored ("0s" for unlimited)
-    -ns,  --nats_server <string>     Connect to this external NATS Server URL (embedded otherwise)
-    -sc,  --stan_config <string>     Streaming server configuration file
-    -hbi, --hb_interval <duration>   Interval at which server sends heartbeat to a client
-    -hbt, --hb_timeout <duration>    How long server waits for a heartbeat response
-    -hbf, --hb_fail_count <int>      Number of failed heartbeats before server closes the client connection
-          --ft_group <string>        Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+    -cid, --cluster_id  <string>      Cluster ID (default: test-cluster)
+    -st,  --store <string>            Store type: MEMORY|FILE (default: MEMORY)
+          --dir <string>              For FILE store type, this is the root directory
+    -mc,  --max_channels <int>        Max number of channels (0 for unlimited)
+    -msu, --max_subs <int>            Max number of subscriptions per channel (0 for unlimited)
+    -mm,  --max_msgs <int>            Max number of messages per channel (0 for unlimited)
+    -mb,  --max_bytes <size>          Max messages total size per channel (0 for unlimited)
+    -ma,  --max_age <duration>        Max duration a message can be stored ("0s" for unlimited)
+    -mi,  --max_inactivity <duration> Max inactivity (no new message, no subscription) after which a channel can be garbage collected (0 for unlimited)
+    -ns,  --nats_server <string>      Connect to this external NATS Server URL (embedded otherwise)
+    -sc,  --stan_config <string>      Streaming server configuration file
+    -hbi, --hb_interval <duration>    Interval at which server sends heartbeat to a client
+    -hbt, --hb_timeout <duration>     How long server waits for a heartbeat response
+    -hbf, --hb_fail_count <int>       Number of failed heartbeats before server closes the client connection
+          --ft_group <string>         Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 
 Streaming Server Clustering Options:
     --clustered <bool>                   Run the server in a clustered configuration (default: false)
@@ -1162,6 +1173,7 @@ Store Limits Configuration:
 | max_msgs | Maximum number of messages per channel, 0 means unlimited | Number >= 0 | `max_msgs: 10000` |
 | max_bytes | Total size of messages per channel, 0 means unlimited | Number >= 0 | `max_bytes: 1GB` |
 | max_age | How long messages can stay in the log | Duration | `max_age: "24h"` |
+| max_inactivity | How long without any subscription and any new message before a channel can be automatically deleted | Duration | `max_inactivity: "24h"` |
 | channels | A map of channel names with specific limits | Map: `channels: { ... }` | **See details below** |
 
 The `channels` section is a map with the key being the channel name. For instance:
@@ -1180,7 +1192,7 @@ For a given channel, the possible parameters are:
 | max_msgs | Maximum number of messages per channel, 0 means unlimited | Number >= 0 | `max_msgs: 10000` |
 | max_bytes | Total size of messages per channel, 0 means unlimited | Bytes | `max_bytes: 1GB` |
 | max_age | How long messages can stay in the log | Duration | `max_age: "24h"` |
-
+| max_inactivity | How long without any subscription and any new message before a channel can be automatically deleted | Duration | `max_inactivity: "24h"` |
 
 File Options Configuration:
 
@@ -1282,6 +1294,11 @@ store_limits: {
         "foo.bar.>": {
             max_age: "2h"
         }
+        # Delete channels with this prefix once they don't have any
+        # subscription and no new message for more than 1 hour
+        "temp.>": {
+            max_inactivity: "1h"
+        }
     }
 }
 ...
@@ -1331,27 +1348,39 @@ Below is what would be displayed with the above store limits configuration. Noti
 how `foo.bar.>` is indented compared to `foo.>` to show the inheritance.
 
 ```
-[63762] 2017/04/19 14:47:36.149341 [INF] STREAM: ---------- Store Limits ----------
-[63762] 2017/04/19 14:47:36.149352 [INF] STREAM: Channels:                   10
-[63762] 2017/04/19 14:47:36.149355 [INF] STREAM: --------- Channels Limits --------
-[63762] 2017/04/19 14:47:36.149359 [INF] STREAM:   Subscriptions:          1000 *
-[63762] 2017/04/19 14:47:36.149362 [INF] STREAM:   Messages     :         10000
-[63762] 2017/04/19 14:47:36.149365 [INF] STREAM:   Bytes        :      10.00 MB
-[63762] 2017/04/19 14:47:36.149368 [INF] STREAM:   Age          :        1h0m0s
-[63762] 2017/04/19 14:47:36.149371 [INF] STREAM: -------- List of Channels ---------
-[63762] 2017/04/19 14:47:36.149374 [INF] STREAM: foo.>
-[63762] 2017/04/19 14:47:36.149378 [INF] STREAM:  |-> Messages                   400
-[63762] 2017/04/19 14:47:36.149383 [INF] STREAM:  foo.bar.>
-[63762] 2017/04/19 14:47:36.149387 [INF] STREAM:   |-> Age                    2h0m0s
-[63762] 2017/04/19 14:47:36.149390 [INF] STREAM: bar
-[63762] 2017/04/19 14:47:36.149393 [INF] STREAM:  |-> Messages                    50
-[63762] 2017/04/19 14:47:36.149572 [INF] STREAM:  |-> Bytes                  1.00 KB
-[63762] 2017/04/19 14:47:36.149581 [INF] STREAM: baz
-[63762] 2017/04/19 14:47:36.149585 [INF] STREAM:  |-> Messages             unlimited
-[63762] 2017/04/19 14:47:36.149589 [INF] STREAM:  |-> Bytes                  1.00 MB
-[63762] 2017/04/19 14:47:36.149592 [INF] STREAM:  |-> Age                     2h0m0s
-[63762] 2017/04/19 14:47:36.149595 [INF] STREAM: bozo
-[63762] 2017/04/19 14:47:36.149599 [INF] STREAM: -----------------------------------
+[8348] 2018/02/21 13:20:51.334874 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.9.0
+[8348] 2018/02/21 13:20:51.334929 [INF] STREAM: ServerID: Nt2YVL5hFu3pEahgD2y9xR
+[8348] 2018/02/21 13:20:51.334932 [INF] STREAM: Go version: go1.9.4
+[8348] 2018/02/21 13:20:51.335320 [INF] Starting nats-server version 1.0.4
+[8348] 2018/02/21 13:20:51.335508 [INF] Listening for client connections on 0.0.0.0:4222
+[8348] 2018/02/21 13:20:51.335514 [INF] Server is ready
+[8348] 2018/02/21 13:20:51.363601 [INF] STREAM: Recovering the state...
+[8348] 2018/02/21 13:20:51.363638 [INF] STREAM: No recovered state
+[8348] 2018/02/21 13:20:51.619429 [INF] STREAM: Message store is MEMORY
+[8348] 2018/02/21 13:20:51.619619 [INF] STREAM: ---------- Store Limits ----------
+[8348] 2018/02/21 13:20:51.619633 [INF] STREAM: Channels:                   10
+[8348] 2018/02/21 13:20:51.619641 [INF] STREAM: --------- Channels Limits --------
+[8348] 2018/02/21 13:20:51.619648 [INF] STREAM:   Subscriptions:          1000 *
+[8348] 2018/02/21 13:20:51.619655 [INF] STREAM:   Messages     :         10000
+[8348] 2018/02/21 13:20:51.619662 [INF] STREAM:   Bytes        :      10.00 MB
+[8348] 2018/02/21 13:20:51.619668 [INF] STREAM:   Age          :        1h0m0s
+[8348] 2018/02/21 13:20:51.619675 [INF] STREAM:   Inactivity   :     unlimited *
+[8348] 2018/02/21 13:20:51.619681 [INF] STREAM: -------- List of Channels ---------
+[8348] 2018/02/21 13:20:51.619688 [INF] STREAM: baz
+[8348] 2018/02/21 13:20:51.619695 [INF] STREAM:  |-> Messages             unlimited
+[8348] 2018/02/21 13:20:51.619701 [INF] STREAM:  |-> Bytes                  1.00 MB
+[8348] 2018/02/21 13:20:51.619708 [INF] STREAM:  |-> Age                     2h0m0s
+[8348] 2018/02/21 13:20:51.619714 [INF] STREAM: bozo
+[8348] 2018/02/21 13:20:51.619721 [INF] STREAM: foo.>
+[8348] 2018/02/21 13:20:51.619728 [INF] STREAM:  |-> Messages                   400
+[8348] 2018/02/21 13:20:51.619879 [INF] STREAM:  foo.bar.>
+[8348] 2018/02/21 13:20:51.619897 [INF] STREAM:   |-> Age                    2h0m0s
+[8348] 2018/02/21 13:20:51.619904 [INF] STREAM: temp.>
+[8348] 2018/02/21 13:20:51.619911 [INF] STREAM:  |-> Inactivity              1h0m0s
+[8348] 2018/02/21 13:20:51.619918 [INF] STREAM: bar
+[8348] 2018/02/21 13:20:51.619924 [INF] STREAM:  |-> Messages                    50
+[8348] 2018/02/21 13:20:51.619931 [INF] STREAM:  |-> Bytes                  1.00 KB
+[8348] 2018/02/21 13:20:51.619937 [INF] STREAM: -----------------------------------
 ```
 
 

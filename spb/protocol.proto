@@ -100,6 +100,7 @@ message RaftOperation {
     SendAndAck         = 4; // Messages send or ack'ed.
     Connect            = 6; // Client connection.
     Disconnect         = 7; // Client disconnect.
+    DeleteChannel      = 8; // Delete the channel.
   }
   Type                  OpType           = 1; // Log message type.
   Batch                 PublishBatch     = 2; // Publish operation data.
@@ -108,6 +109,7 @@ message RaftOperation {
   SubSentAndAck         SubSentAck       = 5; // Send and/or Ack operation data.
   AddClient             ClientConnect    = 7; // Connect operation data.
   pb.CloseRequest       ClientDisconnect = 8; // Disconnect operation data.
+  string                Channel          = 9; // Channel name.
 }
 
 // Batch is a batch of messages for replication.

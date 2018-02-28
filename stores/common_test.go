@@ -31,6 +31,7 @@ var testDefaultStoreLimits = StoreLimits{
 		SubStoreLimits{
 			MaxSubscriptions: 1000,
 		},
+		0,
 	},
 	nil,
 }
@@ -946,6 +947,7 @@ func TestCSPerChannelLimits(t *testing.T) {
 				SubStoreLimits{
 					MaxSubscriptions: 1,
 				},
+				0,
 			}
 			barLimits := ChannelLimits{
 				MsgStoreLimits{
@@ -955,6 +957,7 @@ func TestCSPerChannelLimits(t *testing.T) {
 				SubStoreLimits{
 					MaxSubscriptions: 2,
 				},
+				0,
 			}
 			noSubsOverrideLimits := ChannelLimits{
 				MsgStoreLimits{
@@ -962,18 +965,21 @@ func TestCSPerChannelLimits(t *testing.T) {
 					MaxBytes: 6 * 1024,
 				},
 				SubStoreLimits{},
+				0,
 			}
 			noMaxMsgOverrideLimits := ChannelLimits{
 				MsgStoreLimits{
 					MaxBytes: 7 * 1024,
 				},
 				SubStoreLimits{},
+				0,
 			}
 			noMaxBytesOverrideLimits := ChannelLimits{
 				MsgStoreLimits{
 					MaxMsgs: 10,
 				},
 				SubStoreLimits{},
+				0,
 			}
 
 			storeLimits.AddPerChannel("foo", &fooLimits)
@@ -1083,6 +1089,116 @@ func TestCSLimitWithWildcardsInConfig(t *testing.T) {
 			storeMsg(t, cBar, bar, 4, []byte("msg4"))
 			if msgStoreLookup(t, cBar.Msgs, m1.Sequence) != nil {
 				stackFatalf(t, "M1 should have been removed")
+			}
+		})
+	}
+}
+
+func TestCSGetChannelLimits(t *testing.T) {
+	for _, st := range testStores {
+		st := st
+		t.Run(st.name, func(t *testing.T) {
+			t.Parallel()
+			defer endTest(t, st)
+			s := startTest(t, st)
+			defer s.Close()
+
+			limits := &StoreLimits{}
+			limits.MaxChannels = 10
+			limits.MaxMsgs = 20
+			limits.MaxBytes = 30
+			limits.MaxAge = 40
+			limits.MaxSubscriptions = 50
+			limits.MaxInactivity = 60
+
+			clFooStar := &ChannelLimits{}
+			clFooStar.MaxMsgs = 70
+			clFooStar.MaxInactivity = -1
+			limits.AddPerChannel("foo.*", clFooStar)
+
+			if err := s.SetLimits(limits); err != nil {
+				t.Fatalf("Error setting limits: %v", err)
+			}
+
+			// The store owns a copy of the limits and inheritance
+			// has been applied in that copy, not with the limits
+			// given by the caller. So for the rest of the test
+			// we need to apply inheritance to limits.
+			if err := limits.Build(); err != nil {
+				t.Fatalf("Error building limits: %v", err)
+			}
+			clFooStar = limits.PerChannel["foo.*"]
+
+			// Check for non existing channel
+			cl := s.GetChannelLimits("unknown")
+			if cl != nil {
+				t.Fatalf("Should have returned nil, returned %v", cl)
+			}
+
+			// This channel should have same limits than foo.*
+			storeCreateChannel(t, s, "foo.bar")
+			cl = s.GetChannelLimits("foo.bar")
+			if cl == nil {
+				t.Fatal("Should have returned the channel limits")
+			}
+			if !reflect.DeepEqual(clFooStar, cl) {
+				t.Fatalf("Expected channel limits to be %+v, got %+v", clFooStar, cl)
+			}
+
+			// This channel should have same limits than the global ones
+			storeCreateChannel(t, s, "foo")
+			cl = s.GetChannelLimits("foo")
+			if cl == nil {
+				t.Fatal("Should have returned the channel limits")
+			}
+			if !reflect.DeepEqual(&limits.ChannelLimits, cl) {
+				t.Fatalf("Expected channel limits to be %+v, got %+v", &limits.ChannelLimits, cl)
+			}
+
+			// Check that the returned value is a copy
+			cl.MaxBytes = 2
+			newCL := s.GetChannelLimits("foo")
+			if newCL == nil {
+				t.Fatal("Should have returned the channel limits")
+			}
+			// There should be different
+			if reflect.DeepEqual(cl, newCL) {
+				t.Fatal("These should have been different")
+			}
+			// newCL should be same than global limits
+			if !reflect.DeepEqual(&limits.ChannelLimits, newCL) {
+				t.Fatalf("Expected channel limits to be %+v, got %+v", &limits.ChannelLimits, newCL)
+			}
+		})
+	}
+}
+
+func TestCSDeleteChannel(t *testing.T) {
+	for _, st := range testStores {
+		st := st
+		t.Run(st.name, func(t *testing.T) {
+			t.Parallel()
+			defer endTest(t, st)
+			s := startTest(t, st)
+			defer s.Close()
+
+			if err := s.DeleteChannel("notfound"); err != ErrNotFound {
+				t.Fatalf("Expected %v error, got %v", ErrNotFound, err)
+			}
+			storeCreateChannel(t, s, "foo")
+			if err := s.DeleteChannel("foo"); err != nil {
+				t.Fatalf("Error on delete: %v", err)
+			}
+
+			if !st.recoverable {
+				return
+			}
+			// Restart the store and ensure channel "foo" is not reconvered
+			s.Close()
+			s, state := testReOpenStore(t, st, nil)
+			defer s.Close()
+			if state != nil && len(state.Channels) > 0 {
+				t.Fatal("Channel recovered after restart")
 			}
 		})
 	}

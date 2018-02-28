@@ -38,7 +38,7 @@ func (s *serverSnapshot) Persist(sink raft.SnapshotSink) (err error) {
 
 	s.snapshotClients(snap, sink)
 
-	if err := s.snapshotChannels(snap, sink); err != nil {
+	if err := s.snapshotChannels(snap); err != nil {
 		return err
 	}
 
@@ -99,7 +99,7 @@ func (s *serverSnapshot) snapshotClients(snap *spb.RaftSnapshot, sink raft.Snaps
 	}
 }
 
-func (s *serverSnapshot) snapshotChannels(snap *spb.RaftSnapshot, sink raft.SnapshotSink) error {
+func (s *serverSnapshot) snapshotChannels(snap *spb.RaftSnapshot) error {
 	s.channels.RLock()
 	defer s.channels.RUnlock()
 
@@ -255,6 +255,10 @@ func (s *StanServer) restoreClientsFromSnapshot(serverSnap *spb.RaftSnapshot) er
 }
 
 func (s *StanServer) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, restoreFromRaftInit bool) error {
+	var channelsBeforeRestore map[string]*channel
+	if !restoreFromRaftInit {
+		channelsBeforeRestore = s.channels.getAll()
+	}
 	for _, sc := range serverSnap.Channels {
 		c, err := s.lookupOrCreateChannel(sc.Channel)
 		if err != nil {
@@ -266,10 +270,23 @@ func (s *StanServer) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, r
 			if err := s.restoreMsgsFromSnapshot(c, sc.First, sc.Last); err != nil {
 				return err
 			}
+			delete(channelsBeforeRestore, sc.Channel)
 		}
 		for _, ss := range sc.Subscriptions {
 			s.recoverOneSub(c, ss.State, nil, ss.AcksPending)
 		}
+	}
+	if !restoreFromRaftInit {
+		// Now delete channels that we had before the restore.
+		// This is possible if channels have been deleted while
+		// this node was not running and snapshot occurred. The
+		// channels would not be in the snapshot, so we can remove
+		// them now.
+		s.channels.Lock()
+		for name := range channelsBeforeRestore {
+			s.processDeleteChannel(name, false)
+		}
+		s.channels.Unlock()
 	}
 	return nil
 }
