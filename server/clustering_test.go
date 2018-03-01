@@ -47,10 +47,28 @@ func cleanupRaftLog(t *testing.T) {
 }
 
 func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
-	opts := GetDefaultOptions()
-	opts.StoreType = stores.TypeFile
-	opts.FilestoreDir = filepath.Join(defaultDataStore, id)
-	opts.FileStoreOpts.BufferSize = 1024
+	opts := getTestDefaultOptsForPersistentStore()
+	if persistentStoreType == stores.TypeFile {
+		opts.FilestoreDir = filepath.Join(defaultDataStore, id)
+		opts.FileStoreOpts.BufferSize = 1024
+	} else if persistentStoreType == stores.TypeSQL {
+		// Since we need to have the databases created for all possible
+		// IDs, make sure that if someone adds a test with a new ID
+		// he/she adds it to the list of database names to create on
+		// test startup.
+		ok := false
+		suffix := "_" + id
+		for _, n := range testDBSuffixes {
+			if suffix == n {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			panic(fmt.Errorf("Clustering test with node ID %q, need to create the database for that id", id))
+		}
+		opts.SQLStoreOpts.Source = testSQLSource + suffix
+	}
 	opts.Clustering.Clustered = true
 	opts.Clustering.Bootstrap = bootstrap
 	opts.Clustering.RaftLogPath = filepath.Join(defaultRaftLog, id)

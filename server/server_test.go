@@ -59,7 +59,7 @@ const (
 	testDefaultMySQLSource      = "nss:password@/" + testDefaultDatabaseName
 	testDefaultMySQLSourceAdmin = "nss:password@/"
 
-	testDefaultPostgresSource      = "dbname=" + testDefaultDatabaseName + " sslmode=disable"
+	testDefaultPostgresSource      = "sslmode=disable dbname=" + testDefaultDatabaseName
 	testDefaultPostgresSourceAdmin = "sslmode=disable"
 )
 
@@ -68,6 +68,7 @@ var (
 	testSQLSource       = testDefaultMySQLSource
 	testSQLSourceAdmin  = testDefaultMySQLSourceAdmin
 	testSQLDatabaseName = testDefaultDatabaseName
+	testDBSuffixes      = []string{"", "_a", "_b", "_c"}
 )
 
 func TestMain(m *testing.M) {
@@ -80,6 +81,9 @@ func TestMain(m *testing.M) {
 	)
 	flag.StringVar(&bst, "bench_store", "", "store type for bench tests (mem, file)")
 	flag.StringVar(&pst, "persistent_store", "", "store type for server recovery related tests (file)")
+	// This one is added here so that if we want to disable sql for stores tests
+	// we can use the same param for all packages as in "go test -v ./... -sql=false"
+	flag.Bool("sql", false, "Not used for server tests")
 	// Those 2 sql related flags are handled here, not in AddSQLFlags
 	flag.BoolVar(&sqlCreateDb, "sql_create_db", true, "create sql database on startup")
 	flag.BoolVar(&sqlDeleteDb, "sql_delete_db", true, "delete sql database on exit")
@@ -120,19 +124,23 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 		if sqlCreateDb {
-			// Create the SQL Database once, the cleanup is simply deleting
-			// content from tables (so we don't have to recreate them).
-			if err := test.CreateSQLDatabase(testSQLDriver, testSQLSourceAdmin,
-				testSQLSource, testSQLDatabaseName); err != nil {
-				fmt.Printf("Error initializing SQL Datastore: %v", err)
-				os.Exit(2)
+			for _, n := range testDBSuffixes {
+				// Create the SQL Database once, the cleanup is simply deleting
+				// content from tables (so we don't have to recreate them).
+				if err := test.CreateSQLDatabase(testSQLDriver, testSQLSourceAdmin,
+					testSQLSource, testSQLDatabaseName+n); err != nil {
+					fmt.Printf("Error initializing SQL Datastore: %v", err)
+					os.Exit(2)
+				}
 			}
 		}
 	}
 	ret := m.Run()
 	if doSQL && sqlDeleteDb {
 		// Now that the tests/benchs are done, delete the database
-		test.DeleteSQLDatabase(testSQLDriver, testSQLSourceAdmin, testSQLDatabaseName)
+		for _, n := range testDBSuffixes {
+			test.DeleteSQLDatabase(testSQLDriver, testSQLSourceAdmin, testSQLDatabaseName+n)
+		}
 	}
 	os.Exit(ret)
 }
@@ -365,7 +373,9 @@ func cleanupDatastore(t tLogger) {
 			stackFatalf(t, "Error cleaning up datastore: %v", err)
 		}
 	case stores.TypeSQL:
-		test.CleanupSQLDatastore(t, testSQLDriver, testSQLSource)
+		for _, n := range testDBSuffixes {
+			test.CleanupSQLDatastore(t, testSQLDriver, testSQLSource+n)
+		}
 	}
 }
 

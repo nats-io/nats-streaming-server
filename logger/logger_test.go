@@ -1,12 +1,20 @@
-// Copyright 2017 Apcera Inc. All rights reserved.
+// Copyright 2017-2019 Apcera Inc. All rights reserved.
+// Copyright 2018 Synadia Communications Inc. All rights reserved.
 
 package logger
 
 import (
+	"flag"
 	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestMain(_ *testing.M) {
+	// This one is added here so that if we want to disable sql for stores tests
+	// we can use the same param for all packages as in "go test -v ./... -sql=false"
+	flag.Bool("sql", false, "Not used for logger tests")
+}
 
 type dummyLogger struct {
 	msg string
