@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -23,8 +24,9 @@ const (
 )
 
 var (
-	runningInTests       bool
-	joinRaftGroupTimeout = defaultJoinRaftGroupTimeout
+	runningInTests              bool
+	joinRaftGroupTimeout        = defaultJoinRaftGroupTimeout
+	testPauseAfterNewRaftCalled bool
 )
 
 func clusterSetupForTest() {
@@ -49,7 +51,10 @@ type ClusteringOptions struct {
 
 // raftNode is a handle to a member in a Raft consensus group.
 type raftNode struct {
-	leader uint32
+	initialized int64
+	leader      int64
+	sync.Mutex
+	closed bool
 	*raft.Raft
 	store     *raftboltdb.BoltStore
 	transport *raft.NetworkTransport
@@ -60,6 +65,13 @@ type raftNode struct {
 
 // shutdown attempts to stop the Raft node.
 func (r *raftNode) shutdown() error {
+	r.Lock()
+	if r.closed {
+		r.Unlock()
+		return nil
+	}
+	r.closed = true
+	r.Unlock()
 	if err := r.Raft.Shutdown().Error(); err != nil {
 		return err
 	}
@@ -76,15 +88,16 @@ func (r *raftNode) shutdown() error {
 }
 
 // createRaftNode creates and starts a new Raft node.
-func (s *StanServer) createServerRaftNode(fsm raft.FSM) (*raftNode, error) {
+func (s *StanServer) createServerRaftNode(fsm raft.FSM) error {
 	var (
-		name                     = s.info.ClusterID
-		addr                     = s.getClusteringAddr(name)
-		node, existingState, err = s.createRaftNode(name, fsm)
+		name               = s.info.ClusterID
+		addr               = s.getClusteringAddr(name)
+		existingState, err = s.createRaftNode(name, fsm)
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
+	node := s.raft
 
 	// Bootstrap if there is no previous state and we are starting this node as
 	// a seed or a cluster configuration is provided.
@@ -92,7 +105,7 @@ func (s *StanServer) createServerRaftNode(fsm raft.FSM) (*raftNode, error) {
 	if bootstrap {
 		if err := s.bootstrapCluster(name, node.Raft); err != nil {
 			node.shutdown()
-			return nil, err
+			return err
 		}
 	} else if !existingState {
 		// Attempt to join the cluster if we're not bootstrapping.
@@ -125,7 +138,7 @@ func (s *StanServer) createServerRaftNode(fsm raft.FSM) (*raftNode, error) {
 		}
 		if !joined {
 			node.shutdown()
-			return nil, fmt.Errorf("failed to join Raft group %s", name)
+			return fmt.Errorf("failed to join Raft group %s", name)
 		}
 	}
 	if s.opts.Clustering.Bootstrap {
@@ -137,7 +150,7 @@ func (s *StanServer) createServerRaftNode(fsm raft.FSM) (*raftNode, error) {
 			s.wg.Done()
 		}()
 	}
-	return node, nil
+	return nil
 }
 
 func (s *StanServer) detectBootstrapMisconfig(name string) {
@@ -201,24 +214,30 @@ func (rl *raftLogger) Write(b []byte) (int, error) {
 func (rl *raftLogger) Close() error { return nil }
 
 // createRaftNode creates and starts a new Raft node with the given name and FSM.
-func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, bool, error) {
+func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (bool, error) {
 	path := filepath.Join(s.opts.Clustering.RaftLogPath, name)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := os.MkdirAll(path, os.ModeDir+os.ModePerm); err != nil {
-			return nil, false, err
+			return false, err
 		}
 	}
+
+	// We create s.raft early because once NewRaft() is called, the
+	// raft code may asynchronously invoke FSM.Apply() and FSM.Restore()
+	// So we want the object to exist so we can check on leader atomic, etc..
+	s.raft = &raftNode{}
+
 	store, err := raftboltdb.New(raftboltdb.Options{
 		Path:   filepath.Join(path, raftLogFile),
 		NoSync: !s.opts.Clustering.Sync,
 	})
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
 	cacheStore, err := raft.NewLogCache(s.opts.Clustering.LogCacheSize, store)
 	if err != nil {
 		store.Close()
-		return nil, false, err
+		return false, err
 	}
 
 	addr := s.getClusteringAddr(name)
@@ -238,14 +257,14 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, bool,
 	snapshotStore, err := raft.NewFileSnapshotStore(path, s.opts.Clustering.LogSnapshots, logWriter)
 	if err != nil {
 		store.Close()
-		return nil, false, err
+		return false, err
 	}
 
 	// TODO: using a single NATS conn for every channel might be a bottleneck. Maybe pool conns?
 	transport, err := natslog.NewNATSTransport(addr, s.ncr, 2*time.Second, logWriter)
 	if err != nil {
 		store.Close()
-		return nil, false, err
+		return false, err
 	}
 	// Make the snapshot process never timeout... check (s *serverSnapshot).Persist() for details
 	transport.TimeoutScale = 1
@@ -258,12 +277,18 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, bool,
 	if err != nil {
 		transport.Close()
 		store.Close()
-		return nil, false, err
+		return false, err
+	}
+	if testPauseAfterNewRaftCalled {
+		time.Sleep(time.Second)
 	}
 
 	existingState, err := raft.HasExistingState(cacheStore, store, snapshotStore)
 	if err != nil {
-		return nil, false, err
+		node.Shutdown()
+		transport.Close()
+		store.Close()
+		return false, err
 	}
 
 	if existingState {
@@ -305,19 +330,18 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (*raftNode, bool,
 		s.ncr.Publish(msg.Reply, r)
 	})
 	if err != nil {
+		node.Shutdown()
 		transport.Close()
 		store.Close()
-		return nil, false, err
+		return false, err
 	}
-
-	return &raftNode{
-		Raft:      node,
-		store:     store,
-		transport: transport,
-		logInput:  logWriter,
-		notifyCh:  raftNotifyCh,
-		joinSub:   sub,
-	}, existingState, nil
+	s.raft.Raft = node
+	s.raft.store = store
+	s.raft.transport = transport
+	s.raft.logInput = logWriter
+	s.raft.notifyCh = raftNotifyCh
+	s.raft.joinSub = sub
+	return existingState, nil
 }
 
 // bootstrapCluster bootstraps the node for the provided Raft group either as a
