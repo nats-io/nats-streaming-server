@@ -199,7 +199,10 @@ func (s *serverSnapshot) Release() {}
 func (s *StanServer) restoreFromSnapshot(snapshot io.ReadCloser) error {
 	defer snapshot.Close()
 
-	restoreFromRaftInit := atomic.LoadInt64(&s.raftNodeCreated) == 0
+	// initialized will be 0 until the NewRaft() call has returned.
+	// So restoreFromRaftInit means that the snapshot is restored during
+	// raft node initialization.
+	restoreFromRaftInit := atomic.LoadInt64(&s.raft.initialized) == 0
 
 	// We need to drop current state. The server will recover from snapshot
 	// and all newer Raft entry logs (basically the entire state is being

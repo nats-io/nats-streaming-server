@@ -669,7 +669,6 @@ type StanServer struct {
 	// atomic.* functions crash on 32bit machines if operand is not aligned
 	// at 64bit. See https://github.com/golang/go/issues/599
 	ioChannelStatsMaxBatchSize int64 // stats of the max number of messages than went into a single batch
-	raftNodeCreated            int64
 
 	mu         sync.RWMutex
 	shutdown   bool
@@ -768,7 +767,7 @@ type lazyReplication struct {
 }
 
 func (s *StanServer) isLeader() bool {
-	return atomic.LoadUint32(&s.raft.leader) == 1
+	return atomic.LoadInt64(&s.raft.leader) == 1
 }
 
 // subStore holds all known state for all subscriptions
@@ -1863,12 +1862,11 @@ func (s *StanServer) start(runningState State) error {
 // startRaftNode creates and starts the Raft group.
 // This should only be called if the server is running in clustered mode.
 func (s *StanServer) startRaftNode() error {
-	node, err := s.createServerRaftNode(s)
-	if err != nil {
+	if err := s.createServerRaftNode(s); err != nil {
 		return err
 	}
-	s.raft = node
-	atomic.StoreInt64(&s.raftNodeCreated, 1)
+	node := s.raft
+	atomic.StoreInt64(&s.raft.initialized, 1)
 
 	leaderWait := make(chan struct{}, 1)
 	leaderReady := func() {
@@ -2002,7 +2000,7 @@ func (s *StanServer) leadershipAcquired() error {
 		return err
 	}
 
-	atomic.StoreUint32(&s.raft.leader, 1)
+	atomic.StoreInt64(&s.raft.leader, 1)
 	return nil
 }
 
@@ -2046,7 +2044,7 @@ func (s *StanServer) leadershipLost() {
 	// Only the leader will receive protocols from clients
 	s.unsubscribeInternalSubs()
 
-	atomic.StoreUint32(&s.raft.leader, 0)
+	atomic.StoreInt64(&s.raft.leader, 0)
 }
 
 // TODO:  Explore parameter passing in gnatsd.  Keep separate for now.

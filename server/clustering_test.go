@@ -3094,3 +3094,39 @@ func TestClusteringDeleteChannel(t *testing.T) {
 	m := msgStoreFirstMsg(t, c.store.Msgs)
 	assertMsg(t, *m, []byte("new"), 1)
 }
+
+func TestClusteringCrashOnRestart(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	opts := getTestDefaultOptsForClustering("a", true)
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	getLeader(t, 10*time.Second, s)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	ch := make(chan bool, 1)
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {
+		ch <- true
+	}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	sc.Close()
+
+	s.Shutdown()
+
+	testPauseAfterNewRaftCalled = true
+	s = runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+}
