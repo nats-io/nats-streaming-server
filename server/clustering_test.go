@@ -878,8 +878,6 @@ func TestClusteringDontRecoverFSClientsAndSubs(t *testing.T) {
 	s1.Shutdown()
 	s2.Shutdown()
 
-	cleanupRaftLog(t)
-
 	s1 = runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
@@ -3209,4 +3207,41 @@ func TestClusteringCrashOnRestart(t *testing.T) {
 	defer func() { testPauseAfterNewRaftCalled = false }()
 	s = runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
+}
+
+func TestClusteringNoRaftStateButStreamingState(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	opts := getTestDefaultOptsForClustering("a", true)
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	getLeader(t, 10*time.Second, s)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	sc.Close()
+
+	s.Shutdown()
+	cleanupRaftLog(t)
+	s, err := RunServerWithOpts(opts, nil)
+	if err == nil {
+		s.Shutdown()
+		t.Fatal("Expected error, got none")
+	}
+	// Start again and still should fail
+	s, err = RunServerWithOpts(opts, nil)
+	if err == nil {
+		s.Shutdown()
+		t.Fatal("Expected error, got none")
+	}
 }
