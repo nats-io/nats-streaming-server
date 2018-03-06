@@ -1,8 +1,10 @@
 // Copyright 2016-2017 Apcera Inc. All rights reserved.
+// Copyright 2018 Synadia Communications Inc. All rights reserved.
 
 package util
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"runtime"
@@ -10,6 +12,12 @@ import (
 	"testing"
 	"time"
 )
+
+func TestMain(_ *testing.M) {
+	// This one is added here so that if we want to disable sql for stores tests
+	// we can use the same param for all packages as in "go test -v ./... -sql=false"
+	flag.Bool("sql", false, "Not used for util tests")
+}
 
 func stackFatalf(t *testing.T, f string, args ...interface{}) {
 	lines := make([]string, 0, 32)
