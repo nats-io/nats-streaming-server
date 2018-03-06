@@ -111,7 +111,7 @@ func getLeader(t *testing.T, timeout time.Duration, servers ...*StanServer) *Sta
 			}
 			s.mu.Unlock()
 		}
-		stackFatalf(t, "Unable to find the leader")
+		panic(fmt.Errorf("Unable to find the leader"))
 	}
 	return leader
 }
@@ -1760,10 +1760,14 @@ func TestClusteringLogSnapshotRestoreAfterChannelDeleted(t *testing.T) {
 	follower = runServerWithOpts(t, follower.opts, nil)
 	defer follower.Shutdown()
 
-	// The follower will have recovered foo, but then from
-	// the snapshot should realize that the channel no longer
-	// exits and should delete it.
-	verifyChannelExist(t, follower, channel, false, 2*time.Second)
+	newLeader := getLeader(t, 10*time.Second, leader, follower)
+
+	if newLeader != follower {
+		// The follower will have recovered foo, but then from
+		// the snapshot should realize that the channel no longer
+		// exits and should delete it.
+		verifyChannelExist(t, follower, channel, false, 2*time.Second)
+	}
 	sc.Close()
 }
 
