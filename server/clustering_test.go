@@ -102,6 +102,15 @@ func getLeader(t *testing.T, timeout time.Duration, servers ...*StanServer) *Sta
 		time.Sleep(15 * time.Millisecond)
 	}
 	if leader == nil {
+		for _, s := range servers {
+			s.mu.Lock()
+			if s.raft == nil {
+				fmt.Printf("  server:%v state:%v raft state: nil lastErr=%v\n", s.serverID, s.state, s.lastError)
+			} else {
+				fmt.Printf("  server:%v state:%v raft state: %v lastErr=%v\n", s.serverID, s.state, s.raft.State(), s.lastError)
+			}
+			s.mu.Unlock()
+		}
 		stackFatalf(t, "Unable to find the leader")
 	}
 	return leader
