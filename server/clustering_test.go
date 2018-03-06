@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,7 +112,10 @@ func getLeader(t *testing.T, timeout time.Duration, servers ...*StanServer) *Sta
 			}
 			s.mu.Unlock()
 		}
-		panic(fmt.Errorf("Unable to find the leader"))
+		buf := make([]byte, 1024*1024)
+		n := runtime.Stack(buf, true)
+		fmt.Printf("Go-routines:\n%s\n", string(buf[:n]))
+		stackFatalf(t, "Unable to find the leader")
 	}
 	return leader
 }
