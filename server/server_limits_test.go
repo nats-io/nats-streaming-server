@@ -501,6 +501,8 @@ func TestMaxInactivity(t *testing.T) {
 	opts.AddPerChannel("foo.bar", &stores.ChannelLimits{MaxInactivity: -1})
 	recoveredLimits := &stores.ChannelLimits{MaxInactivity: 800 * time.Millisecond}
 	opts.AddPerChannel("recovered", recoveredLimits)
+	pubLimits := &stores.ChannelLimits{MaxInactivity: 1000 * time.Millisecond}
+	opts.AddPerChannel("pub", pubLimits)
 	s := runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
 
@@ -584,23 +586,22 @@ func TestMaxInactivity(t *testing.T) {
 	verifyChannelExist(t, s, "c7", false, time.Second)
 
 	// Check that last activity bumps the next check
-	if err := sc.Publish("c8", []byte("hello")); err != nil {
+	if err := sc.Publish("pub", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
 	// Wait half MaxInactivity
-	time.Sleep(opts.MaxInactivity / 2)
+	time.Sleep(pubLimits.MaxInactivity / 2)
 	// Publish another
-	if err := sc.Publish("c8", []byte("hello")); err != nil {
+	if err := sc.Publish("pub", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
-	start := time.Now()
 	// Sleep the other half (and a bit more)
-	time.Sleep((opts.MaxInactivity / 2) + 15*time.Millisecond)
+	time.Sleep((pubLimits.MaxInactivity / 2) + 50*time.Millisecond)
 	// Channel should still exist
-	verifyChannelExist(t, s, "c8", true, time.Second)
-	// After at least MaxInflight after the second send the channel should
-	// have disappeared
-	verifyChannelExist(t, s, "c8", false, opts.MaxInactivity-time.Since(start)+50*time.Millisecond)
+	verifyChannelExist(t, s, "pub", true, time.Second)
+	// Wait for at least MaxInactivity since last publish and now channel
+	// should be gone.
+	verifyChannelExist(t, s, "pub", false, pubLimits.MaxInactivity/2+500*time.Millisecond)
 
 	// Create store foo.baz, it should be deleted after 500ms
 	if err := sc.Publish("foo.baz", []byte("hello")); err != nil {
