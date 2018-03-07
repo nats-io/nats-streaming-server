@@ -818,3 +818,20 @@ func TestGhostDurableSubs(t *testing.T) {
 	s = runServerWithOpts(t, opts, nil)
 	check(false)
 }
+
+func TestGetNATSOptions(t *testing.T) {
+	opts := GetDefaultOptions()
+	nopts := GetNATSOptions()
+	nopts.Host = "127.0.0.1"
+	nopts.Port = 4567
+	s, err := RunServerWithOpts(opts, nopts)
+	if err != nil {
+		t.Fatalf("Error running server: %v", err)
+	}
+	defer s.Shutdown()
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsURL("nats://127.0.0.1:4567"))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	sc.Close()
+}

@@ -4955,3 +4955,10 @@ func (s *StanServer) Snapshot() (raft.FSMSnapshot, error) {
 func (s *StanServer) Restore(snapshot io.ReadCloser) error {
 	return s.restoreFromSnapshot(snapshot)
 }
+
+// GetNATSOptions returns an empty NATS Options structure that one can
+// use to configure and then pass to RunServerWithOpts()
+func GetNATSOptions() *server.Options {
+	opts := server.Options{}
+	return &opts
+}
