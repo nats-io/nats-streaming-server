@@ -187,6 +187,21 @@ func stack() string {
 	return strings.Join(lines, "\n")
 }
 
+func printAllStacks() {
+	size := 1024 * 1024
+	buf := make([]byte, size)
+	n := 0
+	for {
+		n = runtime.Stack(buf, true)
+		if n < size {
+			break
+		}
+		size *= 2
+		buf = make([]byte, size)
+	}
+	fmt.Printf("Go-routines:\n%s\n", string(buf[:n]))
+}
+
 func msgStoreFirstAndLastSequence(t tLogger, ms stores.MsgStore) (uint64, uint64) {
 	f, l, err := ms.FirstAndLastSequence()
 	if err != nil {
