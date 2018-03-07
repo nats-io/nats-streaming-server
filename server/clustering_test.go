@@ -10,7 +10,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,15 +105,13 @@ func getLeader(t *testing.T, timeout time.Duration, servers ...*StanServer) *Sta
 		for _, s := range servers {
 			s.mu.Lock()
 			if s.raft == nil {
-				fmt.Printf("  server:%v state:%v raft state: nil lastErr=%v\n", s.serverID, s.state, s.lastError)
+				fmt.Printf("  server:%p state:%v raft state: nil lastErr=%v\n", s, s.state, s.lastError)
 			} else {
-				fmt.Printf("  server:%v state:%v raft state: %v lastErr=%v\n", s.serverID, s.state, s.raft.State(), s.lastError)
+				fmt.Printf("  server:%p state:%v raft state: %v lastErr=%v\n", s, s.state, s.raft.State(), s.lastError)
 			}
 			s.mu.Unlock()
 		}
-		buf := make([]byte, 1024*1024)
-		n := runtime.Stack(buf, true)
-		fmt.Printf("Go-routines:\n%s\n", string(buf[:n]))
+		printAllStacks()
 		stackFatalf(t, "Unable to find the leader")
 	}
 	return leader
@@ -1747,6 +1744,7 @@ func TestClusteringLogSnapshotRestoreAfterChannelDeleted(t *testing.T) {
 			break
 		}
 	}
+	servers = removeServer(servers, follower)
 	follower.Shutdown()
 
 	// Wait for more than the MaxInactivity
@@ -1763,15 +1761,17 @@ func TestClusteringLogSnapshotRestoreAfterChannelDeleted(t *testing.T) {
 	// Restart the follower
 	follower = runServerWithOpts(t, follower.opts, nil)
 	defer follower.Shutdown()
+	servers = append(servers, follower)
 
-	newLeader := getLeader(t, 10*time.Second, leader, follower)
+	getLeader(t, 10*time.Second, servers...)
 
-	if newLeader != follower {
-		// The follower will have recovered foo, but then from
-		// the snapshot should realize that the channel no longer
-		// exits and should delete it.
-		verifyChannelExist(t, follower, channel, false, 2*time.Second)
-	}
+	// Produce some activity to speed up snapshot recovery
+	sc.Publish("bar", []byte("hello"))
+
+	// The follower will have recovered foo, but then from
+	// the snapshot should realize that the channel no longer
+	// exits and should delete it.
+	verifyChannelExist(t, follower, channel, false, 5*time.Second)
 	sc.Close()
 }
 
