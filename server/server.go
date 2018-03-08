@@ -1819,8 +1819,9 @@ func (s *StanServer) start(runningState State) error {
 		if s.opts.Clustering.RaftLogPath == "" {
 			s.opts.Clustering.RaftLogPath = filepath.Join(s.opts.ID, s.opts.Clustering.NodeID)
 		}
-		s.log.Noticef("Cluster Node ID: %s", s.info.NodeID)
-		if err := s.startRaftNode(); err != nil {
+		s.log.Noticef("Cluster Node ID : %s", s.info.NodeID)
+		s.log.Noticef("Cluster Log Path: %s", s.opts.Clustering.RaftLogPath)
+		if err := s.startRaftNode(recoveredState != nil); err != nil {
 			return err
 		}
 	}
@@ -1849,6 +1850,9 @@ func (s *StanServer) start(runningState State) error {
 	}
 
 	s.log.Noticef("Message store is %s", s.store.Name())
+	if s.opts.FilestoreDir != "" {
+		s.log.Noticef("Store location: %v", s.opts.FilestoreDir)
+	}
 	// The store has a copy of the limits and the inheritance
 	// was not applied to our limits. To have them displayed correctly,
 	// call Build() on them (we know that this is not going to fail,
@@ -1871,8 +1875,8 @@ func (s *StanServer) start(runningState State) error {
 
 // startRaftNode creates and starts the Raft group.
 // This should only be called if the server is running in clustered mode.
-func (s *StanServer) startRaftNode() error {
-	if err := s.createServerRaftNode(); err != nil {
+func (s *StanServer) startRaftNode(hasStreamingState bool) error {
+	if err := s.createServerRaftNode(hasStreamingState); err != nil {
 		return err
 	}
 	node := s.raft
@@ -3590,7 +3594,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 					// return an error (we are not using timeout in Apply())
 					// is if raft fails to store its log, but it would have
 					// then switched follower state. On leadership acquisition
-					// we do reet nextSequence based on lastSequence on store.
+					// we do reset nextSequence based on lastSequence on store.
 					// Regardless, do reset here in case of error.
 
 					// Note that each future contains a batch of messages for

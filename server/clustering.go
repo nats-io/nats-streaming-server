@@ -100,7 +100,7 @@ func (r *raftNode) shutdown() error {
 }
 
 // createRaftNode creates and starts a new Raft node.
-func (s *StanServer) createServerRaftNode() error {
+func (s *StanServer) createServerRaftNode(hasStreamingState bool) error {
 	var (
 		name               = s.info.ClusterID
 		addr               = s.getClusteringAddr(name)
@@ -108,6 +108,9 @@ func (s *StanServer) createServerRaftNode() error {
 	)
 	if err != nil {
 		return err
+	}
+	if !existingState && hasStreamingState {
+		return fmt.Errorf("streaming state was recovered but cluster log path %q is empty", s.opts.Clustering.RaftLogPath)
 	}
 	node := s.raft
 
