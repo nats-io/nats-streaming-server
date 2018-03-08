@@ -51,8 +51,7 @@ type ClusteringOptions struct {
 
 // raftNode is a handle to a member in a Raft consensus group.
 type raftNode struct {
-	initialized int64
-	leader      int64
+	leader int64
 	sync.Mutex
 	closed bool
 	*raft.Raft
@@ -61,6 +60,19 @@ type raftNode struct {
 	logInput  io.WriteCloser
 	joinSub   *nats.Subscription
 	notifyCh  <-chan bool
+	fsm       *raftFSM
+}
+
+type replicatedSub struct {
+	c   *channel
+	sub *subState
+	err error
+}
+
+type raftFSM struct {
+	sync.Mutex
+	snapshotsOnInit int
+	server          *StanServer
 }
 
 // shutdown attempts to stop the Raft node.
@@ -88,11 +100,11 @@ func (r *raftNode) shutdown() error {
 }
 
 // createRaftNode creates and starts a new Raft node.
-func (s *StanServer) createServerRaftNode(fsm raft.FSM) error {
+func (s *StanServer) createServerRaftNode() error {
 	var (
 		name               = s.info.ClusterID
 		addr               = s.getClusteringAddr(name)
-		existingState, err = s.createRaftNode(name, fsm)
+		existingState, err = s.createRaftNode(name)
 	)
 	if err != nil {
 		return err
@@ -214,7 +226,7 @@ func (rl *raftLogger) Write(b []byte) (int, error) {
 func (rl *raftLogger) Close() error { return nil }
 
 // createRaftNode creates and starts a new Raft node with the given name and FSM.
-func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (bool, error) {
+func (s *StanServer) createRaftNode(name string) (bool, error) {
 	path := filepath.Join(s.opts.Clustering.RaftLogPath, name)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := os.MkdirAll(path, os.ModeDir+os.ModePerm); err != nil {
@@ -259,6 +271,11 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (bool, error) {
 		store.Close()
 		return false, err
 	}
+	sl, err := snapshotStore.List()
+	if err != nil {
+		store.Close()
+		return false, err
+	}
 
 	// TODO: using a single NATS conn for every channel might be a bottleneck. Maybe pool conns?
 	transport, err := natslog.NewNATSTransport(addr, s.ncr, 2*time.Second, logWriter)
@@ -273,6 +290,11 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (bool, error) {
 	raftNotifyCh := make(chan bool, 1)
 	config.NotifyCh = raftNotifyCh
 
+	fsm := &raftFSM{server: s}
+	fsm.Lock()
+	fsm.snapshotsOnInit = len(sl)
+	fsm.Unlock()
+	s.raft.fsm = fsm
 	node, err := raft.NewRaft(config, fsm, cacheStore, store, snapshotStore, transport)
 	if err != nil {
 		transport.Close()
@@ -282,7 +304,6 @@ func (s *StanServer) createRaftNode(name string, fsm raft.FSM) (bool, error) {
 	if testPauseAfterNewRaftCalled {
 		time.Sleep(time.Second)
 	}
-
 	existingState, err := raft.HasExistingState(cacheStore, store, snapshotStore)
 	if err != nil {
 		node.Shutdown()
@@ -379,4 +400,71 @@ func (s *StanServer) getClusteringAddr(raftName string) string {
 
 func (s *StanServer) getClusteringPeerAddr(raftName, nodeID string) string {
 	return fmt.Sprintf("%s.%s.%s", s.opts.ID, nodeID, raftName)
+}
+
+// Apply log is invoked once a log entry is committed.
+// It returns a value which will be made available in the
+// ApplyFuture returned by Raft.Apply method if that
+// method was called on the same Raft node as the FSM.
+func (r *raftFSM) Apply(l *raft.Log) interface{} {
+	s := r.server
+	op := &spb.RaftOperation{}
+	if err := op.Unmarshal(l.Data); err != nil {
+		panic(err)
+	}
+	switch op.OpType {
+	case spb.RaftOperation_Publish:
+		// Message replication.
+		var (
+			c   *channel
+			err error
+		)
+		for _, msg := range op.PublishBatch.Messages {
+			// This is a batch for a given channel, so lookup channel once.
+			if c == nil {
+				c, err = s.lookupOrCreateChannel(msg.Subject)
+			}
+			if err == nil {
+				_, err = c.store.Msgs.Store(msg)
+			}
+			if err != nil {
+				panic(fmt.Errorf("failed to store replicated message %d on channel %s: %v",
+					msg.Sequence, c.name, err))
+			}
+		}
+		return nil
+	case spb.RaftOperation_Connect:
+		// Client connection create replication.
+		return s.processConnect(op.ClientConnect.Request, op.ClientConnect.Refresh)
+	case spb.RaftOperation_Disconnect:
+		// Client connection close replication.
+		return s.closeClient(op.ClientDisconnect.ClientID)
+	case spb.RaftOperation_Subscribe:
+		// Subscription replication.
+		c, sub, err := s.processSub(op.Sub.Request, op.Sub.AckInbox)
+		return &replicatedSub{c: c, sub: sub, err: err}
+	case spb.RaftOperation_RemoveSubscription:
+		fallthrough
+	case spb.RaftOperation_CloseSubscription:
+		// Close/Unsub subscription replication.
+		isSubClose := op.OpType == spb.RaftOperation_CloseSubscription
+		s.closeMu.Lock()
+		err := s.unsubscribe(op.Unsub, isSubClose)
+		s.closeMu.Unlock()
+		return err
+	case spb.RaftOperation_SendAndAck:
+		if !s.isLeader() {
+			s.processReplicatedSendAndAck(op.SubSentAck)
+		}
+		return nil
+	case spb.RaftOperation_DeleteChannel:
+		// If we are replicating and this node is the leader,
+		// the function we call must not grab a lock since the
+		// caller has it. So grab the lock in case of replay
+		// or if this node is not the leader.
+		useLocking := !s.isLeader()
+		return s.processDeleteChannel(op.Channel, useLocking)
+	default:
+		panic(fmt.Sprintf("unknown op type %s", op.OpType))
+	}
 }
