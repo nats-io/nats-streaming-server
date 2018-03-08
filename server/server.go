@@ -1454,6 +1454,14 @@ func (s *StanServer) createNatsConnections() error {
 	return err
 }
 
+// NewNATSOptions returns a new instance of (NATS) Options.
+// This is needed if one wants to configure specific NATS options
+// before starting a NATS Streaming Server (with RunServerWithOpts()).
+func NewNATSOptions() *server.Options {
+	opts := server.Options{}
+	return &opts
+}
+
 // RunServer will startup an embedded STAN server and a nats-server to support it.
 func RunServer(ID string) (*StanServer, error) {
 	sOpts := GetDefaultOptions()
@@ -4954,11 +4962,4 @@ func (s *StanServer) Snapshot() (raft.FSMSnapshot, error) {
 // state.
 func (s *StanServer) Restore(snapshot io.ReadCloser) error {
 	return s.restoreFromSnapshot(snapshot)
-}
-
-// GetNATSOptions returns an empty NATS Options structure that one can
-// use to configure and then pass to RunServerWithOpts()
-func GetNATSOptions() *server.Options {
-	opts := server.Options{}
-	return &opts
 }

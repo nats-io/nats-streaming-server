@@ -821,7 +821,7 @@ func TestGhostDurableSubs(t *testing.T) {
 
 func TestGetNATSOptions(t *testing.T) {
 	opts := GetDefaultOptions()
-	nopts := GetNATSOptions()
+	nopts := NewNATSOptions()
 	nopts.Host = "127.0.0.1"
 	nopts.Port = 4567
 	s, err := RunServerWithOpts(opts, nopts)
