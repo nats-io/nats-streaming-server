@@ -6,7 +6,6 @@ package server
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/url"
 	"os"
@@ -196,8 +195,11 @@ type ioPendingMsg struct {
 	pm pb.PubMsg
 	pa pb.PubAck
 	c  *channel
-	sc chan struct{}
 	dc bool // if true, this is a request to delete this channel.
+
+	// Use for synchronization between ioLoop and other routines
+	sc  chan struct{}
+	sdc chan struct{}
 }
 
 // Constant that defines the size of the channel that feeds the IO thread.
@@ -1870,11 +1872,10 @@ func (s *StanServer) start(runningState State) error {
 // startRaftNode creates and starts the Raft group.
 // This should only be called if the server is running in clustered mode.
 func (s *StanServer) startRaftNode() error {
-	if err := s.createServerRaftNode(s); err != nil {
+	if err := s.createServerRaftNode(); err != nil {
 		return err
 	}
 	node := s.raft
-	atomic.StoreInt64(&s.raft.initialized, 1)
 
 	leaderWait := make(chan struct{}, 1)
 	leaderReady := func() {
@@ -1926,6 +1927,14 @@ func (s *StanServer) startRaftNode() error {
 	return nil
 }
 
+func (s *StanServer) sendSynchronziationRequest() (chan struct{}, chan struct{}) {
+	sc := make(chan struct{}, 1)
+	sdc := make(chan struct{})
+	iopm := &ioPendingMsg{sc: sc, sdc: sdc}
+	s.ioChannel <- iopm
+	return sc, sdc
+}
+
 // leadershipAcquired should be called when this node is elected leader.
 // This should only be called when the server is running in clustered mode.
 func (s *StanServer) leadershipAcquired() error {
@@ -1936,18 +1945,18 @@ func (s *StanServer) leadershipAcquired() error {
 	// (processing of client publishes). However, since a node could go
 	// from leader to follower to leader again, let's make sure that we
 	// synchronize with the ioLoop before we touch the channels' nextSequence.
-	ch := make(chan struct{}, 1)
-	iopm := &ioPendingMsg{sc: ch}
-	s.ioChannel <- iopm
+	sc, sdc := s.sendSynchronziationRequest()
+
 	// Wait for the ioLoop to reach that special iopm and notifies us (or
 	// give up if server is shutting down).
 	select {
-	case <-ch:
+	case <-sc:
 	case <-s.ioChannelQuit:
+		close(sdc)
 		return nil
 	}
 	// Then, we will notify it back to unlock it when were are done here.
-	defer close(ch)
+	defer close(sdc)
 
 	// Use a barrier to ensure all preceding operations are applied to the FSM
 	if err := s.raft.Barrier(0).Error(); err != nil {
@@ -3639,9 +3648,9 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 		dciopm    *ioPendingMsg
 	)
 
-	leadershipAcquiredSync := func(iopm *ioPendingMsg) {
+	synchronizationRequest := func(iopm *ioPendingMsg) {
 		iopm.sc <- struct{}{}
-		<-iopm.sc
+		<-iopm.sdc
 	}
 
 	ready.Done()
@@ -3654,7 +3663,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 				s.handleChannelDelete(iopm.c)
 				continue
 			} else if iopm.sc != nil {
-				leadershipAcquiredSync(iopm)
+				synchronizationRequest(iopm)
 				continue
 			}
 			batch = append(batch, iopm)
@@ -3691,7 +3700,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 						dciopm = iopm
 						break FILL_BATCH_LOOP
 					} else if iopm.sc != nil {
-						leadershipAcquiredSync(iopm)
+						synchronizationRequest(iopm)
 					} else {
 						batch = append(batch, iopm)
 					}
@@ -4873,93 +4882,4 @@ func (s *StanServer) Shutdown() {
 
 	// Wait for go-routines to return
 	s.wg.Wait()
-}
-
-type replicatedSub struct {
-	c   *channel
-	sub *subState
-	err error
-}
-
-// Apply log is invoked once a log entry is committed.
-// It returns a value which will be made available in the
-// ApplyFuture returned by Raft.Apply method if that
-// method was called on the same Raft node as the FSM.
-func (s *StanServer) Apply(l *raft.Log) interface{} {
-	op := &spb.RaftOperation{}
-	if err := op.Unmarshal(l.Data); err != nil {
-		panic(err)
-	}
-	switch op.OpType {
-	case spb.RaftOperation_Publish:
-		// Message replication.
-		var (
-			c   *channel
-			err error
-		)
-		for _, msg := range op.PublishBatch.Messages {
-			// This is a batch for a given channel, so lookup channel once.
-			if c == nil {
-				c, err = s.lookupOrCreateChannel(msg.Subject)
-			}
-			if err == nil {
-				_, err = c.store.Msgs.Store(msg)
-			}
-			if err != nil {
-				panic(fmt.Errorf("failed to store replicated message %d on channel %s: %v",
-					msg.Sequence, c.name, err))
-			}
-		}
-		return nil
-	case spb.RaftOperation_Connect:
-		// Client connection create replication.
-		return s.processConnect(op.ClientConnect.Request, op.ClientConnect.Refresh)
-	case spb.RaftOperation_Disconnect:
-		// Client connection close replication.
-		return s.closeClient(op.ClientDisconnect.ClientID)
-	case spb.RaftOperation_Subscribe:
-		// Subscription replication.
-		c, sub, err := s.processSub(op.Sub.Request, op.Sub.AckInbox)
-		return &replicatedSub{c: c, sub: sub, err: err}
-	case spb.RaftOperation_RemoveSubscription:
-		fallthrough
-	case spb.RaftOperation_CloseSubscription:
-		// Close/Unsub subscription replication.
-		isSubClose := op.OpType == spb.RaftOperation_CloseSubscription
-		s.closeMu.Lock()
-		err := s.unsubscribe(op.Unsub, isSubClose)
-		s.closeMu.Unlock()
-		return err
-	case spb.RaftOperation_SendAndAck:
-		if !s.isLeader() {
-			s.processReplicatedSendAndAck(op.SubSentAck)
-		}
-		return nil
-	case spb.RaftOperation_DeleteChannel:
-		// If we are replicating and this node is the leader,
-		// the function we call must not grab a lock since the
-		// caller has it. So grab the lock in case of replay
-		// or if this node is not the leader.
-		useLocking := !s.isLeader()
-		return s.processDeleteChannel(op.Channel, useLocking)
-	default:
-		panic(fmt.Sprintf("unknown op type %s", op.OpType))
-	}
-}
-
-// Snapshot is used to support log compaction. This call should
-// return an FSMSnapshot which can be used to save a point-in-time
-// snapshot of the FSM. Apply and Snapshot are not called in multiple
-// threads, but Apply will be called concurrently with Persist. This means
-// the FSM should be implemented in a fashion that allows for concurrent
-// updates while a snapshot is happening.
-func (s *StanServer) Snapshot() (raft.FSMSnapshot, error) {
-	return newServerSnapshot(s), nil
-}
-
-// Restore is used to restore an FSM from a snapshot. It is not called
-// concurrently with any other command. The FSM must discard all previous
-// state.
-func (s *StanServer) Restore(snapshot io.ReadCloser) error {
-	return s.restoreFromSnapshot(snapshot)
 }

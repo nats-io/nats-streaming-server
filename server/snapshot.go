@@ -5,7 +5,6 @@ package server
 import (
 	"fmt"
 	"io"
-	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -21,8 +20,14 @@ type serverSnapshot struct {
 	*StanServer
 }
 
-func newServerSnapshot(s *StanServer) raft.FSMSnapshot {
-	return &serverSnapshot{s}
+// Snapshot is used to support log compaction. This call should
+// return an FSMSnapshot which can be used to save a point-in-time
+// snapshot of the FSM. Apply and Snapshot are not called in multiple
+// threads, but Apply will be called concurrently with Persist. This means
+// the FSM should be implemented in a fashion that allows for concurrent
+// updates while a snapshot is happening.
+func (r *raftFSM) Snapshot() (raft.FSMSnapshot, error) {
+	return &serverSnapshot{r.server}, nil
 }
 
 // Persist should dump all necessary state to the WriteCloser 'sink',
@@ -194,15 +199,42 @@ func (s *serverSnapshot) snapshotChannels(snap *spb.RaftSnapshot) error {
 // Release is a no-op.
 func (s *serverSnapshot) Release() {}
 
-// restoreFromSnapshot restores a server from a snapshot. This is not called
-// concurrently with any other Raft commands.
-func (s *StanServer) restoreFromSnapshot(snapshot io.ReadCloser) error {
+// Restore is used to restore an FSM from a snapshot. It is not called
+// concurrently with any other command. The FSM must discard all previous
+// state.
+func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 	defer snapshot.Close()
 
-	// initialized will be 0 until the NewRaft() call has returned.
-	// So restoreFromRaftInit means that the snapshot is restored during
-	// raft node initialization.
-	restoreFromRaftInit := atomic.LoadInt64(&s.raft.initialized) == 0
+	r.Lock()
+	defer r.Unlock()
+
+	// This function may be invoked directly from raft.NewRaft() when
+	// the node is initialized and if there were exisiting local snapshots,
+	// or later, when catching up with a leader. We behave differently
+	// depending on the situation. So we need to know if we are called
+	// from NewRaft().
+	//
+	// To do so, we first look at the number of local snapshots before
+	// calling NewRaft(). If the number is > 0, it means that Raft will
+	// call us within NewRaft(). Raft will restore the latest snapshot
+	// first, and only in case of Restore() returning an error will move
+	// to the next (earliest) one. When there are none and Restore() still
+	// returns an error raft.NewRaft() will return an error.
+	//
+	// So on error we decrement the number of snapshots, on success we set
+	// it to 0. This means that next time Restore() is invoked, we know it
+	// is restoring from a leader, not from the local snapshots.
+	inNewRaftCall := r.snapshotsOnInit != 0
+	if inNewRaftCall {
+		defer func() {
+			if retErr != nil {
+				r.snapshotsOnInit--
+			} else {
+				r.snapshotsOnInit = 0
+			}
+		}()
+	}
+	s := r.server
 
 	// We need to drop current state. The server will recover from snapshot
 	// and all newer Raft entry logs (basically the entire state is being
@@ -242,13 +274,14 @@ func (s *StanServer) restoreFromSnapshot(snapshot io.ReadCloser) error {
 	if err := serverSnap.Unmarshal(buf); err != nil {
 		panic(err)
 	}
-	if err := s.restoreClientsFromSnapshot(serverSnap); err != nil {
+	if err := r.restoreClientsFromSnapshot(serverSnap); err != nil {
 		return err
 	}
-	return s.restoreChannelsFromSnapshot(serverSnap, restoreFromRaftInit)
+	return r.restoreChannelsFromSnapshot(serverSnap, inNewRaftCall)
 }
 
-func (s *StanServer) restoreClientsFromSnapshot(serverSnap *spb.RaftSnapshot) error {
+func (r *raftFSM) restoreClientsFromSnapshot(serverSnap *spb.RaftSnapshot) error {
+	s := r.server
 	for _, sc := range serverSnap.Clients {
 		if _, err := s.clients.register(sc.ID, sc.HbInbox); err != nil {
 			return err
@@ -257,9 +290,11 @@ func (s *StanServer) restoreClientsFromSnapshot(serverSnap *spb.RaftSnapshot) er
 	return nil
 }
 
-func (s *StanServer) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, restoreFromRaftInit bool) error {
+func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNewRaftCall bool) error {
+	s := r.server
+
 	var channelsBeforeRestore map[string]*channel
-	if !restoreFromRaftInit {
+	if !inNewRaftCall {
 		channelsBeforeRestore = s.channels.getAll()
 	}
 	for _, sc := range serverSnap.Channels {
@@ -269,8 +304,8 @@ func (s *StanServer) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, r
 		}
 		// Do not restore messages from snapshot if the server
 		// just started and is recovering from its own snapshot.
-		if !restoreFromRaftInit {
-			if err := s.restoreMsgsFromSnapshot(c, sc.First, sc.Last); err != nil {
+		if !inNewRaftCall {
+			if err := r.restoreMsgsFromSnapshot(c, sc.First, sc.Last); err != nil {
 				return err
 			}
 			delete(channelsBeforeRestore, sc.Channel)
@@ -279,7 +314,7 @@ func (s *StanServer) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, r
 			s.recoverOneSub(c, ss.State, nil, ss.AcksPending)
 		}
 	}
-	if !restoreFromRaftInit {
+	if !inNewRaftCall {
 		// Now delete channels that we had before the restore.
 		// This is possible if channels have been deleted while
 		// this node was not running and snapshot occurred. The
@@ -294,7 +329,7 @@ func (s *StanServer) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, r
 	return nil
 }
 
-func (s *StanServer) restoreMsgsFromSnapshot(c *channel, first, last uint64) error {
+func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64) error {
 	storeFirst, storeLast, err := c.store.Msgs.FirstAndLastSequence()
 	if err != nil {
 		return err
