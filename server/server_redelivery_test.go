@@ -1116,7 +1116,7 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 
 	ch := make(chan bool, 1)
 	errCh := make(chan error, 4)
-	skipCh := make(chan bool, 1)
+	skipCh := make(chan bool, 2)
 	restarted := int32(0)
 	totalMsgs := int32(10)
 	delivered := int32(0)
@@ -1181,15 +1181,15 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 		}
 	}
 	// Wait for all messages to be received
-	if err := Wait(ch); err != nil {
-		t.Fatal("Did not get our messages")
-	}
 	select {
+	case <-ch:
 	case <-skipCh:
 		// If we have a redelivery before the server restart
 		// (can happen on Travis because of timing), no point
 		// in continuing this test.
 		return
+	case <-time.After(5 * time.Second):
+		t.Fatal("Did not receive all our messages")
 	default:
 	}
 	// Now stop server and wait more than AckWait before resarting.
