@@ -635,25 +635,6 @@ func TestMaxInactivity(t *testing.T) {
 	verifyChannelExist(t, s, "foo.baz", true, time.Second)
 	verifyChannelExist(t, s, "foo.baz", false, fooStarLimits.MaxInactivity+100*time.Millisecond)
 
-	// Check removal of a channel not first in the list
-	if err := sc.Publish("foo.one", []byte("hello")); err != nil {
-		t.Fatalf("Error on publish: %v", err)
-	}
-	if err := sc.Publish("foo.two", []byte("hello")); err != nil {
-		t.Fatalf("Error on publish: %v", err)
-	}
-	sub, err := sc.Subscribe("foo.two", func(_ *stan.Msg) {})
-	if err != nil {
-		t.Fatalf("Error on subscribe: %v", err)
-	}
-	s.channels.Lock()
-	ok := len(s.channels.delWatchList) == 1 && s.channels.delWatchList[0].name == "foo.one"
-	s.channels.Unlock()
-	if !ok {
-		t.Fatal("Delete channel watch list should contain only foo.one")
-	}
-	sub.Unsubscribe()
-
 	// Send a message on a new channel and restart server
 	if err := sc.Publish("recovered", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
@@ -670,5 +651,40 @@ func TestMaxInactivity(t *testing.T) {
 	verifyChannelExist(t, s, "recovered", false, recoveredLimits.MaxInactivity+50*time.Millisecond)
 	// This one should always be there
 	verifyChannelExist(t, s, "foo.bar", true, 2*time.Second)
+
+	// Send to a new channel
+	if err := sc.Publish("c10", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	// Block the ioLoop
+	ch1, ch2 := s.sendSynchronziationRequest()
+	select {
+	case <-ch1:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Did not get notification from ioLoop")
+	}
+	// Wait for timer to fire and post delete channel request to ioLoop
+	// which will be delayed since we did not release the ioLoop yet.
+	time.Sleep(2 * opts.MaxInactivity)
+	// Create a subscription
+	sub, err := sc.Subscribe("c10", func(_ *stan.Msg) {})
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	// Release ioLoop
+	close(ch2)
+	// Check that channel was not deleted
+	verifyChannelExist(t, s, "c10", true, 2*opts.MaxInactivity)
+	c := s.channels.get("c10")
+	s.channels.lockDelete()
+	tset := c.activity.timerSet
+	s.channels.unlockDelete()
+	if tset {
+		t.Fatalf("Timer should not be set")
+	}
+	sub.Unsubscribe()
+	// Now should be removed
+	verifyChannelExist(t, s, "c10", false, 2*opts.MaxInactivity)
+
 	sc.Close()
 }

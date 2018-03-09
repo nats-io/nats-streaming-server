@@ -461,12 +461,8 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 		}
 		return nil
 	case spb.RaftOperation_DeleteChannel:
-		// If we are replicating and this node is the leader,
-		// the function we call must not grab a lock since the
-		// caller has it. So grab the lock in case of replay
-		// or if this node is not the leader.
-		useLocking := !s.isLeader()
-		return s.processDeleteChannel(op.Channel, useLocking)
+		s.processDeleteChannel(op.Channel)
+		return nil
 	default:
 		panic(fmt.Sprintf("unknown op type %s", op.OpType))
 	}

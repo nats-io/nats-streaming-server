@@ -556,3 +556,129 @@ func TestClientStoreError(t *testing.T) {
 		t.Fatalf("Unexpected client in server: %v", c)
 	}
 }
+
+type delChannStore struct {
+	stores.Store
+	sync.RWMutex
+	fail bool
+	ch   chan bool
+}
+
+func (ms *delChannStore) DeleteChannel(name string) error {
+	ms.RLock()
+	fail := ms.fail
+	ch := ms.ch
+	ms.RUnlock()
+	defer func() { ch <- true }()
+	if fail {
+		return errOnPurpose
+	}
+	return ms.Store.DeleteChannel(name)
+}
+
+func TestDeleteChannelStoreError(t *testing.T) {
+	opts := GetDefaultOptions()
+	logger := &checkErrorLogger{checkErrorStr: "deleting channel"}
+	opts.CustomLogger = logger
+	opts.StoreLimits.MaxInactivity = 100 * time.Millisecond
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	s.channels.Lock()
+	ms := &delChannStore{Store: s.channels.store, ch: make(chan bool)}
+	s.channels.store = ms
+	s.channels.Unlock()
+
+	testDeleteChannel = true
+	defer func() { testDeleteChannel = false }()
+
+	c, err := s.lookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Error creating channel: %v", err)
+	}
+	if c.activity == nil {
+		t.Fatalf("Activity not created")
+	}
+	time.Sleep(2 * opts.StoreLimits.MaxInactivity)
+	// Check for possible lookup while channel is being deleted.
+	if _, err := s.lookupOrCreateChannel("foo"); err != ErrChanDelInProgress {
+		t.Fatalf("Expected error %v, got %v", ErrChanDelInProgress, err)
+	}
+	// Wait to be notified that channel has been deleted
+	if err := Wait(ms.ch); err != nil {
+		t.Fatal("Channel was not deleted")
+	}
+	// Channel should have been deleted and no longer be in map
+	if s.channels.get("foo") != nil {
+		t.Fatalf("Channel should have been removed")
+	}
+	// Check that timer is off
+	s.channels.lockDelete()
+	dip := c.activity.deleteInProgress
+	tset := c.activity.timerSet
+	s.channels.unlockDelete()
+	if !dip {
+		t.Fatalf("DeleteInProgress not expected to have been reset")
+	}
+	if tset {
+		t.Fatalf("Timer should have been stopped")
+	}
+
+	// Don't sleep anymore
+	testDeleteChannel = false
+
+	// Now introduce failure
+	ms.Lock()
+	ms.fail = true
+	ms.Unlock()
+
+	// Create new channel
+	c, err = s.lookupOrCreateChannel("bar")
+	if err != nil {
+		t.Fatalf("Error creating channel: %v", err)
+	}
+	// Wait to be notified that store tried to delete channel
+	if err := Wait(ms.ch); err != nil {
+		t.Fatal("Channel was not deleted")
+	}
+	logger.Lock()
+	gotIt := logger.gotError
+	logger.Unlock()
+	if !gotIt {
+		t.Fatalf("No error about deleting channel was logged")
+	}
+	// Check that the activity struct has been reset properly
+	s.channels.lockDelete()
+	dip = c.activity.deleteInProgress
+	tset = c.activity.timerSet
+	s.channels.unlockDelete()
+	if dip {
+		t.Fatalf("DeleteInProgress should have been reset")
+	}
+	if !tset {
+		t.Fatalf("Timer should be active")
+	}
+	// Remove failure
+	ms.Lock()
+	ms.fail = false
+	ms.Unlock()
+	// Wait for deletion
+	if err := Wait(ms.ch); err != nil {
+		t.Fatal("Channel was not deleted")
+	}
+	// Channel should have been deleted and no longer be in map
+	if s.channels.get("foo") != nil {
+		t.Fatalf("Channel should have been removed")
+	}
+	// Check that timer is off
+	s.channels.lockDelete()
+	dip = c.activity.deleteInProgress
+	tset = c.activity.timerSet
+	s.channels.unlockDelete()
+	if !dip {
+		t.Fatalf("DeleteInProgress not expected to have been reset")
+	}
+	if tset {
+		t.Fatalf("Timer should have been stopped")
+	}
+}

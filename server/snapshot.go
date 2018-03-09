@@ -320,11 +320,9 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 		// this node was not running and snapshot occurred. The
 		// channels would not be in the snapshot, so we can remove
 		// them now.
-		s.channels.Lock()
 		for name := range channelsBeforeRestore {
-			s.processDeleteChannel(name, false)
+			s.processDeleteChannel(name)
 		}
-		s.channels.Unlock()
 	}
 	return nil
 }
