@@ -230,6 +230,26 @@ func assertMsg(t *testing.T, msg pb.MsgProto, expectedData []byte, expectedSeq u
 	}
 }
 
+func TestClusteringMemoryStoreNotSupported(t *testing.T) {
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// Configure the server in non-clustered mode.
+	opts := getTestDefaultOptsForClustering("a", true)
+	opts.NATSServerURL = ""
+	opts.StoreType = stores.TypeMemory
+	s, err := RunServerWithOpts(opts, nil)
+	if err == nil {
+		if s != nil {
+			s.Shutdown()
+		}
+		t.Fatal("Expected error got none")
+	}
+	if !strings.Contains(err.Error(), stores.TypeMemory) {
+		t.Fatalf("Expected error about MEMORY store not supported, got %v", err)
+	}
+}
+
 // Ensure restarting a non-clustered server in clustered mode fails.
 func TestClusteringRestart(t *testing.T) {
 	cleanupDatastore(t)

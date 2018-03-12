@@ -1341,6 +1341,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	}
 
 	if sOpts.Clustering.Clustered {
+		if sOpts.StoreType == stores.TypeMemory {
+			return nil, fmt.Errorf("stan: clustering mode not supported with %s store type", stores.TypeMemory)
+		}
 		// Override store sync configuration with cluster sync.
 		sOpts.FileStoreOpts.DoSync = sOpts.Clustering.Sync
 	}
