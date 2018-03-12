@@ -360,14 +360,16 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64) error 
 	subject := fmt.Sprintf("%s.%s.%s", defaultSnapshotPrefix, c.stan.info.ClusterID, c.name)
 
 	var (
-		reqBuf   [16]byte
-		reqNext  = first
-		reqStart = first
-		reqEnd   uint64
+		reqBuf    [16]byte
+		reqNext   = first
+		reqStart  = first
+		reqEnd    uint64
+		batch     = uint64(100)
+		halfBatch = batch / 2
 	)
 	for seq := first; seq <= last; seq++ {
 		if seq == reqNext {
-			reqEnd = reqStart + uint64(100)
+			reqEnd = reqStart + batch
 			if reqEnd > last {
 				reqEnd = last
 			}
@@ -377,7 +379,7 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64) error 
 				return err
 			}
 			if reqEnd != last {
-				reqNext = reqEnd - reqStart/2
+				reqNext = reqStart + halfBatch
 				reqStart = reqEnd + 1
 			}
 		}

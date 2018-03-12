@@ -1816,6 +1816,120 @@ func TestClusteringLogSnapshotRestoreOnInit(t *testing.T) {
 	}
 }
 
+type checkRestoreLogger struct {
+	dummyLogger
+	ch chan error
+}
+
+func (l *checkRestoreLogger) Errorf(format string, args ...interface{}) {
+	m := fmt.Errorf(format, args...)
+	l.ch <- m
+}
+
+func TestClusteringLogSnapshotRestoreBatching(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.TrailingLogs = 0
+	s1sOpts.MaxMsgs = 234
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.TrailingLogs = 0
+	s2sOpts.MaxMsgs = 234
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.Clustering.TrailingLogs = 0
+	s3sOpts.MaxMsgs = 234
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	for _, s := range servers {
+		checkState(t, s, Clustered)
+	}
+
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	// Create a client connection.
+	sc, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Publish 100 messages
+	firstCount := 100
+	for i := 0; i < firstCount; i++ {
+		if err := sc.Publish("foo", []byte(strconv.Itoa(i+1))); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+
+	// Kill a follower
+	var follower *StanServer
+	for _, s := range servers {
+		if leader != s {
+			follower = s
+			break
+		}
+	}
+	servers = removeServer(servers, follower)
+	follower.Shutdown()
+
+	// Publish more messages while the follower is down.
+	moreMsgs := 500
+	for i := 0; i < moreMsgs; i++ {
+		if err := sc.Publish("foo", []byte(strconv.Itoa(i+firstCount+1))); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+
+	// Force snapshot
+	if err := leader.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error during snapshot: %v", err)
+	}
+
+	// Restart follower
+	cl := &checkRestoreLogger{ch: make(chan error, 10)}
+	follower.opts.Clustering.RaftLogging = true
+	follower.opts.CustomLogger = cl
+	follower = runServerWithOpts(t, follower.opts, nil)
+	servers = append(servers, follower)
+
+	getLeader(t, 10*time.Second, servers...)
+
+	expected := make(map[uint64]msg, s1sOpts.MaxMsgs)
+	total := uint64(firstCount + moreMsgs)
+	start := total - uint64(s1sOpts.MaxMsgs) + 1
+	for i := start; i <= total; i++ {
+		expected[i] = msg{sequence: i, data: []byte(strconv.Itoa(int(i)))}
+	}
+	verifyChannelConsistency(t, "foo", 10*time.Second, start, total, expected, servers...)
+
+	select {
+	case e := <-cl.ch:
+		t.Fatalf("Error on restore: %v", e)
+	default:
+	}
+
+	sc.Close()
+}
+
 // Ensures subscriptions are replicated such that when a leader fails over, the
 // subscription continues to deliver messages.
 func TestClusteringSubscriberFailover(t *testing.T) {
