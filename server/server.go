@@ -32,7 +32,7 @@ import (
 	"github.com/nats-io/nats-streaming-server/util"
 )
 
-// A single STAN server
+// A single NATS Streaming Server
 
 // Server defaults.
 const (
@@ -529,7 +529,7 @@ func (c *channel) getAckSubject() string {
 	return fmt.Sprintf("%s.%s", c.stan.info.AcksSubs, c.name)
 }
 
-// StanServer structure represents the STAN server
+// StanServer structure represents the NATS Streaming Server
 type StanServer struct {
 	// Keep all members for which we use atomic at the beginning of the
 	// struct and make sure they are all 64bits (or use padding if necessary).
@@ -644,7 +644,7 @@ type subStore struct {
 	qsubs    map[string]*queueState // queue subscribers
 	durables map[string]*subState   // durables lookup
 	acks     map[string]*subState   // ack inbox lookup
-	stan     *StanServer            // back link to Stan server
+	stan     *StanServer            // back link to the server
 }
 
 // Holds all queue subsribers for a subject/group and
@@ -1080,7 +1080,7 @@ func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 	return sub
 }
 
-// Options for STAN Server
+// Options for NATS Streaming Server
 type Options struct {
 	ID                 string
 	DiscoverPrefix     string
@@ -1119,7 +1119,7 @@ func (o *Options) Clone() *Options {
 	return &clone
 }
 
-// DefaultOptions are default options for the STAN server
+// DefaultOptions are default options for the NATS Streaming Server
 var defaultOptions = Options{
 	ID:                DefaultClusterID,
 	DiscoverPrefix:    DefaultDiscoverPrefix,
@@ -1133,7 +1133,7 @@ var defaultOptions = Options{
 	ClientHBFailCount: DefaultMaxFailedHeartBeats,
 }
 
-// GetDefaultOptions returns default options for the STAN server
+// GetDefaultOptions returns default options for the NATS Streaming Server
 func GetDefaultOptions() (o *Options) {
 	opts := defaultOptions
 	opts.StoreLimits = stores.DefaultStoreLimits
@@ -1311,7 +1311,7 @@ func NewNATSOptions() *server.Options {
 	return &opts
 }
 
-// RunServer will startup an embedded STAN server and a nats-server to support it.
+// RunServer will startup an embedded NATS Streaming Server and a nats-server to support it.
 func RunServer(ID string) (*StanServer, error) {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = ID
@@ -1319,7 +1319,8 @@ func RunServer(ID string) (*StanServer, error) {
 	return RunServerWithOpts(sOpts, &nOpts)
 }
 
-// RunServerWithOpts will startup an embedded STAN server and a nats-server to support it.
+// RunServerWithOpts allows you to run a NATS Streaming Server with full control
+// on the Streaming and NATS Server configuration.
 func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *StanServer, returnedError error) {
 	var sOpts *Options
 	var nOpts *server.Options
@@ -4656,7 +4657,7 @@ func (s *StanServer) startGoRoutine(f func()) {
 	s.mu.Unlock()
 }
 
-// ClusterID returns the STAN Server's ID.
+// ClusterID returns the NATS Streaming Server's ID.
 func (s *StanServer) ClusterID() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
