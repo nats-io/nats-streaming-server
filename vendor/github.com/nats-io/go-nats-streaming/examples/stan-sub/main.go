@@ -1,5 +1,15 @@
-// Copyright 2012-2016 Apcera Inc. All rights reserved.
-// +build ignore
+// Copyright 2016-2018 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package main
 
@@ -106,9 +116,9 @@ func main() {
 
 	if startSeq != 0 {
 		startOpt = stan.StartAtSequence(startSeq)
-	} else if deliverLast == true {
+	} else if deliverLast {
 		startOpt = stan.StartWithLastReceived()
-	} else if deliverAll == true {
+	} else if deliverAll {
 		log.Print("subscribing with DeliverAllAvailable")
 		startOpt = stan.DeliverAllAvailable()
 	} else if startDelta != "" {
@@ -138,7 +148,7 @@ func main() {
 	cleanupDone := make(chan bool)
 	signal.Notify(signalChan, os.Interrupt)
 	go func() {
-		for _ = range signalChan {
+		for range signalChan {
 			fmt.Printf("\nReceived an interrupt, unsubscribing and closing connection...\n\n")
 			// Do not unsubscribe a durable on exit, except if asked to.
 			if durable == "" || unsubscribe {

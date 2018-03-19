@@ -157,7 +157,7 @@
 			"importpath": "github.com/nats-io/gnatsd",
 			"repository": "https://github.com/nats-io/gnatsd",
 			"vcs": "git",
-			"revision": "c19527c03f2dac7c7433880c020eca3bcf676df5",
+			"revision": "b2a9ed97d69a96c65a0ee09f259d25c2379aeacf",
 			"branch": "master",
 			"notests": true
 		},
@@ -165,7 +165,7 @@
 			"importpath": "github.com/nats-io/go-nats",
 			"repository": "https://github.com/nats-io/go-nats",
 			"vcs": "git",
-			"revision": "78ec4b93936d7a00e59b7f3939d8116955916d1b",
+			"revision": "2485387d6ede89c1c8c3445cd1935fd41a2e9ee9",
 			"branch": "master",
 			"notests": true
 		},
@@ -173,7 +173,7 @@
 			"importpath": "github.com/nats-io/go-nats-streaming",
 			"repository": "https://github.com/nats-io/go-nats-streaming",
 			"vcs": "git",
-			"revision": "1b74f22f414c315e983e8aa6dea3571c999a31b2",
+			"revision": "1662e177fdb0b7964a25e8e7e3570dd49b763c9a",
 			"branch": "master",
 			"notests": true
 		},

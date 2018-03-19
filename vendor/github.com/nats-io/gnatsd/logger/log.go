@@ -1,4 +1,15 @@
-// Copyright 2012-2015 Apcera Inc. All rights reserved.
+// Copyright 2012-2018 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //Package logger provides logging facilities for the NATS server
 package logger
@@ -19,6 +30,7 @@ type Logger struct {
 	fatalLabel string
 	debugLabel string
 	traceLabel string
+	logFile    *os.File // file pointer for the file logger.
 }
 
 // NewStdLogger creates a logger with output directed to Stderr
@@ -67,13 +79,25 @@ func NewFileLogger(filename string, time, debug, trace, pid bool) *Logger {
 	}
 
 	l := &Logger{
-		logger: log.New(f, pre, flags),
-		debug:  debug,
-		trace:  trace,
+		logger:  log.New(f, pre, flags),
+		debug:   debug,
+		trace:   trace,
+		logFile: f,
 	}
 
 	setPlainLabelFormats(l)
 	return l
+}
+
+// Close implements the io.Closer interface to clean up
+// resources in the server's logger implementation.
+// Caller must ensure threadsafety.
+func (l *Logger) Close() error {
+	if f := l.logFile; f != nil {
+		l.logFile = nil
+		return f.Close()
+	}
+	return nil
 }
 
 // Generate the pid prefix string
