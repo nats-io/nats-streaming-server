@@ -282,10 +282,6 @@ func TestPerChannelLimits(t *testing.T) {
 			defer cleanupDatastore(t)
 
 			opts = getTestDefaultOptsForPersistentStore()
-			if opts.StoreType == stores.TypeFile {
-				stores.FileStoreTestSetBackgroundTaskInterval(15 * time.Millisecond)
-				defer stores.FileStoreTestResetBackgroundTaskInterval()
-			}
 		}
 		opts.MaxMsgs = 10
 		opts.MaxAge = time.Hour

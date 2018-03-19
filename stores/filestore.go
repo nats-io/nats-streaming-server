@@ -566,6 +566,8 @@ type FileMsgStore struct {
 // for tests puposes.
 var (
 	bufShrinkInterval     = defaultBufShrinkInterval
+	bkgTaskMu             sync.Mutex
+	bkgTaskRefs           int
 	bkgTasksSleepDuration = defaultBkgTasksSleepDuration
 	cacheTTL              = int64(defaultCacheTTL)
 	sliceCloseInterval    = defaultSliceCloseInterval
@@ -574,13 +576,15 @@ var (
 // FileStoreTestSetBackgroundTaskInterval is used by tests to reduce the interval
 // at which some tasks are performed in the background
 func FileStoreTestSetBackgroundTaskInterval(wait time.Duration) {
-	bkgTasksSleepDuration = wait
-}
-
-// FileStoreTestResetBackgroundTaskInterval is used by tests to reset the default
-// interval at which some tasks are performed in the background
-func FileStoreTestResetBackgroundTaskInterval() {
-	bkgTasksSleepDuration = defaultBkgTasksSleepDuration
+	// It is possible that both the server test package and
+	// stores test package run in paraller. Ensure that only
+	// one is setting the value to avoid races.
+	bkgTaskMu.Lock()
+	if bkgTaskRefs == 0 {
+		bkgTasksSleepDuration = wait
+	}
+	bkgTaskRefs++
+	bkgTaskMu.Unlock()
 }
 
 // openFile opens the file specified by `filename`.

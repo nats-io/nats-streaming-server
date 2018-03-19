@@ -164,6 +164,8 @@ func init() {
 	// Make the server interpret all our sub's AckWait() as milliseconds instead
 	// of seconds.
 	testAckWaitIsInMillisecond = true
+	// For tests that use FileStore and do message expiration, etc..
+	stores.FileStoreTestSetBackgroundTaskInterval(15 * time.Millisecond)
 }
 
 func stackFatalf(t tLogger, f string, args ...interface{}) {
