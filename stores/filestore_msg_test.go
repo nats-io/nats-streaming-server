@@ -26,7 +26,6 @@ const (
 )
 
 func init() {
-	FileStoreTestSetBackgroundTaskInterval(testFSDefaultBackgroundTaskInterval)
 	bufShrinkInterval = testFSDefaultBufShrinkInterval
 	cacheTTL = testFSDefaultCacheTTL
 	sliceCloseInterval = testFSDefaultSliceCLoseInterval

@@ -42,6 +42,7 @@ func init() {
 		panic(fmt.Errorf("Error removing temp directory: %v", err))
 	}
 	testFSDefaultDatastore = tmpDir
+	FileStoreTestSetBackgroundTaskInterval(testFSDefaultBackgroundTaskInterval)
 }
 
 func cleanupFSDatastore(t tLogger) {
