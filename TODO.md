@@ -1,6 +1,6 @@
 
 - [ ] Retry limits?
-- [ ] Server Store Limits (time, msgs, byte)
+- [X] Server Store Limits (time, msgs, byte)
 - [X] Change time to deltas
 - [X] Server heartbeat, release dead clients.
 - [X] Require clientID for published messages, error if not registered.

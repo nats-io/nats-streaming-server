@@ -1,4 +1,15 @@
-// Copyright 2013-2017 Apcera Inc. All rights reserved.
+// Copyright 2013-2018 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package server
 
@@ -39,6 +50,7 @@ type route struct {
 	authRequired bool
 	tlsRequired  bool
 	closed       bool
+	connectURLs  []string
 }
 
 type connectInfo struct {
@@ -142,24 +154,32 @@ func (c *client) processRouteInfo(info *Info) {
 		c.Debugf("Registering remote route %q", info.ID)
 		// Send our local subscriptions to this route.
 		s.sendLocalSubsToRoute(c)
+		// sendInfo will be false if the route that we just accepted
+		// is the only route there is.
 		if sendInfo {
-			// Need to get the remote IP address.
-			c.mu.Lock()
-			switch conn := c.nc.(type) {
-			case *net.TCPConn, *tls.Conn:
-				addr := conn.RemoteAddr().(*net.TCPAddr)
-				info.IP = fmt.Sprintf("nats-route://%s/", net.JoinHostPort(addr.IP.String(), strconv.Itoa(info.Port)))
-			default:
-				info.IP = c.route.url.String()
+			// The incoming INFO from the route will have IP set
+			// if it has Cluster.Advertise. In that case, use that
+			// otherwise contruct it from the remote TCP address.
+			if info.IP == "" {
+				// Need to get the remote IP address.
+				c.mu.Lock()
+				switch conn := c.nc.(type) {
+				case *net.TCPConn, *tls.Conn:
+					addr := conn.RemoteAddr().(*net.TCPAddr)
+					info.IP = fmt.Sprintf("nats-route://%s/", net.JoinHostPort(addr.IP.String(),
+						strconv.Itoa(info.Port)))
+				default:
+					info.IP = c.route.url.String()
+				}
+				c.mu.Unlock()
 			}
-			c.mu.Unlock()
 			// Now let the known servers know about this new route
 			s.forwardNewRouteInfoToKnownServers(info)
 		}
-		// If the server Info did not have these URLs, update and send an INFO
-		// protocol to all clients that support it (unless the feature is disabled).
-		if s.updateServerINFO(info.ClientConnectURLs) {
-			s.sendAsyncInfoToClients()
+		// Unless disabled, possibly update the server's INFO protocol
+		// and send to clients that know how to handle async INFOs.
+		if !s.getOpts().Cluster.NoAdvertise {
+			s.addClientConnectURLsAndSendINFOToClients(info.ClientConnectURLs)
 		}
 	} else {
 		c.Debugf("Detected duplicate remote route %q", info.ID)
@@ -169,45 +189,24 @@ func (c *client) processRouteInfo(info *Info) {
 
 // sendAsyncInfoToClients sends an INFO protocol to all
 // connected clients that accept async INFO updates.
+// The server lock is held on entry.
 func (s *Server) sendAsyncInfoToClients() {
-	s.mu.Lock()
 	// If there are no clients supporting async INFO protocols, we are done.
-	if s.cproto == 0 {
-		s.mu.Unlock()
+	// Also don't send if we are shutting down...
+	if s.cproto == 0 || s.shutdown {
 		return
 	}
 
-	// Capture under lock
-	proto := s.infoJSON
-
-	// Make a copy of ALL clients so we can release server lock while
-	// sending the protocol to clients. We could check the conditions
-	// (proto support, first PONG sent) here and so have potentially
-	// a limited number of clients, but that would mean grabbing the
-	// client's lock here, which we don't want since we would still
-	// need it in the second loop.
-	clients := make([]*client, 0, len(s.clients))
 	for _, c := range s.clients {
-		clients = append(clients, c)
-	}
-	s.mu.Unlock()
-
-	for _, c := range clients {
 		c.mu.Lock()
-		// If server did not yet receive the CONNECT protocol, check later
-		// when sending the first PONG.
-		if !c.flags.isSet(connectReceived) {
-			c.flags.set(infoUpdated)
-		} else if c.opts.Protocol >= ClientProtoInfo {
-			// Send only if first PONG was sent
-			if c.flags.isSet(firstPongSent) {
-				// sendInfo takes care of checking if the connection is still
-				// valid or not, so don't duplicate tests here.
-				c.sendInfo(proto)
-			} else {
-				// Otherwise, notify that INFO has changed and check later.
-				c.flags.set(infoUpdated)
-			}
+		// Here, we are going to send only to the clients that are fully
+		// registered (server has received CONNECT and first PING). For
+		// clients that are not at this stage, this will happen in the
+		// processing of the first PING (see client.processPing)
+		if c.opts.Protocol >= ClientProtoInfo && c.flags.isSet(firstPongSent) {
+			// sendInfo takes care of checking if the connection is still
+			// valid or not, so don't duplicate tests here.
+			c.sendInfo(s.infoJSON)
 		}
 		c.mu.Unlock()
 	}
@@ -238,7 +237,7 @@ func (s *Server) processImplicitRoute(info *Info) {
 	// Initiate the connection, using info.IP instead of info.URL here...
 	r, err := url.Parse(info.IP)
 	if err != nil {
-		s.Debugf("Error parsing URL from INFO: %v\n", err)
+		s.Errorf("Error parsing URL from INFO: %v\n", err)
 		return
 	}
 
@@ -338,8 +337,6 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 	// Initialize
 	c.initClient()
 
-	c.Debugf("Route connection created")
-
 	if didSolicit {
 		// Do this before the TLS code, otherwise, in case of failure
 		// and if route is explicit, it would try to reconnect to 'nil'...
@@ -372,7 +369,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 
 		c.mu.Unlock()
 		if err := conn.Handshake(); err != nil {
-			c.Debugf("TLS route handshake error: %v", err)
+			c.Errorf("TLS route handshake error: %v", err)
 			c.sendErr("Secure Connection - TLS Required")
 			c.closeConnection()
 			return nil
@@ -443,6 +440,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 
 	c.mu.Unlock()
 
+	c.Noticef("Route connection created")
 	return c
 }
 
@@ -466,10 +464,17 @@ const (
 	QRSID_LEN = len(QRSID)
 )
 
-func (s *Server) routeSidQueueSubscriber(rsid []byte) (*subscription, bool) {
-	cid, sid, ok := parseRouteSid(rsid)
-	if !ok {
-		return nil, false
+// Parse the given rsid. If the protocol does not start with QRSID,
+// returns false and no subscription nor error.
+// If it does start with QRSID, returns true and possibly a subscription
+// or an error if the QRSID protocol is malformed.
+func (s *Server) routeSidQueueSubscriber(rsid []byte) (bool, *subscription, error) {
+	if !bytes.HasPrefix(rsid, []byte(QRSID)) {
+		return false, nil, nil
+	}
+	cid, sid, err := parseRouteQueueSid(rsid)
+	if err != nil {
+		return true, nil, err
 	}
 
 	s.mu.Lock()
@@ -477,16 +482,16 @@ func (s *Server) routeSidQueueSubscriber(rsid []byte) (*subscription, bool) {
 	s.mu.Unlock()
 
 	if client == nil {
-		return nil, true
+		return true, nil, nil
 	}
 
 	client.mu.Lock()
 	sub, ok := client.subs[string(sid)]
 	client.mu.Unlock()
 	if ok {
-		return sub, true
+		return true, sub, nil
 	}
-	return nil, true
+	return true, nil, nil
 }
 
 func routeSid(sub *subscription) string {
@@ -497,19 +502,40 @@ func routeSid(sub *subscription) string {
 	return fmt.Sprintf("%s%s:%d:%s", qi, RSID, sub.client.cid, sub.sid)
 }
 
-func parseRouteSid(rsid []byte) (uint64, []byte, bool) {
-	if !bytes.HasPrefix(rsid, []byte(QRSID)) {
-		return 0, nil, false
-	}
-
-	// We don't care what's char of rsid[QRSID_LEN+1], it should be ':'
-	for i, count := QRSID_LEN+1, len(rsid); i < count; i++ {
-		switch rsid[i] {
-		case ':':
-			return uint64(parseInt64(rsid[QRSID_LEN+1 : i])), rsid[i+1:], true
+// Parse the given `rsid` knowing that it starts with `QRSID`.
+// Returns the cid and sid or an error not a valid QRSID.
+func parseRouteQueueSid(rsid []byte) (uint64, []byte, error) {
+	var (
+		cid      uint64
+		sid      []byte
+		cidFound bool
+		sidFound bool
+	)
+	// A valid QRSID needs to be at least QRSID:x:y
+	// First character here should be `:`
+	if len(rsid) >= QRSID_LEN+4 {
+		if rsid[QRSID_LEN] == ':' {
+			for i, count := QRSID_LEN+1, len(rsid); i < count; i++ {
+				switch rsid[i] {
+				case ':':
+					cid = uint64(parseInt64(rsid[QRSID_LEN+1 : i]))
+					cidFound = true
+					sid = rsid[i+1:]
+				}
+			}
+			if cidFound {
+				// We can't assume the content of sid, so as long
+				// as it is not len 0, we have to say it is a valid one.
+				if len(rsid) > 0 {
+					sidFound = true
+				}
+			}
 		}
 	}
-	return 0, nil, true
+	if cidFound && sidFound {
+		return cid, sid, nil
+	}
+	return 0, nil, fmt.Errorf("invalid QRSID: %s", rsid)
 }
 
 func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
@@ -530,6 +556,9 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 
 		s.routes[c.cid] = c
 		s.remotes[id] = c
+		c.mu.Lock()
+		c.route.connectURLs = info.ClientConnectURLs
+		c.mu.Unlock()
 
 		// we don't need to send if the only route is the one we just accepted.
 		sendInfo = len(s.routes) > 1
@@ -551,6 +580,9 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 		remote.mu.Lock()
 		// r will be not nil if c.route.didSolicit was true
 		if r != nil {
+			// If we upgrade to solicited, we still want to keep the remote's
+			// connectURLs. So transfer those.
+			r.connectURLs = remote.route.connectURLs
 			remote.route = r
 		}
 		// This is to mitigate the issue where both sides add the route
@@ -610,13 +642,14 @@ func (s *Server) broadcastUnSubscribe(sub *subscription) {
 }
 
 func (s *Server) routeAcceptLoop(ch chan struct{}) {
+	defer func() {
+		if ch != nil {
+			close(ch)
+		}
+	}()
+
 	// Snapshot server options.
 	opts := s.getOpts()
-
-	// Get all possible URLs (when server listens to 0.0.0.0).
-	// This is going to be sent to other Servers, so that they can let their
-	// clients know about us.
-	clientConnectURLs := s.getClientConnectURLs()
 
 	// Snapshot server options.
 	port := opts.Cluster.Port
@@ -629,40 +662,53 @@ func (s *Server) routeAcceptLoop(ch chan struct{}) {
 	s.Noticef("Listening for route connections on %s", hp)
 	l, e := net.Listen("tcp", hp)
 	if e != nil {
-		// We need to close this channel to avoid a deadlock
-		close(ch)
 		s.Fatalf("Error listening on router port: %d - %v", opts.Cluster.Port, e)
 		return
 	}
 
+	s.mu.Lock()
 	// Check for TLSConfig
 	tlsReq := opts.Cluster.TLSConfig != nil
 	info := Info{
-		ID:                s.info.ID,
-		Version:           s.info.Version,
-		Host:              opts.Cluster.Host,
-		Port:              l.Addr().(*net.TCPAddr).Port,
-		AuthRequired:      false,
-		TLSRequired:       tlsReq,
-		SSLRequired:       tlsReq,
-		TLSVerify:         tlsReq,
-		MaxPayload:        s.info.MaxPayload,
-		ClientConnectURLs: clientConnectURLs,
+		ID:           s.info.ID,
+		Version:      s.info.Version,
+		AuthRequired: false,
+		TLSRequired:  tlsReq,
+		SSLRequired:  tlsReq,
+		TLSVerify:    tlsReq,
+		MaxPayload:   s.info.MaxPayload,
 	}
+	// Set this if only if advertise is not disabled
+	if !opts.Cluster.NoAdvertise {
+		info.ClientConnectURLs = s.clientConnectURLs
+	}
+	// If we have selected a random port...
+	if port == 0 {
+		// Write resolved port back to options.
+		opts.Cluster.Port = l.Addr().(*net.TCPAddr).Port
+	}
+	// Keep track of actual listen port. This will be needed in case of
+	// config reload.
+	s.clusterActualPort = opts.Cluster.Port
 	// Check for Auth items
 	if opts.Cluster.Username != "" {
 		info.AuthRequired = true
 	}
 	s.routeInfo = info
-	s.generateRouteInfoJSON()
-
+	// Possibly override Host/Port and set IP based on Cluster.Advertise
+	if err := s.setRouteInfoHostPortAndIP(); err != nil {
+		s.Fatalf("Error setting route INFO with Cluster.Advertise value of %s, err=%v", s.opts.Cluster.Advertise, err)
+		l.Close()
+		s.mu.Unlock()
+		return
+	}
 	// Setup state that can enable shutdown
-	s.mu.Lock()
 	s.routeListener = l
 	s.mu.Unlock()
 
 	// Let them know we are up
 	close(ch)
+	ch = nil
 
 	tmpDelay := ACCEPT_MIN_SLEEP
 
@@ -690,6 +736,26 @@ func (s *Server) routeAcceptLoop(ch chan struct{}) {
 	}
 	s.Debugf("Router accept loop exiting..")
 	s.done <- true
+}
+
+// Similar to setInfoHostPortAndGenerateJSON, but for routeInfo.
+func (s *Server) setRouteInfoHostPortAndIP() error {
+	if s.opts.Cluster.Advertise != "" {
+		advHost, advPort, err := parseHostPort(s.opts.Cluster.Advertise, s.opts.Cluster.Port)
+		if err != nil {
+			return err
+		}
+		s.routeInfo.Host = advHost
+		s.routeInfo.Port = advPort
+		s.routeInfo.IP = fmt.Sprintf("nats-route://%s/", net.JoinHostPort(advHost, strconv.Itoa(advPort)))
+	} else {
+		s.routeInfo.Host = s.opts.Cluster.Host
+		s.routeInfo.Port = s.opts.Cluster.Port
+		s.routeInfo.IP = ""
+	}
+	// (re)generate the routeInfoJSON byte array
+	s.generateRouteInfoJSON()
+	return nil
 }
 
 // StartRouting will start the accept loop on the cluster host:port
@@ -735,7 +801,7 @@ func (s *Server) connectToRoute(rURL *url.URL, tryForEver bool) {
 		s.Debugf("Trying to connect to route on %s", rURL.Host)
 		conn, err := net.DialTimeout("tcp", rURL.Host, DEFAULT_ROUTE_DIAL)
 		if err != nil {
-			s.Debugf("Error trying to connect to route: %v", err)
+			s.Errorf("Error trying to connect to route: %v", err)
 			if !tryForEver {
 				if opts.Cluster.ConnectRetries <= 0 {
 					return

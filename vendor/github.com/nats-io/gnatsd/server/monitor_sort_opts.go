@@ -1,27 +1,39 @@
-// Copyright 2013-2016 Apcera Inc. All rights reserved.
+// Copyright 2013-2018 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package server
 
 // SortOpt is a helper type to sort by ConnInfo values
 type SortOpt string
 
+// Possible sort options
 const (
-	byCid      SortOpt = "cid"
-	bySubs             = "subs"
-	byPending          = "pending"
-	byOutMsgs          = "msgs_to"
-	byInMsgs           = "msgs_from"
-	byOutBytes         = "bytes_to"
-	byInBytes          = "bytes_from"
-	byLast             = "last"
-	byIdle             = "idle"
-	byUptime           = "uptime"
+	ByCid      SortOpt = "cid"        // By connection ID
+	BySubs     SortOpt = "subs"       // By number of subscriptions
+	ByPending  SortOpt = "pending"    // By amount of data in bytes waiting to be sent to client
+	ByOutMsgs  SortOpt = "msgs_to"    // By number of messages sent
+	ByInMsgs   SortOpt = "msgs_from"  // By number of messages received
+	ByOutBytes SortOpt = "bytes_to"   // By amount of bytes sent
+	ByInBytes  SortOpt = "bytes_from" // By amount of bytes received
+	ByLast     SortOpt = "last"       // By the last activity
+	ByIdle     SortOpt = "idle"       // By the amount of inactivity
+	ByUptime   SortOpt = "uptime"     // By the amount of time connections exist
 )
 
 // IsValid determines if a sort option is valid
 func (s SortOpt) IsValid() bool {
 	switch s {
-	case "", byCid, bySubs, byPending, byOutMsgs, byInMsgs, byOutBytes, byInBytes, byLast, byIdle, byUptime:
+	case "", ByCid, BySubs, ByPending, ByOutMsgs, ByInMsgs, ByOutBytes, ByInBytes, ByLast, ByIdle, ByUptime:
 		return true
 	default:
 		return false
