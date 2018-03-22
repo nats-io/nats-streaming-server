@@ -588,7 +588,9 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	if clusterPeers != "" {
 		sopts.Clustering.Peers = []string{}
 		for _, p := range strings.Split(clusterPeers, ",") {
-			sopts.Clustering.Peers = append(sopts.Clustering.Peers, strings.TrimSpace(p))
+			if p = strings.TrimSpace(p); p != sopts.Clustering.NodeID {
+				sopts.Clustering.Peers = append(sopts.Clustering.Peers, p)
+			}
 		}
 	}
 
