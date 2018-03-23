@@ -3389,3 +3389,33 @@ func TestClusteringNoRaftStateButStreamingState(t *testing.T) {
 		t.Fatal("Expected error, got none")
 	}
 }
+
+func TestClusteringNodeIDInPeersArray(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	s1Opts := getTestDefaultOptsForClustering("a", true)
+	s1Opts.Clustering.NodeID = "a"
+	s1Opts.Clustering.Peers = []string{"a", "b", "c"}
+	s1 := runServerWithOpts(t, s1Opts, nil)
+	defer s1.Shutdown()
+
+	s2Opts := getTestDefaultOptsForClustering("b", false)
+	s2Opts.Clustering.NodeID = "b"
+	s2Opts.Clustering.Peers = []string{"a", "b", "c"}
+	s2 := runServerWithOpts(t, s2Opts, nil)
+	defer s2.Shutdown()
+
+	s3Opts := getTestDefaultOptsForClustering("c", false)
+	s3Opts.Clustering.NodeID = "c"
+	s3Opts.Clustering.Peers = []string{"a", "b", "c"}
+	s3 := runServerWithOpts(t, s3Opts, nil)
+	defer s3.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2, s3)
+}

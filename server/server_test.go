@@ -594,6 +594,17 @@ func TestOptionsClone(t *testing.T) {
 	if _, exist := clone.PerChannel["bar"]; exist {
 		t.Fatal("The channel bar should not be in the cloned options")
 	}
+
+	opts = GetDefaultOptions()
+	opts.Clustering.Peers = []string{"a", "b", "c"}
+	clone = opts.Clone()
+	if !reflect.DeepEqual(opts.Clustering.Peers, clone.Clustering.Peers) {
+		t.Fatalf("Expected %#v, got %#v", opts.Clustering.Peers, clone.Clustering.Peers)
+	}
+	opts.Clustering.Peers[0] = "z"
+	if reflect.DeepEqual(opts.Clustering.Peers, clone.Clustering.Peers) {
+		t.Fatal("Expected clone to be different after original changed, was not")
+	}
 }
 
 func TestGetSubStoreRace(t *testing.T) {

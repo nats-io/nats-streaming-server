@@ -623,4 +623,17 @@ func TestParseConfigureOptions(t *testing.T) {
 	if !reflect.DeepEqual(sopts.Clustering.Peers, expectedPeers) {
 		t.Fatalf("Expected Cluster.Peers to be %v, got %v", expectedPeers, sopts.Clustering.Peers)
 	}
+
+	// Check that the node id can be in the peers but is then excluded
+	sopts, _ = mustNotFail([]string{"-clustered", "-cluster_node_id", "a", "-cluster_peers", "a,b,c"})
+	if !sopts.Clustering.Clustered {
+		t.Fatal("Expected Clustering.Clustered to be true")
+	}
+	if sopts.Clustering.NodeID != "a" {
+		t.Fatalf("Expected Clustering.NodeID to be %q, got %q", "a", sopts.Clustering.NodeID)
+	}
+	expectedPeers = []string{"b", "c"}
+	if !reflect.DeepEqual(sopts.Clustering.Peers, expectedPeers) {
+		t.Fatalf("Expected Cluster.Peers to be %v, got %v", expectedPeers, sopts.Clustering.Peers)
+	}
 }
