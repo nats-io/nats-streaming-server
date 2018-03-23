@@ -200,15 +200,21 @@ func TestParseConfig(t *testing.T) {
 	if !opts.Clustering.Bootstrap {
 		t.Fatal("Expected Bootstrap to be true, got false")
 	}
-	peers := []string{"b", "c"}
-	if len(peers) != len(opts.Clustering.Peers) {
+	peers := []string{"a", "b", "c"}
+	if len(peers)-1 != len(opts.Clustering.Peers) {
 		t.Fatalf("Expected Peers to be %s, got %s", peers, opts.Clustering.Peers)
 	}
-	for i, p := range opts.Clustering.Peers {
-		if p != peers[i] {
-			t.Fatalf("Expected peer %q, got %q", peers[i], p)
-		}
+
+	if len(opts.Clustering.Peers) != 2 {
+		t.Fatalf("Expected opts.Clustering.Peers len to be 2, got %d", len(peers))
 	}
+	if opts.Clustering.Peers[0] != "b" {
+		t.Fatalf("Expected opts.Clustering.Peers[0] len to be a, got %s", opts.Clustering.Peers[0])
+	}
+	if opts.Clustering.Peers[1] != "c" {
+		t.Fatalf("Expected opts.Clustering.Peers[1] len to be b, got %s", opts.Clustering.Peers[1])
+	}
+
 	if opts.Clustering.RaftLogPath != "/path/to/log" {
 		t.Fatalf("Expected RaftLogPath to be %q, got %q", "/path/to/log", opts.Clustering.RaftLogPath)
 	}
