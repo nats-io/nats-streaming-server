@@ -1126,6 +1126,13 @@ func (o *Options) Clone() *Options {
 	// But we have the problem of the PerChannel map that needs
 	// to be copied.
 	clone.PerChannel = (&o.StoreLimits).ClonePerChannelMap()
+	// Make a copy of the clustering peers
+	if len(o.Clustering.Peers) > 0 {
+		clone.Clustering.Peers = make([]string, 0, len(o.Clustering.Peers))
+		for _, p := range o.Clustering.Peers {
+			clone.Clustering.Peers = append(clone.Clustering.Peers, p)
+		}
+	}
 	return &clone
 }
 
@@ -1357,6 +1364,20 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		}
 		// Override store sync configuration with cluster sync.
 		sOpts.FileStoreOpts.DoSync = sOpts.Clustering.Sync
+
+		// Remove cluster's node ID (if present) from the list of peers.
+		if len(sOpts.Clustering.Peers) > 0 && sOpts.Clustering.NodeID != "" {
+			nodeID := sOpts.Clustering.NodeID
+			peers := make([]string, 0, len(sOpts.Clustering.Peers))
+			for _, p := range sOpts.Clustering.Peers {
+				if p != nodeID {
+					peers = append(peers, p)
+				}
+			}
+			if len(peers) != len(sOpts.Clustering.Peers) {
+				sOpts.Clustering.Peers = peers
+			}
+		}
 	}
 
 	s := StanServer{
