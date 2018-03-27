@@ -1071,7 +1071,7 @@ Embedding a NATS Streaming Server in your own code is easy. Simply import:
 Then if you want to use default options, it is as simple as doing:
 
 ```
-  s, err := stand.RunsServer("mystreamingserver")
+  s, err := stand.RunServer("mystreamingserver")
 ```
 
 If you want a more advance configuration, then you need to pass options.
