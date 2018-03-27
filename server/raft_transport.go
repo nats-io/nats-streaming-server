@@ -184,15 +184,17 @@ type natsStreamLayer struct {
 }
 
 func newNATSStreamLayer(id string, conn *nats.Conn, logger *log.Logger) (*natsStreamLayer, error) {
-	var (
-		n = &natsStreamLayer{
-			localAddr: natsAddr(id),
-			conn:      conn,
-			logger:    logger,
-			conns:     map[*natsConn]struct{}{},
-		}
-		sub, err = conn.SubscribeSync(fmt.Sprintf(natsConnectInbox, id))
-	)
+	n := &natsStreamLayer{
+		localAddr: natsAddr(id),
+		conn:      conn,
+		logger:    logger,
+		conns:     map[*natsConn]struct{}{},
+	}
+	sub, err := conn.SubscribeSync(fmt.Sprintf(natsConnectInbox, id))
+	if err != nil {
+		return nil, err
+	}
+	sub.SetPendingLimits(-1, -1)
 	n.sub = sub
 	conn.Flush()
 	return n, err
@@ -237,6 +239,7 @@ func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration
 	if err != nil {
 		return nil, err
 	}
+	sub.SetPendingLimits(-1, -1)
 	peerConn.sub = sub
 	n.conn.Flush()
 
@@ -287,6 +290,7 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 			n.logger.Printf("[ERR] raft-nats: Failed to create inbox for remote peer: %v", err)
 			continue
 		}
+		sub.SetPendingLimits(-1, -1)
 		peerConn.sub = sub
 
 		// Reply to peer.
