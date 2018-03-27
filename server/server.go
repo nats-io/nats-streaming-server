@@ -570,7 +570,9 @@ type StanServer struct {
 	dupCIDTimeout time.Duration
 
 	// Clients
-	clients *clientStore
+	clients       *clientStore
+	cliDupCIDsMu  sync.Mutex
+	cliDipCIDsMap map[string]struct{}
 
 	// channels
 	channels *channelStore
@@ -1393,6 +1395,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		shutdownCh:    make(chan struct{}),
 		isClustered:   sOpts.Clustering.Clustered,
 		raftLogging:   sOpts.Clustering.RaftLogging,
+		cliDipCIDsMap: make(map[string]struct{}),
 	}
 
 	// If a custom logger is provided, use this one, otherwise, check
@@ -2449,22 +2452,52 @@ func (s *StanServer) connectCB(m *nats.Msg) {
 	// that the client refreshed (e.g. it crashed and came back) or if the
 	// connection is a duplicate. If it refreshed, we will close the old
 	// client and open a new one.
-	refresh := false
 	client := s.clients.lookup(req.ClientID)
 	if client != nil {
-		if s.isDuplicateConnect(client) {
+		// When detecting a duplicate, the processing of the connect request
+		// is going to be processed in a go-routine. We need however to keep
+		// track and fail another request on the same client ID until the
+		// current one has finished.
+		s.cliDupCIDsMu.Lock()
+		if _, exists := s.cliDipCIDsMap[req.ClientID]; exists {
+			s.cliDupCIDsMu.Unlock()
 			s.log.Debugf("[Client:%s] Connect failed; already connected", req.ClientID)
 			s.sendConnectErr(m.Reply, ErrInvalidClient.Error())
 			return
 		}
-		refresh = true
+		s.cliDipCIDsMap[req.ClientID] = struct{}{}
+		s.cliDupCIDsMu.Unlock()
+
+		s.startGoRoutine(func() {
+			defer s.wg.Done()
+			isDup := false
+			if s.isDuplicateConnect(client) {
+				s.log.Debugf("[Client:%s] Connect failed; already connected", req.ClientID)
+				s.sendConnectErr(m.Reply, ErrInvalidClient.Error())
+				isDup = true
+			}
+			s.cliDupCIDsMu.Lock()
+			if !isDup {
+				s.handleConnect(req, m, true)
+			}
+			delete(s.cliDipCIDsMap, req.ClientID)
+			s.cliDupCIDsMu.Unlock()
+		})
+		return
 	}
+	s.cliDupCIDsMu.Lock()
+	s.handleConnect(req, m, false)
+	s.cliDupCIDsMu.Unlock()
+}
+
+func (s *StanServer) handleConnect(req *pb.ConnectRequest, m *nats.Msg, replaceOld bool) {
+	var err error
 
 	// If clustered, thread operations through Raft.
 	if s.isClustered {
-		err = s.replicateConnect(req, refresh)
+		err = s.replicateConnect(req, replaceOld)
 	} else {
-		err = s.processConnect(req, refresh)
+		err = s.processConnect(req, replaceOld)
 	}
 
 	if err != nil {
@@ -2621,12 +2654,12 @@ func (s *StanServer) replicateConnect(req *pb.ConnectRequest, refresh bool) erro
 	return waitForReplicationErrResponse(s.raft.Apply(data, 0))
 }
 
-func (s *StanServer) processConnect(req *pb.ConnectRequest, refresh bool) error {
-	// If the client refreshed, close the old one first.
-	if refresh {
+func (s *StanServer) processConnect(req *pb.ConnectRequest, replaceOld bool) error {
+	// If the client restarted, close the old one first.
+	if replaceOld {
 		s.closeClient(req.ClientID)
 
-		// Because connections are processed on the same goroutine, it is not
+		// Because connections are processed under a common lock, it is not
 		// possible for a connection request for the same client ID to come in at
 		// the same time after unregistering the old client.
 	}
@@ -2638,7 +2671,7 @@ func (s *StanServer) processConnect(req *pb.ConnectRequest, refresh bool) error 
 		return err
 	}
 
-	if refresh {
+	if replaceOld {
 		s.log.Debugf("[Client:%s] Replaced old client (Inbox=%v)", req.ClientID, req.HeartbeatInbox)
 	} else {
 		s.log.Debugf("[Client:%s] Connected (Inbox=%v)", req.ClientID, req.HeartbeatInbox)

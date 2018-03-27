@@ -85,46 +85,96 @@ func TestClientCrashAndReconnect(t *testing.T) {
 	s := runServer(t, clusterName)
 	defer s.Shutdown()
 
-	nc, err := nats.Connect(nats.DefaultURL)
-	if err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
+	total := 10
+	clientNames := []string{}
+	for i := 0; i < total; i++ {
+		clientNames = append(clientNames, fmt.Sprintf("client%d", i))
 	}
-	defer nc.Close()
 
-	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
-	if err != nil {
-		t.Fatalf("Expected to connect correctly, got err %v", err)
+	natsConns := []*nats.Conn{}
+	scConnsMu := sync.Mutex{}
+	scConns := []stan.Conn{}
+
+	defer func() {
+		for _, nc := range natsConns {
+			if nc != nil {
+				nc.Close()
+			}
+		}
+		for _, sc := range scConns {
+			sc.Close()
+		}
+	}()
+
+	for _, cn := range clientNames {
+		nc, err := nats.Connect(nats.DefaultURL)
+		if err != nil {
+			t.Fatalf("Unexpected error on connect: %v", err)
+		}
+		natsConns = append(natsConns, nc)
+
+		sc, err := stan.Connect(clusterName, cn, stan.NatsConn(nc))
+		if err != nil {
+			t.Fatalf("Expected to connect correctly, got err %v", err)
+		}
+		scConns = append(scConns, sc)
 	}
-	defer sc.Close()
-	// Get the connected client's inbox
+
+	// Get the connected clients' inboxes
 	clients := s.clients.getClients()
-	if cc := len(clients); cc != 1 {
-		t.Fatalf("There should be 1 client, got %v", cc)
+	if cc := len(clients); cc != total {
+		t.Fatalf("There should be %d clients, got %v", total, cc)
 	}
-	cli := clients[clientName]
-	if cli == nil {
-		t.Fatalf("Expected client %q to exist, did not", clientName)
+	hbInboxes := []string{}
+	for _, cn := range clientNames {
+		cli := clients[cn]
+		if cli == nil {
+			t.Fatalf("Expected client %q to exist, did not", cn)
+		}
+		hbInboxes = append(hbInboxes, cli.info.HbInbox)
 	}
-	hbInbox := cli.info.HbInbox
 
 	// should get a duplicate clientID error
-	if sc2, err := stan.Connect(clusterName, clientName); err == nil {
-		sc2.Close()
-		t.Fatal("Expected to be unable to connect")
+	for _, cn := range clientNames {
+		if sc, err := stan.Connect(clusterName, cn); err == nil {
+			sc.Close()
+			t.Fatal("Expected to be unable to connect")
+		}
 	}
 
 	// kill the NATS conn
-	nc.Close()
+	for i, nc := range natsConns {
+		natsConns[i] = nil
+		nc.Close()
+	}
 
 	// Since the original client won't respond to a ping, we should
 	// be able to connect, and it should not take too long.
 	start := time.Now()
 
 	// should succeed
-	if sc2, err := stan.Connect(clusterName, clientName); err != nil {
-		t.Fatalf("Unexpected error on connect: %v", err)
-	} else {
-		defer sc2.Close()
+	wg := sync.WaitGroup{}
+	wg.Add(total)
+	errCh := make(chan error, total)
+	for _, cn := range clientNames {
+		go func(cn string) {
+			defer wg.Done()
+
+			sc, err := stan.Connect(clusterName, cn)
+			if err != nil {
+				errCh <- fmt.Errorf("Unexpected error on connect: %v", err)
+				return
+			}
+			scConnsMu.Lock()
+			scConns = append(scConns, sc)
+			scConnsMu.Unlock()
+		}(cn)
+	}
+	wg.Wait()
+	select {
+	case e := <-errCh:
+		t.Fatalf(e.Error())
+	default:
 	}
 
 	duration := time.Since(start)
@@ -133,17 +183,19 @@ func TestClientCrashAndReconnect(t *testing.T) {
 	}
 
 	clients = s.clients.getClients()
-	if cc := len(clients); cc != 1 {
-		t.Fatalf("There should be 1 client, got %v", cc)
+	if cc := len(clients); cc != total {
+		t.Fatalf("There should be %v client, got %v", total, cc)
 	}
-	cli = clients[clientName]
-	if cli == nil {
-		t.Fatalf("Expected client %q to exist, did not", clientName)
-	}
-	// Check we have registered the "new" client which should have
-	// a different HbInbox
-	if hbInbox == cli.info.HbInbox {
-		t.Fatalf("Looks like restarted client was not properly registered")
+	for i := 0; i < total; i++ {
+		cli := clients[clientNames[i]]
+		if cli == nil {
+			t.Fatalf("Expected client %q to exist, did not", clientNames[i])
+		}
+		// Check we have registered the "new" client which should have
+		// a different HbInbox
+		if hbInboxes[i] == cli.info.HbInbox {
+			t.Fatalf("Looks like restarted client was not properly registered")
+		}
 	}
 }
 
