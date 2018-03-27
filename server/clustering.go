@@ -25,7 +25,6 @@ import (
 	"github.com/hashicorp/raft"
 	"github.com/hashicorp/raft-boltdb"
 	"github.com/nats-io/go-nats"
-	"github.com/nats-io/nats-on-a-log"
 	"github.com/nats-io/nats-streaming-server/spb"
 )
 
@@ -291,7 +290,7 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 	}
 
 	// TODO: using a single NATS conn for every channel might be a bottleneck. Maybe pool conns?
-	transport, err := natslog.NewNATSTransport(addr, s.ncr, 2*time.Second, logWriter)
+	transport, err := newNATSTransport(addr, s.ncr, 2*time.Second, logWriter)
 	if err != nil {
 		store.Close()
 		return false, err
