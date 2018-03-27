@@ -178,14 +178,6 @@
 			"notests": true
 		},
 		{
-			"importpath": "github.com/nats-io/nats-on-a-log",
-			"repository": "https://github.com/nats-io/nats-on-a-log",
-			"vcs": "git",
-			"revision": "2070433f45f93173589cc3d5034f12665564d9f2",
-			"branch": "master",
-			"notests": true
-		},
-		{
 			"importpath": "github.com/nats-io/nuid",
 			"repository": "https://github.com/nats-io/nuid",
 			"vcs": "git",

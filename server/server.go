@@ -1129,9 +1129,7 @@ func (o *Options) Clone() *Options {
 	// Make a copy of the clustering peers
 	if len(o.Clustering.Peers) > 0 {
 		clone.Clustering.Peers = make([]string, 0, len(o.Clustering.Peers))
-		for _, p := range o.Clustering.Peers {
-			clone.Clustering.Peers = append(clone.Clustering.Peers, p)
-		}
+		clone.Clustering.Peers = append(clone.Clustering.Peers, o.Clustering.Peers...)
 	}
 	return &clone
 }

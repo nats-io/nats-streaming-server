@@ -1,8 +1,19 @@
-// Copyright 2017 Apcera Inc. All rights reserved.
+// Copyright 2017-2018 The NATS Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-// Package natslog provides an implementation of the Transport interface for
-// the HashiCorp Raft library using NATS.
-package natslog
+// RAFT Transport implementation using NATS
+
+package server
 
 import (
 	"context"
@@ -305,7 +316,7 @@ func (n *natsStreamLayer) Close() error {
 		conns[conn] = s
 	}
 	n.mu.Unlock()
-	for c, _ := range conns {
+	for c := range conns {
 		c.Close()
 	}
 	return n.sub.Unsubscribe()
@@ -315,33 +326,33 @@ func (n *natsStreamLayer) Addr() net.Addr {
 	return n.localAddr
 }
 
-// NewNATSTransport creates a new raft.NetworkTransport implemented with NATS
+// newNATSTransport creates a new raft.NetworkTransport implemented with NATS
 // as the transport layer.
-func NewNATSTransport(id string, conn *nats.Conn, timeout time.Duration, logOutput io.Writer) (*raft.NetworkTransport, error) {
+func newNATSTransport(id string, conn *nats.Conn, timeout time.Duration, logOutput io.Writer) (*raft.NetworkTransport, error) {
 	if logOutput == nil {
 		logOutput = os.Stderr
 	}
-	return NewNATSTransportWithLogger(id, conn, timeout, log.New(logOutput, "", log.LstdFlags))
+	return newNATSTransportWithLogger(id, conn, timeout, log.New(logOutput, "", log.LstdFlags))
 }
 
-// NewNATSTransportWithLogger creates a new raft.NetworkTransport implemented
+// newNATSTransportWithLogger creates a new raft.NetworkTransport implemented
 // with NATS as the transport layer using the provided Logger.
-func NewNATSTransportWithLogger(id string, conn *nats.Conn, timeout time.Duration, logger *log.Logger) (*raft.NetworkTransport, error) {
-	return newNATSTransport(id, conn, logger, func(stream raft.StreamLayer) *raft.NetworkTransport {
+func newNATSTransportWithLogger(id string, conn *nats.Conn, timeout time.Duration, logger *log.Logger) (*raft.NetworkTransport, error) {
+	return createNATSTransport(id, conn, logger, func(stream raft.StreamLayer) *raft.NetworkTransport {
 		return raft.NewNetworkTransportWithLogger(stream, 3, timeout, logger)
 	})
 }
 
-// NewNATSTransportWithConfig returns a raft.NetworkTransport implemented
+// newNATSTransportWithConfig returns a raft.NetworkTransport implemented
 // with NATS as the transport layer, using the given config struct.
-func NewNATSTransportWithConfig(id string, conn *nats.Conn, config *raft.NetworkTransportConfig) (*raft.NetworkTransport, error) {
-	return newNATSTransport(id, conn, config.Logger, func(stream raft.StreamLayer) *raft.NetworkTransport {
+func newNATSTransportWithConfig(id string, conn *nats.Conn, config *raft.NetworkTransportConfig) (*raft.NetworkTransport, error) {
+	return createNATSTransport(id, conn, config.Logger, func(stream raft.StreamLayer) *raft.NetworkTransport {
 		config.Stream = stream
 		return raft.NewNetworkTransportWithConfig(config)
 	})
 }
 
-func newNATSTransport(id string, conn *nats.Conn, logger *log.Logger,
+func createNATSTransport(id string, conn *nats.Conn, logger *log.Logger,
 	transportCreator func(stream raft.StreamLayer) *raft.NetworkTransport) (*raft.NetworkTransport, error) {
 
 	stream, err := newNATSStreamLayer(id, conn, logger)
