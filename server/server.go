@@ -414,7 +414,7 @@ type channel struct {
 }
 
 type channelActivity struct {
-	last             int64
+	last             time.Time
 	maxInactivity    time.Duration
 	timer            *time.Timer
 	deleteInProgress bool
@@ -425,7 +425,7 @@ type channelActivity struct {
 // a channel delete request to the ioLoop.
 // The channelStore's delMu mutex must be held on entry.
 func (c *channel) startDeleteTimer() {
-	c.activity.last = time.Now().UnixNano()
+	c.activity.last = time.Now()
 	c.resetDeleteTimer(c.activity.maxInactivity)
 }
 
@@ -2575,9 +2575,8 @@ func (s *StanServer) handleChannelDelete(c *channel) {
 		}
 		c.stopDeleteTimer()
 	} else {
-		now := time.Now().UnixNano()
-		elapsed := now - a.last
-		if elapsed >= int64(a.maxInactivity) {
+		elapsed := time.Since(a.last)
+		if elapsed >= a.maxInactivity {
 			if s.debug {
 				s.log.Debugf("Channel %q is being deleted", c.name)
 			}
@@ -2590,10 +2589,10 @@ func (s *StanServer) handleChannelDelete(c *channel) {
 		} else {
 			var next time.Duration
 			if elapsed < 0 {
-				next = time.Duration(a.last) + a.maxInactivity
+				next = a.maxInactivity
 			} else {
-				// elapsed < int64(a.maxInactivity)
-				next = a.maxInactivity - time.Duration(elapsed)
+				// elapsed < a.maxInactivity
+				next = a.maxInactivity - elapsed
 			}
 			if s.debug {
 				s.log.Debugf("Channel %q cannot be deleted now, reset timer to fire in %v",
@@ -3682,7 +3681,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 				delete(storesToFlush, c)
 				// When relevant, update the last activity
 				if c.activity != nil {
-					c.activity.last = c.lTimestamp
+					c.activity.last = time.Unix(0, c.lTimestamp)
 				}
 			}
 
