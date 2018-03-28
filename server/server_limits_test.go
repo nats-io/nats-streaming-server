@@ -498,6 +498,31 @@ func TestPerChannelLimitsSetToUnlimitedPrintedCorrectly(t *testing.T) {
 	}
 }
 
+func checkChannelActivity(t tLogger, s *StanServer, name string, expectedToExist bool, created time.Time, maxInactivity time.Duration) {
+	if expectedToExist {
+		// Check that we are not invoked too late
+		if time.Since(created) >= maxInactivity {
+			// assume ok, return
+			return
+		}
+		if s.channels.get(name) == nil {
+			stackFatalf(t, "Channel %q was expected to exist", name)
+		}
+		return
+	}
+	// Here, we wait for the channel to be removed.
+	// We will wait up to the channel max inactivity before reporting failure
+	timeout := time.Now().Add(maxInactivity + 60*time.Millisecond)
+	for time.Now().Before(timeout) {
+		// If channel is no longer there, we are good.
+		if s.channels.get(name) == nil {
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	stackFatalf(t, "Channel %q was not expected to exist", name)
+}
+
 func TestMaxInactivity(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -597,6 +622,8 @@ func TestMaxInactivity(t *testing.T) {
 	if err := sc.Publish("pub", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
+	c := channelsGet(t, s.channels, "pub")
+	created := c.activity.last
 	// Wait half MaxInactivity
 	time.Sleep(pubLimits.MaxInactivity / 2)
 	// Publish another
@@ -606,19 +633,21 @@ func TestMaxInactivity(t *testing.T) {
 	// Sleep the other half (and a bit more)
 	time.Sleep((pubLimits.MaxInactivity / 2) + 50*time.Millisecond)
 	// Channel should still exist
-	verifyChannelExist(t, s, "pub", true, time.Second)
+	checkChannelActivity(t, s, "pub", true, created, pubLimits.MaxInactivity)
 	// Wait for at least MaxInactivity since last publish and now channel
 	// should be gone.
-	verifyChannelExist(t, s, "pub", false, pubLimits.MaxInactivity/2+500*time.Millisecond)
+	checkChannelActivity(t, s, "pub", false, created, pubLimits.MaxInactivity)
 
 	// Create store foo.baz, it should be deleted after 500ms
 	if err := sc.Publish("foo.baz", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
+	c = channelsGet(t, s.channels, "foo.baz")
+	created = c.activity.last
 	time.Sleep(fooStarLimits.MaxInactivity / 2)
-	verifyChannelExist(t, s, "foo.baz", true, 2*time.Second)
+	checkChannelActivity(t, s, "foo.baz", true, created, fooStarLimits.MaxInactivity)
 	// Wait more than 500ms (total), channel should be gone
-	verifyChannelExist(t, s, "foo.baz", false, fooStarLimits.MaxInactivity*2/3)
+	checkChannelActivity(t, s, "foo.baz", false, created, fooStarLimits.MaxInactivity)
 
 	// Channel foo.bar should override the MaxInactivity to
 	// unlimited, so channel is not expected to be deleted.
@@ -635,13 +664,15 @@ func TestMaxInactivity(t *testing.T) {
 	if err := sc.Publish("foo.baz", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
+	c = channelsGet(t, s.channels, "foo.baz")
+	created = c.activity.last
 	if err := sc.Publish("c9", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
 	time.Sleep(2 * opts.MaxInactivity)
 	verifyChannelExist(t, s, "c9", false, time.Second)
-	verifyChannelExist(t, s, "foo.baz", true, time.Second)
-	verifyChannelExist(t, s, "foo.baz", false, fooStarLimits.MaxInactivity+100*time.Millisecond)
+	checkChannelActivity(t, s, "foo.baz", true, created, fooStarLimits.MaxInactivity)
+	checkChannelActivity(t, s, "foo.baz", false, created, fooStarLimits.MaxInactivity)
 
 	// Send a message on a new channel and restart server
 	if err := sc.Publish("recovered", []byte("hello")); err != nil {
@@ -652,13 +683,17 @@ func TestMaxInactivity(t *testing.T) {
 	s.Shutdown()
 	s = runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
-	// Check channels exist
-	verifyChannelExist(t, s, "recovered", true, time.Second)
-	verifyChannelExist(t, s, "foo.bar", true, 2*time.Second)
-	// But without any activity, it should go away
-	verifyChannelExist(t, s, "recovered", false, recoveredLimits.MaxInactivity+50*time.Millisecond)
-	// This one should always be there
-	verifyChannelExist(t, s, "foo.bar", true, 2*time.Second)
+	c = s.channels.get("recovered")
+	if c != nil {
+		created = c.activity.last
+		// Check channels exist
+		checkChannelActivity(t, s, "recovered", true, created, recoveredLimits.MaxInactivity)
+		verifyChannelExist(t, s, "foo.bar", true, 2*time.Second)
+		// But without any activity, it should go away
+		checkChannelActivity(t, s, "recovered", false, created, recoveredLimits.MaxInactivity)
+		// This one should always be there
+		verifyChannelExist(t, s, "foo.bar", true, 2*time.Second)
+	}
 
 	// Send to a new channel
 	if err := sc.Publish("c10", []byte("hello")); err != nil {
@@ -683,7 +718,7 @@ func TestMaxInactivity(t *testing.T) {
 	close(ch2)
 	// Check that channel was not deleted
 	verifyChannelExist(t, s, "c10", true, 2*opts.MaxInactivity)
-	c := s.channels.get("c10")
+	c = s.channels.get("c10")
 	s.channels.lockDelete()
 	tset := c.activity.timerSet
 	s.channels.unlockDelete()

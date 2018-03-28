@@ -1773,9 +1773,7 @@ func TestClusteringLogSnapshotRestoreAfterChannelDeleted(t *testing.T) {
 	// Wait for more than the MaxInactivity
 	time.Sleep(2 * maxInactivity)
 	// Check channel is no longer in leader
-	if leader.channels.get(channel) != nil {
-		t.Fatal("Channel should have been removed")
-	}
+	verifyChannelExist(t, leader, channel, false, 5*time.Second)
 	// Perform a snapshot after the channel has been deleted
 	if err := leader.raft.Snapshot().Error(); err != nil {
 		t.Fatalf("Error on snapshot: %v", err)
