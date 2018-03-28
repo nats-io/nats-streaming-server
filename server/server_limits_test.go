@@ -683,15 +683,17 @@ func TestMaxInactivity(t *testing.T) {
 	s.Shutdown()
 	s = runServerWithOpts(t, opts, nil)
 	defer s.Shutdown()
-	c = channelsGet(t, s.channels, "recovered")
-	created = c.activity.last
-	// Check channels exist
-	checkChannelActivity(t, s, "recovered", true, created, recoveredLimits.MaxInactivity)
-	verifyChannelExist(t, s, "foo.bar", true, 2*time.Second)
-	// But without any activity, it should go away
-	checkChannelActivity(t, s, "recovered", false, created, recoveredLimits.MaxInactivity)
-	// This one should always be there
-	verifyChannelExist(t, s, "foo.bar", true, 2*time.Second)
+	c = s.channels.get("recovered")
+	if c != nil {
+		created = c.activity.last
+		// Check channels exist
+		checkChannelActivity(t, s, "recovered", true, created, recoveredLimits.MaxInactivity)
+		verifyChannelExist(t, s, "foo.bar", true, 2*time.Second)
+		// But without any activity, it should go away
+		checkChannelActivity(t, s, "recovered", false, created, recoveredLimits.MaxInactivity)
+		// This one should always be there
+		verifyChannelExist(t, s, "foo.bar", true, 2*time.Second)
+	}
 
 	// Send to a new channel
 	if err := sc.Publish("c10", []byte("hello")); err != nil {
