@@ -863,10 +863,19 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 		return
 	}
 
+	var (
+		log               logger.Logger
+		queueGroupIsEmpty bool
+	)
+
+	ss.Lock()
+	if ss.stan.debug {
+		log = ss.stan.log
+	}
+
 	sub.Lock()
 	subject := sub.subject
 	clientID := sub.ClientID
-	sub.clearAckTimer()
 	durableKey := ""
 	// Do this before clearing the sub.ClientID since this is part of the key!!!
 	if sub.isDurableSubscriber() {
@@ -881,7 +890,6 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	isDurable := sub.IsDurable
 	subid := sub.ID
 	store := sub.store
-	qgroup := sub.QGroup
 	sub.Unlock()
 
 	reportError := func(err error) {
@@ -898,15 +906,6 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 		}
 	}
 
-	var (
-		log               logger.Logger
-		queueGroupIsEmpty bool
-	)
-
-	ss.Lock()
-	if ss.stan.debug {
-		log = ss.stan.log
-	}
 	// Delete from ackInbox lookup.
 	delete(ss.acks, ackInbox)
 
@@ -924,6 +923,12 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 		// because qs.subs can be modified by findBestQueueSub,
 		// for which we don't have substore lock held.
 		qs.Lock()
+
+		sub.Lock()
+		sub.clearAckTimer()
+		qgroup := sub.QGroup
+		sub.Unlock()
+
 		qs.subs, _ = sub.deleteFromList(qs.subs)
 		if len(qs.subs) == 0 {
 			queueGroupIsEmpty = true
@@ -1040,6 +1045,11 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 		}
 		qs.Unlock()
 	} else {
+
+		sub.Lock()
+		sub.clearAckTimer()
+		sub.Unlock()
+
 		ss.psubs, _ = sub.deleteFromList(ss.psubs)
 		// When closing a durable subscription (calling sub.Close(), not sub.Unsubscribe()),
 		// we need to update the record on store to prevent the server from adding

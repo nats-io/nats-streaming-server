@@ -14,6 +14,7 @@
 package server
 
 import (
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -921,5 +922,52 @@ func TestQueueGroupUnStalledOnAcks(t *testing.T) {
 	// Wait for all messages to be received
 	if err := Wait(doneCh); err != nil {
 		t.Fatal("Did not get our messages")
+	}
+}
+
+func TestQueueGroupAckTimerStoppedWhenMemberLeavesGroup(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	for i := 0; i < 1024; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+
+	ch := make(chan error, 1)
+	if _, err := sc.QueueSubscribe("foo", "bar", func(m *stan.Msg) {
+		subs := s.clients.getSubs(clientName)
+		if len(subs) != 1 {
+			ch <- fmt.Errorf("Wrong subs len=%v", len(subs))
+			return
+		}
+		sub := subs[0]
+		m.Sub.Close()
+		// Wait for sub close to be processed...
+		waitForNumSubs(t, s, clientName, 0)
+		// Then check that ackTimer is not set
+		sub.RLock()
+		timerSet := sub.ackTimer != nil
+		sub.RUnlock()
+		if timerSet {
+			ch <- fmt.Errorf("Timer should not be set")
+		} else {
+			ch <- nil
+		}
+	}, stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	select {
+	case e := <-ch:
+		if e != nil {
+			t.Fatalf("Error: %v", e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Timeout waiting for callback to fire")
 	}
 }
