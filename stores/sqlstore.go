@@ -118,10 +118,10 @@ var sqlStmts = []string{
 	"DELETE FROM Subscriptions WHERE id=? AND deleted=TRUE",                                                                                                                          // sqlDeleteSubMarkedAsDeleted
 	"DELETE FROM SubsPending WHERE subid=?",                                                                                                                                          // sqlDeleteSubPendingMessages
 	"UPDATE Subscriptions SET lastsent=? WHERE id=? AND subid=?",                                                                                                                     // sqlSubUpdateLastSent
-	"INSERT INTO SubsPending (subid, row, seq) VALUES (?, ?, ?)",                                                                                                                     // sqlSubAddPending
-	"INSERT INTO SubsPending (subid, row, lastsent, pending, acks) VALUES (?, ?, ?, ?, ?)",                                                                                           // sqlSubAddPendingRow
+	"INSERT INTO SubsPending (subid, `row`, seq) VALUES (?, ?, ?)",                                                                                                                   // sqlSubAddPending
+	"INSERT INTO SubsPending (subid, `row`, lastsent, pending, acks) VALUES (?, ?, ?, ?, ?)",                                                                                         // sqlSubAddPendingRow
 	"DELETE FROM SubsPending WHERE subid=? AND seq=?",                                                                                                                                // sqlSubDeletePending
-	"DELETE FROM SubsPending WHERE subid=? AND row=?",                                                                                                                                // sqlSubDeletePendingRow
+	"DELETE FROM SubsPending WHERE subid=? AND `row`=?",                                                                                                                              // sqlSubDeletePendingRow
 	"SELECT id, proto, version FROM ServerInfo WHERE uniquerow=1",                                                                                                                    // sqlRecoverServerInfo
 	"SELECT id, hbinbox FROM Clients",                                                                                                                                                // sqlRecoverClients
 	"SELECT COALESCE(MAX(id), 0) FROM Channels",                                                                                                                                      // sqlRecoverMaxChannelID
@@ -130,7 +130,7 @@ var sqlStmts = []string{
 	"SELECT COUNT(seq), COALESCE(MIN(seq), 0), COALESCE(MAX(seq), 0), COALESCE(SUM(size), 0), COALESCE(MAX(timestamp), 0) FROM Messages WHERE id=?",                                  // sqlRecoverChannelMsgs
 	"SELECT lastsent, proto FROM Subscriptions WHERE id=? AND deleted=FALSE",                                                                                                         // sqlRecoverChannelSubs
 	"DELETE FROM SubsPending WHERE subid=? AND (seq > 0 AND seq<?)",                                                                                                                  // sqlRecoverDoPurgeSubsPending
-	"SELECT row, seq, lastsent, pending, acks FROM SubsPending WHERE subid=?",                                                                                                        // sqlRecoverSubPending
+	"SELECT `row`, seq, lastsent, pending, acks FROM SubsPending WHERE subid=?",                                                                                                      // sqlRecoverSubPending
 	"SELECT maxmsgs, maxbytes, maxage FROM Channels WHERE id=?",                                                                                                                      // sqlRecoverGetChannelLimits
 	"DELETE FROM Messages WHERE id=? AND timestamp<=?",                                                                                                                               // sqlRecoverDoExpireMsgs
 	"SELECT COUNT(seq) FROM Messages WHERE id=?",                                                                                                                                     // sqlRecoverGetMessagesCount
@@ -687,6 +687,14 @@ func initSQLStmtsTable(driver string) {
 			stmt := reg.ReplaceAllStringFunc(stmt, func(string) string {
 				n++
 				return "$" + strconv.Itoa(n)
+			})
+			sqlStmts[i] = stmt
+		}
+		// Replace `row` with row
+		reg = regexp.MustCompile("`row`")
+		for i, stmt := range sqlStmts {
+			stmt := reg.ReplaceAllStringFunc(stmt, func(string) string {
+				return "row"
 			})
 			sqlStmts[i] = stmt
 		}

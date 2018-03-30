@@ -138,7 +138,7 @@ func TestMain(m *testing.M) {
 				// Create the SQL Database once, the cleanup is simply deleting
 				// content from tables (so we don't have to recreate them).
 				if err := test.CreateSQLDatabase(testSQLDriver, testSQLSourceAdmin,
-					testSQLSource, testSQLDatabaseName+n); err != nil {
+					testSQLSource+n, testSQLDatabaseName+n); err != nil {
 					fmt.Printf("Error initializing SQL Datastore: %v", err)
 					os.Exit(2)
 				}
