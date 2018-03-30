@@ -693,6 +693,8 @@ type subState struct {
 
 	replicate *subSentAndAck // Used in Clustering mode
 
+	forwardAckSub *nats.Subscription // For issue #539
+
 	// So far, compacting these booleans into a byte flag would not save space.
 	// May change if we need to add more.
 	initialized bool // false until the subscription response has been sent to prevent data to be sent too early.
@@ -890,6 +892,10 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	isDurable := sub.IsDurable
 	subid := sub.ID
 	store := sub.store
+	if sub.forwardAckSub != nil {
+		sub.forwardAckSub.Unsubscribe()
+		sub.forwardAckSub = nil
+	}
 	sub.Unlock()
 
 	reportError := func(err error) {
@@ -2138,9 +2144,10 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 			return nil, err
 		}
 		if !s.isClustered {
+			ackSubject := channel.getAckSubject()
 			// Get the recovered subscriptions for this channel.
 			for _, recSub := range recoveredChannel.Subscriptions {
-				sub := s.recoverOneSub(channel, recSub.Sub, recSub.Pending, nil)
+				sub := s.recoverOneSub(channel, ackSubject, recSub.Sub, recSub.Pending, nil)
 				if sub != nil {
 					allSubs = append(allSubs, sub)
 				}
@@ -2155,7 +2162,7 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 	return allSubs, nil
 }
 
-func (s *StanServer) recoverOneSub(c *channel, recSub *spb.SubState, pendingAcksAsMap map[uint64]struct{},
+func (s *StanServer) recoverOneSub(c *channel, ackSubject string, recSub *spb.SubState, pendingAcksAsMap map[uint64]struct{},
 	pendingAcksAsArray []uint64) *subState {
 
 	// map, but nowhere else.
@@ -2197,6 +2204,11 @@ func (s *StanServer) recoverOneSub(c *channel, recSub *spb.SubState, pendingAcks
 	}
 	// Copy over fields from SubState protobuf
 	sub.SubState = *recSub
+	// Check if the sub's AckInbox is from before 0.8.0...
+	if !strings.HasPrefix(sub.AckInbox, ackSubject) {
+		// If so, create per-sub ack subscription handler.
+		sub.forwardAckSub, _ = s.nc.Subscribe(sub.AckInbox, s.processAckMsg)
+	}
 	// When recovering older stores, IsDurable may not exist for
 	// durable subscribers. Set it now.
 	durableSub := sub.isDurableSubscriber() // not a durable queue sub!

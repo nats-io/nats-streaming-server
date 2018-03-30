@@ -14,14 +14,17 @@
 package server
 
 import (
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
@@ -1054,4 +1057,90 @@ func TestSubStalledSemantics(t *testing.T) {
 	c = s.channels.channels["foo"]
 	c.store.Msgs = orgMS
 	s.channels.Unlock()
+}
+
+func TestSubAckInboxFromOlderStore(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	opts := getTestDefaultOptsForPersistentStore()
+	opts.NATSServerURL = "nats://127.0.0.1:4222"
+	s := runServerWithOpts(t, opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	if _, err := s.clients.register("me2", nats.NewInbox()); err != nil {
+		t.Fatalf("Error registering client: %v", err)
+	}
+	c, err := s.lookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Error creating channel: %v", err)
+	}
+	sub := &spb.SubState{
+		ClientID:      "me2",
+		AckInbox:      nats.NewInbox(),
+		Inbox:         nats.NewInbox(),
+		MaxInFlight:   10,
+		AckWaitInSecs: 1,
+	}
+	if err := c.store.Subs.CreateSub(sub); err != nil {
+		t.Fatalf("Error creating sub: %v", err)
+	}
+	s.Shutdown()
+
+	// Setup manual sub on Inbox
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	ch := make(chan bool, 1)
+	errCh := make(chan error, 1)
+	if _, err := nc.Subscribe(sub.Inbox, func(raw *nats.Msg) {
+		msg := &pb.MsgProto{}
+		err := msg.Unmarshal(raw.Data)
+		if err != nil {
+			panic(fmt.Errorf("Error processing unmarshal for msg: %v", err))
+		}
+		if !msg.Redelivered {
+			// Send an ack back
+			ack := pb.Ack{
+				Subject:  "foo",
+				Sequence: msg.Sequence,
+			}
+			ackBytes, err := ack.Marshal()
+			if err != nil {
+				panic(fmt.Errorf("Error marshaling ack: %v", err))
+			}
+			nc.Publish(sub.AckInbox, ackBytes)
+			ch <- true
+		} else {
+			errCh <- fmt.Errorf("Msg %v was redelivered", msg)
+		}
+	}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	s = runServerWithOpts(t, opts, nil)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish")
+	}
+	// Wait for the message to be received and ack sent back.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Now wait for more than AckWait to be sure that message is not redelivered
+	select {
+	case e := <-errCh:
+		t.Fatalf(e.Error())
+	case <-time.After(1500 * time.Millisecond):
+		// ok...
+	}
 }
