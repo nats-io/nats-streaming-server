@@ -203,6 +203,13 @@ func TestSQLPostgresDriverInit(t *testing.T) {
 			t.Fatalf("Statement %q incorrect for Postgres driver", stmt)
 		}
 	}
+	// Make sure there is not `row` in the statements
+	reg = regexp.MustCompile("`row`")
+	for _, stmt := range sqlStmts {
+		if reg.FindString(stmt) != "" {
+			t.Fatalf("Statement %q incorrect for Postgres driver", stmt)
+		}
+	}
 }
 
 func TestSQLErrorOnNewStore(t *testing.T) {
