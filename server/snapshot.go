@@ -321,8 +321,9 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 			}
 			delete(channelsBeforeRestore, sc.Channel)
 		}
+		ackSubject := c.getAckSubject()
 		for _, ss := range sc.Subscriptions {
-			s.recoverOneSub(c, ss.State, nil, ss.AcksPending)
+			s.recoverOneSub(c, ackSubject, ss.State, nil, ss.AcksPending)
 		}
 	}
 	if !inNewRaftCall {

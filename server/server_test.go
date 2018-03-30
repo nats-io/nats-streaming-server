@@ -607,8 +607,15 @@ func TestOptionsClone(t *testing.T) {
 	}
 }
 
-func TestGetSubStoreRace(t *testing.T) {
-	numChans := 8000
+func TestConcurrentLookupOfChannels(t *testing.T) {
+	// The original test (TestGetSubStoreRace) was a test to detect a race
+	// that previously existed when creating a channel's subStore. However,
+	// the internal code around that has drastically changed and does not
+	// make that test really relevant. Will keep this to perform concurrent
+	// lookup or create or channels, but lower the number of channels to
+	// 100 (down from 8000) because otherwise with -race, this takes a lot
+	// of memory, slowing down some other tests below...
+	numChans := 100
 
 	opts := GetDefaultOptions()
 	opts.MaxChannels = numChans + 1
