@@ -642,12 +642,14 @@ func TestMaxInactivity(t *testing.T) {
 	if err := sc.Publish("foo.baz", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
-	c = channelsGet(t, s.channels, "foo.baz")
-	created = c.activity.last
-	time.Sleep(fooStarLimits.MaxInactivity / 2)
-	checkChannelActivity(t, s, "foo.baz", true, created, fooStarLimits.MaxInactivity)
-	// Wait more than 500ms (total), channel should be gone
-	checkChannelActivity(t, s, "foo.baz", false, created, fooStarLimits.MaxInactivity)
+	c = s.channels.get("foo.baz")
+	if c != nil {
+		created = c.activity.last
+		time.Sleep(fooStarLimits.MaxInactivity / 2)
+		checkChannelActivity(t, s, "foo.baz", true, created, fooStarLimits.MaxInactivity)
+		// Wait more than 500ms (total), channel should be gone
+		checkChannelActivity(t, s, "foo.baz", false, created, fooStarLimits.MaxInactivity)
+	}
 
 	// Channel foo.bar should override the MaxInactivity to
 	// unlimited, so channel is not expected to be deleted.
@@ -664,15 +666,18 @@ func TestMaxInactivity(t *testing.T) {
 	if err := sc.Publish("foo.baz", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
-	c = channelsGet(t, s.channels, "foo.baz")
-	created = c.activity.last
-	if err := sc.Publish("c9", []byte("hello")); err != nil {
-		t.Fatalf("Error on publish: %v", err)
+	c = s.channels.get("foo.baz")
+	if c != nil {
+		c = channelsGet(t, s.channels, "foo.baz")
+		created = c.activity.last
+		if err := sc.Publish("c9", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+		time.Sleep(2 * opts.MaxInactivity)
+		verifyChannelExist(t, s, "c9", false, time.Second)
+		checkChannelActivity(t, s, "foo.baz", true, created, fooStarLimits.MaxInactivity)
+		checkChannelActivity(t, s, "foo.baz", false, created, fooStarLimits.MaxInactivity)
 	}
-	time.Sleep(2 * opts.MaxInactivity)
-	verifyChannelExist(t, s, "c9", false, time.Second)
-	checkChannelActivity(t, s, "foo.baz", true, created, fooStarLimits.MaxInactivity)
-	checkChannelActivity(t, s, "foo.baz", false, created, fooStarLimits.MaxInactivity)
 
 	// Send a message on a new channel and restart server
 	if err := sc.Publish("recovered", []byte("hello")); err != nil {
