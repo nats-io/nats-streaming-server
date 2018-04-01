@@ -1419,3 +1419,217 @@ func TestFSMsgFileWithExtraZeros(t *testing.T) {
 		}
 	}
 }
+
+type testFSGapsOption struct {
+	name string
+	opt  FileStoreOption
+}
+
+func testFSGetOptionsForGapsTests() []testFSGapsOption {
+	defaultOptions := DefaultFileStoreOptions
+	opts := []testFSGapsOption{
+		testFSGapsOption{"Default", AllOptions(&defaultOptions)},
+		testFSGapsOption{"NoBuffer", BufferSize(0)},
+	}
+	return opts
+}
+
+func TestFSGapsInSequence(t *testing.T) {
+	opts := testFSGetOptionsForGapsTests()
+	for _, o := range opts {
+		t.Run(o.name, func(t *testing.T) {
+
+			cleanupFSDatastore(t)
+			defer cleanupFSDatastore(t)
+
+			s := createDefaultFileStore(t, o.opt)
+			defer s.Close()
+
+			cs := storeCreateChannel(t, s, "foo")
+
+			payload := []byte("msg")
+
+			// storeMsg calls Store and then Lookup
+			storeMsg(t, cs, "foo", 1, payload)
+			storeMsg(t, cs, "foo", 2, payload)
+			storeMsg(t, cs, "foo", 5, payload)
+
+			s.Close()
+			s, state := openDefaultFileStore(t, o.opt)
+			defer s.Close()
+			cs = getRecoveredChannel(t, state, "foo")
+
+			for i := 1; i <= 5; i++ {
+				m := msgStoreLookup(t, cs.Msgs, uint64(i))
+				if i >= 3 && i <= 4 {
+					if len(m.Data) != 0 {
+						stackFatalf(t, "For seq %v, expected empty message, got %v", i, m)
+					}
+				} else {
+					if m == nil || len(m.Data) == 0 {
+						stackFatalf(t, "For seq %v expected message, got nil", i)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestFSGapsInSequenceWithMaxMsgsLimits(t *testing.T) {
+	opts := testFSGetOptionsForGapsTests()
+	for _, o := range opts {
+		t.Run(o.name, func(t *testing.T) {
+
+			cleanupFSDatastore(t)
+			defer cleanupFSDatastore(t)
+
+			s := createDefaultFileStore(t, o.opt)
+			defer s.Close()
+
+			limits := testDefaultStoreLimits
+			limits.MaxMsgs = 3
+			if err := s.SetLimits(&limits); err != nil {
+				t.Fatalf("Error setting limits: %v", err)
+			}
+
+			cs := storeCreateChannel(t, s, "foo")
+
+			payload := []byte("msg")
+			storeMsg(t, cs, "foo", 1, payload)
+			storeMsg(t, cs, "foo", 2, payload)
+			storeMsg(t, cs, "foo", 5, payload)
+
+			s.Close()
+			s, state := openDefaultFileStoreWithLimits(t, &limits, o.opt)
+			defer s.Close()
+
+			cs = getRecoveredChannel(t, state, "foo")
+			n, _ := msgStoreState(t, cs.Msgs)
+			if n != 3 {
+				t.Fatalf("Expected 3 messages, got %v", n)
+			}
+
+			storeMsg(t, cs, "foo", 6, payload)
+			storeMsg(t, cs, "foo", 7, payload)
+			storeMsg(t, cs, "foo", 8, payload)
+
+			n, _ = msgStoreState(t, cs.Msgs)
+			if n != 3 {
+				t.Fatalf("Expected 3 messages, got %v", n)
+			}
+			first, last := msgStoreFirstAndLastSequence(t, cs.Msgs)
+			if first != 6 || last != 8 {
+				t.Fatalf("Unexpected first/last: %v/%v", first, last)
+			}
+		})
+	}
+}
+
+func TestFSGapsInSequenceWithExpirationLimits(t *testing.T) {
+	opts := testFSGetOptionsForGapsTests()
+	for _, o := range opts {
+		t.Run(o.name, func(t *testing.T) {
+
+			cleanupFSDatastore(t)
+			defer cleanupFSDatastore(t)
+
+			s := createDefaultFileStore(t, o.opt)
+			defer s.Close()
+
+			limits := testDefaultStoreLimits
+			limits.MaxAge = 100 * time.Millisecond
+			if err := s.SetLimits(&limits); err != nil {
+				t.Fatalf("Error setting limits: %v", err)
+			}
+
+			cs := storeCreateChannel(t, s, "foo")
+
+			payload := []byte("msg")
+			storeMsg(t, cs, "foo", 1, payload)
+			storeMsg(t, cs, "foo", 2, payload)
+			storeMsg(t, cs, "foo", 5, payload)
+
+			time.Sleep(200 * time.Millisecond)
+
+			n, b := msgStoreState(t, cs.Msgs)
+			if n != 0 || b != 0 {
+				t.Fatalf("Expected no message, got %v/%v", n, b)
+			}
+
+			storeMsg(t, cs, "foo", 6, payload)
+			n, b = msgStoreState(t, cs.Msgs)
+			if n != 1 || b == 0 {
+				t.Fatalf("Expected 1 message, got %v/%v", n, b)
+			}
+		})
+	}
+}
+
+func TestFSGapsInSequenceWithSliceMaxMsgsLimits(t *testing.T) {
+	opts := testFSGetOptionsForGapsTests()
+	for _, o := range opts {
+		t.Run(o.name, func(t *testing.T) {
+
+			cleanupFSDatastore(t)
+			defer cleanupFSDatastore(t)
+
+			s := createDefaultFileStore(t, o.opt, SliceConfig(3, 0, 0, ""))
+			defer s.Close()
+
+			cs := storeCreateChannel(t, s, "foo")
+
+			payload := []byte("msg")
+			storeMsg(t, cs, "foo", 1, payload)
+			storeMsg(t, cs, "foo", 2, payload)
+			storeMsg(t, cs, "foo", 5, payload)
+
+			n, _ := msgStoreState(t, cs.Msgs)
+			// Gaps are still counted as messages
+			if n != 5 {
+				t.Fatalf("Expected 5 messages, got %v", n)
+			}
+
+			storeMsg(t, cs, "foo", 6, payload)
+			storeMsg(t, cs, "foo", 7, payload)
+			storeMsg(t, cs, "foo", 8, payload)
+
+			n, _ = msgStoreState(t, cs.Msgs)
+			if n != 8 {
+				t.Fatalf("Expected 8 messages, got %v", n)
+			}
+			first, last := msgStoreFirstAndLastSequence(t, cs.Msgs)
+			if first != 1 || last != 8 {
+				t.Fatalf("Unexpected first/last: %v/%v", first, last)
+			}
+
+			ms := cs.Msgs.(*FileMsgStore)
+			ms.Lock()
+			numSlices := len(ms.files)
+			if numSlices != 3 {
+				ms.Unlock()
+				t.Fatalf("Expected 3 file slices, got %v", numSlices)
+			}
+			// The first slice will have 1, 2, [3, 4]
+			// The second will have 5, 6, 7
+			// THe third will have 8
+			type firstLast struct {
+				first, last uint64
+			}
+			expected := make(map[int]firstLast)
+			expected[1] = firstLast{1, 4}
+			expected[2] = firstLast{5, 7}
+			expected[3] = firstLast{8, 8}
+			for i := ms.firstFSlSeq; i <= ms.lastFSlSeq; i++ {
+				sl := ms.files[i]
+				first := sl.firstSeq
+				last := sl.lastSeq
+				if first != expected[i].first || last != expected[i].last {
+					ms.Unlock()
+					t.Fatalf("Expected first/last to be %v/%v for slice %d, got %v/%v",
+						expected[i].first, expected[i].last, i, first, last)
+				}
+			}
+			ms.Unlock()
+		})
+	}
+}
