@@ -2344,6 +2344,14 @@ func (ms *FileMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 		}
 	}
 
+	// Is there a gap in message sequence?
+	if ms.last > 0 && m.Sequence > ms.last+1 {
+		if err := ms.fillGaps(fslice, m); err != nil {
+			ms.unlockFiles(fslice)
+			return 0, err
+		}
+	}
+
 	// Check if we need to move to next file slice
 	if fslice == nil || ms.slHasLimits {
 		if fslice == nil ||
@@ -2515,6 +2523,45 @@ func (ms *FileMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 processErr:
 	ms.unlockFiles(fslice)
 	return 0, err
+}
+
+func (ms *FileMsgStore) fillGaps(fslice *fileSlice, upToMsg *pb.MsgProto) error {
+	// flush possible buffered messages.
+	if err := ms.flush(fslice); err != nil {
+		return err
+	}
+
+	var (
+		recSize int
+		err     error
+		msgSize int
+	)
+
+	ms.lastMsg = nil
+	emptyMsg := &pb.MsgProto{
+		Subject:   ms.channelName,
+		Timestamp: upToMsg.Timestamp,
+	}
+	for i := ms.last + 1; i < upToMsg.Sequence; i++ {
+		emptyMsg.Sequence = i
+		msgSize = emptyMsg.Size()
+		ms.tmpMsgBuf, recSize, err = writeRecord(fslice.file.handle, ms.tmpMsgBuf, recNoType, emptyMsg, msgSize, ms.fstore.crcTable)
+		if err != nil {
+			return err
+		}
+		if err := ms.writeIndex(fslice.idxFile.handle, i, ms.wOffset, emptyMsg.Timestamp, msgSize); err != nil {
+			return err
+		}
+		ms.wOffset += int64(recSize)
+		ms.last++
+		ms.totalCount++
+		size := uint64(msgSize + msgRecordOverhead)
+		ms.totalBytes += size
+		fslice.lastSeq = i
+		fslice.msgsCount++
+		fslice.msgsSize += size
+	}
+	return nil
 }
 
 // processBufferedMsgs adds message index records in the given buffer
