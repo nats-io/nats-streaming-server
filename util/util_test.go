@@ -23,10 +23,11 @@ import (
 	"time"
 )
 
-func TestMain(_ *testing.M) {
+func TestMain(m *testing.M) {
 	// This one is added here so that if we want to disable sql for stores tests
 	// we can use the same param for all packages as in "go test -v ./... -sql=false"
 	flag.Bool("sql", false, "Not used for util tests")
+	os.Exit(m.Run())
 }
 
 func stackFatalf(t *testing.T, f string, args ...interface{}) {
