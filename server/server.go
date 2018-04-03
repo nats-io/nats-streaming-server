@@ -525,6 +525,11 @@ func (c *channel) subToSnapshotRestoreRequests() error {
 			if buf == nil {
 				return
 			}
+			select {
+			case <-c.stan.shutdownCh:
+				return
+			default:
+			}
 		}
 	})
 	if err != nil {
