@@ -16,14 +16,16 @@ package logger
 import (
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
 
-func TestMain(_ *testing.M) {
+func TestMain(m *testing.M) {
 	// This one is added here so that if we want to disable sql for stores tests
 	// we can use the same param for all packages as in "go test -v ./... -sql=false"
 	flag.Bool("sql", false, "Not used for logger tests")
+	os.Exit(m.Run())
 }
 
 type dummyLogger struct {
