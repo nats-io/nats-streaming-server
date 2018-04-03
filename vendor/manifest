@@ -129,14 +129,6 @@
 			"notests": true
 		},
 		{
-			"importpath": "github.com/hashicorp/raft-boltdb",
-			"repository": "https://github.com/hashicorp/raft-boltdb",
-			"vcs": "git",
-			"revision": "6e5ba93211eaf8d9a2ad7e41ffad8c6f160f9fe3",
-			"branch": "master",
-			"notests": true
-		},
-		{
 			"importpath": "github.com/lib/pq",
 			"repository": "https://github.com/lib/pq",
 			"vcs": "git",

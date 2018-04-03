@@ -412,6 +412,11 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64) error 
 		if _, err := c.store.Msgs.Store(msg); err != nil {
 			return err
 		}
+		select {
+		case <-r.server.shutdownCh:
+			return fmt.Errorf("server shutting down")
+		default:
+		}
 	}
 	return c.store.Msgs.Flush()
 }

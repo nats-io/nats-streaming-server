@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
-	"github.com/hashicorp/raft-boltdb"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/nats-streaming-server/spb"
 )
@@ -64,7 +63,7 @@ type raftNode struct {
 	sync.Mutex
 	closed bool
 	*raft.Raft
-	store     *raftboltdb.BoltStore
+	store     *raftLog
 	transport *raft.NetworkTransport
 	logInput  io.WriteCloser
 	joinSub   *nats.Subscription
@@ -93,19 +92,32 @@ func (r *raftNode) shutdown() error {
 	}
 	r.closed = true
 	r.Unlock()
-	if err := r.Raft.Shutdown().Error(); err != nil {
-		return err
+	if r.Raft != nil {
+		if err := r.Raft.Shutdown().Error(); err != nil {
+			return err
+		}
 	}
-	if err := r.transport.Close(); err != nil {
-		return err
+	if r.transport != nil {
+		if err := r.transport.Close(); err != nil {
+			return err
+		}
 	}
-	if err := r.store.Close(); err != nil {
-		return err
+	if r.store != nil {
+		if err := r.store.Close(); err != nil {
+			return err
+		}
 	}
-	if err := r.joinSub.Unsubscribe(); err != nil {
-		return err
+	if r.joinSub != nil {
+		if err := r.joinSub.Unsubscribe(); err != nil {
+			return err
+		}
 	}
-	return r.logInput.Close()
+	if r.logInput != nil {
+		if err := r.logInput.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // createRaftNode creates and starts a new Raft node.
@@ -251,10 +263,8 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 	// So we want the object to exist so we can check on leader atomic, etc..
 	s.raft = &raftNode{}
 
-	store, err := raftboltdb.New(raftboltdb.Options{
-		Path:   filepath.Join(path, raftLogFile),
-		NoSync: !s.opts.Clustering.Sync,
-	})
+	raftLogFileName := filepath.Join(path, raftLogFile)
+	store, err := newRaftLog(s.log, raftLogFileName, s.opts.Clustering.Sync, int(s.opts.Clustering.TrailingLogs))
 	if err != nil {
 		return false, err
 	}
@@ -441,7 +451,7 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 			}
 			if err != nil {
 				panic(fmt.Errorf("failed to store replicated message %d on channel %s: %v",
-					msg.Sequence, c.name, err))
+					msg.Sequence, msg.Subject, err))
 			}
 		}
 		return nil
