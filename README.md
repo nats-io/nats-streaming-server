@@ -29,6 +29,7 @@ NATS Streaming provides the following high-level feature set.
         * [Supported Stores](#supported-stores)
         * [Clustering Configuration](#clustering-configuration)
         * [Clustering Auto Configuration](#clustering-auto-configuration)
+        * [Clustering And Containers](#clustering-and-containers)
     * [Fault Tolerance](#fault-tolerance)
         * [Active Server](#active-server)
         * [Standby Servers](#standby-servers)
@@ -232,8 +233,10 @@ After the first queue member is created, any other member joining the group will
 When the last member of the group leaves (subscription unsubscribed/closed/or connection closed), the group is removed from the server.
 The next application creating a subscription with the same name will create a new group, starting at the start position given in the subscription request.
 
-Queue subscriptions can also be durables. In this case, the client provides also a durable name. The behavior is, as you would expect,
-a combination of queue and durable subscriptions. The main difference is that when the last member leaves the group, the state of
+A queue subscription can also be durable. For that, the client needs to provide a queue and durable name. The behavior is, as you would expect,
+a combination of queue and durable subscription. Unlike a durable subscription, though, the client ID is not part of the queue group name.
+It makes sense, because since client ID must be unique, it would prevent more than one connection to participate in the queue group.
+The main difference between a queue subscription and a durable one, is that when the last member leaves the group, the state of
 the group will be maintained by the server. Later, when a member rejoins the group, the delivery will resume.
 
 ***Note: For a durable queue subscription, the last member to * unsubscribe * (not simply close) causes the group to  be removed from the server.***
@@ -455,6 +458,21 @@ The very first server that bootstrapped the cluster can be restarted, however, t
 <b>must remove the datastores</b> of the other servers that were incorrectly started with
 the bootstrap parameter before attempting to restart them. If they are restarted -even without the
 `-cluster_bootstrap` parameter- but with existing state, they will once again start as a leader.
+
+### Clustering And Containers
+
+When running the docker image of NATS Streaming Server, you will want to specify a mounted volume so that the data can be recovered.
+Your `-dir` parameter then points to a directory inside that mounted volume. However, after a restart you may get a failure with a message
+similar to this:
+```
+[FTL] STREAM: Failed to start: streaming state was recovered but cluster log path "mycluster/a" is empty
+```
+This is because the server recovered the streaming state (as pointed by `-dir` and located in the mounted volume), but did
+not recover the RAFT specific state that is by default stored in a directory named after your cluster id, relative to the
+current directory starting the executable. In the context of a container, this data will be lost after the container is stopped.
+
+In order to avoid this issue, you need to specify the `-cluster_log_path` and ensure that it points to the mounted volume so
+that the RAFT state can be recovered along with the Streaming state.
 
 ## Fault Tolerance
 
