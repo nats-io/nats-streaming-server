@@ -217,6 +217,10 @@ func (n *natsStreamLayer) newNATSConn(address string) *natsConn {
 // performing a handshake over NATS which establishes unique inboxes at each
 // endpoint for streaming data.
 func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
+	if !n.conn.IsConnected() {
+		return nil, errors.New("stan: raft dial failed since not connected to NATS")
+	}
+
 	// QUESTION: The Raft NetTransport does connection pooling, which is useful
 	// for TCP sockets. The NATS transport simulates a socket using a
 	// subscription at each endpoint, but everything goes over the same NATS
