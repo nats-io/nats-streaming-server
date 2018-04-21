@@ -3417,3 +3417,65 @@ func TestClusteringNodeIDInPeersArray(t *testing.T) {
 
 	getLeader(t, 10*time.Second, s1, s2, s3)
 }
+
+func TestClusteringUnableToContactPeer(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	logger := &checkErrorLogger{checkErrorStr: "dial failed"}
+
+	s1Opts := getTestDefaultOptsForClustering("a", true)
+	s1Opts.Clustering.NodeID = "a"
+	s1Opts.Clustering.Peers = []string{"b"}
+	s1Opts.Clustering.RaftLogging = true
+	s1Opts.CustomLogger = logger
+	s1 := runServerWithOpts(t, s1Opts, nil)
+	// Due to the nature of this test, do not defer Shutdown here
+
+	s2Opts := getTestDefaultOptsForClustering("b", false)
+	s2Opts.Clustering.NodeID = "b"
+	s2Opts.Clustering.Peers = []string{"a"}
+	s2 := runServerWithOpts(t, s2Opts, nil)
+	// Due to the nature of this test, do not defer Shutdown here
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	// Kill the NATS Server
+	ns.Shutdown()
+
+	// Wait that we get the expected error message
+	gotIt := false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		// Check for error
+		logger.Lock()
+		gotIt = logger.gotError
+		logger.Unlock()
+		if gotIt {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !gotIt {
+		t.Fatalf("Did not get the expected error")
+	}
+
+	// Check that server shutdown in a timely manner
+	checkShutdown := func(s *StanServer) {
+		ch := make(chan bool, 1)
+		go func() {
+			s.Shutdown()
+			ch <- true
+		}()
+		if err := Wait(ch); err != nil {
+			stackFatalf(t, "Server took too long to shutdown")
+		}
+	}
+	checkShutdown(s2)
+	checkShutdown(s1)
+}
