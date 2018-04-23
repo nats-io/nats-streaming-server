@@ -1307,12 +1307,10 @@ func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 	ncOpts.ReconnectWait = 250 * time.Millisecond
 	// Make it try to reconnect for ever.
 	ncOpts.MaxReconnect = -1
-	// For FT make the reconnect buffer as small as possible since
-	// we don't really want FT HBs to be buffered while we are disconnected
-	// and be sent as a burst on reconnect.
-	if name == "ft" {
-		ncOpts.ReconnectBufSize = 128
-	}
+	// To avoid possible duplicate redeliveries, etc.., set the reconnect
+	// buffer to -1 to avoid any buffering in the nats library and flush
+	// on reconnect.
+	ncOpts.ReconnectBufSize = -1
 
 	s.log.Tracef(" NATS conn opts: %v", ncOpts)
 
