@@ -15,12 +15,14 @@ package server
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 )
@@ -1238,5 +1240,86 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 			t.Fatalf(e.Error())
 		}
 	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+type delayReconnectDialer struct {
+	fail int
+}
+
+func (d *delayReconnectDialer) Dial(network, address string) (net.Conn, error) {
+	d.fail++
+	if d.fail >= 10 {
+		return net.Dial(network, address)
+	}
+	return nil, errOnPurpose
+}
+
+func TestNoDuplicateRedeliveryDueToDisconnect(t *testing.T) {
+	ns := natsdTest.RunServer(nil)
+	defer shutdownRestartedNATSServerOnTestExit(&ns)
+
+	opts := GetDefaultOptions()
+	opts.NATSServerURL = nats.DefaultURL
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	// If the server's NATS connections were to use a reconnect buffer,
+	// in case of redeliveries, the server will Publish() them while
+	// being disconnected. On reconnect, the redeliveries would be flushed,
+	// which would result in client getting the same message redelivered
+	// multiple times, even after being ack'ed.
+	// Use a custom dialer for the server's send connection to ensure that
+	// the streaming client lib has a chance to reconnect before the server's
+	// connection reconnects, otherwise, even with a reconnect buffer, the
+	// pending redeliveries may be flushed before the client's subs are
+	// recreated on the NATS server and the issue would not be observed.
+	s.mu.Lock()
+	s.ncs.Opts.CustomDialer = &delayReconnectDialer{}
+	s.mu.Unlock()
+
+	sc, nc := createConnectionWithNatsOpts(t, clientName, nats.MaxReconnects(-1), nats.ReconnectWait(15*time.Millisecond))
+	defer nc.Close()
+	defer sc.Close()
+
+	ch := make(chan bool, 1)
+	rdc := int32(0)
+	ok := int32(0)
+	if _, err := sc.Subscribe("foo", func(m *stan.Msg) {
+		if !m.Redelivered {
+			ch <- true
+			return
+		}
+		// Do not ack until we know that the NATS server has not
+		// been stopped and restarted.
+		if atomic.LoadInt32(&ok) != 1 {
+			return
+		}
+		m.Ack()
+		if atomic.AddInt32(&rdc, 1) == 1 {
+			ch <- true
+		}
+	}, stan.SetManualAckMode(), stan.AckWait(ackWaitInMs(100))); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get out message")
+	}
+	// Shutdown NATS Server and wait for several redelivery attempts
+	ns.Shutdown()
+	time.Sleep(500 * time.Millisecond)
+	ns = natsdTest.RunServer(nil)
+	atomic.StoreInt32(&ok, 1)
+	// Now wait for the redelivered message to be ack'ed.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get redeliverd")
+	}
+	// Wait a bit and check that the rdc count is 1.
+	time.Sleep(400 * time.Millisecond)
+	if c := atomic.LoadInt32(&rdc); c != 1 {
+		t.Fatalf("Message redelivered after being ack'ed: %v", c)
 	}
 }
