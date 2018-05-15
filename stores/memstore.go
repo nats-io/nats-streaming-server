@@ -196,6 +196,10 @@ func (ms *MemoryMsgStore) expireMsgs() {
 	for {
 		m, ok := ms.msgs[ms.first]
 		if !ok {
+			if ms.first < ms.last {
+				ms.first++
+				continue
+			}
 			ms.ageTimer = nil
 			ms.wg.Done()
 			return

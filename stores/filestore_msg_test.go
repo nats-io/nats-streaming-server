@@ -74,16 +74,29 @@ func TestFSBadMsgFile(t *testing.T) {
 	if err := idxFile.Close(); err != nil {
 		t.Fatalf("Unexpected error closing index file: %v", err)
 	}
-	// We should fail to create the filestore
+	// The index file will be deleted and recovery will be done
+	// based on the data file, which should then work.
+	fs, _ = openDefaultFileStore(t)
+	fs.Close()
+
+	// Corrupt data file. Index's last message will not match
+	// data file, so idx file will be removed and recovery from
+	// data file will be done, which should report failure.
+	datContent, err := ioutil.ReadFile(firstSliceFileName)
+	if err != nil {
+		t.Fatalf("Error reading %v: %v", firstSliceFileName, err)
+	}
+	if err := ioutil.WriteFile(firstSliceFileName, datContent[:len(datContent)-5], 0666); err != nil {
+		t.Fatalf("Error writing file %v: %v", firstSliceFileName, err)
+	}
+	// So we should fail to create the filestore
 	expectedErrorOpeningDefaultFileStore(t)
 
-	// Delete the file
-	if err := os.Remove(firstIdxFileName); err != nil {
-		t.Fatalf("Unable to delete the index file %q: %v", firstIdxFileName, err)
-	}
+	// Index file should have been deleted from previous test
+
 	// This will create the file without the file version
 	if file, err := os.OpenFile(firstIdxFileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666); err != nil {
-		t.Fatalf("Error creating client file: %v", err)
+		t.Fatalf("Error creating index file: %v", err)
 	} else {
 		file.Close()
 	}
@@ -102,7 +115,7 @@ func TestFSBadMsgFile(t *testing.T) {
 	}
 	// This will create the file without the file version
 	if file, err := os.OpenFile(firstSliceFileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666); err != nil {
-		t.Fatalf("Error creating client file: %v", err)
+		t.Fatalf("Error creating message data file file: %v", err)
 	} else {
 		file.Close()
 	}
@@ -1631,5 +1644,52 @@ func TestFSGapsInSequenceWithSliceMaxMsgsLimits(t *testing.T) {
 			}
 			ms.Unlock()
 		})
+	}
+}
+
+func TestFSExpirationWithTruncatedNonLastSlice(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t, SliceConfig(3, 0, 0, ""), BufferSize(0))
+	defer s.Close()
+
+	cs := storeCreateChannel(t, s, "foo")
+	payload := []byte("msg")
+	for seq := uint64(1); seq <= 5; seq++ {
+		storeMsg(t, cs, "foo", seq, payload)
+	}
+
+	// Truncate the end of first slice
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.RLock()
+	fslice := ms.files[1]
+	fname := fslice.file.name
+	ms.RUnlock()
+
+	s.Close()
+
+	datContent, err := ioutil.ReadFile(fname)
+	if err != nil {
+		t.Fatalf("Error reading %v: %v", fname, err)
+	}
+	if err := ioutil.WriteFile(fname, datContent[:len(datContent)-5], 0666); err != nil {
+		t.Fatalf("Error writing file %v: %v", fname, err)
+	}
+
+	// Now re-open the store with a max age limit.
+	// Since the first slice is corrupted, one of the message in that
+	// slice will be removed.
+	sl := testDefaultStoreLimits
+	sl.MaxAge = 100 * time.Millisecond
+	s, state := openDefaultFileStoreWithLimits(t, &sl, BufferSize(0), TruncateUnexpectedEOF(true))
+	defer s.Close()
+
+	time.Sleep(200 * time.Millisecond)
+
+	cs = getRecoveredChannel(t, state, "foo")
+	n, b := msgStoreState(t, cs.Msgs)
+	if n != 0 || b != 0 {
+		t.Fatalf("Expected no message, got %v/%v", n, b)
 	}
 }

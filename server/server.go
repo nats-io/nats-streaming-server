@@ -47,7 +47,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.9.3"
+	VERSION = "0.10.0"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -978,35 +978,24 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 			storageUpdate = sub.LastSent == qs.lastSent
 			sortedPendingMsgs := makeSortedPendingMsgs(sub.acksPending)
 			for _, pm := range sortedPendingMsgs {
-				m, err := c.store.Msgs.Lookup(pm.seq)
-				if err != nil {
-					ss.stan.log.Errorf("Unable to update subscription for %s:%v (%v)", sub.subject, pm.seq, err)
-					continue
-				}
-				// This is possible if message has expired or removed from channel
-				// due to limits. No need to ack it since we are destroying this
-				// subscription.
-				if m == nil {
-					continue
-				}
 				// Get one of the remaning queue subscribers.
 				qsub := qs.subs[idx]
 				qsub.Lock()
 				// Store in storage
-				if err := qsub.store.AddSeqPending(qsub.ID, m.Sequence); err != nil {
+				if err := qsub.store.AddSeqPending(qsub.ID, pm.seq); err != nil {
 					ss.stan.log.Errorf("[Client:%s] Unable to transfer message to subid=%d, subject=%s, seq=%d, err=%v",
-						clientID, subid, subject, m.Sequence, err)
+						clientID, subid, subject, pm.seq, err)
 					qsub.Unlock()
 					continue
 				}
 				// We don't need to update if the sub's lastSent is transferred
 				// to another queue subscriber.
-				if storageUpdate && m.Sequence == qs.lastSent {
+				if storageUpdate && pm.seq == qs.lastSent {
 					storageUpdate = false
 				}
 				// Update LastSent if applicable
-				if m.Sequence > qsub.LastSent {
-					qsub.LastSent = m.Sequence
+				if pm.seq > qsub.LastSent {
+					qsub.LastSent = pm.seq
 				}
 				// As of now, members can have different AckWait values.
 				expirationTime := pm.expire
@@ -1017,7 +1006,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 					expirationTime = now + int64(qsub.ackWait)
 				}
 				// Store in ackPending.
-				qsub.acksPending[m.Sequence] = expirationTime
+				qsub.acksPending[pm.seq] = expirationTime
 				// Keep track of this qsub
 				if qsubs == nil {
 					qsubs = make(map[uint64]*subState)
@@ -4617,28 +4606,16 @@ func (s *StanServer) getNextMsg(c *channel, nextSeq, lastSent *uint64) *pb.MsgPr
 		if nextMsg != nil {
 			return nextMsg
 		}
-		// Reason why we don't call FirstMsg here is that
-		// FirstMsg could be costly (read from disk, etc)
-		// to realize that the message is of lower sequence.
-		// So check with cheaper FirstSequence() first.
-
-		// TODO: Error is ignored here. Will revisit this whole function
-		// later with handling of gaps in message sequence (either due
-		// to errors or absence of messages - that may have been removed
-		// after fixing a previous store corruption).
-		firstAvail, _ := c.store.Msgs.FirstSequence()
-		if firstAvail <= *nextSeq {
+		first, last, _ := c.store.Msgs.FirstAndLastSequence()
+		if *nextSeq < first {
+			*nextSeq = first
+			*lastSent = first - 1
+		} else if *nextSeq >= last {
 			return nil
+		} else {
+			*nextSeq++
+			*lastSent++
 		}
-		// TODO: We may send dataloss advisories to the client
-		// through the use of a subscription created optionally
-		// by the sub and given to the server through the SubscriptionRequest.
-		// For queue group, server would pick one of the member to send
-		// the advisory to.
-
-		// For now, just skip the missing ones.
-		*nextSeq = firstAvail
-		*lastSent = firstAvail - 1
 
 		// Note that the next lookup could still fail because
 		// the first avail message may have been dropped in the

@@ -247,55 +247,6 @@ func TestMsgLookupFailures(t *testing.T) {
 	mms.fail = false
 	mms.Unlock()
 	sub.Unsubscribe()
-
-	// Check that removal of qsub with pending message
-
-	// One queue member receives and acks
-	if _, err := sc.QueueSubscribe("bar", "queue", func(_ *stan.Msg) {}); err != nil {
-		t.Fatalf("Error on subscribe: %v", err)
-	}
-	// Another member does not ack.
-	qsub2, err := sc.QueueSubscribe("bar", "queue", func(_ *stan.Msg) {
-		rcvCh <- true
-	}, stan.SetManualAckMode(), stan.AckWait(ackWaitInMs(15)))
-	if err != nil {
-		t.Fatalf("Error on subscribe: %v", err)
-	}
-
-	cs = channelsGet(t, s.channels, "bar")
-	mms = cs.store.Msgs.(*mockedMsgStore)
-
-	// Publish messages until qsub2 receives one
-forLoop:
-	for {
-		if err := sc.Publish("bar", []byte("hello")); err != nil {
-			t.Fatalf("Error on publish: %v", err)
-		}
-		select {
-		case <-rcvCh:
-			break forLoop
-		case <-time.After(500 * time.Millisecond):
-			// send a new message
-		}
-	}
-	// Activate store failures
-	mms.Lock()
-	mms.fail = true
-	logger.Lock()
-	logger.checkErrorStr = "Unable to update subscription"
-	logger.gotError = false
-	logger.Unlock()
-	mms.Unlock()
-	// Close qsub2, server should try to move unack'ed message to qsub1
-	if err := qsub2.Close(); err != nil {
-		t.Fatalf("Error closing qsub: %v", err)
-	}
-	logger.Lock()
-	gotErr = logger.gotError
-	logger.Unlock()
-	if !gotErr {
-		t.Fatalf("Did not capture error about updating subscription")
-	}
 }
 
 func (ss *mockedSubStore) AddSeqPending(subid, seq uint64) error {

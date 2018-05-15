@@ -1370,7 +1370,7 @@ func (t *testReader) Read(p []byte) (n int, err error) {
 	}
 	copy(p, t.content[t.start:t.start+len(p)])
 	t.start += len(p)
-	return len(t.content), nil
+	return len(p), nil
 }
 
 func TestFSReadRecord(t *testing.T) {
@@ -1916,4 +1916,32 @@ func TestFSDeleteChannel(t *testing.T) {
 	// Should be able to recreate same channel
 	storeCreateChannel(t, s, "foo")
 	checkDir("foo", true)
+}
+
+func TestFSTruncateOnUnexpectedEOFLock(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	// When opening with TruncateUnexpectedEOF(true), the store
+	// will create a special file to know that it was last opened
+	// with that. We want the user to no use that option as
+	// a default param, so a restart of the store should not have
+	// it. Only then that special file will be deleted.
+	s := createDefaultFileStore(t, TruncateUnexpectedEOF(true))
+	s.Close()
+
+	// Restarting the server with that option should fail
+	s, err := NewFileStore(testLogger, testFSDefaultDatastore, nil, TruncateUnexpectedEOF(true))
+	if err == nil || s != nil {
+		s.Close()
+		t.Fatalf("Expected error opening the store")
+	}
+
+	// Open without the option should work ok.
+	s, _ = openDefaultFileStore(t)
+	s.Close()
+
+	// Now one can use the option again
+	s, _ = openDefaultFileStore(t, TruncateUnexpectedEOF(true))
+	s.Close()
 }

@@ -113,6 +113,9 @@ const (
 
 	// Lock file name
 	lockFileName = ".rootdir.lck"
+
+	// Witness file for TruncateUnexpectedEOF option
+	truncateBadEOFFileName = ".truncate.lck"
 )
 
 // FileStoreOption is a function on the options for a File Store
@@ -174,6 +177,12 @@ type FileStoreOptions struct {
 
 	// Number of channels recovered in parallel (default is 1).
 	ParallelRecovery int
+
+	// TruncateUnexpectedEOF is set to true means that if recovery reports
+	// an error about unexpected end of file, the last bad record will be
+	// removed (the file is truncated at the beginning of the first incomplete
+	// record). Dataloss may occur.
+	TruncateUnexpectedEOF bool
 }
 
 // This is an internal error to detect situations where we do
@@ -328,6 +337,18 @@ func ParallelRecovery(count int) FileStoreOption {
 	}
 }
 
+// TruncateUnexpectedEOF indicates if on recovery the store should
+// truncate a file that reports an unexpected end-of-file (EOF) on recovery.
+// If set to true, the invalid record byte content is printed but the store
+// will truncate the file prior to this bad record and proceed with recovery.
+// Dataloss may occur.
+func TruncateUnexpectedEOF(truncate bool) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.TruncateUnexpectedEOF = truncate
+		return nil
+	}
+}
+
 // AllOptions is a convenient option to pass all options from a FileStoreOptions
 // structure to the constructor.
 func AllOptions(opts *FileStoreOptions) FileStoreOption {
@@ -359,6 +380,7 @@ func AllOptions(opts *FileStoreOptions) FileStoreOption {
 		o.CompactEnabled = opts.CompactEnabled
 		o.DoCRC = opts.DoCRC
 		o.DoSync = opts.DoSync
+		o.TruncateUnexpectedEOF = opts.TruncateUnexpectedEOF
 		return nil
 	}
 }
@@ -465,6 +487,7 @@ type bufferedWriter struct {
 // FileSubStore is a subscription store in files.
 type FileSubStore struct {
 	genericSubStore
+	fstore      *FileStore
 	fm          *filesManager
 	tmpSubBuf   []byte
 	file        *file
@@ -546,7 +569,7 @@ type FileMsgStore struct {
 	timeTick    int64 // time captured in background tasks go routine
 
 	tmpMsgBuf    []byte
-	fm           *filesManager // shortcut to ms.fs.fm
+	fm           *filesManager // shortcut to ms.fstore.fm
 	hasFDsLimit  bool          // shortcut to ms.fstore.opts.FileDescriptorsLimit > 0
 	bw           *bufferedWriter
 	writer       io.Writer // this is `bw.buf` or `file` depending if buffer writer is used or not
@@ -708,8 +731,7 @@ func writeRecord(w io.Writer, buf []byte, recType recordType, rec record, recSiz
 func readRecord(r io.Reader, buf []byte, recTyped bool, crcTable *crc32.Table, checkCRC bool) ([]byte, int, recordType, error) {
 	_header := [recordHeaderSize]byte{}
 	header := _header[:]
-	if read, err := io.ReadFull(r, header); err != nil {
-		err = expandReadFullError(err, "record header", recordHeaderSize, read)
+	if _, err := io.ReadFull(r, header); err != nil {
 		return buf, 0, recNoType, err
 	}
 	recType := recNoType
@@ -729,8 +751,7 @@ func readRecord(r io.Reader, buf []byte, recTyped bool, crcTable *crc32.Table, c
 	}
 	// Now we are going to read the payload
 	buf = util.EnsureBufBigEnough(buf, recSize)
-	if read, err := io.ReadFull(r, buf[:recSize]); err != nil {
-		err = expandReadFullError(err, "message payload", recSize, read)
+	if _, err := io.ReadFull(r, buf[:recSize]); err != nil {
 		return buf, 0, recNoType, err
 	}
 	if checkCRC {
@@ -741,14 +762,6 @@ func readRecord(r io.Reader, buf []byte, recTyped bool, crcTable *crc32.Table, c
 		}
 	}
 	return buf, recSize, recType, nil
-}
-
-func expandReadFullError(err error, text string, expectedSize, read int) error {
-	// This is a "normal" error that indicates that we are at the end of file.
-	if err == io.EOF {
-		return err
-	}
-	return fmt.Errorf("%v (%s expected to be %v bytes, only read %v)", err, text, expectedSize, read)
 }
 
 // setSize sets the initial buffer size and keep track of min/max allowed sizes
@@ -1089,30 +1102,26 @@ func (fm *filesManager) setBeforeCloseCb(file *file, bccb beforeFileClose) {
 	fm.Unlock()
 }
 
-// rewindAndTruncateFile rewinds the file from the current position by the
-// given number of bytes and truncate the file to this new position.
+// truncateFile truncates the file to the given offset.
 // The file is assumed to be locked on entry.
 // If the file's flags indicate that this file is opened with O_APPEND, it
 // is first closed, reopened in non append mode, truncated, then reopened
 // (and locked) with original flags.
-func (fm *filesManager) rewindAndTruncateFile(file *file, numBytes int) error {
+func (fm *filesManager) truncateFile(file *file, offset int64) error {
 	reopen := false
 	fd := file.handle
-	curPos, err := fd.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return err
-	}
 	if file.flags&os.O_APPEND != 0 {
 		if err := fm.closeLockedFile(file); err != nil {
 			return err
 		}
+		var err error
 		fd, err = openFileWithFlags(file.name, os.O_RDWR)
 		if err != nil {
 			return err
 		}
 		reopen = true
 	}
-	newPos := curPos - int64(numBytes)
+	newPos := offset
 	if err := fd.Truncate(newPos); err != nil {
 		return err
 	}
@@ -1205,6 +1214,25 @@ func NewFileStore(log logger.Logger, rootDir string, limits *StoreLimits, option
 	if err := os.MkdirAll(rootDir, os.ModeDir+os.ModePerm); err != nil && !os.IsExist(err) {
 		return nil, fmt.Errorf("unable to create the root directory [%s]: %v", rootDir, err)
 	}
+
+	// If the TruncateUnexpectedEOF is set, check that the witness
+	// file is not present. If it is, fail starting. If it isn't,
+	// create the witness file.
+	truncateFName := filepath.Join(rootDir, truncateBadEOFFileName)
+	if fs.opts.TruncateUnexpectedEOF {
+		// Try to create the file, if it exists, this is an error.
+		f, err := os.OpenFile(truncateFName, os.O_CREATE|os.O_EXCL, 0666)
+		if f != nil {
+			f.Close()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("file store should not be opened consecutively with the TruncateUnexpectedEOF option set to true")
+		}
+	} else {
+		// Delete possible TruncateUnexpectedEOF witness file
+		os.Remove(truncateFName)
+	}
+
 	return fs, nil
 }
 
@@ -1259,7 +1287,7 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 	// Recover the server file.
 	serverInfo, err = fs.recoverServerInfo()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to recover server file %q: %v", fs.serverFile.name, err)
 	}
 	// If the server file is empty, then we are done
 	if serverInfo == nil {
@@ -1270,7 +1298,7 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 	// Recover the clients file
 	recoveredClients, err = fs.recoverClients()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to recover client file %q: %v", fs.clientsFile.name, err)
 	}
 
 	// Get the channels (there are subdirectories of rootDir)
@@ -1475,6 +1503,7 @@ func (fs *FileStore) recoverClients() ([]*Client, error) {
 
 	_buf := [256]byte{}
 	buf := _buf[:]
+	offset := int64(4)
 
 	// Create a buffered reader to speed-up recovery
 	br := bufio.NewReaderSize(fs.clientsFile.handle, defaultBufSize)
@@ -1482,19 +1511,22 @@ func (fs *FileStore) recoverClients() ([]*Client, error) {
 	for {
 		buf, recSize, recType, err = readRecord(br, buf, true, fs.crcTable, fs.opts.DoCRC)
 		if err != nil {
-			if err == errNeedRewind {
-				err = fs.fm.rewindAndTruncateFile(fs.clientsFile, recordHeaderSize)
-				if err == nil {
-					break
-				}
-			}
-			if err == io.EOF {
+			switch err {
+			case io.EOF:
 				err = nil
+			case errNeedRewind:
+				err = fs.fm.truncateFile(fs.clientsFile, offset)
+			default:
+				err = fs.handleUnexpectedEOF(err, fs.clientsFile, offset, true)
+			}
+			if err == nil {
 				break
 			}
 			return nil, err
 		}
-		fs.cliFileSize += int64(recSize + recordHeaderSize)
+		readBytes := int64(recSize + recordHeaderSize)
+		offset += readBytes
+		fs.cliFileSize += readBytes
 		switch recType {
 		case addClient:
 			c := &Client{}
@@ -1534,6 +1566,8 @@ func (fs *FileStore) recoverServerInfo() (*spb.ServerInfo, error) {
 			// We are done, no state recovered
 			return nil, nil
 		}
+		fs.log.Errorf("Server file %q corrupted: %v", fs.serverFile.name, err)
+		fs.log.Errorf("Follow instructions in documentation in order to recover from this")
 		return nil, err
 	}
 	// Check that the size of the file is consistent with the size
@@ -1779,6 +1813,110 @@ func (fs *FileStore) Close() error {
 	return err
 }
 
+func (fs *FileStore) handleUnexpectedEOF(recoveryErr error, f *file, offset int64, recTyped bool) error {
+	// Regardless the recoveryErr, we will dump the bytes for
+	// the corrupted record, however, we attempt to fix only
+	// for io.ErrUnexpectedEOF.
+	if recoveryErr == io.ErrUnexpectedEOF {
+		fs.log.Errorf("Unexpected EOF for file %q", f.name)
+		if !fs.opts.TruncateUnexpectedEOF {
+			fs.log.Errorf("It is recommended that you make a copy of the whole datatstore %q.", fs.fm.rootDir)
+			fs.log.Errorf("Restart with the ContinueOnUnexpectedEOF flag to truncate this file to this offset: %v.", offset)
+			fs.log.Errorf("Dataloss may occur. Details about the first corrupted record follows...")
+		}
+	} else {
+		fs.log.Errorf("Corrupted record in file %q: %v", f.name, recoveryErr)
+	}
+	if _, err := f.handle.Seek(offset, io.SeekStart); err != nil {
+		panic(fmt.Errorf("Unable to set position of file %q to %v: %v", f.name, offset, err))
+	}
+	var (
+		expectedSize int
+		read         int
+		part         string
+	)
+	fs.log.Errorf("Record header:")
+	part = "record header"
+	expectedSize = recordHeaderSize
+	var (
+		_header = [recordHeaderSize]byte{}
+		header  = _header[:]
+	)
+	read, _ = io.ReadFull(f.handle, header)
+	fs.log.Errorf(" Bytes:")
+	dumpBytes(fs.log, header[:read], false)
+	if read >= recordHeaderSize {
+		recType := recNoType
+		recSize := 0
+		firstInt := int(util.ByteOrder.Uint32(header[:4]))
+		if recTyped {
+			recType = recordType(firstInt >> 24 & 0xFF)
+			recSize = firstInt & 0xFFFFFF
+		} else {
+			recSize = firstInt
+		}
+		crc := util.ByteOrder.Uint32(header[4:recordHeaderSize])
+		if recTyped {
+			fs.log.Errorf(" Type: %v", recType)
+		}
+		fs.log.Errorf(" Size: %v", recSize)
+		fs.log.Errorf(" CRC : 0x%08x", crc)
+		fs.log.Errorf("Record payload:")
+
+		part = "record payload"
+		expectedSize = recSize
+		buf := util.EnsureBufBigEnough(nil, recSize)
+		read, _ = io.ReadFull(f.handle, buf)
+		dumpBytes(fs.log, buf[:read], true)
+	}
+	if recoveryErr == io.ErrUnexpectedEOF {
+		if fs.opts.TruncateUnexpectedEOF {
+			if err := fs.fm.truncateFile(f, offset); err != nil {
+				return fmt.Errorf("unable to repair file %q by truncating at offset %v: %v", f.name, offset, err)
+			}
+			fs.log.Noticef("File %q has been truncated to offset: %v", f.name, offset)
+			fs.log.Noticef("Recovery resumes...")
+			return nil
+		}
+		fs.log.Errorf("%s expected to be %v bytes, only read %v", part, expectedSize, read)
+	}
+	return recoveryErr
+}
+
+func dumpBytes(log logger.Logger, buf []byte, printTxt bool) {
+	lines := len(buf) / 20
+	start := 0
+	for i := 0; i < lines+1; i++ {
+		if start >= len(buf) {
+			break
+		}
+		end := len(buf) - start
+		if end > 20 {
+			end = 20
+		}
+		bl := fmt.Sprintf("% x", buf[start:start+end])
+		if printTxt {
+			tl := ""
+			for b := start; b < start+end; b++ {
+				c := buf[b]
+				if int(c) < 32 || int(c) > 128 {
+					c = '.'
+				}
+				tl = fmt.Sprintf("%s%s", tl, []byte{c})
+			}
+			var paddingStr string
+			padding := 3 * (20 - end)
+			if padding > 0 {
+				paddingStr = fmt.Sprintf("%*s", padding, " ")
+			}
+			log.Errorf("%s%s - %s", bl, paddingStr, tl)
+		} else {
+			log.Errorf(bl)
+		}
+		start += end
+	}
+}
+
 ////////////////////////////////////////////////////////////////////////////
 // FileMsgStore methods
 ////////////////////////////////////////////////////////////////////////////
@@ -1816,7 +1954,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, limits *Msg
 		var dirFiles []os.FileInfo
 		var fseq int64
 		var datFile, idxFile *file
-		var added, useIdxFile bool
+		var useIdxFile bool
 
 		dirFiles, err = ioutil.ReadDir(channelDirName)
 		for _, file := range dirFiles {
@@ -1854,18 +1992,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, limits *Msg
 			// Create the slice
 			fslice := &fileSlice{file: datFile, idxFile: idxFile, lastUsed: time.Now().UnixNano()}
 			// Recover the file slice
-			added, err = ms.recoverOneMsgFile(fslice, int(fseq), useIdxFile)
-			// If no error but not added, files have been unlocked and removed
-			// from filesManager, otherwise, need to unlock and close them.
-			if err != nil || added {
-				ms.fm.closeLockedFile(datFile)
-				// If the index file was not originally present and there
-				// was an error, it has been removed in recoverOneMsgFile.
-				// So unlock and close only when that is not the case.
-				if useIdxFile || err == nil {
-					ms.fm.closeLockedFile(idxFile)
-				}
-			}
+			err = ms.recoverOneMsgFile(fslice, int(fseq), useIdxFile)
 			if err != nil {
 				break
 			}
@@ -2078,7 +2205,7 @@ func (ms *FileMsgStore) closeLockedFiles(fslice *fileSlice) error {
 }
 
 // recovers one of the file
-func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFile bool) (bool, error) {
+func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFile bool) error {
 	var err error
 
 	msgSize := 0
@@ -2099,18 +2226,19 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 	offset := int64(4)
 
 	if useIdxFile {
+		var (
+			lastIndex *msgIndex
+			lastSeq   uint64
+		)
 		for {
 			seq, mindex, err = ms.readIndex(br)
 			if err != nil {
-				if err == errNeedRewind {
-					err = ms.fm.rewindAndTruncateFile(file, msgIndexRecSize)
-					if err == nil {
-						break
-					}
-				}
-				if err == io.EOF {
+				switch err {
+				case io.EOF:
 					// We are done, reset err
 					err = nil
+				case errNeedRewind:
+					err = ms.fm.truncateFile(file, offset)
 				}
 				break
 			}
@@ -2127,8 +2255,44 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 			if fslice.firstWrite == 0 {
 				fslice.firstWrite = mindex.timestamp
 			}
+			lastIndex = mindex
+			lastSeq = seq
+			offset += msgIndexRecSize
 		}
-	} else {
+		if err == nil {
+			err = ms.ensureLastMsgAndIndexMatch(fslice, lastSeq, lastIndex)
+			if err != nil {
+				ms.fstore.log.Errorf(err.Error())
+				if _, serr := fslice.file.handle.Seek(4, io.SeekStart); serr != nil {
+					panic(fmt.Errorf("File %q: unable to set position to beginning of file: %v", fslice.file.name, serr))
+				}
+			}
+		} else {
+			ms.fstore.log.Errorf("Error with index file %q: %v. Truncating and recovering from data file", fslice.idxFile.name, err)
+		}
+		// We can get an error either because the index file was corrupted,
+		// or because the data file is. In both case, we truncate the index
+		// file and recover from data file. The handling of unexpected EOF
+		// is handled in the data file recovery down below.
+		if err != nil {
+			if terr := ms.fm.truncateFile(fslice.idxFile, 4); terr != nil {
+				panic(fmt.Errorf("Error during recovery of file %q: %v, you need "+
+					"to manually remove index file %q (truncate failed with err: %v)",
+					fslice.file.name, err, fslice.idxFile.name, terr))
+			}
+			fslice.firstSeq = 0
+			fslice.lastSeq = 0
+			fslice.msgsCount = 0
+			fslice.msgsSize = 0
+			fslice.firstWrite = 0
+			file = fslice.file
+			br = bufio.NewReaderSize(file.handle, defaultBufSize)
+			err = nil
+			useIdxFile = false
+		}
+	}
+	// No `else` here because in case of error recovering index file, we will do data file recovery
+	if !useIdxFile {
 		// Get these from the file store object
 		crcTable := ms.fstore.crcTable
 		doCRC := ms.fstore.opts.DoCRC
@@ -2139,15 +2303,14 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 		for {
 			ms.tmpMsgBuf, msgSize, _, err = readRecord(br, ms.tmpMsgBuf, false, crcTable, doCRC)
 			if err != nil {
-				if err == errNeedRewind {
-					err = ms.fm.rewindAndTruncateFile(file, recordHeaderSize)
-					if err == nil {
-						break
-					}
-				}
-				if err == io.EOF {
+				switch err {
+				case io.EOF:
 					// We are done, reset err
 					err = nil
+				case errNeedRewind:
+					err = ms.fm.truncateFile(file, offset)
+				default:
+					err = ms.fstore.handleUnexpectedEOF(err, file, offset, false)
 				}
 				break
 			}
@@ -2198,11 +2361,18 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 					"to manually remove index file %q (remove failed with err: %v)",
 					fslice.file.name, err, fslice.idxFile.name, rmErr))
 			}
+			// Close the data file
+			ms.fm.closeLockedFile(fslice.file)
+			return err
 		}
 	}
 
+	// Close the files
+	ms.fm.closeLockedFile(fslice.file)
+	ms.fm.closeLockedFile(fslice.idxFile)
+
 	// If no error and slice is not empty...
-	if err == nil && fslice.msgsCount > 0 {
+	if fslice.msgsCount > 0 {
 		if ms.first == 0 || ms.first > fslice.firstSeq {
 			ms.first = fslice.firstSeq
 		}
@@ -2221,18 +2391,43 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 		if ms.lastFSlSeq < fseq {
 			ms.lastFSlSeq = fseq
 		}
-		return true, nil
+		return nil
 	}
 	// Slice was empty and not recovered. Need to remove those from store's files manager.
-	if err == nil {
-		ms.fm.closeLockedFile(fslice.file)
-		ms.fm.remove(fslice.file)
-		ms.fm.closeLockedFile(fslice.idxFile)
-		ms.fm.remove(fslice.idxFile)
-		return false, nil
+	ms.fm.remove(fslice.file)
+	ms.fm.remove(fslice.idxFile)
+	return nil
+}
+
+func (ms *FileMsgStore) ensureLastMsgAndIndexMatch(fslice *fileSlice, seq uint64, index *msgIndex) error {
+	var (
+		msgSize  int
+		err      error
+		startErr = fmt.Sprintf("Verification of last message for file %q failed", fslice.file.name)
+	)
+	fd := fslice.file.handle
+	// Position for the last record
+	if _, err := fd.Seek(index.offset, io.SeekStart); err != nil {
+		return fmt.Errorf("%s: unable to set position to %v", startErr, index.offset)
 	}
-	// Error
-	return false, err
+	ms.tmpMsgBuf, msgSize, _, err = readRecord(fd, ms.tmpMsgBuf, false, ms.fstore.crcTable, true)
+	if err != nil {
+		return fmt.Errorf("%s: unable to read last record: %v", startErr, err)
+	}
+	if uint32(msgSize) != index.msgSize {
+		return fmt.Errorf("%s: last message size in index is %v, data file is %v",
+			startErr, index.msgSize, msgSize)
+	}
+	// Recover this message
+	msg := &pb.MsgProto{}
+	if err := msg.Unmarshal(ms.tmpMsgBuf[:msgSize]); err != nil {
+		return fmt.Errorf("%s: error decoding message: %v", startErr, err)
+	}
+	if msg.Sequence != seq {
+		return fmt.Errorf("%s: last message sequence in index is %v, data file is %v",
+			startErr, seq, msg.Sequence)
+	}
+	return nil
 }
 
 // setSliceLimits sets the limits of a file slice based on options and/or
@@ -2301,8 +2496,7 @@ func (ms *FileMsgStore) addIndex(buf []byte, seq uint64, offset, timestamp int64
 func (ms *FileMsgStore) readIndex(r io.Reader) (uint64, *msgIndex, error) {
 	_buf := [msgIndexRecSize]byte{}
 	buf := _buf[:]
-	if read, err := io.ReadFull(r, buf); err != nil {
-		err = expandReadFullError(err, "message index record", msgIndexRecSize, read)
+	if _, err := io.ReadFull(r, buf); err != nil {
 		return 0, nil, err
 	}
 	mindex := &msgIndex{}
@@ -2610,6 +2804,17 @@ func (ms *FileMsgStore) expireMsgs(now, maxAge int64) int64 {
 				// So there is no need to unlock it since this has already
 				// been done.
 				slice = ms.getFileSliceForSeq(ms.first)
+				if slice == nil {
+					// If we did not find a slice for this sequence, it could
+					// be cause there is a gap in message sequence due to
+					// file truncation following unexpected EOF on recovery.
+					// So set the first seq to the first sequence of the now
+					// first slice.
+					slice = ms.files[ms.firstFSlSeq]
+					if slice != nil {
+						ms.first = slice.firstSeq
+					}
+				}
 				if slice != nil {
 					if err := ms.lockIndexFile(slice); err != nil {
 						slice = nil
@@ -3298,6 +3503,7 @@ func (ms *FileMsgStore) Empty() error {
 // newFileSubStore returns a new instace of a file SubStore.
 func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doRecover bool) (*FileSubStore, error) {
 	ss := &FileSubStore{
+		fstore:   fs,
 		fm:       fs.fm,
 		opts:     &fs.opts,
 		crcTable: fs.crcTable,
@@ -3407,27 +3613,31 @@ func (ss *FileSubStore) recoverSubscriptions() error {
 	var recType recordType
 
 	recSize := 0
+	offset := int64(4)
+
 	// Create a buffered reader to speed-up recovery
 	br := bufio.NewReaderSize(ss.file.handle, defaultBufSize)
 
 	for {
 		ss.tmpSubBuf, recSize, recType, err = readRecord(br, ss.tmpSubBuf, true, ss.crcTable, ss.opts.DoCRC)
 		if err != nil {
-			if err == errNeedRewind {
-				err = ss.fm.rewindAndTruncateFile(ss.file, recordHeaderSize)
-				if err == nil {
-					break
-				}
-			}
-			if err == io.EOF {
+			switch err {
+			case io.EOF:
 				// We are done, reset err
 				err = nil
-				break
-			} else {
-				return err
+			case errNeedRewind:
+				err = ss.fm.truncateFile(ss.file, offset)
+			default:
+				err = ss.fstore.handleUnexpectedEOF(err, ss.file, offset, true)
 			}
+			if err == nil {
+				break
+			}
+			return err
 		}
-		ss.fileSize += int64(recSize + recordHeaderSize)
+		readBytes := int64(recSize + recordHeaderSize)
+		offset += readBytes
+		ss.fileSize += readBytes
 		// Based on record type...
 		switch recType {
 		case subRecNew:
