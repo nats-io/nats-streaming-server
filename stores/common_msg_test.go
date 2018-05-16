@@ -422,6 +422,43 @@ func TestCSMaxAge(t *testing.T) {
 	}
 }
 
+func TestCSMaxAgeWithGapInSeq(t *testing.T) {
+	for _, st := range testStores {
+		st := st
+		t.Run(st.name, func(t *testing.T) {
+			t.Parallel()
+			defer endTest(t, st)
+			s := startTest(t, st)
+			defer s.Close()
+
+			sl := testDefaultStoreLimits
+			sl.MaxAge = 100 * time.Millisecond
+			s.SetLimits(&sl)
+
+			cs := storeCreateChannel(t, s, "foo")
+			msg := []byte("hello")
+			seq := uint64(1)
+			for i := 0; i < 10; i++ {
+				storeMsg(t, cs, "foo", seq, msg)
+				seq++
+			}
+			// Create a gap
+			seq += 10
+			for i := 0; i < 10; i++ {
+				storeMsg(t, cs, "foo", seq, msg)
+				seq++
+			}
+
+			// Wait for more than expiration
+			time.Sleep(200 * time.Millisecond)
+			// They all should be gone.
+			if n, _ := msgStoreState(t, cs.Msgs); n != 0 {
+				t.Fatalf("All messages should have expired, got %v", n)
+			}
+		})
+	}
+}
+
 func TestCSGetSeqFromStartTime(t *testing.T) {
 	for _, st := range testStores {
 		st := st

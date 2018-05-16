@@ -54,6 +54,7 @@ NATS Streaming provides the following high-level feature set.
     * [Persistence](#persistence)
         * [File Store](#file-store)
             * [File Store Options](#file-store-options)
+            * [File Store Recovery Errors](#file-store-recovery-errors)
         * [SQL Store](#sql-store)
             * [SQL Store Options](#sql-store-options)
 - [Clients](#clients)
@@ -1254,6 +1255,7 @@ Streaming Server File Store Options:
     --file_slice_archive_script <string> Path to script to use if you want to archive a file slice being removed
     --file_fds_limit <int>               Store will try to use no more file descriptors than this given limit
     --file_parallel_recovery <int>       On startup, number of channels that can be recovered in parallel
+    --file_truncate_bad_eof <bool>       Truncate files for which there is an unexpected EOF on recovery, dataloss may occur
 
 Streaming Server SQL Store Options:
     --sql_driver <string>            Name of the SQL Driver ("mysql" or "postgres")
@@ -1749,6 +1751,58 @@ the option `fds_limit` (or command line parameter `--file_fds_limit`) may be con
 Note that this is a soft limit. It is possible for the store to use more file descriptors than the given limit if the
 number of concurrent read/writes to different channels is more than the said limit. It is also understood that this
 may affect performance since files may need to be closed/re-opened as needed.
+
+#### File Store Recovery Errors
+
+We have added the ability for the server to truncate any file that may otherwise report an `unexpected EOF`
+error during the recovery process.
+
+Since dataloss is likely to occur, the default behavior for the server on startup is to report recovery error and stop.
+It will now print the content of the first corrupted record before exiting.
+
+With the `-file_truncate_bad_eof` parameter, the server will still print those bad records but truncate each file at
+the position of the first corrupted record in order to successfully start.
+
+To prevent the use of this parameter as the default value, this option is not available in the configuration file.
+Moreover, the server will fail to start if started more than once with that parameter.<br>
+This flag may help recover from a store failure, but since data may be lost in that process, we think that the
+operator needs to be aware and make an informed decision.
+
+Note that this flag will not help with file corruption due to bad CRC for instance. You have the option to disable
+CRC on recovery with the `-file_crc=false` option.
+
+Let's review the impact and suggested steps for each of the server's corrupted files:
+
+* `server.dat`: This file contains meta data and NATS subjects used to communicate with client applications. If
+a corruption is reported with this file, we would suggest that you stop all your clients, stop the server, remove
+this file, restart the server. This will create a new `server.dat` file, but will not attempt to recover the
+rest of the channels because the server assumes that there is no state. So you should stop and restart the
+server once more. Then, you can restart all your clients.
+
+* `clients.dat`: This contains information about client connections. If the file is truncated to move past
+an `unexpected EOF` error, this can result in no issue at all, or in client connections not being recovered,
+which means that the server will not know about possible running clients, and therefore it will not try
+to deliver any message to those non recovered clients, or reject incoming published messages from those clients.
+It is also possible that the server recovers a client connection that was actually closed. In this case, the
+server may attempt to deliver or redeliver messages unnecessarily.
+
+* `subs.dat`: This is a channel's subscriptions file (under the channel's directory). If this file is truncated
+and some records are lost, it may result in no issue at all, or in client applications not receiving their messages
+since the server will not know about them. It is also possible that acknowledged messages get redelivered
+(since their ack may have been lost).
+
+* `msgs.<n>.dat`: This is a channel's message log (several per channel). If one of those files is truncated, then
+message loss occurs. With the `unexpected EOF` errors, it is likely that only the last "file slice" of a channel will
+be affected. Nevertheless, if a lower sequence file slice is truncated, then gaps in message sequence will occur.
+So it would be possible for a channel to have now messages 1..100, 110..300 for instance, with messages 101 to 109
+missing. Again, this is unlikely since we expect the unexpected end-of-file errors to occur on the last slice.
+
+For *Clustered* mode, this flag would work only for the NATS Streaming specific store files. As you know, NATS
+Streaming uses RAFT for consensus, and RAFT uses its own logs. You could try the option if the server reports
+`unexpected EOF` errors for NATS Streaming file stores, however, you may want to simply delete all NATS Streaming
+and RAFT stores for the failed node and restart it. By design, the other nodes in the cluster have replicated the
+data, so this node will become a follower and catchup with the rest of the cluster, getting the data from the
+current leader and recreating its local stores.
 
 ### SQL Store
 

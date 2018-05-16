@@ -21,6 +21,8 @@ import (
 
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
+	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/stores"
 )
 
 func testStalledDelivery(t *testing.T, typeSub string) {
@@ -184,4 +186,70 @@ func TestPersistentStoreAutomaticDeliveryOnRestart(t *testing.T) {
 	}
 	sc.Close()
 	nc.Close()
+}
+
+type mockedGapInSeqStore struct {
+	stores.Store
+}
+
+func (ms *mockedGapInSeqStore) CreateChannel(name string) (*stores.Channel, error) {
+	cs, err := ms.Store.CreateChannel(name)
+	if err != nil {
+		return nil, err
+	}
+	cs.Msgs = &mockedGapInSeqMsgStore{MsgStore: cs.Msgs}
+	return cs, nil
+}
+
+type mockedGapInSeqMsgStore struct {
+	stores.MsgStore
+}
+
+func (mms *mockedGapInSeqMsgStore) Store(m *pb.MsgProto) (uint64, error) {
+	if m.Sequence == 3 {
+		return 3, nil
+	}
+	return mms.MsgStore.Store(m)
+}
+
+func TestDeliveryWithGapsInSequence(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	s.channels.Lock()
+	s.channels.store = &mockedGapInSeqStore{Store: s.channels.store}
+	s.channels.Unlock()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Unable to publish: %v", err)
+		}
+	}
+
+	ch := make(chan bool)
+	errCh := make(chan error, 1)
+	count := 0
+	sc.Subscribe("foo", func(m *stan.Msg) {
+		if m.Sequence == 3 {
+			errCh <- fmt.Errorf("Should not have received message 3")
+		} else {
+			count++
+			if count == 9 {
+				ch <- true
+			}
+		}
+
+	}, stan.DeliverAllAvailable())
+
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our messages")
+	}
+	select {
+	case e := <-errCh:
+		t.Fatalf(e.Error())
+	default:
+	}
 }
