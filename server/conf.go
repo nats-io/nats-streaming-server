@@ -16,7 +16,6 @@ package server
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"reflect"
 	"strconv"
 	"strings"
@@ -31,11 +30,7 @@ import (
 // ProcessConfigFile parses the configuration file `configFile` and updates
 // the given Streaming options `opts`.
 func ProcessConfigFile(configFile string, opts *Options) error {
-	data, err := ioutil.ReadFile(configFile)
-	if err != nil {
-		return err
-	}
-	m, err := conf.Parse(string(data))
+	m, err := conf.ParseFile(configFile)
 	if err != nil {
 		return err
 	}
