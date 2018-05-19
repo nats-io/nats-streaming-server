@@ -14,6 +14,7 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
 	"sync"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nuid"
 )
 
 func TestClientIDIsValid(t *testing.T) {
@@ -467,4 +469,119 @@ func TestPersistentStoreCheckClientHealthAfterRestart(t *testing.T) {
 	}
 	// Both clients should quickly timed-out
 	waitForNumClients(t, s, 0)
+}
+
+func TestClientPings(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	s.mu.RLock()
+	discoverySubj := s.info.Discovery
+	pubSubj := s.info.Publish
+	s.mu.RUnlock()
+
+	testClientPings(t, discoverySubj, pubSubj)
+}
+
+func testClientPings(t *testing.T, discoverySubj, pubSubj string) {
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	hbInbox := nats.NewInbox()
+	uid := getUIDFromInbox(hbInbox)
+	creq := &pb.ConnectRequest{
+		ClientID:       "me",
+		HeartbeatInbox: hbInbox,
+		PingInterval:   int64(time.Second),
+		PingTimeout:    int64(time.Second),
+		PingMaxOut:     3,
+	}
+	creqBytes, _ := creq.Marshal()
+	crespMsg, err := nc.Request(discoverySubj, creqBytes, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	cresp := &pb.ConnectResponse{}
+	if err := cresp.Unmarshal(crespMsg.Data); err != nil {
+		t.Fatalf("Error on connect response: %v", err)
+	}
+	if cresp.Error != "" {
+		t.Fatalf("Error on connect: %v", cresp.Error)
+	}
+	if cresp.PingRequests == "" || cresp.PingInterval != int64(time.Second) || cresp.PingTimeout != int64(time.Second) || cresp.PingMaxOut != 3 {
+		t.Fatalf("Unexpected response: %#v", cresp)
+	}
+
+	// Send ping, expect success
+	resp, err := nc.Request(cresp.PingRequests, []byte(uid), time.Second)
+	if err != nil || len(resp.Data) > 0 {
+		t.Fatalf("Error on ping: %v - %v", resp, err)
+	}
+
+	// Send with incorrect UID, expect error
+	resp, err = nc.Request(cresp.PingRequests, []byte("wronguid"), time.Second)
+	if err != nil || len(resp.Data) == 0 {
+		t.Fatalf("Error on ping: %v - %v", resp, err)
+	}
+
+	// Register new client with same client ID. Since this is a fake
+	// client that is not going to respond to server HB to detect if
+	// it is still present, the old client will be closed, new client
+	// will be accepted.
+	hbInbox2 := nats.NewInbox()
+	creq = &pb.ConnectRequest{
+		ClientID:       "me",
+		HeartbeatInbox: hbInbox2,
+		PingInterval:   int64(time.Second),
+		PingTimeout:    int64(time.Second),
+		PingMaxOut:     3,
+	}
+	creqBytes, _ = creq.Marshal()
+	crespMsg, err = nc.Request(discoverySubj, creqBytes, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	cresp = &pb.ConnectResponse{}
+	if err := cresp.Unmarshal(crespMsg.Data); err != nil {
+		t.Fatalf("Error on connect response: %v", err)
+	}
+	if cresp.Error != "" {
+		t.Fatalf("Error on connect: %v", cresp.Error)
+	}
+
+	// Using the "old" client, send a PING with original uid.
+	// Since the old client has been replaced, we should get an error
+	resp, err = nc.Request(cresp.PingRequests, []byte(uid), time.Second)
+	if err != nil || !bytes.Equal(resp.Data, invalidClientErrBytes) {
+		t.Fatalf("Error on ping: %v - %v", resp, err)
+	}
+	// Also expect a publish to fail since the old client is no longer valid.
+	msg := &pb.PubMsg{
+		ClientID: "me",
+		Subject:  "foo",
+		Uid:      []byte(uid),
+		Guid:     nuid.New().Next(),
+		Data:     []byte("hello"),
+	}
+	msgBytes, _ := msg.Marshal()
+	pubAckSubj := nats.NewInbox()
+	ch := make(chan bool, 1)
+	if _, err := nc.Subscribe(pubAckSubj, func(m *nats.Msg) {
+		pubAck := &pb.PubAck{}
+		pubAck.Unmarshal(m.Data)
+		if pubAck.Error != "" {
+			ch <- true
+		}
+	}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if err := nc.PublishRequest(pubSubj+".foo", pubAckSubj, msgBytes); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not our error back")
+	}
 }
