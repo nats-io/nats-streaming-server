@@ -87,6 +87,7 @@ func TestClientUnregister(t *testing.T) {
 	cs := createClientStore()
 
 	clientID, hbInbox := createClientInfo()
+	uid := []byte(getUIDFromInbox(hbInbox))
 
 	// Unregistering one that does not exist should not cause a crash
 	cs.unregister(clientID)
@@ -95,7 +96,13 @@ func TestClientUnregister(t *testing.T) {
 	cs.register(clientID, hbInbox)
 
 	// Verify it's in the list of clients
-	if !cs.isValid(clientID) {
+	if !cs.isValid(clientID, nil) {
+		t.Fatal("Expected client to be registered")
+	}
+	if !cs.isValid("", uid) {
+		t.Fatal("Expected client to be registered")
+	}
+	if !cs.isValid(clientID, uid) {
 		t.Fatal("Expected client to be registered")
 	}
 
@@ -103,7 +110,13 @@ func TestClientUnregister(t *testing.T) {
 	cs.unregister(clientID)
 
 	// Verify it's gone.
-	if cs.isValid(clientID) {
+	if cs.isValid(clientID, nil) {
+		t.Fatal("Expected client to be unregistered")
+	}
+	if cs.isValid("", uid) {
+		t.Fatal("Expected client to be unregistered")
+	}
+	if cs.isValid(clientID, uid) {
 		t.Fatal("Expected client to be unregistered")
 	}
 }

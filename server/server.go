@@ -171,6 +171,7 @@ var (
 	clientCheckTimeout         = defaultClientCheckTimeout
 	lazyReplicationInterval    = defaultLazyReplicationInterval
 	testDeleteChannel          bool
+	invalidClientErrBytes      = []byte(ErrInvalidClient.Error())
 )
 
 func computeAckWait(wait int32) time.Duration {
@@ -643,6 +644,7 @@ type StanServer struct {
 	subSub      *nats.Subscription
 	subCloseSub *nats.Subscription
 	subUnsubSub *nats.Subscription
+	cliPingSub  *nats.Subscription
 }
 
 type lazyReplication struct {
@@ -1873,7 +1875,7 @@ func (s *StanServer) leadershipAcquired() error {
 		client.RLock()
 		cID := client.info.ID
 		client.RUnlock()
-		s.clients.setClientHB(cID, s.opts.ClientHBTimeout, func() {
+		s.clients.setClientHB(cID, s.opts.ClientHBInterval, func() {
 			s.checkClientHealth(cID)
 		})
 	}
@@ -2268,7 +2270,7 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 		for _, sc := range recoveredClients {
 			// Because of the loop, we need to make copy for the closure
 			cID := sc.ID
-			s.clients.setClientHB(cID, s.opts.ClientHBTimeout, func() {
+			s.clients.setClientHB(cID, s.opts.ClientHBInterval, func() {
 				s.checkClientHealth(cID)
 			})
 		}
@@ -2408,6 +2410,11 @@ func (s *StanServer) initInternalSubs(createPub bool) error {
 	}
 	// Receive close requests from clients.
 	s.closeSub, err = s.createSub(s.info.Close, s.processCloseRequest, "close request")
+	if err != nil {
+		return err
+	}
+	// Receive PINGs from clients.
+	s.cliPingSub, err = s.createSub(s.info.Discovery+".pings", s.processClientPings, "client pings")
 	return err
 }
 
@@ -2435,6 +2442,10 @@ func (s *StanServer) unsubscribeInternalSubs() {
 	if s.pubSub != nil {
 		s.pubSub.Unsubscribe()
 		s.pubSub = nil
+	}
+	if s.cliPingSub != nil {
+		s.cliPingSub.Unsubscribe()
+		s.cliPingSub = nil
 	}
 }
 
@@ -2699,6 +2710,15 @@ func (s *StanServer) finishConnectRequest(req *pb.ConnectRequest, replyInbox str
 		UnsubRequests:    s.info.Unsubscribe,
 		SubCloseRequests: s.info.SubClose,
 		CloseRequests:    s.info.Close,
+		PingRequests:     s.info.Discovery + ".pings",
+		// In the future, we may want to return different values
+		// than the one the client sent in the connect request.
+		// For now, return the values from the request.
+		// Note1: Server and clients have possibly different HBs values.
+		// Note2: The following values will be 0s for older clients, which is fine.
+		PingInterval: req.PingInterval,
+		PingTimeout:  req.PingTimeout,
+		PingMaxOut:   req.PingMaxOut,
 	}
 	b, _ := cr.Marshal()
 	s.nc.Publish(replyInbox, b)
@@ -2899,9 +2919,9 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 		// before the connect request is processed. If so, make sure we wait
 		// for conn request	to be processed first. Check clientCheckTimeout
 		// doc for details.
-		valid = s.clients.isValidWithTimeout(pm.ClientID, clientCheckTimeout)
+		valid = s.clients.isValidWithTimeout(pm.ClientID, pm.Uid, clientCheckTimeout)
 	} else {
-		valid = s.clients.isValid(pm.ClientID)
+		valid = s.clients.isValid(pm.ClientID, pm.Uid)
 	}
 	if !valid {
 		s.log.Errorf("Received invalid client publish message %v", pm)
@@ -2910,6 +2930,21 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	}
 
 	s.ioChannel <- iopm
+}
+
+// processClientPings receives a PING from a client. The payload is the client's UID.
+// If the client is present, a response with nil payload is sent back to indicate
+// success, otherwise the payload contains an error message.
+func (s *StanServer) processClientPings(m *nats.Msg) {
+	valid := false
+	if len(m.Data) > 0 {
+		valid = s.clients.isValid("", m.Data)
+	}
+	var reply []byte
+	if !valid {
+		reply = invalidClientErrBytes
+	}
+	s.ncs.Publish(m.Reply, reply)
 }
 
 // CtrlMsg are no longer used to solve connection and subscription close/unsub
@@ -4326,7 +4361,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 		// Also check that the connection request has already
 		// been processed. Check clientCheckTimeout doc for details.
-		if !s.clients.isValidWithTimeout(sr.ClientID, clientCheckTimeout) {
+		if !s.clients.isValidWithTimeout(sr.ClientID, nil, clientCheckTimeout) {
 			s.log.Errorf("[Client:%s] Rejecting subscription on %q: connection not created yet",
 				sr.ClientID, sr.Subject)
 			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubReq)

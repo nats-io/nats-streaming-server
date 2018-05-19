@@ -14,9 +14,11 @@
 package server
 
 import (
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/nats-io/go-nats"
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
@@ -24,6 +26,7 @@ import (
 type clientStore struct {
 	sync.RWMutex
 	clients        map[string]*client
+	uids           map[string]*client
 	waitOnRegister map[string]chan struct{}
 	store          stores.Store
 }
@@ -40,7 +43,11 @@ type client struct {
 
 // newClientStore creates a new clientStore instance using `store` as the backing storage.
 func newClientStore(store stores.Store) *clientStore {
-	return &clientStore{clients: make(map[string]*client), store: store}
+	return &clientStore{
+		clients: make(map[string]*client),
+		uids:    make(map[string]*client),
+		store:   store,
+	}
 }
 
 // getSubsCopy returns a copy of the client's subscribers array.
@@ -49,6 +56,12 @@ func (c *client) getSubsCopy() []*subState {
 	subs := make([]*subState, len(c.subs))
 	copy(subs, c.subs)
 	return subs
+}
+
+// Use hbInbox as UID: strips "_INBOX." if its starts with that, otherwise
+// use given hbInbox as-is.
+func getUIDFromInbox(hbInbox string) string {
+	return strings.TrimPrefix(hbInbox, nats.InboxPrefix)
 }
 
 // Register a new client. Returns ErrInvalidClient if client is already registered.
@@ -65,6 +78,8 @@ func (cs *clientStore) register(ID, hbInbox string) (*client, error) {
 	}
 	c = &client{info: sc, subs: make([]*subState, 0, 4)}
 	cs.clients[ID] = c
+	uid := getUIDFromInbox(hbInbox)
+	cs.uids[uid] = c
 	if cs.waitOnRegister != nil {
 		ch := cs.waitOnRegister[ID]
 		if ch != nil {
@@ -88,8 +103,10 @@ func (cs *clientStore) unregister(ID string) (*client, error) {
 		c.hbt.Stop()
 		c.hbt = nil
 	}
+	uid := getUIDFromInbox(c.info.HbInbox)
 	c.Unlock()
 	delete(cs.clients, ID)
+	delete(cs.uids, uid)
 	if cs.waitOnRegister != nil {
 		delete(cs.waitOnRegister, ID)
 	}
@@ -98,8 +115,18 @@ func (cs *clientStore) unregister(ID string) (*client, error) {
 }
 
 // IsValid returns true if the client is registered, false otherwise.
-func (cs *clientStore) isValid(ID string) bool {
-	return cs.lookup(ID) != nil
+func (cs *clientStore) isValid(ID string, UID []byte) bool {
+	// If UID is provided, use it for the search key, otherwise,
+	// fallback to client ID.
+	var valid bool
+	cs.RLock()
+	if len(UID) > 0 {
+		valid = cs.uids[string(UID)] != nil
+	} else {
+		valid = cs.clients[ID] != nil
+	}
+	cs.RUnlock()
+	return valid
 }
 
 // isValidWithTimeout will return true if the client is registered,
@@ -109,9 +136,16 @@ func (cs *clientStore) isValid(ID string) bool {
 // registered client to the channel.
 // On timeout, this call return false to indicate that the client
 // has still not registered.
-func (cs *clientStore) isValidWithTimeout(ID string, timeout time.Duration) bool {
+func (cs *clientStore) isValidWithTimeout(ID string, UID []byte, timeout time.Duration) bool {
+	// If UID is provided, use it for the search key, otherwise,
+	// fallback to client ID.
 	cs.Lock()
-	c := cs.clients[ID]
+	var c *client
+	if len(UID) > 0 {
+		c = cs.uids[string(UID)]
+	} else {
+		c = cs.clients[ID]
+	}
 	if c != nil {
 		cs.Unlock()
 		return true
