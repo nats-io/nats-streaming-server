@@ -218,7 +218,7 @@ type Store interface {
 	DeleteChannel(channel string) error
 
 	// AddClient stores information about the client identified by `clientID`.
-	AddClient(clientID, hbInbox string) (*Client, error)
+	AddClient(info *spb.ClientInfo) (*Client, error)
 
 	// DeleteClient removes the client identified by `clientID` from the store.
 	DeleteClient(clientID string) error

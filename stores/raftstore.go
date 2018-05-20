@@ -78,9 +78,9 @@ func (s *RaftStore) Recover() (*RecoveredState, error) {
 }
 
 // AddClient implements the Store interface
-func (s *RaftStore) AddClient(clientID, hbInbox string) (*Client, error) {
+func (s *RaftStore) AddClient(info *spb.ClientInfo) (*Client, error) {
 	// No need for storage
-	return &Client{spb.ClientInfo{ID: clientID, HbInbox: hbInbox}}, nil
+	return &Client{*info}, nil
 }
 
 // DeleteClient implements the Store interface

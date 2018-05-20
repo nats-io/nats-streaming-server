@@ -294,7 +294,7 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 func (r *raftFSM) restoreClientsFromSnapshot(serverSnap *spb.RaftSnapshot) error {
 	s := r.server
 	for _, sc := range serverSnap.Clients {
-		if _, err := s.clients.register(sc.ID, sc.HbInbox); err != nil {
+		if _, err := s.clients.register(sc); err != nil {
 			return err
 		}
 	}

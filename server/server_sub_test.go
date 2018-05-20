@@ -1071,7 +1071,7 @@ func TestSubAckInboxFromOlderStore(t *testing.T) {
 	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
-	if _, err := s.clients.register("me2", nats.NewInbox()); err != nil {
+	if _, err := s.clients.register(&spb.ClientInfo{ID: "me2", HbInbox: nats.NewInbox()}); err != nil {
 		t.Fatalf("Error registering client: %v", err)
 	}
 	c, err := s.lookupOrCreateChannel("foo")
