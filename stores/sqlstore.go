@@ -773,11 +773,14 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 		if err := cliRows.Scan(&clientID, &hbInbox, &proto); err != nil {
 			return nil, err
 		}
-		info := spb.ClientInfo{}
-		info.Unmarshal(proto)
-		client := &Client{info}
-		client.ID = clientID
-		client.HbInbox = hbInbox
+		var client *Client
+		if len(proto) == 0 {
+			client = &Client{spb.ClientInfo{ID: clientID, HbInbox: hbInbox}}
+		} else {
+			info := spb.ClientInfo{}
+			info.Unmarshal(proto)
+			client = &Client{info}
+		}
 		clients = append(clients, client)
 	}
 	cliRows.Close()
@@ -1176,11 +1179,9 @@ func (s *SQLStore) AddClient(info *spb.ClientInfo) (*Client, error) {
 		protoBytes []byte
 		err        error
 	)
-	if info.Protocol > 0 {
-		protoBytes, err = info.Marshal()
-		if err != nil {
-			return nil, err
-		}
+	protoBytes, err = info.Marshal()
+	if err != nil {
+		return nil, err
 	}
 	client := &Client{*info}
 	for i := 0; i < 2; i++ {
@@ -1195,7 +1196,7 @@ func (s *SQLStore) AddClient(info *spb.ClientInfo) (*Client, error) {
 		}
 		// This is the first AddClient failed attempt. It could be because
 		// client was already in db, so delete now and try again.
-		_, err = s.preparedStmts[sqlDeleteClient].Exec(info.ID)
+		_, err = s.preparedStmts[sqlDeleteClient].Exec(client.ID)
 		if err != nil {
 			err = sqlStmtError(sqlDeleteClient, err)
 			break
