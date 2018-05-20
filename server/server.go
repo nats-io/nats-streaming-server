@@ -138,6 +138,13 @@ const (
 	replicateAck  = false
 )
 
+const (
+	// Client send connID in ConnectRequest and PubMsg, and server
+	// listens and responds to client PINGs. The validity of the
+	// connection (based on connID) is checked on incoming PINGs.
+	protocolOne = int32(1)
+)
+
 // Errors.
 var (
 	ErrInvalidSubject     = errors.New("stan: invalid subject")
@@ -167,10 +174,12 @@ var (
 var clientIDRegEx *regexp.Regexp
 
 var (
-	testAckWaitIsInMillisecond bool
-	clientCheckTimeout         = defaultClientCheckTimeout
-	lazyReplicationInterval    = defaultLazyReplicationInterval
-	testDeleteChannel          bool
+	testAckWaitIsInMillisecond     bool
+	clientCheckTimeout             = defaultClientCheckTimeout
+	lazyReplicationInterval        = defaultLazyReplicationInterval
+	testDeleteChannel              bool
+	pingResponseOKBytes            []byte
+	pingResponseInvalidClientBytes []byte
 )
 
 func computeAckWait(wait int32) time.Duration {
@@ -643,6 +652,7 @@ type StanServer struct {
 	subSub      *nats.Subscription
 	subCloseSub *nats.Subscription
 	subUnsubSub *nats.Subscription
+	cliPingSub  *nats.Subscription
 }
 
 type lazyReplication struct {
@@ -1873,7 +1883,7 @@ func (s *StanServer) leadershipAcquired() error {
 		client.RLock()
 		cID := client.info.ID
 		client.RUnlock()
-		s.clients.setClientHB(cID, s.opts.ClientHBTimeout, func() {
+		s.clients.setClientHB(cID, s.opts.ClientHBInterval, func() {
 			s.checkClientHealth(cID)
 		})
 	}
@@ -2268,7 +2278,7 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 		for _, sc := range recoveredClients {
 			// Because of the loop, we need to make copy for the closure
 			cID := sc.ID
-			s.clients.setClientHB(cID, s.opts.ClientHBTimeout, func() {
+			s.clients.setClientHB(cID, s.opts.ClientHBInterval, func() {
 				s.checkClientHealth(cID)
 			})
 		}
@@ -2408,6 +2418,11 @@ func (s *StanServer) initInternalSubs(createPub bool) error {
 	}
 	// Receive close requests from clients.
 	s.closeSub, err = s.createSub(s.info.Close, s.processCloseRequest, "close request")
+	if err != nil {
+		return err
+	}
+	// Receive PINGs from clients.
+	s.cliPingSub, err = s.createSub(s.info.Discovery+".pings", s.processClientPings, "client pings")
 	return err
 }
 
@@ -2435,6 +2450,10 @@ func (s *StanServer) unsubscribeInternalSubs() {
 	if s.pubSub != nil {
 		s.pubSub.Unsubscribe()
 		s.pubSub = nil
+	}
+	if s.cliPingSub != nil {
+		s.cliPingSub.Unsubscribe()
+		s.cliPingSub = nil
 	}
 }
 
@@ -2705,6 +2724,21 @@ func (s *StanServer) finishConnectRequest(req *pb.ConnectRequest, replyInbox str
 		UnsubRequests:    s.info.Unsubscribe,
 		SubCloseRequests: s.info.SubClose,
 		CloseRequests:    s.info.Close,
+		Protocol:         protocolOne,
+	}
+	// We could set those unconditionally since even with
+	// older clients, the protobuf Unmarshal would simply not
+	// decode them.
+	if req.Protocol >= protocolOne {
+		cr.PingRequests = s.info.Discovery + ".pings"
+		// In the future, we may want to return different values
+		// than the one the client sent in the connect request.
+		// For now, return the values from the request.
+		// Note1: Server and clients have possibly different HBs values.
+		// Note2: The following values will be 0s for older clients, which is fine.
+		cr.PingInterval = req.PingInterval
+		cr.PingTimeout = req.PingTimeout
+		cr.PingMaxOut = req.PingMaxOut
 	}
 	b, _ := cr.Marshal()
 	s.nc.Publish(replyInbox, b)
@@ -2738,8 +2772,6 @@ func (s *StanServer) checkClientHealth(clientID string) {
 	hbInbox := client.info.HbInbox
 	client.RUnlock()
 
-	var subs []*subState
-	hasFailedHB := false
 	// Sends the HB request. This call blocks for ClientHBTimeout,
 	// do not hold the lock for that long!
 	_, err := s.nc.Request(hbInbox, nil, s.opts.ClientHBTimeout)
@@ -2751,6 +2783,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 		client.Unlock()
 		return
 	}
+	hadFailed := client.fhb > 0
 	// If we did not get the reply, increase the number of
 	// failed heartbeats.
 	if err != nil {
@@ -2776,11 +2809,16 @@ func (s *StanServer) checkClientHealth(clientID string) {
 		// We got the reply, reset the number of failed heartbeats.
 		client.fhb = 0
 	}
-	// Get a copy of subscribers and client.fhb while under lock
-	subs = client.getSubsCopy()
-	hasFailedHB = client.fhb > 0
 	// Reset the timer to fire again.
 	client.hbt.Reset(s.opts.ClientHBInterval)
+	var (
+		subs        []*subState
+		hasFailedHB = client.fhb > 0
+	)
+	if (hadFailed && !hasFailedHB) || (!hadFailed && hasFailedHB) {
+		// Get a copy of subscribers and client.fhb while under lock
+		subs = client.getSubsCopy()
+	}
 	client.Unlock()
 	if len(subs) > 0 {
 		// Push the info about presence of failed heartbeats down to
@@ -2905,9 +2943,9 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 		// before the connect request is processed. If so, make sure we wait
 		// for conn request	to be processed first. Check clientCheckTimeout
 		// doc for details.
-		valid = s.clients.isValidWithTimeout(pm.ClientID, clientCheckTimeout)
+		valid = s.clients.isValidWithTimeout(pm.ClientID, pm.ConnID, clientCheckTimeout)
 	} else {
-		valid = s.clients.isValid(pm.ClientID)
+		valid = s.clients.isValid(pm.ClientID, pm.ConnID)
 	}
 	if !valid {
 		s.log.Errorf("Received invalid client publish message %v", pm)
@@ -2916,6 +2954,55 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 	}
 
 	s.ioChannel <- iopm
+}
+
+// processClientPings receives a PING from a client. The payload is the client's UID.
+// If the client is present, a response with nil payload is sent back to indicate
+// success, otherwise the payload contains an error message.
+func (s *StanServer) processClientPings(m *nats.Msg) {
+	if len(m.Data) == 0 {
+		return
+	}
+	ping := &pb.Ping{}
+	if err := ping.Unmarshal(m.Data); err != nil {
+		return
+	}
+	var (
+		valid bool
+		reply []byte
+	)
+	client := s.clients.lookupByConnID(ping.ConnID)
+	if client != nil {
+		valid = true
+		// If the client has failed heartbeats and since the
+		// server just received a PING from the client, reset
+		// the server-to-client HB timer so that a PING is
+		// sent soon and the client's subscriptions failedHB
+		// is cleared.
+		client.RLock()
+		hasFailedHBs := client.fhb > 0
+		client.RUnlock()
+		if hasFailedHBs {
+			client.Lock()
+			client.hbt.Reset(time.Millisecond)
+			client.Unlock()
+		}
+	}
+	if valid {
+		if pingResponseOKBytes == nil {
+			pingResponseOKBytes, _ = (&pb.PingResponse{}).Marshal()
+		}
+		reply = pingResponseOKBytes
+	} else {
+		if pingResponseInvalidClientBytes == nil {
+			pingError := &pb.PingResponse{
+				Error: "client has been replaced or is no longer registered",
+			}
+			pingResponseInvalidClientBytes, _ = pingError.Marshal()
+		}
+		reply = pingResponseInvalidClientBytes
+	}
+	s.ncs.Publish(m.Reply, reply)
 }
 
 // CtrlMsg are no longer used to solve connection and subscription close/unsub
@@ -3145,8 +3232,6 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 	sub.Unlock()
 
 	c := s.channels.get(subject)
-	// Should not happen at this time since channels are not
-	// removed...
 	if c == nil {
 		s.log.Errorf("[Client:%s] Aborting redelivery to subid=%d for non existing channel %s", clientID, subID, subject)
 		sub.Lock()
@@ -4332,7 +4417,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 		// Also check that the connection request has already
 		// been processed. Check clientCheckTimeout doc for details.
-		if !s.clients.isValidWithTimeout(sr.ClientID, clientCheckTimeout) {
+		if !s.clients.isValidWithTimeout(sr.ClientID, nil, clientCheckTimeout) {
 			s.log.Errorf("[Client:%s] Rejecting subscription on %q: connection not created yet",
 				sr.ClientID, sr.Subject)
 			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubReq)

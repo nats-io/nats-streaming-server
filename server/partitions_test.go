@@ -861,3 +861,34 @@ func TestPartitionsAndFT(t *testing.T) {
 		t.Fatalf("Error on publish: %v", err)
 	}
 }
+
+func TestPartitionsClientPings(t *testing.T) {
+	setPartitionsVarsForTest()
+	defer resetDefaultPartitionsVars()
+
+	clientCheckTimeout = 150 * time.Millisecond
+	defer func() { clientCheckTimeout = defaultClientCheckTimeout }()
+
+	// For this test, create a single NATS server to which both servers connect to.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	fooSubj := "foo"
+	barSubj := "bar"
+
+	opts1 := GetDefaultOptions()
+	opts1.NATSServerURL = "nats://localhost:4222"
+	opts1.Partitioning = true
+	opts1.StoreLimits.AddPerChannel(fooSubj, &stores.ChannelLimits{})
+	s1 := runServerWithOpts(t, opts1, nil)
+	defer s1.Shutdown()
+
+	opts2 := GetDefaultOptions()
+	opts2.NATSServerURL = "nats://localhost:4222"
+	opts2.Partitioning = true
+	opts2.StoreLimits.AddPerChannel(barSubj, &stores.ChannelLimits{})
+	s2 := runServerWithOpts(t, opts2, nil)
+	defer s2.Shutdown()
+
+	testClientPings(t, s1)
+}
