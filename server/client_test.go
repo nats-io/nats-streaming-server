@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nuid"
 )
@@ -30,20 +31,22 @@ func createClientStore() *clientStore {
 	return cs
 }
 
-func createClientInfo() (string, string) {
-	clientID := "me"
-	hbInbox := nuid.Next()
-
-	return clientID, hbInbox
+func createClientInfo() *spb.ClientInfo {
+	return &spb.ClientInfo{
+		ID:      "me",
+		HbInbox: nuid.Next(),
+	}
 }
 
 func TestClientRegister(t *testing.T) {
 	cs := createClientStore()
 
-	clientID, hbInbox := createClientInfo()
+	info := createClientInfo()
+	clientID := info.ID
+	hbInbox := info.HbInbox
 
 	// Register a new one
-	sc, err := cs.register(clientID, hbInbox)
+	sc, err := cs.register(info)
 	if err != nil {
 		t.Fatalf("Error on register: %v", err)
 	}
@@ -77,7 +80,7 @@ func TestClientRegister(t *testing.T) {
 	}()
 
 	// Try to register with same clientID, should get an error
-	secondCli, err := cs.register(clientID, hbInbox)
+	secondCli, err := cs.register(&spb.ClientInfo{ID: clientID, HbInbox: hbInbox})
 	if secondCli != nil || err != ErrInvalidClient {
 		t.Fatalf("Expected to get no client and an error, got %v err=%v", secondCli, err)
 	}
@@ -86,13 +89,14 @@ func TestClientRegister(t *testing.T) {
 func TestClientUnregister(t *testing.T) {
 	cs := createClientStore()
 
-	clientID, hbInbox := createClientInfo()
+	info := createClientInfo()
+	clientID := info.ID
 
 	// Unregistering one that does not exist should not cause a crash
 	cs.unregister(clientID)
 
 	// Now register a client
-	cs.register(clientID, hbInbox)
+	cs.register(info)
 
 	// Verify it's in the list of clients
 	if !cs.isValid(clientID) {
@@ -111,7 +115,8 @@ func TestClientUnregister(t *testing.T) {
 func TestClientLookup(t *testing.T) {
 	cs := createClientStore()
 
-	clientID, hbInbox := createClientInfo()
+	info := createClientInfo()
+	clientID := info.ID
 
 	// Looks-up one that does not exist
 	if c := cs.lookup("not-registered"); c != nil {
@@ -119,7 +124,7 @@ func TestClientLookup(t *testing.T) {
 	}
 
 	// Registers one
-	cs.register(clientID, hbInbox)
+	cs.register(info)
 
 	// Lookup again
 	if c := cs.lookup(clientID); c == nil {
@@ -144,15 +149,9 @@ func TestClientGetClientIDs(t *testing.T) {
 
 	nuid := nuid.New()
 
-	clientID := "me"
-	hbInbox := nuid.Next()
+	cs.register(&spb.ClientInfo{ID: "me", HbInbox: nuid.Next()})
 
-	cs.register(clientID, hbInbox)
-
-	clientID = "me2"
-	hbInbox = nuid.Next()
-
-	cs.register(clientID, hbInbox)
+	cs.register(&spb.ClientInfo{ID: "me2", HbInbox: nuid.Next()})
 
 	clients := cs.getClients()
 	if clients == nil || len(clients) != 2 {
@@ -169,7 +168,8 @@ func TestClientGetClientIDs(t *testing.T) {
 func TestClientAddSub(t *testing.T) {
 	cs := createClientStore()
 
-	clientID, hbInbox := createClientInfo()
+	info := createClientInfo()
+	clientID := info.ID
 
 	sub := &subState{}
 
@@ -179,7 +179,7 @@ func TestClientAddSub(t *testing.T) {
 	}
 
 	// Now register the client
-	sc, _ := cs.register(clientID, hbInbox)
+	sc, _ := cs.register(info)
 
 	// Now this should work
 	if !cs.addSub(clientID, sub) {
@@ -233,7 +233,7 @@ func TestClientAddSub(t *testing.T) {
 	insubs := 0
 	for i := 0; i < total; i++ {
 		// Register the client
-		cs.register(clientID, hbInbox)
+		cs.register(info)
 		runtime.Gosched()
 		c, _ := cs.unregister(clientID)
 		if sc == nil {
@@ -254,7 +254,8 @@ func TestClientAddSub(t *testing.T) {
 func TestClientRemoveSub(t *testing.T) {
 	cs := createClientStore()
 
-	clientID, hbInbox := createClientInfo()
+	info := createClientInfo()
+	clientID := info.ID
 
 	sub := &subState{}
 
@@ -264,7 +265,7 @@ func TestClientRemoveSub(t *testing.T) {
 	}
 
 	// Now register the client
-	cs.register(clientID, hbInbox)
+	cs.register(info)
 
 	// Add a subscription
 	if !cs.addSub(clientID, sub) {
@@ -309,7 +310,7 @@ func TestClientRemoveSub(t *testing.T) {
 	insubs := 0
 	for i := 0; i < total; i++ {
 		// Register the client
-		cs.register(clientID, hbInbox)
+		cs.register(info)
 		cs.addSub(clientID, sub)
 		runtime.Gosched()
 		c, _ := cs.unregister(clientID)
@@ -331,14 +332,15 @@ func TestClientRemoveSub(t *testing.T) {
 func TestClientGetSubs(t *testing.T) {
 	cs := createClientStore()
 
-	clientID, hbInbox := createClientInfo()
+	info := createClientInfo()
+	clientID := info.ID
 
 	if subs := cs.getSubs(clientID); len(subs) != 0 {
 		t.Fatalf("Expected 0 subs, got: %v", len(subs))
 	}
 
 	// Now register the client
-	cs.register(clientID, hbInbox)
+	cs.register(info)
 
 	// Add a subscription
 	if !cs.addSub(clientID, &subState{subject: "foo"}) {
@@ -396,7 +398,7 @@ func TestClientSetClientHBForNonExistentClient(t *testing.T) {
 
 type clientStoreErrorsStore struct{ stores.Store }
 
-func (s *clientStoreErrorsStore) AddClient(id, hbinbox string) (*stores.Client, error) {
+func (s *clientStoreErrorsStore) AddClient(_ *spb.ClientInfo) (*stores.Client, error) {
 	return nil, errOnPurpose
 }
 func (s *clientStoreErrorsStore) DeleteClient(id string) error {
@@ -406,8 +408,10 @@ func (s *clientStoreErrorsStore) DeleteClient(id string) error {
 func TestClientStoreErrors(t *testing.T) {
 	cs := createClientStore()
 
+	info := createClientInfo()
+
 	// Register a client
-	rc, err := cs.register("me", "hbInbox")
+	rc, err := cs.register(info)
 	if err != nil {
 		t.Fatalf("Error during registration: %v", err)
 	}
@@ -422,7 +426,7 @@ func TestClientStoreErrors(t *testing.T) {
 	cs.Unlock()
 
 	// Register: store will fail the AddClient call
-	if _, err := cs.register("me2", "hbInbox"); err == nil {
+	if _, err := cs.register(&spb.ClientInfo{ID: "me2", HbInbox: "hbInbox"}); err == nil {
 		t.Fatal("Expected register to fail")
 	}
 	// Make sure client is not registered

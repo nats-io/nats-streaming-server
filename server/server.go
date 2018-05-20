@@ -2678,7 +2678,13 @@ func (s *StanServer) processConnect(req *pb.ConnectRequest, replaceOld bool) err
 	}
 
 	// Try to register
-	_, err := s.clients.register(req.ClientID, req.HeartbeatInbox)
+	info := &spb.ClientInfo{
+		ID:       req.ClientID,
+		HbInbox:  req.HeartbeatInbox,
+		ConnID:   req.ConnID,
+		Protocol: req.Protocol,
+	}
+	_, err := s.clients.register(info)
 	if err != nil {
 		s.log.Errorf("[Client:%s] Error registering client: %v", req.ClientID, err)
 		return err

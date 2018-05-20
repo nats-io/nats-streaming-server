@@ -62,6 +62,38 @@ NATS Streaming provides the following high-level feature set.
 
 # Important Changes
 
+## Version `0.10.0`
+
+The server needs to persist more state for a client connection. Therefore, the Store interface has been changed:
+
+* Changed `AddClient(clientID, hbInbox string)` to `AddClient(info *spb.ClientInfo)`
+
+For SQL Stores, the `Clients` table has been altered to add a `proto` column.<br>
+You can update the SQL table manually or run the provided scripts that create the tables if they don't exists
+and alter the `Clients` table adding the new column. For instance, with MySQL, you would run something similar to:
+
+```
+mysql -u root nss_db < mysql.db.sql
+```
+The above assumes you are in the NATS Streaming Server directory, and the streaming database is called `nss_db`.
+
+Otherwise, from the mysql CLI, you can run the command:
+```
+mysql> alter table Clients add proto blob;
+Query OK, 0 rows affected (0.05 sec)
+Records: 0  Duplicates: 0  Warnings: 0
+```
+For Postgres, it would be:
+```
+nss_db=# alter table Clients add proto bytea;
+ALTER TABLE
+```
+
+If you run the server version with `0.10.0` a database that has not been updated, you would get the following error:
+```
+[FTL] STREAM: Failed to start: unable to prepare statement "INSERT INTO Clients (id, hbinbox, proto) VALUES (?, ?, ?)": Error 1054: Unknown column 'proto' in 'field list'
+```
+
 ## Version `0.9.0`
 
 Additions to the Store interface to support deletion of channels.

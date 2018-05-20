@@ -98,7 +98,7 @@ var sqlStmts = []string{
 	"SELECT COUNT(uniquerow) FROM ServerInfo",                                                                                                                                        // sqlHasServerInfoRow
 	"UPDATE ServerInfo SET id=?, proto=?, version=? WHERE uniquerow=1",                                                                                                               // sqlUpdateServerInfo
 	"INSERT INTO ServerInfo (id, proto, version) VALUES (?, ?, ?)",                                                                                                                   // sqlAddServerInfo
-	"INSERT INTO Clients (id, hbinbox) VALUES (?, ?)",                                                                                                                                // sqlAddClient
+	"INSERT INTO Clients (id, hbinbox, proto) VALUES (?, ?, ?)",                                                                                                                      // sqlAddClient
 	"DELETE FROM Clients WHERE id=?",                                                                                                                                                 // sqlDeleteClient
 	"INSERT INTO Channels (id, name, maxmsgs, maxbytes, maxage) VALUES (?, ?, ?, ?, ?)",                                                                                              // sqlAddChannel
 	"INSERT INTO Messages VALUES (?, ?, ?, ?, ?)",                                                                                                                                    // sqlStoreMsg
@@ -123,7 +123,7 @@ var sqlStmts = []string{
 	"DELETE FROM SubsPending WHERE subid=? AND seq=?",                                                                                                                                // sqlSubDeletePending
 	"DELETE FROM SubsPending WHERE subid=? AND `row`=?",                                                                                                                              // sqlSubDeletePendingRow
 	"SELECT id, proto, version FROM ServerInfo WHERE uniquerow=1",                                                                                                                    // sqlRecoverServerInfo
-	"SELECT id, hbinbox FROM Clients",                                                                                                                                                // sqlRecoverClients
+	"SELECT id, hbinbox, proto FROM Clients",                                                                                                                                         // sqlRecoverClients
 	"SELECT COALESCE(MAX(id), 0) FROM Channels",                                                                                                                                      // sqlRecoverMaxChannelID
 	"SELECT COALESCE(MAX(subid), 0) FROM Subscriptions",                                                                                                                              // sqlRecoverMaxSubID
 	"SELECT id, name, maxseq FROM Channels WHERE deleted=FALSE",                                                                                                                      // sqlRecoverChannelsList
@@ -768,11 +768,17 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 		var (
 			clientID string
 			hbInbox  string
+			proto    []byte
 		)
-		if err := cliRows.Scan(&clientID, &hbInbox); err != nil {
+		if err := cliRows.Scan(&clientID, &hbInbox, &proto); err != nil {
 			return nil, err
 		}
-		clients = append(clients, &Client{spb.ClientInfo{ID: clientID, HbInbox: hbInbox}})
+		info := spb.ClientInfo{}
+		info.Unmarshal(proto)
+		client := &Client{info}
+		client.ID = clientID
+		client.HbInbox = hbInbox
+		clients = append(clients, client)
 	}
 	cliRows.Close()
 	// Set clients into recovered state.
@@ -843,6 +849,12 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 		}
 
 		subStore := s.newSQLSubStore(channelID, &channelLimits.SubStoreLimits)
+		// Prevent scheduling to flusher while we are recovering
+		if !s.opts.NoCaching {
+			// By setting this to true, we prevent scheduling since
+			// scheduling would occur only if needsFlush is false.
+			subStore.cache.needsFlush = true
+		}
 
 		var subscriptions []*RecoveredSubscription
 
@@ -914,8 +926,7 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 		subRows.Close()
 
 		if !s.opts.NoCaching {
-			// Clear the needsFlush flag that may have been set during recovery
-			// due to use of common code.
+			// Clear but also allow scheduling now that the recovery is complete.
 			subStore.cache.needsFlush = false
 		}
 
@@ -1158,12 +1169,22 @@ func (s *SQLStore) deepChannelDelete(channelID int64) error {
 }
 
 // AddClient implements the Store interface
-func (s *SQLStore) AddClient(clientID, hbInbox string) (*Client, error) {
+func (s *SQLStore) AddClient(info *spb.ClientInfo) (*Client, error) {
 	s.Lock()
 	defer s.Unlock()
-	var err error
+	var (
+		protoBytes []byte
+		err        error
+	)
+	if info.Protocol > 0 {
+		protoBytes, err = info.Marshal()
+		if err != nil {
+			return nil, err
+		}
+	}
+	client := &Client{*info}
 	for i := 0; i < 2; i++ {
-		_, err = s.preparedStmts[sqlAddClient].Exec(clientID, hbInbox)
+		_, err = s.preparedStmts[sqlAddClient].Exec(client.ID, client.HbInbox, protoBytes)
 		if err == nil {
 			break
 		}
@@ -1174,7 +1195,7 @@ func (s *SQLStore) AddClient(clientID, hbInbox string) (*Client, error) {
 		}
 		// This is the first AddClient failed attempt. It could be because
 		// client was already in db, so delete now and try again.
-		_, err = s.preparedStmts[sqlDeleteClient].Exec(clientID)
+		_, err = s.preparedStmts[sqlDeleteClient].Exec(info.ID)
 		if err != nil {
 			err = sqlStmtError(sqlDeleteClient, err)
 			break
@@ -1183,7 +1204,7 @@ func (s *SQLStore) AddClient(clientID, hbInbox string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{spb.ClientInfo{ID: clientID, HbInbox: hbInbox}}, nil
+	return client, nil
 }
 
 // DeleteClient implements the Store interface

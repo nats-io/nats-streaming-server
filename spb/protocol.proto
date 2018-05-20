@@ -66,8 +66,10 @@ message ServerInfo {
 
 // ClientInfo contains information related to a Client
 message ClientInfo {
-  string ID      = 1; // Client ID
-  string HbInbox = 2; // The inbox heartbeats are sent to
+  string ID       = 1; // Client ID
+  string HbInbox  = 2; // The inbox heartbeats are sent to
+  bytes  ConnID   = 3; // Connection ID (no connection should ever have the same)
+  int32  Protocol = 4; // Protocol the client is at
 }
 
 message ClientDelete {

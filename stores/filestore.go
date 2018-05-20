@@ -462,7 +462,6 @@ type FileStore struct {
 	opts          FileStoreOptions
 	compactItvl   time.Duration
 	clients       map[string]*Client
-	addClientRec  spb.ClientInfo
 	delClientRec  spb.ClientDelete
 	cliFileSize   int64
 	cliDeleteRecs int // Number of deleted client records
@@ -1645,14 +1644,13 @@ func (fs *FileStore) DeleteChannel(channel string) error {
 }
 
 // AddClient implements the Store interface
-func (fs *FileStore) AddClient(clientID, hbInbox string) (*Client, error) {
+func (fs *FileStore) AddClient(info *spb.ClientInfo) (*Client, error) {
 	fs.Lock()
 	if _, err := fs.fm.lockFile(fs.clientsFile); err != nil {
 		fs.Unlock()
 		return nil, err
 	}
-	fs.addClientRec = spb.ClientInfo{ID: clientID, HbInbox: hbInbox}
-	_, size, err := writeRecord(fs.clientsFile.handle, nil, addClient, &fs.addClientRec, fs.addClientRec.Size(), fs.crcTable)
+	_, size, err := writeRecord(fs.clientsFile.handle, nil, addClient, info, info.Size(), fs.crcTable)
 	if err != nil {
 		fs.fm.unlockFile(fs.clientsFile)
 		fs.Unlock()
@@ -1660,10 +1658,10 @@ func (fs *FileStore) AddClient(clientID, hbInbox string) (*Client, error) {
 	}
 	fs.cliFileSize += int64(size)
 	fs.fm.unlockFile(fs.clientsFile)
-	client := Client{fs.addClientRec}
-	fs.clients[clientID] = &client
+	client := &Client{*info}
+	fs.clients[client.ID] = client
 	fs.Unlock()
-	return &client, nil
+	return client, nil
 }
 
 // DeleteClient implements the Store interface
@@ -1747,8 +1745,7 @@ func (fs *FileStore) compactClientFile(orgFileName string) error {
 	buf := _buf[:]
 	// Dump the content of active clients into the temporary file.
 	for _, c := range fs.clients {
-		fs.addClientRec = spb.ClientInfo{ID: c.ID, HbInbox: c.HbInbox}
-		buf, size, err = writeRecord(bw, buf, addClient, &fs.addClientRec, fs.addClientRec.Size(), fs.crcTable)
+		buf, size, err = writeRecord(bw, buf, addClient, &c.ClientInfo, c.ClientInfo.Size(), fs.crcTable)
 		if err != nil {
 			return err
 		}

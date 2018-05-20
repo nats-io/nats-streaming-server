@@ -317,7 +317,7 @@ func TestSQLErrorsDueToFailDBConnection(t *testing.T) {
 	})
 	expectToFail(func() error { return s.DeleteChannel("foo") })
 	expectToFail(func() error {
-		_, err := s.AddClient("me", "hbInbox")
+		_, err := s.AddClient(&spb.ClientInfo{ID: "me", HbInbox: "hbInbox"})
 		return err
 	})
 	expectToFail(func() error {

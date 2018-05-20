@@ -211,8 +211,8 @@ func (gs *genericStore) canAddChannel(name string) error {
 }
 
 // AddClient implements the Store interface
-func (gs *genericStore) AddClient(clientID, hbInbox string) (*Client, error) {
-	return &Client{spb.ClientInfo{ID: clientID, HbInbox: hbInbox}}, nil
+func (gs *genericStore) AddClient(info *spb.ClientInfo) (*Client, error) {
+	return &Client{*info}, nil
 }
 
 // DeleteClient implements the Store interface

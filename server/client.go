@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
@@ -52,24 +53,24 @@ func (c *client) getSubsCopy() []*subState {
 }
 
 // Register a new client. Returns ErrInvalidClient if client is already registered.
-func (cs *clientStore) register(ID, hbInbox string) (*client, error) {
+func (cs *clientStore) register(info *spb.ClientInfo) (*client, error) {
 	cs.Lock()
 	defer cs.Unlock()
-	c := cs.clients[ID]
+	c := cs.clients[info.ID]
 	if c != nil {
 		return nil, ErrInvalidClient
 	}
-	sc, err := cs.store.AddClient(ID, hbInbox)
+	sc, err := cs.store.AddClient(info)
 	if err != nil {
 		return nil, err
 	}
 	c = &client{info: sc, subs: make([]*subState, 0, 4)}
-	cs.clients[ID] = c
+	cs.clients[c.info.ID] = c
 	if cs.waitOnRegister != nil {
-		ch := cs.waitOnRegister[ID]
+		ch := cs.waitOnRegister[c.info.ID]
 		if ch != nil {
 			ch <- struct{}{}
-			delete(cs.waitOnRegister, ID)
+			delete(cs.waitOnRegister, c.info.ID)
 		}
 	}
 	return c, nil

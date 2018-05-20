@@ -173,7 +173,11 @@ func subStoreDeleteSub(t tLogger, ss SubStore, subid uint64) {
 }
 
 func storeAddClient(t tLogger, s Store, clientID, hbInbox string) *Client {
-	c, err := s.AddClient(clientID, hbInbox)
+	client := &spb.ClientInfo{
+		ID:      clientID,
+		HbInbox: hbInbox,
+	}
+	c, err := s.AddClient(client)
 	if err != nil {
 		stackFatalf(t, "Error adding client %q: %v", clientID, err)
 	}
@@ -1209,6 +1213,47 @@ func TestCSDeleteChannel(t *testing.T) {
 			defer s.Close()
 			if state != nil && len(state.Channels) > 0 {
 				t.Fatal("Channel recovered after restart")
+			}
+		})
+	}
+}
+
+func TestCSAddClientProto(t *testing.T) {
+	for _, st := range testStores {
+		if !st.recoverable {
+			continue
+		}
+		st := st
+		t.Run(st.name, func(t *testing.T) {
+			t.Parallel()
+			defer endTest(t, st)
+			s := startTest(t, st)
+			defer s.Close()
+
+			info := &spb.ClientInfo{
+				ID:       "me",
+				HbInbox:  "hbInbox",
+				ConnID:   []byte("connID"),
+				Protocol: 1,
+			}
+			c, err := s.AddClient(info)
+			if err != nil {
+				t.Fatalf("Error adding client: %v", err)
+			}
+			if !reflect.DeepEqual(&c.ClientInfo, info) {
+				t.Fatalf("Expected %v, got %v", info, c.ClientInfo)
+			}
+			s.Close()
+
+			s, state := testReOpenStore(t, st, nil)
+			defer s.Close()
+
+			if l := len(state.Clients); l != 1 {
+				t.Fatalf("Expected to have recovered 1 client, got %v", l)
+			}
+			rc := state.Clients[0]
+			if !reflect.DeepEqual(c, rc) {
+				t.Fatalf("Expected %v, got %v", c, rc)
 			}
 		})
 	}

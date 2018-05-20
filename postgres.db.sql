@@ -8,3 +8,6 @@ CREATE TABLE IF NOT EXISTS Subscriptions (id INTEGER, subid BIGINT, lastsent BIG
 CREATE TABLE IF NOT EXISTS SubsPending (subid BIGINT, row BIGINT, seq BIGINT DEFAULT 0, lastsent BIGINT DEFAULT 0, pending BYTEA, acks BYTEA, CONSTRAINT PK_MsgPendingKey PRIMARY KEY(subid, row));
 CREATE INDEX Idx_SubsPendingSeq ON SubsPending (seq);
 CREATE TABLE IF NOT EXISTS StoreLock (id VARCHAR(30), tick BIGINT DEFAULT 0);
+
+-- Updates for 0.10.0
+ALTER TABLE Clients ADD proto BYTEA;
