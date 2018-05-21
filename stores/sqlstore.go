@@ -430,7 +430,7 @@ func (s *SQLStore) GetExclusiveLock() (bool, error) {
 	}
 	if s.dbLock == nil {
 		s.dbLock = &sqlDBLock{
-			id: nuid.New().Next(),
+			id: nuid.Next(),
 			db: s.db,
 		}
 	}

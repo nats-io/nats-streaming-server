@@ -494,7 +494,7 @@ func testClientPings(t *testing.T, s *StanServer) {
 	creq := &pb.ConnectRequest{
 		ClientID:       "me",
 		HeartbeatInbox: hbInbox,
-		ConnID:         []byte(nuid.New().Next()),
+		ConnID:         []byte(nuid.Next()),
 		Protocol:       protocolOne,
 		PingInterval:   int64(time.Second),
 		PingTimeout:    int64(time.Second),
@@ -595,7 +595,7 @@ func testClientPings(t *testing.T, s *StanServer) {
 	creq = &pb.ConnectRequest{
 		ClientID:       "me",
 		HeartbeatInbox: nats.NewInbox(),
-		ConnID:         []byte(nuid.New().Next()),
+		ConnID:         []byte(nuid.Next()),
 		Protocol:       protocolOne,
 		PingInterval:   int64(time.Second),
 		PingTimeout:    int64(time.Second),
@@ -647,7 +647,7 @@ func testClientPings(t *testing.T, s *StanServer) {
 		ClientID: "me",
 		Subject:  "foo",
 		ConnID:   firstConnID,
-		Guid:     nuid.New().Next(),
+		Guid:     nuid.Next(),
 		Data:     []byte("hello"),
 	}
 	msgBytes, _ := msg.Marshal()
@@ -691,7 +691,7 @@ func TestPersistentStoreRecoverClientInfo(t *testing.T) {
 	creq := &pb.ConnectRequest{
 		ClientID:       "me",
 		HeartbeatInbox: nats.NewInbox(),
-		ConnID:         []byte(nuid.New().Next()),
+		ConnID:         []byte(nuid.Next()),
 		Protocol:       protocolOne,
 		PingInterval:   int64(time.Second),
 		PingTimeout:    int64(time.Second),
