@@ -25,6 +25,7 @@ import (
 type clientStore struct {
 	sync.RWMutex
 	clients        map[string]*client
+	connIDs        map[string]*client
 	waitOnRegister map[string]chan struct{}
 	store          stores.Store
 }
@@ -41,7 +42,11 @@ type client struct {
 
 // newClientStore creates a new clientStore instance using `store` as the backing storage.
 func newClientStore(store stores.Store) *clientStore {
-	return &clientStore{clients: make(map[string]*client), store: store}
+	return &clientStore{
+		clients: make(map[string]*client),
+		connIDs: make(map[string]*client),
+		store:   store,
+	}
 }
 
 // getSubsCopy returns a copy of the client's subscribers array.
@@ -66,6 +71,9 @@ func (cs *clientStore) register(info *spb.ClientInfo) (*client, error) {
 	}
 	c = &client{info: sc, subs: make([]*subState, 0, 4)}
 	cs.clients[c.info.ID] = c
+	if len(c.info.ConnID) > 0 {
+		cs.connIDs[string(c.info.ConnID)] = c
+	}
 	if cs.waitOnRegister != nil {
 		ch := cs.waitOnRegister[c.info.ID]
 		if ch != nil {
@@ -89,8 +97,12 @@ func (cs *clientStore) unregister(ID string) (*client, error) {
 		c.hbt.Stop()
 		c.hbt = nil
 	}
+	connID := c.info.ConnID
 	c.Unlock()
 	delete(cs.clients, ID)
+	if len(connID) > 0 {
+		delete(cs.connIDs, string(connID))
+	}
 	if cs.waitOnRegister != nil {
 		delete(cs.waitOnRegister, ID)
 	}
@@ -99,8 +111,11 @@ func (cs *clientStore) unregister(ID string) (*client, error) {
 }
 
 // IsValid returns true if the client is registered, false otherwise.
-func (cs *clientStore) isValid(ID string) bool {
-	return cs.lookup(ID) != nil
+func (cs *clientStore) isValid(ID string, connID []byte) bool {
+	cs.RLock()
+	valid := cs.lookupByConnIDOrID(ID, connID) != nil
+	cs.RUnlock()
+	return valid
 }
 
 // isValidWithTimeout will return true if the client is registered,
@@ -110,9 +125,9 @@ func (cs *clientStore) isValid(ID string) bool {
 // registered client to the channel.
 // On timeout, this call return false to indicate that the client
 // has still not registered.
-func (cs *clientStore) isValidWithTimeout(ID string, timeout time.Duration) bool {
+func (cs *clientStore) isValidWithTimeout(ID string, connID []byte, timeout time.Duration) bool {
 	cs.Lock()
-	c := cs.clients[ID]
+	c := cs.lookupByConnIDOrID(ID, connID)
 	if c != nil {
 		cs.Unlock()
 		return true
@@ -135,10 +150,30 @@ func (cs *clientStore) isValidWithTimeout(ID string, timeout time.Duration) bool
 	}
 }
 
+// Lookup client by ConnID if not nil, otherwise by clientID.
+// Assume at least clientStore RLock is held on entry.
+func (cs *clientStore) lookupByConnIDOrID(ID string, connID []byte) *client {
+	var c *client
+	if len(connID) > 0 {
+		c = cs.connIDs[string(connID)]
+	} else {
+		c = cs.clients[ID]
+	}
+	return c
+}
+
 // Lookup a client
 func (cs *clientStore) lookup(ID string) *client {
 	cs.RLock()
 	c := cs.clients[ID]
+	cs.RUnlock()
+	return c
+}
+
+// Lookup a client by connection ID
+func (cs *clientStore) lookupByConnID(connID []byte) *client {
+	cs.RLock()
+	c := cs.connIDs[string(connID)]
 	cs.RUnlock()
 	return c
 }

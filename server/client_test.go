@@ -35,6 +35,7 @@ func createClientInfo() *spb.ClientInfo {
 	return &spb.ClientInfo{
 		ID:      "me",
 		HbInbox: nuid.Next(),
+		ConnID:  []byte(nuid.Next()),
 	}
 }
 
@@ -91,6 +92,7 @@ func TestClientUnregister(t *testing.T) {
 
 	info := createClientInfo()
 	clientID := info.ID
+	connID := info.ConnID
 
 	// Unregistering one that does not exist should not cause a crash
 	cs.unregister(clientID)
@@ -99,7 +101,13 @@ func TestClientUnregister(t *testing.T) {
 	cs.register(info)
 
 	// Verify it's in the list of clients
-	if !cs.isValid(clientID) {
+	if !cs.isValid(clientID, nil) {
+		t.Fatal("Expected client to be registered")
+	}
+	if !cs.isValid("", connID) {
+		t.Fatal("Expected client to be registered")
+	}
+	if !cs.isValid(clientID, connID) {
 		t.Fatal("Expected client to be registered")
 	}
 
@@ -107,7 +115,13 @@ func TestClientUnregister(t *testing.T) {
 	cs.unregister(clientID)
 
 	// Verify it's gone.
-	if cs.isValid(clientID) {
+	if cs.isValid(clientID, nil) {
+		t.Fatal("Expected client to be unregistered")
+	}
+	if cs.isValid("", connID) {
+		t.Fatal("Expected client to be unregistered")
+	}
+	if cs.isValid(clientID, connID) {
 		t.Fatal("Expected client to be unregistered")
 	}
 }
