@@ -669,3 +669,81 @@ func testClientPings(t *testing.T, s *StanServer) {
 		t.Fatal("Did not our error back")
 	}
 }
+
+func TestPersistentStoreRecoverClientInfo(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	opts := getTestDefaultOptsForPersistentStore()
+	s := runServerWithOpts(t, opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	s.mu.RLock()
+	discoverySubj := s.info.Discovery
+	s.mu.RUnlock()
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	creq := &pb.ConnectRequest{
+		ClientID:       "me",
+		HeartbeatInbox: nats.NewInbox(),
+		ConnID:         []byte(nuid.New().Next()),
+		Protocol:       protocolOne,
+		PingInterval:   int64(time.Second),
+		PingTimeout:    int64(time.Second),
+		PingMaxOut:     3,
+	}
+	creqBytes, _ := creq.Marshal()
+	crespMsg, err := nc.Request(discoverySubj, creqBytes, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	cresp := &pb.ConnectResponse{}
+	if err := cresp.Unmarshal(crespMsg.Data); err != nil {
+		t.Fatalf("Error on connect response: %v", err)
+	}
+	if cresp.Error != "" {
+		t.Fatalf("Error on connect: %v", cresp.Error)
+	}
+	if cresp.Protocol != protocolOne || cresp.PingRequests == "" || cresp.PingInterval != int64(time.Second) || cresp.PingTimeout != int64(time.Second) || cresp.PingMaxOut != 3 {
+		t.Fatalf("Unexpected response: %#v", cresp)
+	}
+
+	// Shutdown and restart server
+	s.Shutdown()
+	s = runServerWithOpts(t, opts, nil)
+
+	// Check client's info was properly persisted
+	c := s.clients.lookup("me")
+	if c == nil {
+		t.Fatalf("Client was not recovered")
+	}
+	c.RLock()
+	proto := c.info.Protocol
+	cid := c.info.ConnID
+	pi := c.info.PingInterval
+	pt := c.info.PingTimeout
+	pmo := c.info.PingMaxOut
+	c.RUnlock()
+
+	if proto != 1 {
+		t.Fatalf("Recovered proto should be 1, got %v", proto)
+	}
+	if string(cid) != string(creq.ConnID) {
+		t.Fatalf("Recovered ConnID should be %s, got %s", creq.ConnID, cid)
+	}
+	if pi != int64(time.Second) {
+		t.Fatalf("Recovered ping interval should be %v, got %v", time.Second, time.Duration(pi))
+	}
+	if pt != int64(time.Second) {
+		t.Fatalf("Recovered ping timeout should be %v, got %v", time.Second, time.Duration(pt))
+	}
+	if pmo != 3 {
+		t.Fatalf("Recovered ping max out should be 3, got %v", pmo)
+	}
+	nc.Close()
+}

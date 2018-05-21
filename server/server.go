@@ -2698,10 +2698,13 @@ func (s *StanServer) processConnect(req *pb.ConnectRequest, replaceOld bool) err
 
 	// Try to register
 	info := &spb.ClientInfo{
-		ID:       req.ClientID,
-		HbInbox:  req.HeartbeatInbox,
-		ConnID:   req.ConnID,
-		Protocol: req.Protocol,
+		ID:           req.ClientID,
+		HbInbox:      req.HeartbeatInbox,
+		ConnID:       req.ConnID,
+		Protocol:     req.Protocol,
+		PingInterval: req.PingInterval,
+		PingTimeout:  req.PingTimeout,
+		PingMaxOut:   req.PingMaxOut,
 	}
 	_, err := s.clients.register(info)
 	if err != nil {
