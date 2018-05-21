@@ -497,7 +497,6 @@ func testClientPings(t *testing.T, s *StanServer) {
 		ConnID:         []byte(nuid.Next()),
 		Protocol:       protocolOne,
 		PingInterval:   int64(time.Second),
-		PingTimeout:    int64(time.Second),
 		PingMaxOut:     3,
 	}
 	firstConnID := creq.ConnID
@@ -513,7 +512,7 @@ func testClientPings(t *testing.T, s *StanServer) {
 	if cresp.Error != "" {
 		t.Fatalf("Error on connect: %v", cresp.Error)
 	}
-	if cresp.Protocol != protocolOne || cresp.PingRequests == "" || cresp.PingInterval != int64(time.Second) || cresp.PingTimeout != int64(time.Second) || cresp.PingMaxOut != 3 {
+	if cresp.Protocol != protocolOne || cresp.PingRequests == "" || cresp.PingInterval != int64(time.Second) || cresp.PingMaxOut != 3 {
 		t.Fatalf("Unexpected response: %#v", cresp)
 	}
 
@@ -598,7 +597,6 @@ func testClientPings(t *testing.T, s *StanServer) {
 		ConnID:         []byte(nuid.Next()),
 		Protocol:       protocolOne,
 		PingInterval:   int64(time.Second),
-		PingTimeout:    int64(time.Second),
 		PingMaxOut:     3,
 	}
 	creqBytes, _ = creq.Marshal()
@@ -694,7 +692,6 @@ func TestPersistentStoreRecoverClientInfo(t *testing.T) {
 		ConnID:         []byte(nuid.Next()),
 		Protocol:       protocolOne,
 		PingInterval:   int64(time.Second),
-		PingTimeout:    int64(time.Second),
 		PingMaxOut:     3,
 	}
 	creqBytes, _ := creq.Marshal()
@@ -709,7 +706,7 @@ func TestPersistentStoreRecoverClientInfo(t *testing.T) {
 	if cresp.Error != "" {
 		t.Fatalf("Error on connect: %v", cresp.Error)
 	}
-	if cresp.Protocol != protocolOne || cresp.PingRequests == "" || cresp.PingInterval != int64(time.Second) || cresp.PingTimeout != int64(time.Second) || cresp.PingMaxOut != 3 {
+	if cresp.Protocol != protocolOne || cresp.PingRequests == "" || cresp.PingInterval != int64(time.Second) || cresp.PingMaxOut != 3 {
 		t.Fatalf("Unexpected response: %#v", cresp)
 	}
 
@@ -726,7 +723,6 @@ func TestPersistentStoreRecoverClientInfo(t *testing.T) {
 	proto := c.info.Protocol
 	cid := c.info.ConnID
 	pi := c.info.PingInterval
-	pt := c.info.PingTimeout
 	pmo := c.info.PingMaxOut
 	c.RUnlock()
 
@@ -738,9 +734,6 @@ func TestPersistentStoreRecoverClientInfo(t *testing.T) {
 	}
 	if pi != int64(time.Second) {
 		t.Fatalf("Recovered ping interval should be %v, got %v", time.Second, time.Duration(pi))
-	}
-	if pt != int64(time.Second) {
-		t.Fatalf("Recovered ping timeout should be %v, got %v", time.Second, time.Duration(pt))
 	}
 	if pmo != 3 {
 		t.Fatalf("Recovered ping max out should be 3, got %v", pmo)
