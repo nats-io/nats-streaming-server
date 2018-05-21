@@ -71,8 +71,7 @@ message ClientInfo {
   bytes  ConnID       = 3; // Connection ID (no connection should ever have the same)
   int32  Protocol     = 4; // Protocol the client is at
   int64  PingInterval = 5; // Interval at which the client is sending PINGs (time.Duration so in nanoseconds)
-  int64  PingTimeout  = 6; // How long the client waits for a response (time.Duration so in nanoseconds)
-  int32  PingMaxOut   = 7; // Number of PINGs without response before the connection can be considered lost
+  int32  PingMaxOut   = 6; // Number of PINGs without response before the connection can be considered lost
 }
 
 message ClientDelete {

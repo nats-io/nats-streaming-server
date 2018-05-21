@@ -2703,7 +2703,6 @@ func (s *StanServer) processConnect(req *pb.ConnectRequest, replaceOld bool) err
 		ConnID:       req.ConnID,
 		Protocol:     req.Protocol,
 		PingInterval: req.PingInterval,
-		PingTimeout:  req.PingTimeout,
 		PingMaxOut:   req.PingMaxOut,
 	}
 	_, err := s.clients.register(info)
@@ -2737,10 +2736,8 @@ func (s *StanServer) finishConnectRequest(req *pb.ConnectRequest, replyInbox str
 		// In the future, we may want to return different values
 		// than the one the client sent in the connect request.
 		// For now, return the values from the request.
-		// Note1: Server and clients have possibly different HBs values.
-		// Note2: The following values will be 0s for older clients, which is fine.
+		// Note: Server and clients have possibly different HBs values.
 		cr.PingInterval = req.PingInterval
-		cr.PingTimeout = req.PingTimeout
 		cr.PingMaxOut = req.PingMaxOut
 	}
 	b, _ := cr.Marshal()
