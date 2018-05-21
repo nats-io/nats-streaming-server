@@ -83,7 +83,7 @@ func loadCreateDatabaseStmts(driver string) ([]string, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		line = strings.TrimLeft(line, " ")
-		if len(line) == 0 || line[0] == '#' {
+		if len(line) == 0 || line[0] == '#' || line[0] == '-' {
 			continue
 		}
 		stmts = append(stmts, line)
