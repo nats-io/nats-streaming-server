@@ -136,7 +136,7 @@ var sqlStmts = []string{
 	"SELECT COUNT(seq) FROM Messages WHERE id=?",                                                                                                                                     // sqlRecoverGetMessagesCount
 	"SELECT MIN(t.seq) FROM (SELECT seq FROM Messages WHERE id=? ORDER BY seq DESC LIMIT ?)t",                                                                                        // sqlRecoverGetSeqFloorForMaxMsgs
 	"SELECT COALESCE(SUM(size), 0) FROM Messages WHERE id=?",                                                                                                                         // sqlRecoverGetChannelTotalSize
-	"SELECT COALESCE(MIN(seq), 0) FROM (SELECT seq, (SELECT SUM(size) FROM Messages WHERE id=? AND seq<=t.seq) AS total FROM Messages t WHERE id=? ORDER BY seq)t2 WHERE t2.total>?", // sqlRecoverGetSeqFloorForMaxBytes
+	"SELECT COALESCE(MIN(seq), 0) FROM (SELECT seq, (SELECT SUM(size) FROM Messages t WHERE id=? AND seq<=t.seq) AS total FROM Messages WHERE id=? ORDER BY seq)t2 WHERE t2.total>?", // sqlRecoverGetSeqFloorForMaxBytes
 	"UPDATE Channels SET maxmsgs=?, maxbytes=?, maxage=? WHERE id=?",                                                                                                                 // sqlRecoverUpdateChannelLimits
 	"UPDATE Channels SET deleted=true WHERE id=?",                                                                                                                                    // sqlDeleteChannelFast
 	"SELECT DISTINCT(SubsPending.subid) FROM SubsPending INNER JOIN Subscriptions ON Subscriptions.id=? AND Subscriptions.subid=SubsPending.subid LIMIT ?",                           // sqlDeleteChannelGetSubIds
