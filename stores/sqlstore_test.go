@@ -1572,3 +1572,45 @@ func TestSQLDeleteChannel(t *testing.T) {
 	checkTables("foo", false)
 	checkTables("bar", true)
 }
+
+func TestSQLRecoverWithMaxBytes(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	s := createDefaultSQLStore(t)
+	defer s.Close()
+
+	cs := storeCreateChannel(t, s, "foo")
+	payload := make([]byte, 100)
+	storeMsg(t, cs, "foo", 1, payload)
+	storeMsg(t, cs, "foo", 2, payload)
+	storeMsg(t, cs, "foo", 3, payload)
+	storeMsg(t, cs, "foo", 4, payload)
+	storeMsg(t, cs, "foo", 5, payload)
+	s.Close()
+
+	limits := testDefaultStoreLimits
+	// Since the message is a bit more than the payload, with this
+	// value we should be keeping the 3 last ones.
+	limits.MaxBytes = 350
+	s, state := openDefaultSQLStoreWithLimits(t, &limits)
+	defer s.Close()
+	cs = state.Channels["foo"].Channel
+	first, last := msgStoreFirstAndLastSequence(t, cs.Msgs)
+	if first != 3 && last != 5 {
+		t.Fatalf("Should be left with 3..5, got %v..%v", first, last)
+	}
+	s.Close()
+
+	limits.MaxBytes = 10
+	s, state = openDefaultSQLStoreWithLimits(t, &limits)
+	defer s.Close()
+	cs = state.Channels["foo"].Channel
+	if n, _ := msgStoreState(t, cs.Msgs); n != 1 {
+		t.Fatalf("Should have left the last message")
+	}
+	s.Close()
+}
