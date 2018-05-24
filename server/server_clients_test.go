@@ -496,7 +496,7 @@ func testClientPings(t *testing.T, s *StanServer) {
 		HeartbeatInbox: hbInbox,
 		ConnID:         []byte(nuid.Next()),
 		Protocol:       protocolOne,
-		PingInterval:   int64(time.Second),
+		PingInterval:   1,
 		PingMaxOut:     3,
 	}
 	firstConnID := creq.ConnID
@@ -512,7 +512,7 @@ func testClientPings(t *testing.T, s *StanServer) {
 	if cresp.Error != "" {
 		t.Fatalf("Error on connect: %v", cresp.Error)
 	}
-	if cresp.Protocol != protocolOne || cresp.PingRequests == "" || cresp.PingInterval != int64(time.Second) || cresp.PingMaxOut != 3 {
+	if cresp.Protocol != protocolOne || cresp.PingRequests == "" || cresp.PingInterval != 1 || cresp.PingMaxOut != 3 {
 		t.Fatalf("Unexpected response: %#v", cresp)
 	}
 
@@ -596,7 +596,7 @@ func testClientPings(t *testing.T, s *StanServer) {
 		HeartbeatInbox: nats.NewInbox(),
 		ConnID:         []byte(nuid.Next()),
 		Protocol:       protocolOne,
-		PingInterval:   int64(time.Second),
+		PingInterval:   1,
 		PingMaxOut:     3,
 	}
 	creqBytes, _ = creq.Marshal()
@@ -691,7 +691,7 @@ func TestPersistentStoreRecoverClientInfo(t *testing.T) {
 		HeartbeatInbox: nats.NewInbox(),
 		ConnID:         []byte(nuid.Next()),
 		Protocol:       protocolOne,
-		PingInterval:   int64(time.Second),
+		PingInterval:   1,
 		PingMaxOut:     3,
 	}
 	creqBytes, _ := creq.Marshal()
@@ -706,7 +706,7 @@ func TestPersistentStoreRecoverClientInfo(t *testing.T) {
 	if cresp.Error != "" {
 		t.Fatalf("Error on connect: %v", cresp.Error)
 	}
-	if cresp.Protocol != protocolOne || cresp.PingRequests == "" || cresp.PingInterval != int64(time.Second) || cresp.PingMaxOut != 3 {
+	if cresp.Protocol != protocolOne || cresp.PingRequests == "" || cresp.PingInterval != 1 || cresp.PingMaxOut != 3 {
 		t.Fatalf("Unexpected response: %#v", cresp)
 	}
 
@@ -732,8 +732,8 @@ func TestPersistentStoreRecoverClientInfo(t *testing.T) {
 	if string(cid) != string(creq.ConnID) {
 		t.Fatalf("Recovered ConnID should be %s, got %s", creq.ConnID, cid)
 	}
-	if pi != int64(time.Second) {
-		t.Fatalf("Recovered ping interval should be %v, got %v", time.Second, time.Duration(pi))
+	if pi != 1 {
+		t.Fatalf("Recovered ping interval should be 1, got %v", time.Duration(pi))
 	}
 	if pmo != 3 {
 		t.Fatalf("Recovered ping max out should be 3, got %v", pmo)
