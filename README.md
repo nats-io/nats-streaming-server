@@ -1245,7 +1245,7 @@ Usage: nats-streaming-server [options]
 
 Streaming Server Options:
     -cid, --cluster_id  <string>      Cluster ID (default: test-cluster)
-    -st,  --store <string>            Store type: MEMORY|FILE (default: MEMORY)
+    -st,  --store <string>            Store type: MEMORY|FILE|SQL (default: MEMORY)
           --dir <string>              For FILE store type, this is the root directory
     -mc,  --max_channels <int>        Max number of channels (0 for unlimited)
     -msu, --max_subs <int>            Max number of subscriptions per channel (0 for unlimited)
@@ -1400,7 +1400,7 @@ In general the configuration parameters are the same as the command line argumen
 |:----|:----|:----|:----|
 | cluster_id | Cluster name | String, underscore possible | `cluster_id: "my_cluster_name"` |
 | discover_prefix | Subject prefix for server discovery by clients | NATS Subject | `discover_prefix: "_STAN.Discovery"` |
-| store | Store type | `file` or `memory` | `store: "file"` |
+| store | Store type | `memory`, `file` or `sql` | `store: "file"` |
 | dir | When using a file store, this is the root directory | File path | `dir: "/path/to/storage` |
 | sd | Enable debug logging | `true` or `false` | `sd: true` |
 | sv | Enable trace logging | `true` or `false` | `sv: true` |
