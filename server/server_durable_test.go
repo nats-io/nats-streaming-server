@@ -280,11 +280,6 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 		t.Fatalf("Unexpected error on subscribe: %v", err)
 	}
 
-	c, err := s.lookupOrCreateChannel("foo")
-	if err != nil {
-		t.Fatalf("Unexpected error on lookupOrCreateChannel: %v", err)
-	}
-
 	// Check durable is created
 	checkDurable(t, s, "foo", durName, durKey)
 
@@ -295,7 +290,7 @@ func TestDurableAckedMsgNotRedelivered(t *testing.T) {
 	// Get the AckInbox.
 	ackInbox := durable.AckInbox
 	// Get the ack subscriber
-	ackSub := c.acksSub
+	ackSub := durable.ackSub
 	durable.RUnlock()
 
 	// Send a message
@@ -405,30 +400,30 @@ func TestDurableRemovedOnUnsubscribe(t *testing.T) {
 
 func checkDurableNoPendingAck(t *testing.T, s *StanServer, isSame bool,
 	ackInbox string, ackSub *nats.Subscription, expectedSeq uint64, channel string) {
-	c, err := s.lookupOrCreateChannel(channel)
-	if err != nil {
-		t.Fatalf("Unexpected error on lookupOrCreateChannel: %v", err)
-	}
 
 	// When called, we know that there is 1 sub, and the sub is a durable.
 	subs := s.clients.getSubs(clientName)
 	durable := subs[0]
 	durable.RLock()
 	durAckInbox := durable.AckInbox
-	durAckSub := c.acksSub
+	durAckSub := durable.ackSub
 	durable.RUnlock()
 
 	if isSame {
 		if durAckInbox != ackInbox {
 			stackFatalf(t, "Expected ackInbox %v, got %v", ackInbox, durAckInbox)
 		}
+		if durAckSub != ackSub {
+			stackFatalf(t, "Expected subscriber on ack to be %p, got %p", ackSub, durAckSub)
+		}
+
 	} else {
 		if durAckInbox == ackInbox {
 			stackFatalf(t, "Expected different ackInbox'es")
 		}
-	}
-	if durAckSub != ackSub {
-		stackFatalf(t, "Expected subscriber on ack to be %p, got %p", ackSub, durAckSub)
+		if durAckSub == ackSub {
+			stackFatalf(t, "Expected different ackSub")
+		}
 	}
 
 	limit := time.Now().Add(5 * time.Second)
