@@ -571,6 +571,10 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.BoolVar(&sopts.SQLStoreOpts.NoCaching, "sql_no_caching", defSQLOpts.NoCaching, "Enable/Disable caching")
 	fs.IntVar(&sopts.SQLStoreOpts.MaxOpenConns, "sql_max_open_conns", defSQLOpts.MaxOpenConns, "Max opened connections to the database")
 
+	// 2018-06-13
+    sopts.ConsulUtil = new(ConsulUtility)
+    fs.StringVar(&sopts.ConsulServerURL, "consul", "", "consul server address,like: 127.0.0.1:8500")
+
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
 	// It will be augmented with NATS specific flags and call fs.Parse(args) for us.
 	nopts, err := natsd.ConfigureOptions(fs, args, printVersion, printHelp, printTLSHelp)
