@@ -129,6 +129,9 @@ NATS Clustering Options:
         --routes <string, ...>       Routes to solicit and connect
         --cluster <string>           Cluster URL for solicited routes
 
+Consul Address:
+        --consul <string>            Consul address to registe (default: 127.0.0.1:8500)
+
 Common Options:
     -h, --help                       Show this message
     -v, --version                    Show version
