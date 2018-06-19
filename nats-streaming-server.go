@@ -33,7 +33,7 @@ Usage: nats-streaming-server [options]
 
 Streaming Server Options:
     -cid, --cluster_id  <string>      Cluster ID (default: test-cluster)
-    -st,  --store <string>            Store type: MEMORY|FILE (default: MEMORY)
+    -st,  --store <string>            Store type: MEMORY|FILE|SQL (default: MEMORY)
           --dir <string>              For FILE store type, this is the root directory
     -mc,  --max_channels <int>        Max number of channels (0 for unlimited)
     -msu, --max_subs <int>            Max number of subscriptions per channel (0 for unlimited)
