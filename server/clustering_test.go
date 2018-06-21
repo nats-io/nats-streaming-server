@@ -3435,13 +3435,13 @@ func TestClusteringUnableToContactPeer(t *testing.T) {
 	s1Opts.Clustering.RaftLogging = true
 	s1Opts.CustomLogger = logger
 	s1 := runServerWithOpts(t, s1Opts, nil)
-	// Due to the nature of this test, do not defer Shutdown here
+	defer s1.Shutdown()
 
 	s2Opts := getTestDefaultOptsForClustering("b", false)
 	s2Opts.Clustering.NodeID = "b"
 	s2Opts.Clustering.Peers = []string{"a"}
 	s2 := runServerWithOpts(t, s2Opts, nil)
-	// Due to the nature of this test, do not defer Shutdown here
+	defer s2.Shutdown()
 
 	getLeader(t, 10*time.Second, s1, s2)
 

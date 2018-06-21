@@ -267,6 +267,7 @@ func BenchmarkStore__RecoverMsgs(b *testing.B) {
 				}
 				cs.Msgs.Flush()
 			}
+			s.Close()
 		}
 		benchInitRecoverMsgs = false
 	}
@@ -353,6 +354,7 @@ func BenchmarkStore__RecoverSubs(b *testing.B) {
 				b.Fatalf("Error pesisting msgseq or ack: %v", e)
 			default:
 			}
+			s.Close()
 		}
 		benchInitRecoverSubs = false
 	}
