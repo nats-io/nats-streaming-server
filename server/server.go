@@ -174,12 +174,10 @@ var (
 var clientIDRegEx *regexp.Regexp
 
 var (
-	testAckWaitIsInMillisecond     bool
-	clientCheckTimeout             = defaultClientCheckTimeout
-	lazyReplicationInterval        = defaultLazyReplicationInterval
-	testDeleteChannel              bool
-	pingResponseOKBytes            []byte
-	pingResponseInvalidClientBytes []byte
+	testAckWaitIsInMillisecond bool
+	clientCheckTimeout         = defaultClientCheckTimeout
+	lazyReplicationInterval    = defaultLazyReplicationInterval
+	testDeleteChannel          bool
 )
 
 func computeAckWait(wait int32) time.Duration {
@@ -629,6 +627,11 @@ type StanServer struct {
 	subCloseSub *nats.Subscription
 	subUnsubSub *nats.Subscription
 	cliPingSub  *nats.Subscription
+
+	// For sending responses to client PINGS. Used to be global but would
+	// cause races when running more than 1 server in a program or test.
+	pingResponseOKBytes            []byte
+	pingResponseInvalidClientBytes []byte
 }
 
 type lazyReplication struct {
@@ -2958,18 +2961,18 @@ func (s *StanServer) processClientPings(m *nats.Msg) {
 		}
 	}
 	if valid {
-		if pingResponseOKBytes == nil {
-			pingResponseOKBytes, _ = (&pb.PingResponse{}).Marshal()
+		if s.pingResponseOKBytes == nil {
+			s.pingResponseOKBytes, _ = (&pb.PingResponse{}).Marshal()
 		}
-		reply = pingResponseOKBytes
+		reply = s.pingResponseOKBytes
 	} else {
-		if pingResponseInvalidClientBytes == nil {
+		if s.pingResponseInvalidClientBytes == nil {
 			pingError := &pb.PingResponse{
 				Error: "client has been replaced or is no longer registered",
 			}
-			pingResponseInvalidClientBytes, _ = pingError.Marshal()
+			s.pingResponseInvalidClientBytes, _ = pingError.Marshal()
 		}
-		reply = pingResponseInvalidClientBytes
+		reply = s.pingResponseInvalidClientBytes
 	}
 	s.ncs.Publish(m.Reply, reply)
 }
