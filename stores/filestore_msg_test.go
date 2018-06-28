@@ -1149,7 +1149,7 @@ func TestFSCacheList(t *testing.T) {
 	// Increase cacheTTL so eviction does not happen while we test content of list
 	cacheTTL = int64(10 * time.Second)
 	defer func() {
-		cacheTTL = int64(defaultCacheTTL)
+		cacheTTL = int64(testFSDefaultCacheTTL)
 	}()
 
 	fs := createDefaultFileStore(t)

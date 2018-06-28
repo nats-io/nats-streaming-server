@@ -321,7 +321,7 @@ func TestCSMaxAge(t *testing.T) {
 			defer s.Close()
 
 			sl := testDefaultStoreLimits
-			sl.MaxAge = 100 * time.Millisecond
+			sl.MaxAge = 500 * time.Millisecond
 			s.SetLimits(&sl)
 
 			cs := storeCreateChannel(t, s, "foo")
@@ -332,14 +332,14 @@ func TestCSMaxAge(t *testing.T) {
 				seq++
 			}
 			// Wait a bit
-			time.Sleep(60 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
 			// Send more
 			for i := 0; i < 5; i++ {
 				storeMsg(t, cs, "foo", seq, msg)
 				seq++
 			}
 			// Wait a bit
-			time.Sleep(60 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
 			// We should have the first 10 expired and 5 left.
 			expectedFirst := uint64(11)
 			expectedLast := uint64(15)
@@ -366,12 +366,12 @@ func TestCSMaxAge(t *testing.T) {
 			storeMsg(t, cs, "bar", seq, msg)
 			seq++
 			// Wait a bit
-			time.Sleep(60 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
 			// Send another message that should replace the first one
 			m2 := storeMsg(t, cs, "bar", seq, msg)
 			seq++
 			// Wait more so that max age of initial message is passed
-			time.Sleep(60 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
 			// Ensure there is still 1 message...
 			if n, _ := msgStoreState(t, cs.Msgs); n != 1 {
 				t.Fatalf("There should be 1 message, got %v", n)
@@ -379,7 +379,7 @@ func TestCSMaxAge(t *testing.T) {
 			// ...which should be m2: this should not fail
 			msgStoreLookup(t, cs.Msgs, m2.Sequence)
 			// Again, wait more and second message should not be gone
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
 			timeout := time.Now().Add(2 * time.Second)
 			ok := false
 			for time.Now().Before(timeout) {
