@@ -2686,6 +2686,10 @@ func (s *StanServer) processConnect(req *pb.ConnectRequest, replaceOld bool) err
 }
 
 func (s *StanServer) finishConnectRequest(req *pb.ConnectRequest, replyInbox string) {
+	clientID := req.ClientID
+	// Heartbeat timer.
+	s.clients.setClientHB(clientID, s.opts.ClientHBInterval, func() { s.checkClientHealth(clientID) })
+
 	cr := &pb.ConnectResponse{
 		PubPrefix:        s.info.Publish,
 		SubRequests:      s.info.Subscribe,
@@ -2708,10 +2712,6 @@ func (s *StanServer) finishConnectRequest(req *pb.ConnectRequest, replyInbox str
 	}
 	b, _ := cr.Marshal()
 	s.nc.Publish(replyInbox, b)
-
-	clientID := req.ClientID
-	// Heartbeat timer.
-	s.clients.setClientHB(clientID, s.opts.ClientHBInterval, func() { s.checkClientHealth(clientID) })
 }
 
 func (s *StanServer) sendConnectErr(replyInbox, err string) {
@@ -2939,13 +2939,9 @@ func (s *StanServer) processClientPings(m *nats.Msg) {
 	if err := ping.Unmarshal(m.Data); err != nil {
 		return
 	}
-	var (
-		valid bool
-		reply []byte
-	)
+	var reply []byte
 	client := s.clients.lookupByConnID(ping.ConnID)
 	if client != nil {
-		valid = true
 		// If the client has failed heartbeats and since the
 		// server just received a PING from the client, reset
 		// the server-to-client HB timer so that a PING is
@@ -2959,8 +2955,6 @@ func (s *StanServer) processClientPings(m *nats.Msg) {
 			client.hbt.Reset(time.Millisecond)
 			client.Unlock()
 		}
-	}
-	if valid {
 		if s.pingResponseOKBytes == nil {
 			s.pingResponseOKBytes, _ = (&pb.PingResponse{}).Marshal()
 		}
