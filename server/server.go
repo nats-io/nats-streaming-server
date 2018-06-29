@@ -4147,7 +4147,7 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 
 // replicateSub replicates the SubscriptionRequest to nodes in the cluster via
 // Raft.
-func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string) (*channel, *subState, error) {
+func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string) (*subState, error) {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Subscribe,
 		Sub: &spb.AddSubscription{
@@ -4162,10 +4162,10 @@ func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string) (
 	// Replicate operation and wait on result.
 	future := s.raft.Apply(data, 0)
 	if err := future.Error(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	rs := future.Response().(*replicatedSub)
-	return rs.c, rs.sub, rs.err
+	return rs.sub, rs.err
 }
 
 // addSubscription adds `sub` to the client and store.
@@ -4207,11 +4207,15 @@ func (s *StanServer) updateDurable(ss *subStore, sub *subState) error {
 }
 
 // processSub adds the subscription to the server.
-func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string) (*channel, *subState, error) {
-	c, err := s.lookupOrCreateChannel(sr.Subject)
-	if err != nil {
-		s.log.Errorf("Unable to create channel for subscription on %q", sr.Subject)
-		return nil, nil, err
+func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox string) (*subState, error) {
+	// If channel not provided, we have to look it up
+	var err error
+	if c == nil {
+		c, err = s.lookupOrCreateChannel(sr.Subject)
+		if err != nil {
+			s.log.Errorf("Unable to create channel for subscription on %q", sr.Subject)
+			return nil, err
+		}
 	}
 	var (
 		sub *subState
@@ -4230,7 +4234,7 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string) (*c
 			if strings.Contains(sr.DurableName, ":") {
 				s.log.Errorf("[Client:%s] Invalid DurableName (%q) for queue subscriber from %s",
 					sr.ClientID, sr.DurableName, sr.Subject)
-				return c, nil, ErrInvalidDurName
+				return nil, ErrInvalidDurName
 			}
 			isDurable = true
 			// Make the queue group a compound name between durable name and q group.
@@ -4261,7 +4265,7 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string) (*c
 			sub.RUnlock()
 			if clientID != "" {
 				s.log.Errorf("[Client:%s] Duplicate durable subscription registration", sr.ClientID)
-				return c, nil, ErrDupDurable
+				return nil, ErrDupDurable
 			}
 			setStartPos = false
 		}
@@ -4322,7 +4326,11 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string) (*c
 
 		if setStartPos {
 			// set the start sequence of the subscriber.
-			subStartTrace, err = s.setSubStartSequence(c, sub, sr)
+			var lastSent uint64
+			subStartTrace, lastSent, err = s.setSubStartSequence(c, sr)
+			if err == nil {
+				sub.LastSent = lastSent
+			}
 		}
 
 		if err == nil {
@@ -4345,7 +4353,7 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string) (*c
 		ss.Remove(c, sub, false)
 		s.closeMu.Unlock()
 		s.log.Errorf("Unable to add subscription for %s: %v", sr.Subject, err)
-		return c, nil, err
+		return nil, err
 	}
 	if s.debug {
 		traceCtx := subStateTraceCtx{clientID: sr.ClientID, isNew: subIsNew, startTrace: subStartTrace}
@@ -4356,7 +4364,7 @@ func (s *StanServer) processSub(sr *pb.SubscriptionRequest, ackInbox string) (*c
 	s.numSubs++
 	s.monMu.Unlock()
 
-	return c, sub, nil
+	return sub, nil
 }
 
 // processSubscriptionRequest will process a subscription request.
@@ -4427,24 +4435,45 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 	}
 
-	// Keep the channel delete mutex to ensure that channel cannot be
-	// deleted while we are about to add a subscription.
-	s.channels.lockDelete()
-	defer s.channels.unlockDelete()
-
 	var (
-		c        *channel
 		sub      *subState
 		ackInbox = nats.NewInbox()
 	)
 
-	// If clustered, thread operations through Raft.
-	if s.isClustered {
-		c, sub, err = s.replicateSub(sr, ackInbox)
-	} else {
-		c, sub, err = s.processSub(sr, ackInbox)
-	}
+	c, err := s.lookupOrCreateChannel(sr.Subject)
+	if err == nil {
+		// Keep the channel delete mutex to ensure that channel cannot be
+		// deleted while we are about to add a subscription.
+		s.channels.lockDelete()
+		defer s.channels.unlockDelete()
 
+		// If clustered, thread operations through Raft.
+		if s.isClustered {
+			// For start requests other than SequenceStart, we MUST convert the request
+			// to a SequenceStart, otherwise, during the replay on server restart, the
+			// subscription would be created with whatever is the seq at that time.
+			// For instance, a request with new-only could originally be created with
+			// the current max seq of 100, but when the cluster is restarted and sub
+			// request is replayed, the channel's current max may be 200, which
+			// would cause the subscription to be created at start 200, which could cause
+			// subscription to miss all messages in between.
+			if sr.StartPosition != pb.StartPosition_SequenceStart {
+				// Figure out what the sequence should be based on orinal StartPosition
+				// request.
+				var seq uint64
+				_, seq, err = s.setSubStartSequence(c, sr)
+				if err == nil {
+					// Convert to a SequenceStart start position with the proper sequence
+					// number.
+					sr.StartPosition = pb.StartPosition_SequenceStart
+					sr.StartSequence = seq
+				}
+			}
+			sub, err = s.replicateSub(sr, ackInbox)
+		} else {
+			sub, err = s.processSub(c, sr, ackInbox)
+		}
+	}
 	if err != nil {
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
@@ -4717,10 +4746,7 @@ func (s *StanServer) getNextMsg(c *channel, nextSeq, lastSent *uint64) *pb.MsgPr
 }
 
 // Setup the start position for the subscriber.
-func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.SubscriptionRequest) (string, error) {
-	sub.Lock()
-	defer sub.Unlock()
-
+func (s *StanServer) setSubStartSequence(c *channel, sr *pb.SubscriptionRequest) (string, uint64, error) {
 	lastSent := uint64(0)
 	debugTrace := ""
 
@@ -4732,7 +4758,7 @@ func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.Subsc
 		var err error
 		lastSent, err = c.store.Msgs.LastSequence()
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		if s.debug {
 			debugTrace = fmt.Sprintf("new-only, seq=%d", lastSent+1)
@@ -4740,7 +4766,7 @@ func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.Subsc
 	case pb.StartPosition_LastReceived:
 		lastSeq, err := c.store.Msgs.LastSequence()
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		if lastSeq > 0 {
 			lastSent = lastSeq - 1
@@ -4753,7 +4779,7 @@ func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.Subsc
 		// If there is no message, seq will be 0.
 		seq, err := c.store.Msgs.GetSequenceFromTimestamp(startTime)
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		if seq > 0 {
 			// If the time delta is in the future relative to the last
@@ -4768,7 +4794,7 @@ func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.Subsc
 		// If there is no message, firstSeq and lastSeq will be equal to 0.
 		firstSeq, lastSeq, err := c.store.Msgs.FirstAndLastSequence()
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		// StartSequence is an uint64, so can't be lower than 0.
 		if sr.StartSequence < firstSeq {
@@ -4788,7 +4814,7 @@ func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.Subsc
 	case pb.StartPosition_First:
 		firstSeq, err := c.store.Msgs.FirstSequence()
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		if firstSeq > 0 {
 			lastSent = firstSeq - 1
@@ -4797,8 +4823,7 @@ func (s *StanServer) setSubStartSequence(c *channel, sub *subState, sr *pb.Subsc
 			debugTrace = fmt.Sprintf("from beginning, seq=%d", lastSent+1)
 		}
 	}
-	sub.LastSent = lastSent
-	return debugTrace, nil
+	return debugTrace, lastSent, nil
 }
 
 // startGoRoutine starts the given function as a go routine if and only if

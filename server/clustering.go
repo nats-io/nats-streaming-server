@@ -72,7 +72,6 @@ type raftNode struct {
 }
 
 type replicatedSub struct {
-	c   *channel
 	sub *subState
 	err error
 }
@@ -463,8 +462,8 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 		return s.closeClient(op.ClientDisconnect.ClientID)
 	case spb.RaftOperation_Subscribe:
 		// Subscription replication.
-		c, sub, err := s.processSub(op.Sub.Request, op.Sub.AckInbox)
-		return &replicatedSub{c: c, sub: sub, err: err}
+		sub, err := s.processSub(nil, op.Sub.Request, op.Sub.AckInbox)
+		return &replicatedSub{sub: sub, err: err}
 	case spb.RaftOperation_RemoveSubscription:
 		fallthrough
 	case spb.RaftOperation_CloseSubscription:
