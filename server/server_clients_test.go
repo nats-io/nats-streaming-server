@@ -516,6 +516,11 @@ func testClientPings(t *testing.T, s *StanServer) {
 		t.Fatalf("Unexpected response: %#v", cresp)
 	}
 
+	// In partitioning mode, we may have received first the
+	// response from the other server (not `s` that is passed
+	// to this test). So wait for client registration.
+	waitForNumClients(t, s, 1)
+
 	// Artificially add a sub and set timer to fire soon
 	s.clients.addSub("me", &subState{})
 	client := s.clients.lookup("me")
@@ -617,10 +622,15 @@ func testClientPings(t *testing.T, s *StanServer) {
 	ping = pb.Ping{ConnID: firstConnID}
 	pingBytes, _ = ping.Marshal()
 
-	// In partitioning mode, one of the server may not have
-	// yet replaced the old client and may send an OK back first.
-	// So in case of no error, repeat once.
-	for i := 0; i < 2; i++ {
+	// In partitioning mode, there are 2 servers replying to the
+	// ping requests, and if one of the server has not yet replaced
+	// the old client, it will reply OK. Repeating the requests twice
+	// is not enough since in the worst case scenario we get the
+	// expected error response for the server we are not interested
+	// in for the pub test.
+	// So, repeat requests until we get at least an error back.
+	ok := false
+	for i := 0; i < 10; i++ {
 		resp, err = nc.Request(cresp.PingRequests, pingBytes, time.Second)
 		if err != nil {
 			t.Fatalf("Error on ping: %v", err)
@@ -631,40 +641,54 @@ func testClientPings(t *testing.T, s *StanServer) {
 		}
 		if pingResp.Error != "" {
 			// Expected error, ok.
+			ok = true
 			break
 		}
-		if i == 0 {
-			time.Sleep(50 * time.Millisecond)
-		} else {
-			t.Fatalf("Expected ping response error, got none")
+		// We got an OK, wait a bit then try again
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !ok {
+		t.Fatalf("Expected ping response error, got none")
+	}
+	// But now, we still need to verify that server `s`, the one we
+	// are going to publish to, has really replaced the client.
+	// What we will do instead, is publish until we get the failure.
+	ok = false
+	for i := 0; i < 5; i++ {
+		// Also expect a publish to fail since the old client is no longer valid.
+		msg := &pb.PubMsg{
+			ClientID: "me",
+			Subject:  "foo",
+			ConnID:   firstConnID,
+			Guid:     nuid.Next(),
+			Data:     []byte("hello"),
 		}
-	}
-
-	// Also expect a publish to fail since the old client is no longer valid.
-	msg := &pb.PubMsg{
-		ClientID: "me",
-		Subject:  "foo",
-		ConnID:   firstConnID,
-		Guid:     nuid.Next(),
-		Data:     []byte("hello"),
-	}
-	msgBytes, _ := msg.Marshal()
-	pubAckSubj := nats.NewInbox()
-	ch := make(chan bool, 1)
-	if _, err := nc.Subscribe(pubAckSubj, func(m *nats.Msg) {
-		pubAck := &pb.PubAck{}
-		pubAck.Unmarshal(m.Data)
-		if pubAck.Error != "" {
-			ch <- true
+		msgBytes, _ := msg.Marshal()
+		pubAckSubj := nats.NewInbox()
+		ch := make(chan bool, 1)
+		sub, err := nc.Subscribe(pubAckSubj, func(m *nats.Msg) {
+			pubAck := &pb.PubAck{}
+			pubAck.Unmarshal(m.Data)
+			if pubAck.Error != "" {
+				ch <- true
+			}
+		})
+		if err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
 		}
-	}); err != nil {
-		t.Fatalf("Error on subscribe: %v", err)
+		if err := nc.PublishRequest(pubSubj+".foo", pubAckSubj, msgBytes); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+		if err := WaitTime(ch, time.Second); err == nil {
+			// We got it, we are ok.
+			ok = true
+			break
+		}
+		// Try again
+		sub.Unsubscribe()
 	}
-	if err := nc.PublishRequest(pubSubj+".foo", pubAckSubj, msgBytes); err != nil {
-		t.Fatalf("Error on publish: %v", err)
-	}
-	if err := Wait(ch); err != nil {
-		t.Fatal("Did not our error back")
+	if !ok {
+		t.Fatal("Did not get the PubAck error message")
 	}
 }
 
