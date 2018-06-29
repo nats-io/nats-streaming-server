@@ -764,3 +764,82 @@ func TestPersistentStoreRecoverClientInfo(t *testing.T) {
 	}
 	nc.Close()
 }
+
+func TestPersistentStoreClientPings(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	opts := getTestDefaultOptsForPersistentStore()
+	s := runServerWithOpts(t, opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	s.mu.RLock()
+	discoverySubj := s.info.Discovery
+	s.mu.RUnlock()
+
+	ch := make(chan bool, 1)
+	nc, err := nats.Connect(nats.DefaultURL,
+		nats.ReconnectWait(50*time.Millisecond),
+		nats.ReconnectHandler(func(_ *nats.Conn) {
+			ch <- true
+		}))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	hbInbox := nats.NewInbox()
+	creq := &pb.ConnectRequest{
+		ClientID:       "me",
+		HeartbeatInbox: hbInbox,
+		ConnID:         []byte(nuid.Next()),
+		Protocol:       protocolOne,
+		// any value, so far server does not do anything with those
+		PingInterval: 1,
+		PingMaxOut:   3,
+	}
+	creqBytes, _ := creq.Marshal()
+	crespMsg, err := nc.Request(discoverySubj, creqBytes, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	cresp := &pb.ConnectResponse{}
+	if err := cresp.Unmarshal(crespMsg.Data); err != nil {
+		t.Fatalf("Error on connect response: %v", err)
+	}
+	if cresp.Error != "" {
+		t.Fatalf("Error on connect: %v", cresp.Error)
+	}
+	if cresp.Protocol != protocolOne || cresp.PingRequests == "" || cresp.PingInterval != 1 || cresp.PingMaxOut != 3 {
+		t.Fatalf("Unexpected response: %#v", cresp)
+	}
+
+	// In partitioning mode, we may have received first the
+	// response from the other server (not `s` that is passed
+	// to this test). So wait for client registration.
+	waitForNumClients(t, s, 1)
+
+	// Restart server
+	s.Shutdown()
+	s = runServerWithOpts(t, opts, nil)
+
+	// Wait to be reconnected, then send ping.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get reconnected")
+	}
+
+	// Send ping, expect success
+	ping := pb.Ping{ConnID: creq.ConnID}
+	pingBytes, _ := ping.Marshal()
+	resp, err := nc.Request(cresp.PingRequests, pingBytes, time.Second)
+	if err != nil {
+		t.Fatalf("Error on ping: %v", err)
+	}
+	pingResp := &pb.PingResponse{}
+	if err := pingResp.Unmarshal(resp.Data); err != nil {
+		t.Fatalf("Error decoding ping response: %v", err)
+	}
+	if pingResp.Error != "" {
+		t.Fatalf("Got ping response error: %v", pingResp.Error)
+	}
+}

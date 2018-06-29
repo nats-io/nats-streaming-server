@@ -740,7 +740,10 @@ func (ss *subStore) Store(sub *subState) error {
 	// the code, so we don't need locking.
 
 	// Adds to storage.
+	// Use sub lock to avoid race with waitForAcks in some tests
+	sub.Lock()
 	err := sub.store.CreateSub(&sub.SubState)
+	sub.Unlock()
 	if err != nil {
 		ss.stan.log.Errorf("Unable to store subscription [%v:%v] on [%s]: %v", sub.ClientID, sub.Inbox, sub.subject, err)
 		return err

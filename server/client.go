@@ -233,6 +233,9 @@ func (cs *clientStore) recoverClients(clients []*stores.Client) {
 	for _, sc := range clients {
 		client := &client{info: sc, subs: make([]*subState, 0, 4)}
 		cs.clients[client.info.ID] = client
+		if len(client.info.ConnID) > 0 {
+			cs.connIDs[string(client.info.ConnID)] = client
+		}
 	}
 	cs.Unlock()
 }
