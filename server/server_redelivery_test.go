@@ -1323,3 +1323,49 @@ func TestNoDuplicateRedeliveryDueToDisconnect(t *testing.T) {
 		t.Fatalf("Message redelivered after being ack'ed: %v", c)
 	}
 }
+
+func TestPersistentStoreNotStalledIfBelowMaxInflight(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	opts := getTestDefaultOptsForPersistentStore()
+	s := runServerWithOpts(t, opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc, nc := createConnectionWithNatsOpts(t, clientName,
+		nats.ReconnectWait(100*time.Millisecond))
+	defer nc.Close()
+	defer sc.Close()
+
+	ch := make(chan *stan.Msg, 1)
+	if _, err := sc.Subscribe("foo", func(m *stan.Msg) {
+		ch <- m
+	}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("first")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	select {
+	case m := <-ch:
+		assertMsg(t, m.MsgProto, []byte("first"), 1)
+	case <-time.After(time.Second):
+		t.Fatalf("Did not get our message")
+	}
+
+	// Restart server
+	s.Shutdown()
+	s = runServerWithOpts(t, opts, nil)
+
+	// Send one more message
+	if err := sc.Publish("foo", []byte("second")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	// Second message should get delivered
+	select {
+	case m := <-ch:
+		assertMsg(t, m.MsgProto, []byte("second"), 2)
+	case <-time.After(time.Second):
+		t.Fatalf("Did not get our second message")
+	}
+}

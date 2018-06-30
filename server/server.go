@@ -2163,9 +2163,10 @@ func (s *StanServer) recoverOneSub(c *channel, recSub *spb.SubState, pendingAcks
 
 	// Create a subState
 	sub := &subState{
-		subject: c.name,
-		ackWait: computeAckWait(recSub.AckWaitInSecs),
-		store:   c.store.Subs,
+		SubState: *recSub,
+		subject:  c.name,
+		ackWait:  computeAckWait(recSub.AckWaitInSecs),
+		store:    c.store.Subs,
 	}
 	// Depending from where this function is called, we are given
 	// a map[uint64]struct{} or a []uint64.
@@ -2189,8 +2190,6 @@ func (s *StanServer) recoverOneSub(c *channel, recSub *spb.SubState, pendingAcks
 			sub.stalled = true
 		}
 	}
-	// Copy over fields from SubState protobuf
-	sub.SubState = *recSub
 	// When recovering older stores, IsDurable may not exist for
 	// durable subscribers. Set it now.
 	durableSub := sub.isDurableSubscriber() // not a durable queue sub!
