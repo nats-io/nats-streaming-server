@@ -843,3 +843,108 @@ func TestPersistentStoreClientPings(t *testing.T) {
 		t.Fatalf("Got ping response error: %v", pingResp.Error)
 	}
 }
+
+func TestSubHasFailedHBClearedAfterDurableResume(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.ID = clusterName
+	// Override HB settings
+	opts.ClientHBInterval = 100 * time.Millisecond
+	opts.ClientHBTimeout = 10 * time.Millisecond
+	opts.ClientHBFailCount = 100
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Wait for client to be registered
+	waitForNumClients(t, s, 1)
+
+	// Create durable that does not ack message
+	ch := make(chan bool, 1)
+	cb := func(_ *stan.Msg) {
+		ch <- true
+	}
+	if _, err := sc.Subscribe("foo", cb,
+		stan.DurableName("dur"),
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(50))); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	// Same for queue durable
+	if _, err := sc.QueueSubscribe("foo", "bar", cb,
+		stan.DurableName("dur"),
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(50))); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	// Publish one message
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	// Make sure it is received
+	for i := 0; i < 2; i++ {
+		if err := Wait(ch); err != nil {
+			t.Fatal("Did not get our message")
+		}
+	}
+
+	// kill the NATS conn
+	nc.Close()
+
+	// Message should not be delivered
+	select {
+	case <-ch:
+		t.Fatalf("Message should not have been redelivered")
+	case <-time.After(150 * time.Millisecond):
+		// ok
+	}
+
+	// Recreate NATS and STAN connection and resume durable
+	nc, err = nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	sc2, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc2.Close()
+
+	// Wait for client to be registered
+	waitForNumClients(t, s, 1)
+
+	if _, err := sc2.Subscribe("foo", cb,
+		stan.DurableName("dur"),
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(50))); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if _, err := sc2.QueueSubscribe("foo", "bar", cb,
+		stan.DurableName("dur"),
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(50))); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	// Message should be redelivered many times...
+	for i := 0; i < 10; i++ {
+		if err := Wait(ch); err != nil {
+			t.Fatal("Did not get our message")
+		}
+	}
+
+	sc2.Close()
+	sc.Close()
+}

@@ -4187,6 +4187,10 @@ func (s *StanServer) addSubscription(ss *subStore, sub *subState) error {
 // updateDurable adds back `sub` to the client and updates the store.
 // No lock is needed for `sub` since it has just been created.
 func (s *StanServer) updateDurable(ss *subStore, sub *subState) error {
+	// Reset the hasFailedHB boolean since it may have been set
+	// if the client previously crashed and server set this
+	// flag to its subs.
+	sub.hasFailedHB = false
 	// Store in the client
 	if !s.clients.addSub(sub.ClientID, sub) {
 		return fmt.Errorf("can't find clientID: %v", sub.ClientID)
