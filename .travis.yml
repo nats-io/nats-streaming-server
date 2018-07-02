@@ -8,7 +8,7 @@ install:
 - go get github.com/nats-io/gnatsd
 - go get github.com/mattn/goveralls
 - go get github.com/wadey/gocovmerge
-- go get -u -insecure honnef.co/go/tools/cmd/megacheck
+- go get -u honnef.co/go/tools/cmd/megacheck
 - go get -u github.com/client9/misspell/cmd/misspell
 - go get -u github.com/go-sql-driver/mysql
 services:
