@@ -788,22 +788,23 @@ func (ss *subStore) updateState(sub *subState) {
 			ss.acks[sub.AckInbox] = sub
 
 			qs.subs = append(qs.subs, sub)
+
+			// If the added sub has newOnHold it means that we are doing recovery and
+			// that this member had unacknowledged messages. Mark the queue group
+			// with newOnHold
+			if sub.newOnHold {
+				qs.newOnHold = true
+			}
+			// Update stalled (on recovery)
+			if sub.stalled {
+				qs.stalledSubCount++
+			}
 		}
 		// Needed in the case of server restart, where
 		// the queue group's last sent needs to be updated
 		// based on the recovered subscriptions.
 		if sub.LastSent > qs.lastSent {
 			qs.lastSent = sub.LastSent
-		}
-		// If the added sub has newOnHold it means that we are doing recovery and
-		// that this member had unacknowledged messages. Mark the queue group
-		// with newOnHold
-		if sub.newOnHold {
-			qs.newOnHold = true
-		}
-		// Update stalled (on recovery)
-		if sub.stalled {
-			qs.stalledSubCount++
 		}
 		qs.Unlock()
 		sub.qstate = qs
@@ -1749,7 +1750,10 @@ func (s *StanServer) start(runningState State) error {
 	// clustered, the leader will handle redelivery upon election.
 	if !s.isClustered {
 		s.wg.Add(1)
-		go s.performRedeliveryOnStartup(recoveredSubs)
+		go func() {
+			s.performRedeliveryOnStartup(recoveredSubs)
+			s.wg.Done()
+		}()
 	}
 	return nil
 }
@@ -1879,25 +1883,25 @@ func (s *StanServer) leadershipAcquired() error {
 		return err
 	}
 
+	var allSubs []*subState
 	for _, c := range channels {
 		// Subscribe to channel snapshot restore subject
 		if err := c.subToSnapshotRestoreRequests(); err != nil {
 			return err
 		}
-
-		allSubs := c.ss.getAllSubs()
-		// Attempt to redeliver outstanding messages that have expired.
-		for _, sub := range allSubs {
-			sub.Lock()
-			sub.initialized = true
-			sub.Unlock()
-			s.performAckExpirationRedelivery(sub, true)
+		subs := c.ss.getAllSubs()
+		if len(subs) > 0 {
+			allSubs = append(allSubs, subs...)
 		}
-		// If this channel has a MaxInactivity, check if we should start
-		// its delete timer.
 		if c.activity != nil {
 			s.channels.maybeStartChannelDeleteTimer(c.name, c)
 		}
+	}
+	if len(allSubs) > 0 {
+		s.startGoRoutine(func() {
+			s.performRedeliveryOnStartup(allSubs)
+			s.wg.Done()
+		})
 	}
 
 	if err := s.nc.Flush(); err != nil {
@@ -2264,19 +2268,16 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 	}
 }
 
-// Redelivers unacknowledged messages and release the hold for new messages delivery
+// Redelivers unacknowledged messages, releases the hold for new messages delivery,
+// and kicks delivery of available messages.
 func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
-	defer s.wg.Done()
-
 	queues := make(map[*queueState]*channel)
 
 	for _, sub := range recoveredSubs {
 		// Ignore subs that did not have any ack pendings on startup.
 		sub.Lock()
-		if !sub.newOnHold {
-			sub.Unlock()
-			continue
-		}
+		// Consider this subscription ready to receive messages
+		sub.initialized = true
 		// If this is a durable and it is offline, then skip the rest.
 		if sub.isOfflineDurableSubscriber() {
 			sub.newOnHold = false
@@ -3136,28 +3137,26 @@ func (s *StanServer) performDurableRedelivery(c *channel, sub *subState) {
 	}
 
 	// If we don't find the client, we are done.
-	client := s.clients.lookup(clientID)
-	if client == nil {
-		return
-	}
-	// Go through all messages
-	for _, seq := range sortedSeqs {
-		m := s.getMsgForRedelivery(c, sub, seq)
-		if m == nil {
-			continue
+	if s.clients.lookup(clientID) != nil {
+		// Go through all messages
+		for _, seq := range sortedSeqs {
+			m := s.getMsgForRedelivery(c, sub, seq)
+			if m == nil {
+				continue
+			}
+
+			if s.trace {
+				s.log.Tracef("[Client:%s] Redelivering to subid=%d, seq=%d", clientID, subID, m.Sequence)
+			}
+
+			// Flag as redelivered.
+			m.Redelivered = true
+
+			sub.Lock()
+			// Force delivery
+			s.sendMsgToSub(sub, m, forceDelivery)
+			sub.Unlock()
 		}
-
-		if s.trace {
-			s.log.Tracef("[Client:%s] Redelivering to subid=%d, seq=%d", clientID, subID, m.Sequence)
-		}
-
-		// Flag as redelivered.
-		m.Redelivered = true
-
-		sub.Lock()
-		// Force delivery
-		s.sendMsgToSub(sub, m, forceDelivery)
-		sub.Unlock()
 	}
 	// Release newOnHold if needed.
 	if newOnHold {
@@ -3217,11 +3216,13 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 	// limit is now plus a buffer of 15ms to avoid repeated timer callbacks.
 	limit := now + int64(15*time.Millisecond)
 
-	var pick *subState
-	sent := false
-	needToSetExpireTime := false
-	tracePrinted := false
-	nextExpirationTIme := int64(0)
+	var (
+		pick               *subState
+		sent               bool
+		tracePrinted       bool
+		foundWithZero      bool
+		nextExpirationTime int64
+	)
 
 	// We will move through acksPending(sorted) and see what needs redelivery.
 	for _, pm := range sortedPendingMsgs {
@@ -3229,31 +3230,27 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 		if m == nil {
 			continue
 		}
-		expireTime := pm.expire
-		if expireTime == 0 {
-			needToSetExpireTime = true
-			expireTime = m.Timestamp + expTime
-		}
-
-		// If this message has not yet expired, reset timer for next callback
-		if expireTime > limit {
-			if nextExpirationTIme == 0 {
-				nextExpirationTIme = expireTime
-			}
-			if !tracePrinted && s.trace {
-				tracePrinted = true
-				s.log.Tracef("[Client:%s] Redelivery for subid=%d, skipping seq=%d", clientID, subID, m.Sequence)
-			}
-			if needToSetExpireTime {
+		// If we found any pm.expire with 0 in the array (due to a server restart),
+		// ensure that all have now an expiration set, then reschedule right away.
+		if foundWithZero || pm.expire == 0 {
+			foundWithZero = true
+			if pm.expire == 0 {
 				sub.Lock()
 				// Is message still pending?
 				if _, present := sub.acksPending[pm.seq]; present {
-					// Update expireTime
-					expireTime = time.Now().UnixNano() + expTime
-					sub.acksPending[pm.seq] = expireTime
+					sub.acksPending[pm.seq] = m.Timestamp + expTime
 				}
 				sub.Unlock()
-				continue
+			}
+			continue
+		}
+
+		// If this message has not yet expired, reset timer for next callback
+		if pm.expire > limit {
+			nextExpirationTime = pm.expire
+			if !tracePrinted && s.trace {
+				tracePrinted = true
+				s.log.Tracef("[Client:%s] Redelivery for subid=%d, skipping seq=%d", clientID, subID, m.Sequence)
 			}
 			break
 		}
@@ -3286,9 +3283,15 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 			sub.Unlock()
 		}
 	}
+	if foundWithZero {
+		// Restart expiration now that ackPending map's expire values are properly
+		// set. Note that messages may have been added/removed in the meantime.
+		s.performAckExpirationRedelivery(sub, isStartup)
+		return
+	}
 
 	// Adjust the timer
-	sub.adjustAckTimer(nextExpirationTIme)
+	sub.adjustAckTimer(nextExpirationTime)
 }
 
 // getMsgForRedelivery looks up the message from storage. If not found -
@@ -4691,6 +4694,12 @@ func (s *StanServer) sendAvailableMessagesToQueue(c *channel, qs *queueState) {
 	}
 
 	qs.Lock()
+	// Short circuit if no active members
+	if len(qs.subs) == 0 {
+		qs.Unlock()
+		return
+	}
+	// If redelivery at startup in progress, don't attempt to deliver new messages
 	if qs.newOnHold {
 		qs.Unlock()
 		return
