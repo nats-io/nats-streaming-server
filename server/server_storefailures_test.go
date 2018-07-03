@@ -604,12 +604,18 @@ func TestDeleteChannelStoreError(t *testing.T) {
 	if err := Wait(ms.ch); err != nil {
 		t.Fatal("Channel was not deleted")
 	}
-	logger.Lock()
-	gotIt := logger.gotError
-	logger.Unlock()
-	if !gotIt {
-		t.Fatalf("No error about deleting channel was logged")
-	}
+	// We get the notification after the mock DeleteChannel returns the
+	// error, but the server logs the error after that call, so make
+	// sure we give it a chance.
+	waitFor(t, time.Second, 15*time.Millisecond, func() error {
+		logger.Lock()
+		gotIt := logger.gotError
+		logger.Unlock()
+		if !gotIt {
+			return fmt.Errorf("No error about deleting channel was logged")
+		}
+		return nil
+	})
 	// Check that the activity struct has been reset properly
 	s.channels.lockDelete()
 	dip = c.activity.deleteInProgress

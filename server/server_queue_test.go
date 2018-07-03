@@ -971,3 +971,62 @@ func TestQueueGroupAckTimerStoppedWhenMemberLeavesGroup(t *testing.T) {
 		t.Fatalf("Timeout waiting for callback to fire")
 	}
 }
+
+func TestPersistentStoreNewOnHoldClearedAfterRestart(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	opts := getTestDefaultOptsForPersistentStore()
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Create durable queue sub that does not ack messages so we
+	// get a pending ack on server restart.
+	ch := make(chan bool, 1)
+	if _, err := sc.QueueSubscribe("foo", "bar", func(_ *stan.Msg) {
+		ch <- true
+	}, stan.DurableName("dur"), stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	// Publish a message
+	if err := sc.Publish("foo", []byte("1")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	// Close connection/sub
+	sc.Close()
+
+	// Restart server
+	s.Shutdown()
+	s = runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	// Create connection and publish a new message
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	if err := sc.Publish("foo", []byte("2")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	// Restart the queue durable sub, it should get the redelivered message
+	// and the new message.
+	msgCh := make(chan *stan.Msg, 1)
+	if _, err := sc.QueueSubscribe("foo", "bar", func(m *stan.Msg) {
+		msgCh <- m
+	}, stan.DurableName("dur")); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	// Check received messages
+	for i := uint64(1); i < 3; i++ {
+		select {
+		case m := <-msgCh:
+			assertMsg(t, m.MsgProto, []byte(fmt.Sprintf("%v", i)), i)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Did not get expected message %v", i)
+		}
+	}
+}

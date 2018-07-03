@@ -276,24 +276,35 @@ func checkCount(t tLogger, expected int, f func() (string, int)) {
 	}
 }
 
+// Helper function that waits up to totalWait for the function `f` to return
+// without error. When f returns error, this function sleeps for waitInBetween.
+// At the end of the totalWait, the last reported error from `f` causes the
+// test to fail.
+func waitFor(t tLogger, totalWait, waitInBetween time.Duration, f func() error) {
+	timeout := time.Now().Add(totalWait)
+	var err error
+	for time.Now().Before(timeout) {
+		err = f()
+		if err == nil {
+			return
+		}
+		time.Sleep(waitInBetween)
+	}
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+}
+
 // Helper function that waits that the number returned by function `f`
 // is equal to `expected` for a certain period of time, otherwise fails.
 func waitForCount(t tLogger, expected int, f func() (string, int)) {
-	ok := false
-	label := ""
-	count := 0
-	timeout := time.Now().Add(5 * time.Second)
-	for !ok && time.Now().Before(timeout) {
-		label, count = f()
+	waitFor(t, 5*time.Second, 10*time.Millisecond, func() error {
+		label, count := f()
 		if count != expected {
-			time.Sleep(10 * time.Millisecond)
-			continue
+			return fmt.Errorf("Timeout waiting to get %v %s, got %v", expected, label, count)
 		}
-		ok = true
-	}
-	if !ok {
-		stackFatalf(t, "Timeout waiting to get %v %s, got %v", expected, label, count)
-	}
+		return nil
+	})
 }
 
 // Helper function that fails if number of clients is not as expected
