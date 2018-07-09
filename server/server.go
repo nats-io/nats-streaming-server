@@ -47,7 +47,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.10.2"
+	VERSION = "0.10.3"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
