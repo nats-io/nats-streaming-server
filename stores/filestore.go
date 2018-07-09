@@ -2257,21 +2257,26 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 			offset += msgIndexRecSize
 		}
 		if err == nil {
-			err = ms.ensureLastMsgAndIndexMatch(fslice, lastSeq, lastIndex)
-			if err != nil {
-				ms.fstore.log.Errorf(err.Error())
-				if _, serr := fslice.file.handle.Seek(4, io.SeekStart); serr != nil {
-					panic(fmt.Errorf("File %q: unable to set position to beginning of file: %v", fslice.file.name, serr))
+			if lastIndex != nil {
+				err = ms.ensureLastMsgAndIndexMatch(fslice, lastSeq, lastIndex)
+				if err != nil {
+					ms.fstore.log.Errorf(err.Error())
+					if _, serr := fslice.file.handle.Seek(4, io.SeekStart); serr != nil {
+						panic(fmt.Errorf("File %q: unable to set position to beginning of file: %v", fslice.file.name, serr))
+					}
 				}
+			} else {
+				// Nothing recovered from the index file, try to recover
+				// from data file in case it is not empty.
+				useIdxFile = false
 			}
-		} else {
-			ms.fstore.log.Errorf("Error with index file %q: %v. Truncating and recovering from data file", fslice.idxFile.name, err)
 		}
 		// We can get an error either because the index file was corrupted,
 		// or because the data file is. In both case, we truncate the index
 		// file and recover from data file. The handling of unexpected EOF
 		// is handled in the data file recovery down below.
 		if err != nil {
+			ms.fstore.log.Errorf("Error with index file %q: %v. Truncating and recovering from data file", fslice.idxFile.name, err)
 			if terr := ms.fm.truncateFile(fslice.idxFile, 4); terr != nil {
 				panic(fmt.Errorf("Error during recovery of file %q: %v, you need "+
 					"to manually remove index file %q (truncate failed with err: %v)",
@@ -2283,7 +2288,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 			fslice.msgsSize = 0
 			fslice.firstWrite = 0
 			file = fslice.file
-			br = bufio.NewReaderSize(file.handle, defaultBufSize)
 			err = nil
 			useIdxFile = false
 		}
@@ -2293,6 +2297,9 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 		// Get these from the file store object
 		crcTable := ms.fstore.crcTable
 		doCRC := ms.fstore.opts.DoCRC
+
+		// Create a buffered reader from the data file to speed-up recovery
+		br := bufio.NewReaderSize(fslice.file.handle, defaultBufSize)
 
 		// We are going to write the index file while recovering the data file
 		bw := bufio.NewWriterSize(fslice.idxFile.handle, msgIndexRecSize*1000)

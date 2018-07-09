@@ -1693,3 +1693,53 @@ func TestFSExpirationWithTruncatedNonLastSlice(t *testing.T) {
 		t.Fatalf("Expected no message, got %v/%v", n, b)
 	}
 }
+
+func TestFSRecoverEmptyIndexMsgFile(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+	ms := c.Msgs
+	storeMsg(t, c, "foo", 1, []byte("msg"))
+	ms.(*FileMsgStore).RLock()
+	datname := ms.(*FileMsgStore).writeSlice.file.name
+	idxname := ms.(*FileMsgStore).writeSlice.idxFile.name
+	ms.(*FileMsgStore).RUnlock()
+	s.Close()
+
+	// Truncate both files to just file header size
+	if err := os.Truncate(datname, 4); err != nil {
+		t.Fatalf("Error truncating %s: %v", datname, err)
+	}
+	if err := os.Truncate(idxname, 4); err != nil {
+		t.Fatalf("Error truncating %s: %v", datname, err)
+	}
+
+	s, rs := openDefaultFileStore(t)
+	defer s.Close()
+
+	c = getRecoveredChannel(t, rs, "foo")
+	if n, b := msgStoreState(t, c.Msgs); n != 0 || b != 0 {
+		t.Fatalf("Unexpected state: %v - %v", n, b)
+	}
+
+	// Files were empty, store one messages
+	msg := storeMsg(t, c, "foo", 1, []byte("msg"))
+	s.Close()
+
+	// Truncate only index file
+	if err := os.Truncate(idxname, 4); err != nil {
+		t.Fatalf("Error truncating %s: %v", datname, err)
+	}
+	// Recover and check that message is recovered (index reconstructed)
+	s, rs = openDefaultFileStore(t)
+	defer s.Close()
+	c = getRecoveredChannel(t, rs, "foo")
+	rm := msgStoreLookup(t, c.Msgs, msg.Sequence)
+	if !reflect.DeepEqual(rm, msg) {
+		t.Fatalf("Expected %v, got %v", msg, rm)
+	}
+}
