@@ -927,6 +927,10 @@ func TestSQLSubStoreCaching(t *testing.T) {
 		t.Fatalf("Error creating store: %v", err)
 	}
 	defer s.Close()
+	info := testDefaultServerInfo
+	if err := s.Init(&info); err != nil {
+		t.Fatalf("Error on init: %v", err)
+	}
 
 	channel := "foo"
 	cs := storeCreateChannel(t, s, channel)
@@ -1004,6 +1008,46 @@ func TestSQLSubStoreCaching(t *testing.T) {
 	// Delete sub
 	storeSubDelete(t, cs, channel, subID)
 	testSQLCheckPendingRow(t, db, subID)
+
+	// Start with fresh subscription
+	subID = storeSub(t, cs, channel)
+	// Store some pending messages
+	storeSubPending(t, cs, channel, subID, 1, 2, 3)
+	storeSubAck(t, cs, channel, subID, 2)
+	storeSubFlush(t, cs, channel)
+
+	// Recover with NoCaching enabled
+	s.Close()
+	s, err = NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(true), SQLMaxOpenConns(5))
+	if err != nil {
+		t.Fatalf("Error opening store: %v", err)
+	}
+	defer s.Close()
+	state, err := s.Recover()
+	if err != nil {
+		t.Fatalf("Error on recovery: %v", err)
+	}
+	rc := state.Channels[channel]
+	if rc == nil {
+		t.Fatalf("Expected channel %q to be recovered", channel)
+	}
+	if count := len(rc.Subscriptions); count != 1 {
+		t.Fatalf("Expected 1 subscription to be recovered, got %v", count)
+	}
+	rs := rc.Subscriptions[0]
+	if count := len(rs.Pending); count != 2 {
+		t.Fatalf("Expected 2 pending messages, got %v", count)
+	}
+	if _, ok := rs.Pending[1]; !ok {
+		t.Fatalf("Expected seq 1 to be in pending")
+	}
+	if _, ok := rs.Pending[3]; !ok {
+		t.Fatalf("Expected seq 1 to be in pending")
+	}
+	last := rs.Sub.LastSent
+	if last != 3 {
+		t.Fatalf("Expected last sent to be 3, got %v", last)
+	}
 }
 
 func TestSQLSubStoreCachingFlushInterval(t *testing.T) {

@@ -1948,12 +1948,15 @@ func (ss *SQLSubStore) recoverPendingRow(rows *sql.Rows, sub *spb.SubState, ap *
 		}
 		pendingAcks[seq] = struct{}{}
 	} else {
-		row := &sqlSubsPendingRow{
-			ID:   ss.curRow,
-			msgs: sqlSeqMapPool.Get().(map[uint64]struct{}),
+		var row *sqlSubsPendingRow
+		if ap != nil {
+			row = &sqlSubsPendingRow{
+				ID:   ss.curRow,
+				msgs: sqlSeqMapPool.Get().(map[uint64]struct{}),
+			}
+			ap.lastSent = lastSent
+			ap.prevLastSent = lastSent
 		}
-		ap.lastSent = lastSent
-		ap.prevLastSent = lastSent
 
 		if lastSent > sub.LastSent {
 			sub.LastSent = lastSent
@@ -1961,9 +1964,11 @@ func (ss *SQLSubStore) recoverPendingRow(rows *sql.Rows, sub *spb.SubState, ap *
 		if len(pendingBytes) > 0 {
 			if err := sqlDecodeSeqs(pendingBytes, func(seq uint64) {
 				pendingAcks[seq] = struct{}{}
-				row.msgsRefs++
-				row.msgs[seq] = struct{}{}
-				ap.msgToRow[seq] = row
+				if ap != nil {
+					row.msgsRefs++
+					row.msgs[seq] = struct{}{}
+					ap.msgToRow[seq] = row
+				}
 			}); err != nil {
 				return err
 			}
@@ -1972,15 +1977,17 @@ func (ss *SQLSubStore) recoverPendingRow(rows *sql.Rows, sub *spb.SubState, ap *
 			if err := sqlDecodeSeqs(acksBytes, func(seq uint64) {
 				if _, exists := pendingAcks[seq]; exists {
 					delete(pendingAcks, seq)
-					row.acksRefs++
-					ap.ackToRow[seq] = row
+					if ap != nil {
+						row.acksRefs++
+						ap.ackToRow[seq] = row
 
-					seqRow := ap.msgToRow[seq]
-					if seqRow != nil {
-						delete(ap.msgToRow, seq)
-						seqRow.msgsRefs--
-						if seqRow.msgsRefs == 0 && seqRow.acksRefs == 0 {
-							gcedRows[seqRow.ID] = struct{}{}
+						seqRow := ap.msgToRow[seq]
+						if seqRow != nil {
+							delete(ap.msgToRow, seq)
+							seqRow.msgsRefs--
+							if seqRow.msgsRefs == 0 && seqRow.acksRefs == 0 {
+								gcedRows[seqRow.ID] = struct{}{}
+							}
 						}
 					}
 				}
