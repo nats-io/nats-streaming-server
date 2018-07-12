@@ -14,11 +14,15 @@
 package logger
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"strings"
 	"testing"
+
+	natsdLogger "github.com/nats-io/gnatsd/logger"
 )
 
 func TestMain(m *testing.M) {
@@ -52,6 +56,10 @@ func (d *dummyLogger) Fatalf(format string, args ...interface{}) {
 	d.msg = fmt.Sprintf(format, args...)
 }
 
+func (d *dummyLogger) Close() error {
+	return errors.New("dummy error")
+}
+
 func (d *dummyLogger) Reset() {
 	d.msg = ""
 }
@@ -59,12 +67,15 @@ func (d *dummyLogger) Reset() {
 func TestLogger(t *testing.T) {
 	logger := NewStanLogger()
 
-	check := func(log Logger, debug, trace bool) {
+	check := func(log Logger, logtime, debug, trace bool, logfile string) {
 		logger.mu.RLock()
-		l, dbg, trc := logger.log, logger.debug, logger.trace
+		l, ltime, dbg, trc, lfile := logger.log, logger.ltime, logger.debug, logger.trace, logger.lfile
 		logger.mu.RUnlock()
 		if log != l {
 			t.Fatalf("Expected log to be %v, got %v", log, l)
+		}
+		if logtime != ltime {
+			t.Fatalf("Expected ltime to be %v, got %v", logtime, ltime)
 		}
 		if debug != dbg {
 			t.Fatalf("Expected debug to be %v, got %v", debug, dbg)
@@ -72,26 +83,41 @@ func TestLogger(t *testing.T) {
 		if trace != trc {
 			t.Fatalf("Expected trace to be %v, got %v", trace, trc)
 		}
+		if logfile != lfile {
+			t.Fatalf("Expected lfile to be %v, got %v", logfile, lfile)
+		}
 	}
-	check(nil, false, false)
+	check(nil, false, false, false, "")
 	// This should not produce any logging, but should not crash
 	logger.Noticef("Should not crash")
 
-	logger.SetLogger(nil, false, false)
-	check(nil, false, false)
+	logger.SetLogger(nil, false, false, false, "")
+	check(nil, false, false, false, "")
 
-	logger.SetLogger(nil, true, false)
-	check(nil, true, false)
+	logger.SetLogger(nil, true, false, false, "")
+	check(nil, true, false, false, "")
 
-	logger.SetLogger(nil, false, true)
-	check(nil, false, true)
+	logger.SetLogger(nil, false, true, false, "")
+	check(nil, false, true, false, "")
 
-	logger.SetLogger(nil, true, true)
-	check(nil, true, true)
+	logger.SetLogger(nil, false, false, true, "")
+	check(nil, false, false, true, "")
+
+	logger.SetLogger(nil, false, false, false, "test.log")
+	check(nil, false, false, false, "test.log")
+
+	logger.SetLogger(nil, true, false, false, "test.log")
+	check(nil, true, false, false, "test.log")
+
+	logger.SetLogger(nil, true, true, false, "test.log")
+	check(nil, true, true, false, "test.log")
+
+	logger.SetLogger(nil, true, true, true, "test.log")
+	check(nil, true, true, true, "test.log")
 
 	dl := &dummyLogger{}
-	logger.SetLogger(dl, false, false)
-	check(dl, false, false)
+	logger.SetLogger(dl, false, false, false, "")
+	check(dl, false, false, false, "")
 
 	ls := logger.GetLogger()
 	if dl != ls {
@@ -125,7 +151,7 @@ func TestLogger(t *testing.T) {
 	checkLogger("")
 
 	// enable debug and trace
-	logger.SetLogger(dl, true, true)
+	logger.SetLogger(dl, false, true, true, "")
 
 	// Debug is set so we should have the value
 	logger.Debugf("foo")
@@ -134,4 +160,30 @@ func TestLogger(t *testing.T) {
 	// Trace is set so we should have the value
 	logger.Tracef("foo")
 	checkLogger("foo")
+
+	// Trying to re-open should log that this is not a filelog based
+	logger.ReopenLogFile()
+	checkLogger("File log re-open ignored, not a file logger")
+
+	// Set a filename but still use the dummy logger
+	logger.SetLogger(dl, true, true, true, "dummy.log")
+	// Try to re-open, this should produce an error
+	logger.ReopenLogFile()
+	checkLogger("Unable to close logger: dummy error")
+
+	// Switch to file log
+	fname := "test.log"
+	defer os.Remove(fname)
+	fl := natsdLogger.NewFileLogger(fname, true, true, true, true)
+	logger.SetLogger(fl, true, true, true, fname)
+	// Reopen and check file content
+	logger.ReopenLogFile()
+	buf, err := ioutil.ReadFile(fname)
+	if err != nil {
+		t.Fatalf("Error reading file: %v", err)
+	}
+	expectedStr := "File log re-opened"
+	if !strings.Contains(string(buf), expectedStr) {
+		t.Fatalf("Expected log to contain %q, got %q", expectedStr, string(buf))
+	}
 }
