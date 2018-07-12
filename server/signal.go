@@ -36,7 +36,7 @@ func (s *StanServer) handleSignals() {
 				os.Exit(0)
 			case syscall.SIGUSR1:
 				// File log re-open for rotating file logs.
-				s.natsServer.ReOpenLogFile()
+				s.log.ReopenLogFile()
 			}
 		}
 	}()

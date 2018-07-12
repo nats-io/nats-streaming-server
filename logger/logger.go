@@ -14,8 +14,10 @@
 package logger
 
 import (
+	"io"
 	"sync"
 
+	natsdLogger "github.com/nats-io/gnatsd/logger"
 	natsd "github.com/nats-io/gnatsd/server"
 )
 
@@ -32,6 +34,8 @@ type StanLogger struct {
 	mu    sync.RWMutex
 	debug bool
 	trace bool
+	ltime bool
+	lfile string
 	log   natsd.Logger
 }
 
@@ -41,11 +45,13 @@ func NewStanLogger() *StanLogger {
 }
 
 // SetLogger sets the logger, debug and trace
-func (s *StanLogger) SetLogger(log Logger, debug, trace bool) {
+func (s *StanLogger) SetLogger(log Logger, logtime, debug, trace bool, logfile string) {
 	s.mu.Lock()
 	s.log = log
+	s.ltime = logtime
 	s.debug = debug
 	s.trace = trace
+	s.lfile = logfile
 	s.mu.Unlock()
 }
 
@@ -55,6 +61,28 @@ func (s *StanLogger) GetLogger() Logger {
 	l := s.log
 	s.mu.RUnlock()
 	return l
+}
+
+// ReopenLogFile closes and reopen the logfile.
+// Does nothing if the logger is not a file based.
+func (s *StanLogger) ReopenLogFile() {
+	s.mu.Lock()
+	if s.lfile == "" {
+		s.mu.Unlock()
+		s.Noticef("File log re-open ignored, not a file logger")
+		return
+	}
+	if l, ok := s.log.(io.Closer); ok {
+		if err := l.Close(); err != nil {
+			s.mu.Unlock()
+			s.Errorf("Unable to close logger: %v", err)
+			return
+		}
+	}
+	fileLog := natsdLogger.NewFileLogger(s.lfile, s.ltime, s.debug, s.trace, true)
+	s.log = fileLog
+	s.mu.Unlock()
+	s.Noticef("File log re-opened")
 }
 
 // Noticef logs a notice statement

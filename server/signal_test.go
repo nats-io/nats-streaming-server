@@ -16,6 +16,7 @@
 package server
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	natsd "github.com/nats-io/gnatsd/server"
+	natsdTest "github.com/nats-io/gnatsd/test"
 )
 
 func TestSignalIgnoreUnknown(t *testing.T) {
@@ -42,44 +44,73 @@ func TestSignalIgnoreUnknown(t *testing.T) {
 
 func TestSignalToReOpenLogFile(t *testing.T) {
 	logFile := "test.log"
-	defer os.Remove(logFile)
-	defer os.Remove(logFile + ".bak")
-	sopts := GetDefaultOptions()
-	sopts.HandleSignals = true
-	nopts := &natsd.Options{
-		Host:    "localhost",
-		Port:    -1,
-		NoSigs:  true,
-		LogFile: logFile,
-	}
-	sopts.EnableLogging = true
-	s := runServerWithOpts(t, sopts, nopts)
-	defer s.Shutdown()
+	f := func(iter int) {
+		defer os.Remove(logFile)
+		defer os.Remove(logFile + ".bak")
 
-	// Add a trace
-	expectedStr := "This is a Notice"
-	s.log.Noticef(expectedStr)
-	buf, err := ioutil.ReadFile(logFile)
-	if err != nil {
-		t.Fatalf("Error reading file: %v", err)
+		var ns *natsd.Server
+		if iter == 0 {
+			ns = natsdTest.RunDefaultServer()
+			defer ns.Shutdown()
+		}
+		sopts := GetDefaultOptions()
+		sopts.HandleSignals = true
+		nopts := &natsd.Options{
+			Host:    "localhost",
+			Port:    -1,
+			NoSigs:  true,
+			LogFile: logFile,
+		}
+		sopts.EnableLogging = true
+		if iter == 0 {
+			sopts.NATSServerURL = "nats://" + ns.Addr().String()
+		}
+		s := runServerWithOpts(t, sopts, nopts)
+		defer s.Shutdown()
+
+		// Repeat twice to ensure that signal is processed more than once
+		for i := 0; i < 2; i++ {
+			// Add a trace
+			expectedStr := "This is a Notice"
+			s.log.Noticef(expectedStr)
+			buf, err := ioutil.ReadFile(logFile)
+			if err != nil {
+				t.Fatalf("Error reading file: %v", err)
+			}
+			if !strings.Contains(string(buf), expectedStr) {
+				t.Fatalf("Expected log to contain %q, got %q", expectedStr, string(buf))
+			}
+			// Rename the file
+			if err := os.Rename(logFile, logFile+".bak"); err != nil {
+				t.Fatalf("Unable to rename file: %v", err)
+			}
+			// This should cause file to be reopened.
+			syscall.Kill(syscall.Getpid(), syscall.SIGUSR1)
+			// Wait a bit for action to be performed
+			waitFor(t, 2*time.Second, 15*time.Millisecond, func() error {
+				buf, err = ioutil.ReadFile(logFile)
+				if err != nil {
+					return fmt.Errorf("Error reading file: %v", err)
+				}
+				expectedStr = "File log re-opened"
+				if !strings.Contains(string(buf), expectedStr) {
+					return fmt.Errorf("Expected log to contain %q, got %q", expectedStr, string(buf))
+				}
+				return nil
+			})
+			// Make sure that new traces are added
+			expectedStr = "This is a new notice"
+			s.log.Noticef(expectedStr)
+			buf, err = ioutil.ReadFile(logFile)
+			if err != nil {
+				t.Fatalf("Error reading file: %v", err)
+			}
+			if !strings.Contains(string(buf), expectedStr) {
+				t.Fatalf("Expected log to contain %q, got %q", expectedStr, string(buf))
+			}
+		}
 	}
-	if !strings.Contains(string(buf), expectedStr) {
-		t.Fatalf("Expected log to contain %q, got %q", expectedStr, string(buf))
-	}
-	// Rename the file
-	if err := os.Rename(logFile, logFile+".bak"); err != nil {
-		t.Fatalf("Unable to rename file: %v", err)
-	}
-	// This should cause file to be reopened.
-	syscall.Kill(syscall.Getpid(), syscall.SIGUSR1)
-	// Wait a bit for action to be performed
-	time.Sleep(500 * time.Millisecond)
-	buf, err = ioutil.ReadFile(logFile)
-	if err != nil {
-		t.Fatalf("Error reading file: %v", err)
-	}
-	expectedStr = "File log re-opened"
-	if !strings.Contains(string(buf), expectedStr) {
-		t.Fatalf("Expected log to contain %q, got %q", expectedStr, string(buf))
+	for iter := 0; iter < 2; iter++ {
+		f(iter)
 	}
 }

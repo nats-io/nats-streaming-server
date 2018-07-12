@@ -1401,7 +1401,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// If a custom logger is provided, use this one, otherwise, check
 	// if we should configure the logger or not.
 	if sOpts.CustomLogger != nil {
-		s.log.SetLogger(sOpts.CustomLogger, sOpts.Debug, sOpts.Trace)
+		s.log.SetLogger(sOpts.CustomLogger, nOpts.Logtime, sOpts.Debug, sOpts.Trace, "")
 	} else if sOpts.EnableLogging {
 		s.configureLogger()
 	}
@@ -1564,7 +1564,7 @@ func (s *StanServer) configureLogger() {
 		newLogger = natsdLogger.NewStdLogger(nOpts.Logtime, enableDebug, enableTrace, colors, true)
 	}
 
-	s.log.SetLogger(newLogger, sOpts.Debug, sOpts.Trace)
+	s.log.SetLogger(newLogger, nOpts.Logtime, sOpts.Debug, sOpts.Trace, nOpts.LogFile)
 }
 
 // This is either running inside RunServerWithOpts() and before any reference
