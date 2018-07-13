@@ -16,10 +16,13 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -112,5 +115,43 @@ func TestSignalToReOpenLogFile(t *testing.T) {
 	}
 	for iter := 0; iter < 2; iter++ {
 		f(iter)
+	}
+}
+
+type stderrCatcher struct {
+	sync.Mutex
+	b []byte
+}
+
+func (sc *stderrCatcher) Write(p []byte) (n int, err error) {
+	sc.Lock()
+	sc.b = append(sc.b, p...)
+	sc.Unlock()
+	return len(p), nil
+}
+
+func TestSignalTrapsSIGTERM(t *testing.T) {
+	// This test requires that the
+	cmd := exec.Command("nats-streaming-server")
+	sc := &stderrCatcher{}
+	cmd.Stderr = sc
+	cmd.Start()
+	// Wait for it to print some startup trace
+	waitFor(t, 2*time.Second, 15*time.Millisecond, func() error {
+		sc.Lock()
+		ready := bytes.Contains(sc.b, []byte("STREAM: ------------------"))
+		sc.Unlock()
+		if ready {
+			return nil
+		}
+		return fmt.Errorf("process not started yet")
+	})
+	syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
+	cmd.Wait()
+	sc.Lock()
+	gotIt := bytes.Contains(sc.b, []byte("Shutting down"))
+	sc.Unlock()
+	if !gotIt {
+		t.Fatalf("Did not get the Shutting down trace (make sure you did a `go install` prior to running the test")
 	}
 }
