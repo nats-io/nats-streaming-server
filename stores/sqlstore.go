@@ -2033,14 +2033,13 @@ func (ss *SQLSubStore) flush() error {
 		return err
 	}
 	for subid, ap := range ss.cache.subs {
-		prevLastSent := ap.prevLastSent
-		ap.prevLastSent = ap.lastSent
 		if len(ap.msgs) == 0 && len(ap.acks) == 0 {
 			// Update subscription's lastSent column if it has changed.
-			if ap.lastSent != prevLastSent {
+			if ap.lastSent != ap.prevLastSent {
 				if _, err := tx.Exec(sqlStmts[sqlSubUpdateLastSent], ap.lastSent, ss.channelID, subid); err != nil {
 					return err
 				}
+				ap.prevLastSent = ap.lastSent
 			}
 			// Since there was no pending nor ack for this sub, simply continue
 			// with the next subscription.
