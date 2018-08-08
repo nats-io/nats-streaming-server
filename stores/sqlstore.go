@@ -17,8 +17,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -683,21 +683,18 @@ func initSQLStmtsTable(driver string) {
 	switch driver {
 	case driverPostgres:
 		// Replace ? with $1, $2, etc...
-		reg := regexp.MustCompile(`\?`)
 		for i, stmt := range sqlStmts {
 			n := 0
-			stmt := reg.ReplaceAllStringFunc(stmt, func(string) string {
+			for strings.IndexByte(stmt, '?') != -1 {
 				n++
-				return "$" + strconv.Itoa(n)
-			})
+				param := "$" + strconv.Itoa(n)
+				stmt = strings.Replace(stmt, "?", param, 1)
+			}
 			sqlStmts[i] = stmt
 		}
 		// Replace `row` with row
-		reg = regexp.MustCompile("`row`")
 		for i, stmt := range sqlStmts {
-			stmt := reg.ReplaceAllStringFunc(stmt, func(string) string {
-				return "row"
-			})
+			stmt := strings.Replace(stmt, "`row`", "row", -1)
 			sqlStmts[i] = stmt
 		}
 		// OVER (PARTITION ...) is not supported in older MySQL servers.
