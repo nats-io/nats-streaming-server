@@ -1256,3 +1256,48 @@ func TestAckForUnknownChannel(t *testing.T) {
 	}
 	t.Fatalf("Server did not log error about not finding channel")
 }
+
+func TestAckProcessedBeforeClose(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+
+	ch := make(chan bool, 1)
+	for i := 0; i < 50; i++ {
+		if _, err := sc.Subscribe("foo",
+			func(m *stan.Msg) {
+				m.Ack()
+				m.Sub.Close()
+				ch <- true
+			},
+			stan.DeliverAllAvailable(),
+			stan.DurableName("dur"),
+			stan.SetManualAckMode()); err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		if err := Wait(ch); err != nil {
+			t.Fatal("Did not get our message")
+		}
+		pc := 0
+		cs := s.channels.get("foo")
+		cs.ss.RLock()
+		for _, dur := range cs.ss.durables {
+			pc = len(dur.acksPending)
+		}
+		cs.ss.RUnlock()
+		if pc != 0 {
+			t.Fatalf("Did not expect pending messages, got %v", pc)
+		}
+		dur, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
+		if err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		dur.Unsubscribe()
+	}
+}

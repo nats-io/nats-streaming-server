@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -197,16 +196,14 @@ func TestSQLPostgresDriverInit(t *testing.T) {
 	initSQLStmtsTable(driverPostgres)
 
 	// Make sure there is not ? but $ in the statements
-	reg := regexp.MustCompile(`\?`)
 	for _, stmt := range sqlStmts {
-		if reg.FindString(stmt) != "" {
+		if strings.IndexByte(stmt, '?') != -1 {
 			t.Fatalf("Statement %q incorrect for Postgres driver", stmt)
 		}
 	}
 	// Make sure there is not `row` in the statements
-	reg = regexp.MustCompile("`row`")
 	for _, stmt := range sqlStmts {
-		if reg.FindString(stmt) != "" {
+		if strings.Contains(stmt, "`row`") {
 			t.Fatalf("Statement %q incorrect for Postgres driver", stmt)
 		}
 	}

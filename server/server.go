@@ -2841,24 +2841,18 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 		return
 	}
 
-	s.nc.Barrier(func() {
-		// Ensure all pending acks are received by the connection
-		s.nca.Flush()
-		// Then ensure that all acks have been processed in processAckMsg callbacks
-		// before executing the closing function.
-		s.nca.Barrier(func() {
-			var err error
-			// If clustered, thread operations through Raft.
-			if s.isClustered {
-				err = s.replicateConnClose(req)
-			} else {
-				err = s.closeClient(req.ClientID)
-			}
-			// If there was an error, it has been already logged.
+	s.barrier(func() {
+		var err error
+		// If clustered, thread operations through Raft.
+		if s.isClustered {
+			err = s.replicateConnClose(req)
+		} else {
+			err = s.closeClient(req.ClientID)
+		}
+		// If there was an error, it has been already logged.
 
-			// Send response, if err is nil, will be a success response.
-			s.sendCloseResponse(m.Reply, err)
-		})
+		// Send response, if err is nil, will be a success response.
+		s.sendCloseResponse(m.Reply, err)
 	})
 }
 
@@ -3923,6 +3917,25 @@ func (s *StanServer) processSubCloseRequest(m *nats.Msg) {
 	s.performmUnsubOrCloseSubscription(m, req, true)
 }
 
+// Used when processing protocol messages to guarantee ordering.
+// Since protocols handlers use different subscriptions, a client
+// may send a message then close the connection, but those protocols
+// are processed by different internal subscriptions in the server.
+// Using nats's Conn.Barrier() we ensure that messages have been
+// processed in their respective callbacks before invoking `f`.
+// Since we also use a separate connection to handle acks, we
+// also need to flush the connection used to process ack's and
+// chained Barrier calls between s.nc and s.nca.
+func (s *StanServer) barrier(f func()) {
+	s.nc.Barrier(func() {
+		// Ensure all pending acks are received by the connection
+		s.nca.Flush()
+		// Then ensure that all acks have been processed in processAckMsg callbacks
+		// before executing the closing function.
+		s.nca.Barrier(f)
+	})
+}
+
 // performmUnsubOrCloseSubscription processes the unsub or close subscription
 // request.
 func (s *StanServer) performmUnsubOrCloseSubscription(m *nats.Msg, req *pb.UnsubscribeRequest, isSubClose bool) {
@@ -3935,7 +3948,7 @@ func (s *StanServer) performmUnsubOrCloseSubscription(m *nats.Msg, req *pb.Unsub
 		}
 	}
 
-	s.nc.Barrier(func() {
+	s.barrier(func() {
 		var err error
 		if s.isClustered {
 			if isSubClose {
