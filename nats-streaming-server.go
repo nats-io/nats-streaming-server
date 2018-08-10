@@ -47,6 +47,7 @@ Streaming Server Options:
     -hbt, --hb_timeout <duration>     How long server waits for a heartbeat response
     -hbf, --hb_fail_count <int>       Number of failed heartbeats before server closes the client connection
           --ft_group <string>         Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+    -sl,  --signal <signal>[=<pid>]   Send signal to nats-streaming-server process (stop, quit, reopen)
 
 Streaming Server Clustering Options:
     --clustered <bool>                   Run the server in a clustered configuration (default: false)
@@ -94,6 +95,7 @@ Streaming Server Logging Options:
     -SD, --stan_debug=<bool>         Enable STAN debugging output
     -SV, --stan_trace=<bool>         Trace the raw STAN protocol
     -SDV                             Debug and trace STAN
+         --syslog_name               On Windows, when running several servers as a service, use this name for the event source
     (See additional NATS logging options below)
 
 Embedded NATS Server Options:
@@ -150,7 +152,8 @@ func main() {
 	nOpts.NoSigs = true
 	// Without this option set to true, the logger is not configured.
 	sOpts.EnableLogging = true
-	if _, err := stand.RunServerWithOpts(sOpts, nOpts); err != nil {
+	// This will invoke RunServerWithOpts but on Windows, may run it as a service.
+	if _, err := stand.Run(sOpts, nOpts); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
@@ -169,7 +172,7 @@ func parseFlags() (*stand.Options, *natsd.Options) {
 		fs.Usage,
 		natsd.PrintTLSHelpAndDie)
 	if err != nil {
-		natsd.PrintAndDie(err.Error() + "\n" + usageStr)
+		natsd.PrintAndDie(err.Error())
 	}
 	return stanOpts, natsOpts
 }

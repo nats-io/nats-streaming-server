@@ -191,6 +191,9 @@ func TestParseConfig(t *testing.T) {
 	if !opts.Partitioning {
 		t.Fatalf("Expected Partitioning to be true, got false")
 	}
+	if opts.SyslogName != "myservice" {
+		t.Fatalf("Expected SyslogName to be %q, got %q", "myservice", opts.SyslogName)
+	}
 	if !opts.Clustering.Clustered {
 		t.Fatal("Expected Clustered to be true, got false")
 	}
@@ -382,6 +385,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "hb_fail_count: false", wrongTypeErr)
 	expectFailureFor(t, "ft_group: 123", wrongTypeErr)
 	expectFailureFor(t, "partitioning: 123", wrongTypeErr)
+	expectFailureFor(t, "syslog_name: 123", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_channels:false}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_msgs:false}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_bytes:false}", wrongTypeErr)

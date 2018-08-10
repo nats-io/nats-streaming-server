@@ -24,7 +24,7 @@ import (
 // Signal Handling
 func (s *StanServer) handleSignals() {
 	c := make(chan os.Signal, 1)
-	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
+	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1, syscall.SIGHUP)
 	go func() {
 		for sig := range c {
 			// Notify will relay only the signals that we have
@@ -37,6 +37,8 @@ func (s *StanServer) handleSignals() {
 			case syscall.SIGUSR1:
 				// File log re-open for rotating file logs.
 				s.log.ReopenLogFile()
+			case syscall.SIGHUP:
+				// Ignore for now
 			}
 		}
 	}()
