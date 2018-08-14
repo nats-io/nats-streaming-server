@@ -338,6 +338,11 @@ majority of servers are available, the cluster cannot make progress, e.g. if
 two nodes go down in a cluster of three, the cluster is unavailable until at
 least one node comes back.
 
+Note about Channels Partitioning and Clustering. These two features are mutually
+exclusive. Trying to start a server with channels Partitioning and Clustering enabled
+will result in a startup error. Clustering requires all channels to be replicated
+in the cluster.
+
 ### Supported Stores
 
 In order to run NATS Streaming Server in clustered mode, you need to specify
@@ -567,6 +572,9 @@ acquire the store lock. The interval is random but as of now set to a bit more t
 
 ## Partitioning
 
+***Note, this feature is incompatible with Clustering mode. Trying to start a server with Partitioning and Clustering
+enabled will result in a startup error.***
+
 It is possible to limit the list of channels a server can handle. This can be used to:
 
 * Prevent creation of unwanted channels
@@ -593,9 +601,9 @@ store_limits: {
 ```
 
 When partitioning is enabled, multiple servers with the same cluster ID can coexist on the same NATS network,
-each server handling its own set of channels. ***Note however that in this mode, state is not replicated
-(as it will be in the full clustering feature to come). The only communication between servers is to report
-if a given channel is handled in more than one server***.
+each server handling its own set of channels. ***Note however that in this mode, state is not replicated as it
+is in Clustering mode. The only communication between servers is to report if a given channel is handled in
+more than one serve.r***
 
 ### Wildcards
 
