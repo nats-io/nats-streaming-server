@@ -149,6 +149,11 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 			if err := parseCluster(v, opts); err != nil {
 				return err
 			}
+		case "syslog_name":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.SyslogName = v.(string)
 		}
 	}
 	return nil
@@ -570,6 +575,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	defSQLOpts := stores.DefaultSQLStoreOptions()
 	fs.BoolVar(&sopts.SQLStoreOpts.NoCaching, "sql_no_caching", defSQLOpts.NoCaching, "Enable/Disable caching")
 	fs.IntVar(&sopts.SQLStoreOpts.MaxOpenConns, "sql_max_open_conns", defSQLOpts.MaxOpenConns, "Max opened connections to the database")
+	fs.StringVar(&sopts.SyslogName, "syslog_name", "", "Syslog Name")
 
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
 	// It will be augmented with NATS specific flags and call fs.Parse(args) for us.

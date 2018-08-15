@@ -22,7 +22,6 @@ import (
 )
 
 const (
-	serviceName     = "gnatsd"
 	reopenLogCode   = 128
 	reopenLogCmd    = svc.Cmd(reopenLogCode)
 	acceptReopenLog = svc.Accepted(reopenLogCode)
@@ -40,6 +39,13 @@ func init() {
 	if v, exists := os.LookupEnv("NATS_DOCKERIZED"); exists && v == "1" {
 		dockerized = true
 	}
+}
+
+var serviceName = "gnatsd"
+
+// SetServiceName allows setting a different service name
+func SetServiceName(name string) {
+	serviceName = name
 }
 
 // Execute will be called by the package code at the start of

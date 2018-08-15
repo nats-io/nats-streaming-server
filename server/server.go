@@ -47,7 +47,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.10.3"
+	VERSION = "0.11.0"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -1117,6 +1117,7 @@ type Options struct {
 	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
 	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
+	SyslogName         string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
 	Clustering         ClusteringOptions
 }
 
@@ -1547,11 +1548,23 @@ func (s *StanServer) configureLogger() {
 	enableDebug := nOpts.Debug || sOpts.Debug
 	enableTrace := nOpts.Trace || sOpts.Trace
 
+	syslog := nOpts.Syslog
+	// Enable syslog if no log file is specified and we're running as a
+	// Windows service so that logs are written to the Windows event log.
+	if isWindowsService() && nOpts.LogFile == "" {
+		syslog = true
+	}
+	// If we have a syslog name specified, make sure we will use this name.
+	// This is for syslog and remote syslogs running on Windows.
+	if sOpts.SyslogName != "" {
+		natsdLogger.SetSyslogName(sOpts.SyslogName)
+	}
+
 	if nOpts.LogFile != "" {
 		newLogger = natsdLogger.NewFileLogger(nOpts.LogFile, nOpts.Logtime, enableDebug, enableTrace, true)
 	} else if nOpts.RemoteSyslog != "" {
 		newLogger = natsdLogger.NewRemoteSysLogger(nOpts.RemoteSyslog, enableDebug, enableTrace)
-	} else if nOpts.Syslog {
+	} else if syslog {
 		newLogger = natsdLogger.NewSysLogger(enableDebug, enableTrace)
 	} else {
 		colors := true
