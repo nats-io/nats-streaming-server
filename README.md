@@ -1103,25 +1103,25 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[69905] 2018/08/15 11:25:47.111380 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.11.0
-[69905] 2018/08/15 11:25:47.111469 [INF] STREAM: ServerID: 7T4VhlyHF3v6CyA22t1ko4
-[69905] 2018/08/15 11:25:47.111473 [INF] STREAM: Go version: go1.10.3
-[69905] 2018/08/15 11:25:47.112094 [INF] Starting nats-server version 1.1.0
-[69905] 2018/08/15 11:25:47.112134 [INF] Git commit [not set]
-[69905] 2018/08/15 11:25:47.112328 [INF] Listening for client connections on 0.0.0.0:4222
-[69905] 2018/08/15 11:25:47.112337 [INF] Server is ready
-[69905] 2018/08/15 11:25:47.142372 [INF] STREAM: Recovering the state...
-[69905] 2018/08/15 11:25:47.142396 [INF] STREAM: No recovered state
-[69905] 2018/08/15 11:25:47.397227 [INF] STREAM: Message store is MEMORY
-[69905] 2018/08/15 11:25:47.397313 [INF] STREAM: ---------- Store Limits ----------
-[69905] 2018/08/15 11:25:47.397318 [INF] STREAM: Channels:                  100 *
-[69905] 2018/08/15 11:25:47.397321 [INF] STREAM: --------- Channels Limits --------
-[69905] 2018/08/15 11:25:47.397324 [INF] STREAM:   Subscriptions:          1000 *
-[69905] 2018/08/15 11:25:47.397327 [INF] STREAM:   Messages     :       1000000 *
-[69905] 2018/08/15 11:25:47.397329 [INF] STREAM:   Bytes        :     976.56 MB *
-[69905] 2018/08/15 11:25:47.397332 [INF] STREAM:   Age          :     unlimited *
-[69905] 2018/08/15 11:25:47.397335 [INF] STREAM:   Inactivity   :     unlimited *
-[69905] 2018/08/15 11:25:47.397338 [INF] STREAM: ----------------------------------
+[47596] 2018/08/16 13:56:41.699946 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.11.0
+[47596] 2018/08/16 13:56:41.700011 [INF] STREAM: ServerID: 109OXmeLww4bnw0LsuSvwP
+[47596] 2018/08/16 13:56:41.700025 [INF] STREAM: Go version: go1.10.3
+[47596] 2018/08/16 13:56:41.700493 [INF] Starting nats-server version 1.3.0
+[47596] 2018/08/16 13:56:41.700539 [INF] Git commit [not set]
+[47596] 2018/08/16 13:56:41.700731 [INF] Listening for client connections on 0.0.0.0:4222
+[47596] 2018/08/16 13:56:41.700737 [INF] Server is ready
+[47596] 2018/08/16 13:56:41.730457 [INF] STREAM: Recovering the state...
+[47596] 2018/08/16 13:56:41.730492 [INF] STREAM: No recovered state
+[47596] 2018/08/16 13:56:41.984562 [INF] STREAM: Message store is MEMORY
+[47596] 2018/08/16 13:56:41.984685 [INF] STREAM: ---------- Store Limits ----------
+[47596] 2018/08/16 13:56:41.984693 [INF] STREAM: Channels:                  100 *
+[47596] 2018/08/16 13:56:41.984698 [INF] STREAM: --------- Channels Limits --------
+[47596] 2018/08/16 13:56:41.984703 [INF] STREAM:   Subscriptions:          1000 *
+[47596] 2018/08/16 13:56:41.984708 [INF] STREAM:   Messages     :       1000000 *
+[47596] 2018/08/16 13:56:41.984713 [INF] STREAM:   Bytes        :     976.56 MB *
+[47596] 2018/08/16 13:56:41.984717 [INF] STREAM:   Age          :     unlimited *
+[47596] 2018/08/16 13:56:41.984722 [INF] STREAM:   Inactivity   :     unlimited *
+[47596] 2018/08/16 13:56:41.984727 [INF] STREAM: ----------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
@@ -1688,40 +1688,40 @@ Below is what would be displayed with the above store limits configuration. Noti
 how `foo.bar.>` is indented compared to `foo.>` to show the inheritance.
 
 ```
-[70005] 2018/08/15 11:27:37.777900 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.11.0
-[70005] 2018/08/15 11:27:37.777956 [INF] STREAM: ServerID: TTZKATihUDruDdATKZ46dh
-[70005] 2018/08/15 11:27:37.777969 [INF] STREAM: Go version: go1.10.3
-[70005] 2018/08/15 11:27:37.778631 [INF] Starting nats-server version 1.1.0
-[70005] 2018/08/15 11:27:37.778640 [INF] Git commit [not set]
-[70005] 2018/08/15 11:27:37.778817 [INF] Listening for client connections on 0.0.0.0:4222
-[70005] 2018/08/15 11:27:37.778822 [INF] Server is ready
-[70005] 2018/08/15 11:27:37.809752 [INF] STREAM: Recovering the state...
-[70005] 2018/08/15 11:27:37.809772 [INF] STREAM: No recovered state
-[70005] 2018/08/15 11:27:38.065146 [INF] STREAM: Message store is MEMORY
-[70005] 2018/08/15 11:27:38.065327 [INF] STREAM: ---------- Store Limits ----------
-[70005] 2018/08/15 11:27:38.065340 [INF] STREAM: Channels:                   10
-[70005] 2018/08/15 11:27:38.065348 [INF] STREAM: --------- Channels Limits --------
-[70005] 2018/08/15 11:27:38.065356 [INF] STREAM:   Subscriptions:          1000 *
-[70005] 2018/08/15 11:27:38.065361 [INF] STREAM:   Messages     :         10000
-[70005] 2018/08/15 11:27:38.065366 [INF] STREAM:   Bytes        :      10.00 MB
-[70005] 2018/08/15 11:27:38.065372 [INF] STREAM:   Age          :        1h0m0s
-[70005] 2018/08/15 11:27:38.065379 [INF] STREAM:   Inactivity   :     unlimited *
-[70005] 2018/08/15 11:27:38.065384 [INF] STREAM: -------- List of Channels ---------
-[70005] 2018/08/15 11:27:38.065389 [INF] STREAM: baz
-[70005] 2018/08/15 11:27:38.065394 [INF] STREAM:  |-> Messages             unlimited
-[70005] 2018/08/15 11:27:38.065399 [INF] STREAM:  |-> Bytes                  1.00 MB
-[70005] 2018/08/15 11:27:38.065404 [INF] STREAM:  |-> Age                     2h0m0s
-[70005] 2018/08/15 11:27:38.065408 [INF] STREAM: bozo
-[70005] 2018/08/15 11:27:38.065413 [INF] STREAM: foo.>
-[70005] 2018/08/15 11:27:38.065418 [INF] STREAM:  |-> Messages                   400
-[70005] 2018/08/15 11:27:38.065603 [INF] STREAM:  foo.bar.>
-[70005] 2018/08/15 11:27:38.065617 [INF] STREAM:   |-> Age                    2h0m0s
-[70005] 2018/08/15 11:27:38.065623 [INF] STREAM: temp.>
-[70005] 2018/08/15 11:27:38.065628 [INF] STREAM:  |-> Inactivity              1h0m0s
-[70005] 2018/08/15 11:27:38.065633 [INF] STREAM: bar
-[70005] 2018/08/15 11:27:38.065637 [INF] STREAM:  |-> Messages                    50
-[70005] 2018/08/15 11:27:38.065642 [INF] STREAM:  |-> Bytes                  1.00 KB
-[70005] 2018/08/15 11:27:38.065647 [INF] STREAM: -----------------------------------
+[47635] 2018/08/16 13:57:51.074682 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.11.0
+[47635] 2018/08/16 13:57:51.074735 [INF] STREAM: ServerID: HXlseNZwdXvVENS4Ik9yqu
+[47635] 2018/08/16 13:57:51.074749 [INF] STREAM: Go version: go1.10.3
+[47635] 2018/08/16 13:57:51.075208 [INF] Starting nats-server version 1.3.0
+[47635] 2018/08/16 13:57:51.075248 [INF] Git commit [not set]
+[47635] 2018/08/16 13:57:51.075412 [INF] Listening for client connections on 0.0.0.0:4222
+[47635] 2018/08/16 13:57:51.075417 [INF] Server is ready
+[47635] 2018/08/16 13:57:51.102876 [INF] STREAM: Recovering the state...
+[47635] 2018/08/16 13:57:51.102899 [INF] STREAM: No recovered state
+[47635] 2018/08/16 13:57:51.358780 [INF] STREAM: Message store is MEMORY
+[47635] 2018/08/16 13:57:51.359000 [INF] STREAM: ---------- Store Limits ----------
+[47635] 2018/08/16 13:57:51.359012 [INF] STREAM: Channels:                   10
+[47635] 2018/08/16 13:57:51.359018 [INF] STREAM: --------- Channels Limits --------
+[47635] 2018/08/16 13:57:51.359022 [INF] STREAM:   Subscriptions:          1000 *
+[47635] 2018/08/16 13:57:51.359027 [INF] STREAM:   Messages     :         10000
+[47635] 2018/08/16 13:57:51.359032 [INF] STREAM:   Bytes        :      10.00 MB
+[47635] 2018/08/16 13:57:51.359037 [INF] STREAM:   Age          :        1h0m0s
+[47635] 2018/08/16 13:57:51.359042 [INF] STREAM:   Inactivity   :     unlimited *
+[47635] 2018/08/16 13:57:51.359047 [INF] STREAM: -------- List of Channels ---------
+[47635] 2018/08/16 13:57:51.359052 [INF] STREAM: baz
+[47635] 2018/08/16 13:57:51.359057 [INF] STREAM:  |-> Messages             unlimited
+[47635] 2018/08/16 13:57:51.359061 [INF] STREAM:  |-> Bytes                  1.00 MB
+[47635] 2018/08/16 13:57:51.359066 [INF] STREAM:  |-> Age                     2h0m0s
+[47635] 2018/08/16 13:57:51.359071 [INF] STREAM: bozo
+[47635] 2018/08/16 13:57:51.359076 [INF] STREAM: foo.>
+[47635] 2018/08/16 13:57:51.359081 [INF] STREAM:  |-> Messages                   400
+[47635] 2018/08/16 13:57:51.359086 [INF] STREAM:  foo.bar.>
+[47635] 2018/08/16 13:57:51.359090 [INF] STREAM:   |-> Age                    2h0m0s
+[47635] 2018/08/16 13:57:51.359095 [INF] STREAM: temp.>
+[47635] 2018/08/16 13:57:51.359100 [INF] STREAM:  |-> Inactivity              1h0m0s
+[47635] 2018/08/16 13:57:51.359301 [INF] STREAM: bar
+[47635] 2018/08/16 13:57:51.359312 [INF] STREAM:  |-> Messages                    50
+[47635] 2018/08/16 13:57:51.359317 [INF] STREAM:  |-> Bytes                  1.00 KB
+[47635] 2018/08/16 13:57:51.359322 [INF] STREAM: -----------------------------------
 ```
 
 

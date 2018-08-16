@@ -19,7 +19,15 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	natsd "github.com/nats-io/gnatsd/server"
 )
+
+func init() {
+	// Set the process name so signal code use this process name
+	// instead of gnatsd.
+	natsd.SetProcessName("nats-streaming-server")
+}
 
 // Signal Handling
 func (s *StanServer) handleSignals() {
