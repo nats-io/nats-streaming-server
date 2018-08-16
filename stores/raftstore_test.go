@@ -108,6 +108,7 @@ func TestRSRecover(t *testing.T) {
 		stackFatalf(t, "Error creating raft store: %v", err)
 	}
 	s = NewRaftStore(fs)
+	defer s.Close()
 	state, err := s.Recover()
 	if err != nil {
 		t.Fatalf("Error on recover: %v", err)

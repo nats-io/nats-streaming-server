@@ -186,4 +186,8 @@ func TestLogger(t *testing.T) {
 	if !strings.Contains(string(buf), expectedStr) {
 		t.Fatalf("Expected log to contain %q, got %q", expectedStr, string(buf))
 	}
+	logger.Close()
+	if err := os.Remove(fname); err != nil {
+		t.Fatalf("Unable to remove log file: %v", err)
+	}
 }

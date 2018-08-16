@@ -20,6 +20,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1937,6 +1938,7 @@ func TestClusteringLogSnapshotRestoreBatching(t *testing.T) {
 	follower.opts.Clustering.RaftLogging = true
 	follower.opts.CustomLogger = cl
 	follower = runServerWithOpts(t, follower.opts, nil)
+	defer follower.Shutdown()
 	servers = append(servers, follower)
 
 	getLeader(t, 10*time.Second, servers...)
@@ -3419,6 +3421,9 @@ func TestClusteringNodeIDInPeersArray(t *testing.T) {
 }
 
 func TestClusteringUnableToContactPeer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.SkipNow()
+	}
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 	cleanupRaftLog(t)
