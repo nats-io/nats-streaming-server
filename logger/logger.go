@@ -85,6 +85,16 @@ func (s *StanLogger) ReopenLogFile() {
 	s.Noticef("File log re-opened")
 }
 
+// Close closes this logger, releasing possible held resources.
+func (s *StanLogger) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l, ok := s.log.(io.Closer); ok {
+		return l.Close()
+	}
+	return nil
+}
+
 // Noticef logs a notice statement
 func (s *StanLogger) Noticef(format string, v ...interface{}) {
 	s.executeLogCall(func(log Logger, format string, v ...interface{}) {
