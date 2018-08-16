@@ -146,7 +146,6 @@ func (t *tlsOption) Apply(server *Server) {
 		server.info.TLSVerify = (t.newValue.ClientAuth == tls.RequireAndVerifyClientCert)
 		message = "enabled"
 	}
-	server.generateServerInfoJSON()
 	server.mu.Unlock()
 	server.Noticef("Reloaded: tls = %s", message)
 }
@@ -279,10 +278,16 @@ func (r *routesOption) Apply(server *Server) {
 	// Remove routes.
 	for _, remove := range r.remove {
 		for _, client := range routes {
-			if client.route.url == remove {
+			var url *url.URL
+			client.mu.Lock()
+			if client.route != nil {
+				url = client.route.url
+			}
+			client.mu.Unlock()
+			if url != nil && urlsAreEqual(url, remove) {
 				// Do not attempt to reconnect when route is removed.
 				client.setRouteNoReconnectOnClose()
-				client.closeConnection()
+				client.closeConnection(RouteRemoved)
 				server.Noticef("Removed route %v", remove)
 			}
 		}
@@ -351,6 +356,19 @@ func (p *pidFileOption) Apply(server *Server) {
 	server.Noticef("Reloaded: pid_file = %v", p.newValue)
 }
 
+// portsFileDirOption implements the option interface for the `portFileDir` setting.
+type portsFileDirOption struct {
+	noopOption
+	oldValue string
+	newValue string
+}
+
+func (p *portsFileDirOption) Apply(server *Server) {
+	server.deletePortsFile(p.oldValue)
+	server.logPorts()
+	server.Noticef("Reloaded: ports_file_dir = %v", p.newValue)
+}
+
 // maxControlLineOption implements the option interface for the
 // `max_control_line` setting.
 type maxControlLineOption struct {
@@ -375,7 +393,6 @@ type maxPayloadOption struct {
 func (m *maxPayloadOption) Apply(server *Server) {
 	server.mu.Lock()
 	server.info.MaxPayload = m.newValue
-	server.generateServerInfoJSON()
 	for _, client := range server.clients {
 		atomic.StoreInt64(&client.mpay, int64(m.newValue))
 	}
@@ -551,6 +568,8 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			diffOpts = append(diffOpts, &maxConnOption{newValue: newValue.(int)})
 		case "pidfile":
 			diffOpts = append(diffOpts, &pidFileOption{newValue: newValue.(string)})
+		case "portsfiledir":
+			diffOpts = append(diffOpts, &portsFileDirOption{newValue: newValue.(string), oldValue: oldValue.(string)})
 		case "maxcontrolline":
 			diffOpts = append(diffOpts, &maxControlLineOption{newValue: newValue.(int)})
 		case "maxpayload":
@@ -570,8 +589,8 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 				}
 			}
 			diffOpts = append(diffOpts, &clientAdvertiseOption{newValue: cliAdv})
-		case "nolog":
-			// Ignore NoLog option since it's not parsed and only used in
+		case "nolog", "nosigs":
+			// Ignore NoLog and NoSigs options since they are not parsed and only used in
 			// testing.
 			continue
 		case "port":
@@ -622,7 +641,6 @@ func (s *Server) applyOptions(opts []option) {
 func (s *Server) reloadAuthorization() {
 	s.mu.Lock()
 	s.configureAuthorization()
-	s.generateServerInfoJSON()
 	clients := make(map[uint64]*client, len(s.clients))
 	for i, client := range s.clients {
 		clients[i] = client
@@ -644,11 +662,14 @@ func (s *Server) reloadAuthorization() {
 		s.removeUnauthorizedSubs(client)
 	}
 
-	for _, client := range routes {
+	for _, route := range routes {
 		// Disconnect any unauthorized routes.
-		if !s.isRouterAuthorized(client) {
-			client.setRouteNoReconnectOnClose()
-			client.authViolation()
+		// Do this only for route that were accepted, not initiated
+		// because in the later case, we don't have the user name/password
+		// of the remote server.
+		if !route.isSolicitedRoute() && !s.isRouterAuthorized(route) {
+			route.setRouteNoReconnectOnClose()
+			route.authViolation()
 		}
 	}
 }
@@ -680,7 +701,7 @@ func diffRoutes(old, new []*url.URL) (add, remove []*url.URL) {
 removeLoop:
 	for _, oldRoute := range old {
 		for _, newRoute := range new {
-			if oldRoute == newRoute {
+			if urlsAreEqual(oldRoute, newRoute) {
 				continue removeLoop
 			}
 		}
@@ -691,7 +712,7 @@ removeLoop:
 addLoop:
 	for _, newRoute := range new {
 		for _, oldRoute := range old {
-			if oldRoute == newRoute {
+			if urlsAreEqual(oldRoute, newRoute) {
 				continue addLoop
 			}
 		}

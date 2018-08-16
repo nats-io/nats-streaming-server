@@ -27,6 +27,13 @@ const (
 	acceptReopenLog = svc.Accepted(reopenLogCode)
 )
 
+var serviceName = "gnatsd"
+
+// SetServiceName allows setting a different service name
+func SetServiceName(name string) {
+	serviceName = name
+}
+
 // winServiceWrapper implements the svc.Handler interface for implementing
 // gnatsd as a Windows service.
 type winServiceWrapper struct {
@@ -39,13 +46,6 @@ func init() {
 	if v, exists := os.LookupEnv("NATS_DOCKERIZED"); exists && v == "1" {
 		dockerized = true
 	}
-}
-
-var serviceName = "gnatsd"
-
-// SetServiceName allows setting a different service name
-func SetServiceName(name string) {
-	serviceName = name
 }
 
 // Execute will be called by the package code at the start of
