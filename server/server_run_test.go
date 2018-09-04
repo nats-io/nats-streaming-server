@@ -358,7 +358,7 @@ func TestTLSSuccessSecure(t *testing.T) {
 	defer s.Shutdown()
 }
 
-func TestTLSFailServerTLSClientPlain(t *testing.T) {
+func TestTLSSwitchAutomatically(t *testing.T) {
 	nOpts := DefaultNatsServerOptions
 
 	nOpts.TLSCert = "../test/certs/server-cert.pem"
@@ -369,10 +369,10 @@ func TestTLSFailServerTLSClientPlain(t *testing.T) {
 	sOpts.ID = clusterName
 
 	s, err := RunServerWithOpts(sOpts, &nOpts)
-	if s != nil || err == nil {
-		s.Shutdown()
-		t.Fatal("Expected server to fail to start, it did not")
+	if err != nil {
+		t.Fatalf("Should have connected, got %v", err)
 	}
+	s.Shutdown()
 }
 
 func TestTLSFailClientTLSServerPlain(t *testing.T) {

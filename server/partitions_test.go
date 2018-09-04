@@ -113,8 +113,8 @@ func TestPartitionsInvalidRequest(t *testing.T) {
 	}
 	verifyNoResponse := func() {
 		select {
-		case <-msgCh:
-			stackFatalf(t, "Should not have receive a response, got: %v")
+		case m := <-msgCh:
+			stackFatalf(t, "Should not have receive a response, got: %v", m)
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
@@ -361,7 +361,7 @@ func TestPartitionsWithClusterOfServers(t *testing.T) {
 			stackFatalf(t, "Server should not have channel %v", chanNotOk)
 		}
 		if n, _ := msgStoreState(t, s.channels.get(chanOk).store.Msgs); n != 1 {
-			stackFatalf(t, "Channel %q should have 1 message and no error, got %v - %v", chanOk, n)
+			stackFatalf(t, "Channel %q should have 1 message and no error, got %v", chanOk, n)
 		}
 	}
 	checkChannel(s1, fooSubj, barSubj)

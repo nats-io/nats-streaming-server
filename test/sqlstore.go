@@ -98,7 +98,7 @@ func loadCreateDatabaseStmts(driver string) ([]string, error) {
 func CleanupSQLDatastore(t TLogger, driver, source string) {
 	db, err := sql.Open(driver, source)
 	if err != nil {
-		StackFatalf(t, "Error cleaning up SQL datastore", err)
+		StackFatalf(t, "Error cleaning up SQL datastore: %v", err)
 	}
 	defer db.Close()
 	MustExecuteSQL(t, db, "DELETE FROM StoreLock")
