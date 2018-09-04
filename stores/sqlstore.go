@@ -93,41 +93,41 @@ const (
 )
 
 var sqlStmts = []string{
-	"SELECT id, tick from StoreLock FOR UPDATE",                                                                                                                    // sqlDBLockSelect
-	"INSERT INTO StoreLock (id, tick) VALUES (?, ?)",                                                                                                               // sqlDBLockInsert
-	"UPDATE StoreLock SET id=?, tick=?",                                                                                                                            // sqlDBLockUpdate
-	"SELECT COUNT(uniquerow) FROM ServerInfo",                                                                                                                      // sqlHasServerInfoRow
-	"UPDATE ServerInfo SET id=?, proto=?, version=? WHERE uniquerow=1",                                                                                             // sqlUpdateServerInfo
-	"INSERT INTO ServerInfo (id, proto, version) VALUES (?, ?, ?)",                                                                                                 // sqlAddServerInfo
-	"INSERT INTO Clients (id, hbinbox, proto) VALUES (?, ?, ?)",                                                                                                    // sqlAddClient
-	"DELETE FROM Clients WHERE id=?",                                                                                                                               // sqlDeleteClient
-	"INSERT INTO Channels (id, name, maxmsgs, maxbytes, maxage) VALUES (?, ?, ?, ?, ?)",                                                                            // sqlAddChannel
-	"INSERT INTO Messages VALUES (?, ?, ?, ?, ?)",                                                                                                                  // sqlStoreMsg
-	"SELECT timestamp, data FROM Messages WHERE id=? AND seq=?",                                                                                                    // sqlLookupMsg
-	"SELECT seq FROM Messages WHERE id=? AND timestamp>=? LIMIT 1",                                                                                                 // sqlGetSequenceFromTimestamp
-	"UPDATE Channels SET maxseq=? WHERE id=?",                                                                                                                      // sqlUpdateChannelMaxSeq
-	"SELECT COUNT(seq), COALESCE(MAX(seq), 0), COALESCE(SUM(size), 0) FROM Messages WHERE id=? AND timestamp<=?",                                                   // sqlGetExpiredMessages
-	"SELECT timestamp FROM Messages WHERE id=? AND seq>=? LIMIT 1",                                                                                                 // sqlGetFirstMsgTimestamp
-	"DELETE FROM Messages WHERE id=? AND seq<=?",                                                                                                                   // sqlDeletedMsgsWithSeqLowerThan
-	"SELECT size FROM Messages WHERE id=? AND seq=?",                                                                                                               // sqlGetSizeOfMessage
-	"DELETE FROM Messages WHERE id=? AND seq=?",                                                                                                                    // sqlDeleteMessage
-	"SELECT COUNT(subid) FROM Subscriptions WHERE id=? AND deleted=FALSE",                                                                                          // sqlCheckMaxSubs
-	"INSERT INTO Subscriptions (id, subid, proto) VALUES (?, ?, ?)",                                                                                                // sqlCreateSub
-	"UPDATE Subscriptions SET proto=? WHERE id=? AND subid=?",                                                                                                      // sqlUpdateSub
-	"UPDATE Subscriptions SET deleted=TRUE WHERE id=? AND subid=?",                                                                                                 // sqlMarkSubscriptionAsDeleted
-	"DELETE FROM Subscriptions WHERE id=? AND subid=?",                                                                                                             // sqlDeleteSubscription
-	"DELETE FROM Subscriptions WHERE id=? AND deleted=TRUE",                                                                                                        // sqlDeleteSubMarkedAsDeleted
-	"DELETE FROM SubsPending WHERE subid=?",                                                                                                                        // sqlDeleteSubPendingMessages
-	"UPDATE Subscriptions SET lastsent=? WHERE id=? AND subid=?",                                                                                                   // sqlSubUpdateLastSent
-	"INSERT INTO SubsPending (subid, `row`, seq) VALUES (?, ?, ?)",                                                                                                 // sqlSubAddPending
-	"INSERT INTO SubsPending (subid, `row`, lastsent, pending, acks) VALUES (?, ?, ?, ?, ?)",                                                                       // sqlSubAddPendingRow
-	"DELETE FROM SubsPending WHERE subid=? AND seq=?",                                                                                                              // sqlSubDeletePending
-	"DELETE FROM SubsPending WHERE subid=? AND `row`=?",                                                                                                            // sqlSubDeletePendingRow
-	"SELECT id, proto, version FROM ServerInfo WHERE uniquerow=1",                                                                                                  // sqlRecoverServerInfo
-	"SELECT id, hbinbox, proto FROM Clients",                                                                                                                       // sqlRecoverClients
-	"SELECT COALESCE(MAX(id), 0) FROM Channels",                                                                                                                    // sqlRecoverMaxChannelID
-	"SELECT COALESCE(MAX(subid), 0) FROM Subscriptions",                                                                                                            // sqlRecoverMaxSubID
-	"SELECT id, name, maxseq FROM Channels WHERE deleted=FALSE",                                                                                                    // sqlRecoverChannelsList
+	"SELECT id, tick from StoreLock FOR UPDATE",                                                                  // sqlDBLockSelect
+	"INSERT INTO StoreLock (id, tick) VALUES (?, ?)",                                                             // sqlDBLockInsert
+	"UPDATE StoreLock SET id=?, tick=?",                                                                          // sqlDBLockUpdate
+	"SELECT COUNT(uniquerow) FROM ServerInfo",                                                                    // sqlHasServerInfoRow
+	"UPDATE ServerInfo SET id=?, proto=?, version=? WHERE uniquerow=1",                                           // sqlUpdateServerInfo
+	"INSERT INTO ServerInfo (id, proto, version) VALUES (?, ?, ?)",                                               // sqlAddServerInfo
+	"INSERT INTO Clients (id, hbinbox, proto) VALUES (?, ?, ?)",                                                  // sqlAddClient
+	"DELETE FROM Clients WHERE id=?",                                                                             // sqlDeleteClient
+	"INSERT INTO Channels (id, name, maxmsgs, maxbytes, maxage) VALUES (?, ?, ?, ?, ?)",                          // sqlAddChannel
+	"INSERT INTO Messages VALUES (?, ?, ?, ?, ?)",                                                                // sqlStoreMsg
+	"SELECT timestamp, data FROM Messages WHERE id=? AND seq=?",                                                  // sqlLookupMsg
+	"SELECT seq FROM Messages WHERE id=? AND timestamp>=? LIMIT 1",                                               // sqlGetSequenceFromTimestamp
+	"UPDATE Channels SET maxseq=? WHERE id=?",                                                                    // sqlUpdateChannelMaxSeq
+	"SELECT COUNT(seq), COALESCE(MAX(seq), 0), COALESCE(SUM(size), 0) FROM Messages WHERE id=? AND timestamp<=?", // sqlGetExpiredMessages
+	"SELECT timestamp FROM Messages WHERE id=? AND seq>=? LIMIT 1",                                               // sqlGetFirstMsgTimestamp
+	"DELETE FROM Messages WHERE id=? AND seq<=?",                                                                 // sqlDeletedMsgsWithSeqLowerThan
+	"SELECT size FROM Messages WHERE id=? AND seq=?",                                                             // sqlGetSizeOfMessage
+	"DELETE FROM Messages WHERE id=? AND seq=?",                                                                  // sqlDeleteMessage
+	"SELECT COUNT(subid) FROM Subscriptions WHERE id=? AND deleted=FALSE",                                        // sqlCheckMaxSubs
+	"INSERT INTO Subscriptions (id, subid, proto) VALUES (?, ?, ?)",                                              // sqlCreateSub
+	"UPDATE Subscriptions SET proto=? WHERE id=? AND subid=?",                                                    // sqlUpdateSub
+	"UPDATE Subscriptions SET deleted=TRUE WHERE id=? AND subid=?",                                               // sqlMarkSubscriptionAsDeleted
+	"DELETE FROM Subscriptions WHERE id=? AND subid=?",                                                           // sqlDeleteSubscription
+	"DELETE FROM Subscriptions WHERE id=? AND deleted=TRUE",                                                      // sqlDeleteSubMarkedAsDeleted
+	"DELETE FROM SubsPending WHERE subid=?",                                                                      // sqlDeleteSubPendingMessages
+	"UPDATE Subscriptions SET lastsent=? WHERE id=? AND subid=?",                                                 // sqlSubUpdateLastSent
+	"INSERT INTO SubsPending (subid, `row`, seq) VALUES (?, ?, ?)",                                               // sqlSubAddPending
+	"INSERT INTO SubsPending (subid, `row`, lastsent, pending, acks) VALUES (?, ?, ?, ?, ?)",                     // sqlSubAddPendingRow
+	"DELETE FROM SubsPending WHERE subid=? AND seq=?",                                                            // sqlSubDeletePending
+	"DELETE FROM SubsPending WHERE subid=? AND `row`=?",                                                          // sqlSubDeletePendingRow
+	"SELECT id, proto, version FROM ServerInfo WHERE uniquerow=1",                                                // sqlRecoverServerInfo
+	"SELECT id, hbinbox, proto FROM Clients",                                                                     // sqlRecoverClients
+	"SELECT COALESCE(MAX(id), 0) FROM Channels",                                                                  // sqlRecoverMaxChannelID
+	"SELECT COALESCE(MAX(subid), 0) FROM Subscriptions",                                                          // sqlRecoverMaxSubID
+	"SELECT id, name, maxseq FROM Channels WHERE deleted=FALSE",                                                  // sqlRecoverChannelsList
 	"SELECT COUNT(seq), COALESCE(MIN(seq), 0), COALESCE(MAX(seq), 0), COALESCE(SUM(size), 0), COALESCE(MAX(timestamp), 0) FROM Messages WHERE id=?",                // sqlRecoverChannelMsgs
 	"SELECT lastsent, proto FROM Subscriptions WHERE id=? AND deleted=FALSE",                                                                                       // sqlRecoverChannelSubs
 	"DELETE FROM SubsPending WHERE subid=? AND (seq > 0 AND seq<?)",                                                                                                // sqlRecoverDoPurgeSubsPending

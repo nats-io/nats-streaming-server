@@ -61,7 +61,7 @@ func newRaftLog(log logger.Logger, fileName string, sync bool, trailingLogs int)
 		ratioThreshold:         50,
 		simpleDelThresholdLow:  1000,
 		simpleDelThresholdHigh: 100000,
-		codec: &codec.MsgpackHandle{},
+		codec:                  &codec.MsgpackHandle{},
 	}
 	conn, err := r.openAndSetOptions(fileName)
 	if err != nil {
