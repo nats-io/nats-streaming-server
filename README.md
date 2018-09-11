@@ -1081,7 +1081,7 @@ The best way to get the NATS Streaming Server is to use one of the pre-built rel
 
 Of course you can build the latest version of the server from the master branch. The master branch will always build and pass tests, but may not work correctly in your environment. You will first need Go installed on your machine (version 1.5+ is required) to build the NATS server.
 
-See also the NATS Streaming Quickstart [tutorial](https://nats.io/doc/streaming/nats-streaming-quickstart/).
+See also the NATS Streaming Quickstart [tutorial](https://nats.io/documentation/streaming/nats-streaming-quickstart/).
 
 ## Building
 
