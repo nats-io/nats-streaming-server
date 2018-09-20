@@ -3282,7 +3282,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 			// We do this only after confirmation that it was successfully added
 			// as pending on the other queue subscriber.
 			if pick != sub && sent {
-				s.processAck(c, sub, m.Sequence)
+				s.processAck(c, sub, m.Sequence, false)
 			}
 		} else {
 			sub.Lock()
@@ -3313,7 +3313,7 @@ func (s *StanServer) getMsgForRedelivery(c *channel, sub *subState, seq uint64) 
 				sub.ID, seq, err)
 		}
 		// Ack it so that it does not reincarnate on restart
-		s.processAck(c, sub, seq)
+		s.processAck(c, sub, seq, false)
 		return nil
 	}
 	// The store implementation does not return a copy, we need one
@@ -4638,11 +4638,11 @@ func (s *StanServer) processAckMsg(m *nats.Msg) {
 	if sub == nil {
 		return
 	}
-	s.processAck(c, sub, ack.Sequence)
+	s.processAck(c, sub, ack.Sequence, true)
 }
 
 // processAck processes an ack and if needed sends more messages.
-func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
+func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64, fromUser bool) {
 	var stalled bool
 
 	// This is immutable, so can grab outside of sub's lock.
@@ -4655,28 +4655,55 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64) {
 
 	sub.Lock()
 
-	// If in cluster mode, replicate the ack but leader
-	// does not wait on quorum result.
-	if s.isClustered {
-		s.replicateSentOrAck(sub, replicateAck, sequence)
-	}
-
-	if s.trace {
-		s.log.Tracef("[Client:%s] Processing ack for subid=%d, subject=%s, seq=%d",
-			sub.ClientID, sub.ID, sub.subject, sequence)
-	}
-
-	if err := sub.store.AckSeqPending(sub.ID, sequence); err != nil {
-		s.log.Errorf("[Client:%s] Unable to persist ack for subid=%d, subject=%s, seq=%d, err=%v",
-			sub.ClientID, sub.ID, sub.subject, sequence, err)
-		sub.Unlock()
-		if qs != nil {
-			qs.Unlock()
+	persistAck := func(aSub *subState) bool {
+		if err := aSub.store.AckSeqPending(aSub.ID, sequence); err != nil {
+			s.log.Errorf("[Client:%s] Unable to persist ack for subid=%d, subject=%s, seq=%d, err=%v",
+				aSub.ClientID, aSub.ID, aSub.subject, sequence, err)
+			return false
 		}
-		return
+		return true
 	}
 
-	delete(sub.acksPending, sequence)
+	if _, found := sub.acksPending[sequence]; found {
+		// If in cluster mode, replicate the ack but leader
+		// does not wait on quorum result.
+		if s.isClustered {
+			s.replicateSentOrAck(sub, replicateAck, sequence)
+		}
+		if s.trace && fromUser {
+			s.log.Tracef("[Client:%s] Processing ack for subid=%d, subject=%s, seq=%d",
+				sub.ClientID, sub.ID, sub.subject, sequence)
+		}
+		if !persistAck(sub) {
+			sub.Unlock()
+			if qs != nil {
+				qs.Unlock()
+			}
+			return
+		}
+		delete(sub.acksPending, sequence)
+	} else if qs != nil && fromUser {
+		// For queue members, if this is not an internally generated ACK
+		// and we don't find the sequence in this sub's pending, we are
+		// going to look for it in other members and process it if found.
+		sub.Unlock()
+		for _, qsub := range qs.subs {
+			if qsub == sub {
+				continue
+			}
+			qsub.Lock()
+			if _, found := qsub.acksPending[sequence]; found {
+				delete(qsub.acksPending, sequence)
+				persistAck(qsub)
+				qsub.Unlock()
+				break
+			}
+			qsub.Unlock()
+		}
+		sub.Lock()
+		// Proceed with original sub (regardless if member was found
+		// or not) so that server sends more messages if needed.
+	}
 	if sub.stalled && int32(len(sub.acksPending)) < sub.MaxInFlight {
 		// For queue, we must not check the queue stalled count here. The queue
 		// as a whole may not be stalled, yet, if this sub was stalled, it is
