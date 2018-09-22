@@ -2818,15 +2818,8 @@ func (s *StanServer) checkClientHealth(clientID string) {
 func (s *StanServer) closeClient(clientID string) error {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
-	// Remove from our clientStore.
-	client, err := s.clients.unregister(clientID)
-	// The above call may return an error (due to storage) but still return
-	// the client that is being unregistered. So log error an proceed.
-	if err != nil {
-		s.log.Errorf("Error unregistering client %q: %v", clientID, err)
-	}
-	// This would mean that the client was already unregistered or was never
-	// registered.
+	// Lookup client first, will unregister only after removing its subscriptions
+	client := s.clients.lookup(clientID)
 	if client == nil {
 		s.log.Errorf("Unknown client %q in close request", clientID)
 		return ErrUnknownClient
@@ -2834,6 +2827,11 @@ func (s *StanServer) closeClient(clientID string) error {
 
 	// Remove all non-durable subscribers.
 	s.removeAllNonDurableSubscribers(client)
+
+	// Remove from our clientStore.
+	if _, err := s.clients.unregister(clientID); err != nil {
+		s.log.Errorf("Error unregistering client %q: %v", clientID, err)
+	}
 
 	if s.debug {
 		client.RLock()
@@ -3891,10 +3889,14 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 	// subscriptions, so it is safe to use the original.
 	client.RLock()
 	subs := client.subs
+	clientID := client.info.ID
 	client.RUnlock()
+	var storesToFlush map[string]stores.SubStore
 	for _, sub := range subs {
 		sub.RLock()
 		subject := sub.subject
+		isDurable := sub.IsDurable
+		subStore := sub.store
 		sub.RUnlock()
 		// Get the channel
 		c := s.channels.get(subject)
@@ -3903,6 +3905,22 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 		}
 		// Don't remove durables
 		c.ss.Remove(c, sub, false)
+		// If the sub is a durable, there may have been an update to storage,
+		// so we will want to flush the store. In clustering, during replay,
+		// subStore may be nil.
+		if isDurable && subStore != nil {
+			if storesToFlush == nil {
+				storesToFlush = make(map[string]stores.SubStore, 16)
+			}
+			storesToFlush[subject] = subStore
+		}
+	}
+	if len(storesToFlush) > 0 {
+		for subject, subStore := range storesToFlush {
+			if err := subStore.Flush(); err != nil {
+				s.log.Errorf("[Client:%s] Error flushing store while removing subscriptions: subject=%s, err=%v", clientID, subject, err)
+			}
+		}
 	}
 }
 
@@ -4005,10 +4023,10 @@ func (s *StanServer) unsubscribe(req *pb.UnsubscribeRequest, isSubClose bool) er
 			req.ClientID, action, req.Inbox)
 		return ErrInvalidSub
 	}
-	return s.unsubscribeSub(c, req.ClientID, action, sub, isSubClose)
+	return s.unsubscribeSub(c, req.ClientID, action, sub, isSubClose, true)
 }
 
-func (s *StanServer) unsubscribeSub(c *channel, clientID, action string, sub *subState, isSubClose bool) error {
+func (s *StanServer) unsubscribeSub(c *channel, clientID, action string, sub *subState, isSubClose, shouldFlush bool) error {
 	// Remove from Client
 	if !s.clients.removeSub(clientID, sub) {
 		s.log.Errorf("[Client:%s] %s request for missing client", clientID, action)
@@ -4017,10 +4035,17 @@ func (s *StanServer) unsubscribeSub(c *channel, clientID, action string, sub *su
 	// Remove the subscription
 	unsubscribe := !isSubClose
 	c.ss.Remove(c, sub, unsubscribe)
+	var err error
+	if shouldFlush {
+		sub.RLock()
+		ss := sub.store
+		sub.RUnlock()
+		err = ss.Flush()
+	}
 	s.monMu.Lock()
 	s.numSubs--
 	s.monMu.Unlock()
-	return nil
+	return err
 }
 
 func (s *StanServer) replicateRemoveSubscription(req *pb.UnsubscribeRequest) error {

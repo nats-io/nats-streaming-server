@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -771,6 +772,14 @@ func (l *captureFatalLogger) Fatalf(format string, args ...interface{}) {
 	l.Unlock()
 }
 
+type storeNoClose struct {
+	stores.Store
+}
+
+func (snc *storeNoClose) Close() error {
+	return nil
+}
+
 func TestGhostDurableSubs(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -826,9 +835,63 @@ func TestGhostDurableSubs(t *testing.T) {
 	s.Shutdown()
 	check(true)
 
+	// We cannot do the rest of this test on Windows because
+	// to simulate crash we don't close store and restart the
+	// server. This would not be allowed on Windows.
+	if runtime.GOOS == "windows" {
+		return
+	}
+
 	// Re-open, this time, there should not be the warning anymore.
+	opts.ClientHBInterval = 250 * time.Millisecond
+	opts.ClientHBTimeout = 100 * time.Millisecond
+	opts.ClientHBFailCount = 1
 	s = runServerWithOpts(t, opts, nil)
 	check(false)
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+	sc, err := stan.Connect(clusterName, clientName,
+		stan.NatsConn(nc), stan.ConnectWait(500*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc.Close()
+
+	ch := make(chan bool, 1)
+	// Create queue sub
+	if _, err := sc.QueueSubscribe("foo", "bar",
+		func(_ *stan.Msg) {
+			ch <- true
+		},
+		stan.DurableName("dur")); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+
+	// Close NATS connection to cause server to close client connection due
+	// to missed HBs.
+	nc.Close()
+
+	waitForNumClients(t, s, 0)
+
+	// Change store to simulate no flush on simulated crash
+	s.store = &storeNoClose{Store: s.store}
+	s.Shutdown()
+
+	// Re-open, there should be no warning.
+	s = runServerWithOpts(t, opts, nil)
+	check(false)
+
+	sc.Close()
 }
 
 func TestGetNATSOptions(t *testing.T) {
