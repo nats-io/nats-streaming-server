@@ -39,7 +39,8 @@ type mockedMsgStore struct {
 type mockedSubStore struct {
 	stores.SubStore
 	sync.RWMutex
-	fail bool
+	fail          bool
+	failFlushOnce bool
 }
 
 func (ms *mockedStore) CreateChannel(name string) (*stores.Channel, error) {
@@ -279,6 +280,16 @@ func (ss *mockedSubStore) DeleteSub(subid uint64) error {
 	return ss.SubStore.DeleteSub(subid)
 }
 
+func (ss *mockedSubStore) Flush() error {
+	ss.RLock()
+	fail := ss.failFlushOnce
+	ss.RUnlock()
+	if fail {
+		return fmt.Errorf("On purpose")
+	}
+	return ss.SubStore.Flush()
+}
+
 func TestDeleteSubFailures(t *testing.T) {
 	logger := &checkErrorLogger{checkErrorStr: "deleting subscription"}
 	opts := GetDefaultOptions()
@@ -425,6 +436,48 @@ func TestUpdateSubFailure(t *testing.T) {
 	logger.Unlock()
 	if !gotIt {
 		t.Fatalf("Server did not log error on subscribe")
+	}
+}
+
+func TestCloseClientWithDurableSubs(t *testing.T) {
+	logger := &checkErrorLogger{checkErrorStr: "flushing store"}
+	opts := GetDefaultOptions()
+	opts.CustomLogger = logger
+	s, err := RunServerWithOpts(opts, nil)
+	if err != nil {
+		t.Fatalf("Error running server: %v", err)
+	}
+	defer s.Shutdown()
+
+	s.channels.Lock()
+	s.channels.store = &mockedStore{Store: s.channels.store}
+	s.channels.Unlock()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if _, err := sc.QueueSubscribe("foo", "bar",
+		func(_ *stan.Msg) {},
+		stan.DurableName("dur")); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	waitForNumSubs(t, s, clientName, 1)
+
+	cs := channelsGet(t, s.channels, "foo")
+	mss := cs.store.Subs.(*mockedSubStore)
+	mss.Lock()
+	mss.failFlushOnce = true
+	mss.Unlock()
+
+	// Close client, we should get failure trying to update the queue sub record
+	sc.Close()
+	waitForNumClients(t, s, 0)
+
+	logger.Lock()
+	gotIt := logger.gotError
+	logger.Unlock()
+	if !gotIt {
+		t.Fatalf("Server did not log error on close client")
 	}
 }
 

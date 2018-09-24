@@ -255,10 +255,11 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 			sub.RLock()
 			clientID := sub.ClientID
 			sub.RUnlock()
-			if err := s.unsubscribeSub(c, clientID, "unsub", sub, false); err != nil {
+			if err := s.unsubscribeSub(c, clientID, "unsub", sub, false, false); err != nil {
 				return err
 			}
 		}
+		c.store.Subs.Flush()
 	}
 	for clientID := range s.clients.getClients() {
 		if _, err := s.clients.unregister(clientID); err != nil {

@@ -193,7 +193,7 @@ func TestClientAddSub(t *testing.T) {
 	}
 
 	// Now register the client
-	sc, _ := cs.register(info)
+	cs.register(info)
 
 	// Now this should work
 	if !cs.addSub(clientID, sub) {
@@ -250,7 +250,7 @@ func TestClientAddSub(t *testing.T) {
 		cs.register(info)
 		runtime.Gosched()
 		c, _ := cs.unregister(clientID)
-		if sc == nil {
+		if c == nil {
 			t.Fatal("Client should have been found")
 		}
 		c.RLock()
