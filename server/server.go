@@ -4524,12 +4524,15 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 				_, seq, err = s.setSubStartSequence(c, sr)
 				if err == nil {
 					// Convert to a SequenceStart start position with the proper sequence
-					// number.
+					// number. Since setSubStartSequence() is returning what should be
+					// the lastSent, we need to bump the count by 1.
 					sr.StartPosition = pb.StartPosition_SequenceStart
-					sr.StartSequence = seq
+					sr.StartSequence = seq + 1
 				}
 			}
-			sub, err = s.replicateSub(sr, ackInbox)
+			if err == nil {
+				sub, err = s.replicateSub(sr, ackInbox)
+			}
 		} else {
 			sub, err = s.processSub(c, sr, ackInbox)
 		}
