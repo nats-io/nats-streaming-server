@@ -1716,3 +1716,38 @@ func TestSQLSubStoreFlush(t *testing.T) {
 		t.Fatalf("Expected last sent to be %v, got %v", lastSent, rs.Sub.LastSent)
 	}
 }
+
+func TestSQLRecoverLastSeqAfterMessagesExpired(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	s := createDefaultSQLStore(t)
+	defer s.Close()
+
+	cs := storeCreateChannel(t, s, "foo")
+	payload := make([]byte, 100)
+	storeMsg(t, cs, "foo", 1, payload)
+	storeMsg(t, cs, "foo", 2, payload)
+	storeMsg(t, cs, "foo", 3, payload)
+	storeMsg(t, cs, "foo", 4, payload)
+	storeMsg(t, cs, "foo", 5, payload)
+	s.Close()
+
+	// Sleep for more than the maxAge we will then set
+	time.Sleep(700 * time.Millisecond)
+
+	// Restart store with a maxAge
+	limits := testDefaultStoreLimits
+	limits.MaxAge = 250 * time.Millisecond
+	s, state := openDefaultSQLStoreWithLimits(t, &limits)
+	defer s.Close()
+	cs = state.Channels["foo"].Channel
+	first, last := msgStoreFirstAndLastSequence(t, cs.Msgs)
+	if first != 6 && last != 5 {
+		t.Fatalf("Should be left with 6..5, got %v..%v", first, last)
+	}
+	s.Close()
+}
