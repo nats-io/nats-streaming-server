@@ -1806,6 +1806,7 @@ func (s *StanServer) startRaftNode(hasStreamingState bool) error {
 							// Node shutdown, just return.
 							return
 						case err == raft.ErrLeadershipLost:
+						case err == raft.ErrNotLeader:
 							// Node lost leadership, continue loop.
 							continue
 						default:

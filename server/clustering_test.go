@@ -3885,3 +3885,56 @@ func TestClusteringStartReceiveNext(t *testing.T) {
 		})
 	}
 }
+
+type captureNoLeaderLog struct {
+	dummyLogger
+	gotIt bool
+}
+
+func (l *captureNoLeaderLog) Errorf(format string, args ...interface{}) {
+	l.dummyLogger.Lock()
+	trace := fmt.Sprintf(format, args...)
+	if strings.Contains(trace, raft.ErrNotLeader.Error()) {
+		l.gotIt = true
+	}
+	l.dummyLogger.Unlock()
+}
+
+func TestClusteringNotLeaderWhenLeadershipAcquired(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	l := &captureNoLeaderLog{}
+	s1sOpts.CustomLogger = l
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	ch1, ch2 := s1.sendSynchronziationRequest()
+	<-ch1
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	s2.Shutdown()
+
+	time.Sleep(time.Second)
+	close(ch2)
+
+	waitFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		l.Lock()
+		gotIt := l.gotIt
+		l.Unlock()
+		if !gotIt {
+			return fmt.Errorf("Did not get the no leader error")
+		}
+		return nil
+	})
+}
