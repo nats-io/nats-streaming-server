@@ -230,6 +230,18 @@ func TestParseConfig(t *testing.T) {
 	if !opts.Clustering.RaftLogging {
 		t.Fatal("Expected RaftLogging to be true")
 	}
+	if opts.Clustering.RaftHeartbeatTimeout != time.Second {
+		t.Fatalf("Expected RaftHeartbeatTimeout to be 1s, got %v", opts.Clustering.RaftHeartbeatTimeout)
+	}
+	if opts.Clustering.RaftElectionTimeout != time.Second {
+		t.Fatalf("Expected RaftElectionTimeout to be 1s, got %v", opts.Clustering.RaftElectionTimeout)
+	}
+	if opts.Clustering.RaftLeaseTimeout != 500*time.Millisecond {
+		t.Fatalf("Expected RaftLeaseTimeout to be 500ms, got %v", opts.Clustering.RaftLeaseTimeout)
+	}
+	if opts.Clustering.RaftCommitTimeout != 50*time.Millisecond {
+		t.Fatalf("Expected RaftCommitTimeout to be 50ms, got %v", opts.Clustering.RaftCommitTimeout)
+	}
 	if opts.SQLStoreOpts.Driver != "mysql" {
 		t.Fatalf("Expected SQL Driver to be %q, got %q", "mysql", opts.SQLStoreOpts.Driver)
 	}
@@ -432,6 +444,14 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "cluster:{trailing_logs:false}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{sync:1}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{raft_logging:1}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{raft_heartbeat_timeout:123}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{raft_heartbeat_timeout:\"not_a_time\"}", wrongTimeErr)
+	expectFailureFor(t, "cluster:{raft_election_timeout:123}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{raft_election_timeout:\"not_a_time\"}", wrongTimeErr)
+	expectFailureFor(t, "cluster:{raft_lease_timeout:123}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{raft_lease_timeout:\"not_a_time\"}", wrongTimeErr)
+	expectFailureFor(t, "cluster:{raft_commit_timeout:123}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{raft_commit_timeout:\"not_a_time\"}", wrongTimeErr)
 	expectFailureFor(t, "sql:{driver:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{source:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{no_caching:123}", wrongTypeErr)

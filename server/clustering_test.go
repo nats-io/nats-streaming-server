@@ -3938,3 +3938,42 @@ func TestClusteringNotLeaderWhenLeadershipAcquired(t *testing.T) {
 		return nil
 	})
 }
+
+func TestClusteringRaftDefaultTimeouts(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	runningInTests = false
+	defer func() { runningInTests = true }()
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	sOpts := getTestDefaultOptsForClustering("a", true)
+	s := runServerWithOpts(t, sOpts, nil)
+	defer s.Shutdown()
+
+	// Check timeout values
+	s.mu.Lock()
+	hbTimeout := s.opts.Clustering.RaftHeartbeatTimeout
+	electionTimeout := s.opts.Clustering.RaftElectionTimeout
+	leaseTimeout := s.opts.Clustering.RaftLeaseTimeout
+	commitTimeout := s.opts.Clustering.RaftCommitTimeout
+	s.mu.Unlock()
+	if hbTimeout != defaultRaftHBTimeout {
+		t.Fatalf("Expected hb timeout to be %v, got %v", defaultRaftHBTimeout, hbTimeout)
+	}
+	if electionTimeout != defaultRaftElectionTimeout {
+		t.Fatalf("Expected election timeout to be %v, got %v", defaultRaftElectionTimeout, electionTimeout)
+	}
+	if leaseTimeout != defaultRaftLeastTimeout {
+		t.Fatalf("Expected lease timeout to be %v, got %v", defaultRaftLeastTimeout, leaseTimeout)
+	}
+	if commitTimeout != defaultRaftCommitTimeout {
+		t.Fatalf("Expected commit timeout to be %v, got %v", defaultRaftCommitTimeout, commitTimeout)
+	}
+}
