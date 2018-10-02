@@ -29,6 +29,10 @@ import (
 
 const (
 	defaultJoinRaftGroupTimeout = time.Second
+	defaultRaftHBTimeout        = 2 * time.Second
+	defaultRaftElectionTimeout  = 2 * time.Second
+	defaultRaftLeastTimeout     = time.Second
+	defaultRaftCommitTimeout    = 100 * time.Millisecond
 )
 
 var (
@@ -55,6 +59,12 @@ type ClusteringOptions struct {
 	TrailingLogs int64    // Number of logs left after a snapshot.
 	Sync         bool     // Do a file sync after every write to the Raft log and message store.
 	RaftLogging  bool     // Enable logging of Raft library (disabled by default since really verbose).
+
+	// These will be set to some sane defaults. Change only if experiencing raft issues.
+	RaftHeartbeatTimeout time.Duration
+	RaftElectionTimeout  time.Duration
+	RaftLeaseTimeout     time.Duration
+	RaftCommitTimeout    time.Duration
 }
 
 // raftNode is a handle to a member in a Raft consensus group.
@@ -280,6 +290,23 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 		config.ElectionTimeout = 100 * time.Millisecond
 		config.HeartbeatTimeout = 100 * time.Millisecond
 		config.LeaderLeaseTimeout = 50 * time.Millisecond
+	} else {
+		if s.opts.Clustering.RaftHeartbeatTimeout == 0 {
+			s.opts.Clustering.RaftHeartbeatTimeout = defaultRaftHBTimeout
+		}
+		if s.opts.Clustering.RaftElectionTimeout == 0 {
+			s.opts.Clustering.RaftElectionTimeout = defaultRaftElectionTimeout
+		}
+		if s.opts.Clustering.RaftLeaseTimeout == 0 {
+			s.opts.Clustering.RaftLeaseTimeout = defaultRaftLeastTimeout
+		}
+		if s.opts.Clustering.RaftCommitTimeout == 0 {
+			s.opts.Clustering.RaftCommitTimeout = defaultRaftCommitTimeout
+		}
+		config.HeartbeatTimeout = s.opts.Clustering.RaftHeartbeatTimeout
+		config.ElectionTimeout = s.opts.Clustering.RaftElectionTimeout
+		config.LeaderLeaseTimeout = s.opts.Clustering.RaftLeaseTimeout
+		config.CommitTimeout = s.opts.Clustering.RaftCommitTimeout
 	}
 	config.LocalID = raft.ServerID(s.opts.Clustering.NodeID)
 	config.TrailingLogs = uint64(s.opts.Clustering.TrailingLogs)
