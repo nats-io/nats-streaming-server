@@ -14,6 +14,7 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
@@ -1368,4 +1369,76 @@ func TestPersistentStoreNotStalledIfBelowMaxInflight(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatalf("Did not get our second message")
 	}
+}
+
+func TestQueueAckRemovesFromOwningMember(t *testing.T) {
+	resetPreviousHTTPConnections()
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	opts := getTestDefaultOptsForPersistentStore()
+	nopts := defaultMonitorOptions
+	s := runServerWithOpts(t, opts, &nopts)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc, nc := createConnectionWithNatsOpts(t, clientName,
+		nats.ReconnectWait(100*time.Millisecond))
+	defer nc.Close()
+	defer sc.Close()
+
+	redelivered := int32(0)
+	cb := func(m *stan.Msg) {
+		if m.Redelivered {
+			atomic.AddInt32(&redelivered, 1)
+		} else {
+			time.Sleep(750 * time.Millisecond)
+			m.Ack()
+		}
+	}
+	if _, err := sc.QueueSubscribe("foo", "bar", cb,
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(500))); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	if _, err := sc.QueueSubscribe("foo", "bar",
+		func(_ *stan.Msg) {
+			atomic.AddInt32(&redelivered, 1)
+		},
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(500))); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	waitForAcks(t, s, clientName, 1, 0)
+	waitForAcks(t, s, clientName, 2, 0)
+
+	if n := atomic.LoadInt32(&redelivered); n != 1 {
+		t.Fatalf("Expected message to be redelivered only once, was %v times", n)
+	}
+
+	resp, body := getBody(t, ChannelsPath+"?channel=foo&subs=1", expectedJSON)
+	defer resp.Body.Close()
+	cz := Channelz{}
+	if err := json.Unmarshal(body, &cz); err != nil {
+		t.Fatalf("Got an error unmarshalling the body: %v", err)
+	}
+	resp.Body.Close()
+	subs := cz.Subscriptions
+	if len(subs) != 2 {
+		t.Fatalf("Expected 2 subscriptions, got %v", len(subs))
+	}
+	for _, sub := range subs {
+		if pc := sub.PendingCount; pc != 0 {
+			t.Fatalf("Pending count of subID: %v should be 0, got %v", sub.AckInbox, pc)
+		}
+	}
+
+	s.Shutdown()
+	s = runServerWithOpts(t, opts, nil)
+
+	waitForAcks(t, s, clientName, 1, 0)
+	waitForAcks(t, s, clientName, 2, 0)
 }
