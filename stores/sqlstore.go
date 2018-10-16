@@ -817,7 +817,8 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 		var (
 			channelID int64
 			name      string
-			maxseq    uint64
+			maxseq    uint64 // We get that from the Channels table.
+			mmseq     uint64 // This is the max seq found in the Messages table for given channel.
 		)
 		if err := channelRows.Scan(&channelID, &name, &maxseq); err != nil {
 			return nil, err
@@ -826,6 +827,16 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 		channelLimits := s.genericStore.getChannelLimits(name)
 
 		msgStore := s.newSQLMsgStore(name, channelID, &channelLimits.MsgStoreLimits)
+
+		// We need to get the last seq from messages table before possibly expiring messages.
+		r = s.preparedStmts[sqlGetLastSeq].QueryRow(channelID)
+		if err := r.Scan(&mmseq); err != nil {
+			return nil, sqlStmtError(sqlGetLastSeq, err)
+		}
+		// If it is more than the one that was updated in the Channel row, then use this one.
+		if mmseq > maxseq {
+			maxseq = mmseq
+		}
 
 		if err := s.applyLimitsOnRecovery(msgStore); err != nil {
 			return nil, err
@@ -846,10 +857,9 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 		msgStore.last = last
 		msgStore.totalCount = totalCount
 		msgStore.totalBytes = totalBytes
-		// If all messages have expired, the above should all be 0, however,
-		// the Channel table may contain a maxseq that we should use as starting
-		// point.
-		if msgStore.last == 0 {
+		// Since messages may have been removed due to limits, update first/last
+		// based on known max sequence.
+		if maxseq > msgStore.last {
 			msgStore.first = maxseq + 1
 			msgStore.last = maxseq
 		}
