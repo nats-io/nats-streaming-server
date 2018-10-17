@@ -3970,8 +3970,8 @@ func TestClusteringRaftDefaultTimeouts(t *testing.T) {
 	if electionTimeout != defaultRaftElectionTimeout {
 		t.Fatalf("Expected election timeout to be %v, got %v", defaultRaftElectionTimeout, electionTimeout)
 	}
-	if leaseTimeout != defaultRaftLeastTimeout {
-		t.Fatalf("Expected lease timeout to be %v, got %v", defaultRaftLeastTimeout, leaseTimeout)
+	if leaseTimeout != defaultRaftLeaseTimeout {
+		t.Fatalf("Expected lease timeout to be %v, got %v", defaultRaftLeaseTimeout, leaseTimeout)
 	}
 	if commitTimeout != defaultRaftCommitTimeout {
 		t.Fatalf("Expected commit timeout to be %v, got %v", defaultRaftCommitTimeout, commitTimeout)

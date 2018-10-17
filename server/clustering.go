@@ -31,7 +31,7 @@ const (
 	defaultJoinRaftGroupTimeout = time.Second
 	defaultRaftHBTimeout        = 2 * time.Second
 	defaultRaftElectionTimeout  = 2 * time.Second
-	defaultRaftLeastTimeout     = time.Second
+	defaultRaftLeaseTimeout     = time.Second
 	defaultRaftCommitTimeout    = 100 * time.Millisecond
 )
 
@@ -298,7 +298,7 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 			s.opts.Clustering.RaftElectionTimeout = defaultRaftElectionTimeout
 		}
 		if s.opts.Clustering.RaftLeaseTimeout == 0 {
-			s.opts.Clustering.RaftLeaseTimeout = defaultRaftLeastTimeout
+			s.opts.Clustering.RaftLeaseTimeout = defaultRaftLeaseTimeout
 		}
 		if s.opts.Clustering.RaftCommitTimeout == 0 {
 			s.opts.Clustering.RaftCommitTimeout = defaultRaftCommitTimeout
