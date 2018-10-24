@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,6 +233,26 @@ func TestMonitorServerz(t *testing.T) {
 	}
 	if sz.TotalBytes != totalBytes {
 		t.Fatalf("Expected %v bytes, got %v", totalBytes, sz.TotalBytes)
+	}
+	if runtime.GOOS == "linux" {
+		if sz.OpenFDs == 0 {
+			t.Fatalf("Expected more than 0 open files, got %v", sz.OpenFDs)
+		}
+		if sz.MaxFDs == 0 {
+			t.Fatalf("Expected open files limit to be bigger than 0, got %v", sz.MaxFDs)
+		}
+	} else {
+		if sz.OpenFDs != 0 {
+			t.Fatalf("Expected 0 open files, got %v", sz.OpenFDs)
+		}
+		if sz.MaxFDs != 0 {
+			t.Fatalf("Expected open files limit to 0, got %v", sz.MaxFDs)
+		}
+		// Not only check that values are expected to be 0, but that we don't even
+		// find them in the json content (omitempty)
+		if strings.Contains(string(body), "max_fds") || strings.Contains(string(body), "open_fds") {
+			t.Fatal("open_fds and max_fds should be omitempty")
+		}
 	}
 	resp.Body.Close()
 
