@@ -3235,8 +3235,13 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error
 	if ms.firstMsg != nil && ms.firstMsg.Timestamp >= timestamp {
 		return ms.first, nil
 	}
-	if ms.lastMsg != nil && timestamp >= ms.lastMsg.Timestamp {
-		return ms.last + 1, nil
+	if ms.lastMsg != nil {
+		if timestamp > ms.lastMsg.Timestamp {
+			return ms.last + 1, nil
+		}
+		if timestamp == ms.lastMsg.Timestamp {
+			return ms.last, nil
+		}
 	}
 
 	smallest := int64(-1)
@@ -3246,7 +3251,10 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error
 			return 0, err
 		}
 		mindex := ms.getMsgIndex(slice, slice.firstSeq)
-		if timestamp >= mindex.timestamp {
+		if timestamp == mindex.timestamp {
+			ms.unlockIndexFile(slice)
+			return slice.firstSeq, nil
+		} else if timestamp > mindex.timestamp {
 			mindex = ms.getMsgIndex(slice, slice.lastSeq)
 			if timestamp <= mindex.timestamp {
 				// Could do binary search, but will be probably more efficient
@@ -3261,6 +3269,8 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error
 						return seq, nil
 					}
 				}
+				ms.unlockIndexFile(slice)
+				return slice.lastSeq, nil
 			}
 		} else if smallest == -1 || mindex.timestamp < smallest {
 			smallest = mindex.timestamp
