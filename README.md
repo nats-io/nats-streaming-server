@@ -475,7 +475,7 @@ streaming {
 }
 ```
 
-In the example abve, the configuration assumes no existing NATS Cluster and therefore configure the
+In the example above, the configuration assumes no existing NATS Cluster and therefore configure the
 NATS routes between each node. Should you want to use an existing NATS cluster, do not include the
 "NATS specific configuration" section, instead, add `nats_server_url` in the `streaming` section
 to point to the NATS server you want.
