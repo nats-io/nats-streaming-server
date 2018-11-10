@@ -3892,7 +3892,10 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 	subs := client.subs
 	clientID := client.info.ID
 	client.RUnlock()
-	var storesToFlush map[string]stores.SubStore
+	var (
+		storesToFlush map[string]stores.SubStore
+		channels      = map[string]struct{}{}
+	)
 	for _, sub := range subs {
 		sub.RLock()
 		subject := sub.subject
@@ -3915,6 +3918,7 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 			}
 			storesToFlush[subject] = subStore
 		}
+		channels[subject] = struct{}{}
 	}
 	if len(storesToFlush) > 0 {
 		for subject, subStore := range storesToFlush {
@@ -3922,6 +3926,9 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 				s.log.Errorf("[Client:%s] Error flushing store while removing subscriptions: subject=%s, err=%v", clientID, subject, err)
 			}
 		}
+	}
+	for channel := range channels {
+		s.channels.maybeStartChannelDeleteTimer(channel, nil)
 	}
 }
 
