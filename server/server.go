@@ -3893,7 +3893,7 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 	clientID := client.info.ID
 	client.RUnlock()
 	var (
-		storesToFlush map[string]stores.SubStore
+		storesToFlush = map[string]stores.SubStore{}
 		channels      = map[string]struct{}{}
 	)
 	for _, sub := range subs {
@@ -3913,9 +3913,6 @@ func (s *StanServer) removeAllNonDurableSubscribers(client *client) {
 		// so we will want to flush the store. In clustering, during replay,
 		// subStore may be nil.
 		if isDurable && subStore != nil {
-			if storesToFlush == nil {
-				storesToFlush = make(map[string]stores.SubStore, 16)
-			}
 			storesToFlush[subject] = subStore
 		}
 		channels[subject] = struct{}{}
