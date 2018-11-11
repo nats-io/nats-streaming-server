@@ -526,7 +526,9 @@ that the RAFT state can be recovered along with the Streaming state.
 
 To minimize the single point of failure, NATS Streaming server can be run in Fault Tolerance mode. It works by having a group
 of servers with one acting as the active server (accessing the store) and handling all communication with clients, and all others
-acting as standby servers. It is important to note that is not possible to run Nats Stream as Fault Tolerance mode and Clustering mode at the same time.
+acting as standby servers. 
+
+It is important to note that is not possible to run Nats Stream as Fault Tolerance mode and Clustering mode at the same time.
 
 To start a server in Fault Tolerance (FT) mode, you specify an FT group name.
 
