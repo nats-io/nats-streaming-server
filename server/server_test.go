@@ -291,7 +291,7 @@ func waitFor(t tLogger, totalWait, waitInBetween time.Duration, f func() error) 
 		time.Sleep(waitInBetween)
 	}
 	if err != nil {
-		t.Fatalf(err.Error())
+		stackFatalf(t, err.Error())
 	}
 }
 

@@ -14,6 +14,7 @@
 package server
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -735,4 +736,55 @@ func TestMaxInactivity(t *testing.T) {
 	verifyChannelExist(t, s, "c10", false, 2*opts.MaxInactivity)
 
 	sc.Close()
+}
+
+func TestMaxInactivityOnConnectionClose(t *testing.T) {
+	o := GetDefaultOptions()
+	o.MaxInactivity = 250 * time.Millisecond
+	o.ClientHBInterval = 100 * time.Millisecond
+	o.ClientHBTimeout = 50 * time.Millisecond
+	o.ClientHBFailCount = 2
+	s := runServerWithOpts(t, o, nil)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if s.channels.get("foo") == nil {
+		t.Fatalf("Channel should exit")
+	}
+	// Close connection without closing subscription
+	sc.Close()
+	// Wait for server to remove...
+	waitForNumClients(t, s, 0)
+	// Wait for channel to be removed
+	waitFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		if s.channels.get("foo") != nil {
+			return fmt.Errorf("Channel should have been removed")
+		}
+		return nil
+	})
+	sc.Close()
+
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if s.channels.get("foo") == nil {
+		t.Fatalf("Channel should exit")
+	}
+	// Close NATS connection to cause server to remove it
+	sc.NatsConn().Close()
+	// Wait for server to remove...
+	waitForNumClients(t, s, 0)
+	// Wait for channel to be removed
+	waitFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+		if s.channels.get("foo") != nil {
+			return fmt.Errorf("Channel should have been removed")
+		}
+		return nil
+	})
 }
