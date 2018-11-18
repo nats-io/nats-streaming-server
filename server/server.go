@@ -124,7 +124,7 @@ const (
 	// pending sent/ack operations that needs to be replicated.
 	defaultLazyReplicationInterval = time.Second
 
-	defaultNatsClientMaxPingsOut = 0
+	defaultNatsClientMaxPingsOut  = 0
 	defaultNatsClientPingInterval = 0
 )
 
@@ -1096,34 +1096,34 @@ func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 
 // Options for NATS Streaming Server
 type Options struct {
-	ID                 string
-	DiscoverPrefix     string
-	StoreType          string
-	FilestoreDir       string
-	FileStoreOpts      stores.FileStoreOptions
-	SQLStoreOpts       stores.SQLStoreOptions
-	stores.StoreLimits               // Store limits (MaxChannels, etc..)
-	EnableLogging      bool          // Enables logging
-	CustomLogger       logger.Logger // Server will start with the provided logger
-	Trace              bool          // Verbose trace
-	Debug              bool          // Debug trace
-	HandleSignals      bool          // Should the server setup a signal handler (for Ctrl+C, etc...)
-	Secure             bool          // Create a TLS enabled connection w/o server verification
-	ClientCert         string        // Client Certificate for TLS
-	ClientKey          string        // Client Key for TLS
-	ClientCA           string        // Client CAs for TLS
-	IOBatchSize        int           // Maximum number of messages collected from clients before starting their processing.
-	IOSleepTime        int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
-	NATSServerURL      string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
-	ClientHBInterval   time.Duration // Interval at which server sends heartbeat to a client.
-	ClientHBTimeout    time.Duration // How long server waits for a heartbeat response.
-	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
-	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
-	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
-	SyslogName         string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
-	Clustering         ClusteringOptions
+	ID                     string
+	DiscoverPrefix         string
+	StoreType              string
+	FilestoreDir           string
+	FileStoreOpts          stores.FileStoreOptions
+	SQLStoreOpts           stores.SQLStoreOptions
+	stores.StoreLimits                   // Store limits (MaxChannels, etc..)
+	EnableLogging          bool          // Enables logging
+	CustomLogger           logger.Logger // Server will start with the provided logger
+	Trace                  bool          // Verbose trace
+	Debug                  bool          // Debug trace
+	HandleSignals          bool          // Should the server setup a signal handler (for Ctrl+C, etc...)
+	Secure                 bool          // Create a TLS enabled connection w/o server verification
+	ClientCert             string        // Client Certificate for TLS
+	ClientKey              string        // Client Key for TLS
+	ClientCA               string        // Client CAs for TLS
+	IOBatchSize            int           // Maximum number of messages collected from clients before starting their processing.
+	IOSleepTime            int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
+	NATSServerURL          string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
+	ClientHBInterval       time.Duration // Interval at which server sends heartbeat to a client.
+	ClientHBTimeout        time.Duration // How long server waits for a heartbeat response.
+	ClientHBFailCount      int           // Number of failed heartbeats before server closes client connection.
+	FTGroupName            string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+	Partitioning           bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
+	SyslogName             string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
+	Clustering             ClusteringOptions
 	NatsClientPingInterval uint
-	NatsClientMaxPingsOut int
+	NatsClientMaxPingsOut  int
 }
 
 // Clone returns a deep copy of the Options object.
