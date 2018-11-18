@@ -16,7 +16,6 @@ package server
 import (
 	"flag"
 	"fmt"
-	"github.com/nats-io/go-nats"
 	"reflect"
 	"strconv"
 	"strings"
