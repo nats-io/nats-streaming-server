@@ -1122,8 +1122,8 @@ type Options struct {
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
 	SyslogName         string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
 	Clustering         ClusteringOptions
-	NCPingInterval     uint
-	NCMaxPingsOut      int
+	NCPingInterval     uint //Optional config that change value Ping interval of nats client. This config is defined in seconds. Default value is 2 minutes.
+	NCMaxPingsOut      int  //Optional config that change value Max  pings out of nats client. Default value is 2.
 }
 
 // Clone returns a deep copy of the Options object.

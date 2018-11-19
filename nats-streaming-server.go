@@ -48,6 +48,8 @@ Streaming Server Options:
     -hbf, --hb_fail_count <int>       Number of failed heartbeats before server closes the client connection
           --ft_group <string>         Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
     -sl,  --signal <signal>[=<pid>]   Send signal to nats-streaming-server process (stop, quit, reopen)
+    -npi, --nc_ping_interval <uint>   NATS Client ping interval in seconds. If not informed, NATS Streaming considers the NATS Client default value.
+    -npo, --nc_max_pings_out <int>    NATS Client max pings out. If not informed, NATS Streaming considers the NATS Client default value.
 
 Streaming Server Clustering Options:
     --clustered <bool>                   Run the server in a clustered configuration (default: false)
