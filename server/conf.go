@@ -149,6 +149,12 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 			if err := parseCluster(v, opts); err != nil {
 				return err
 			}
+		// config file support "consul" define  ---2018-11-27
+		case "consul":
+                       if err := checkType(k, reflect.String, v); err != nil {
+                               return err
+                       }
+                       opts.ConsulServerURL = v.(string)
 		}
 	}
 	return nil
