@@ -1182,8 +1182,13 @@ func (s *StanServer) stanClosedHandler(nc *nats.Conn) {
 }
 
 func (s *StanServer) stanErrorHandler(nc *nats.Conn, sub *nats.Subscription, err error) {
-	s.log.Errorf("Asynchronous error on connection %s, subject %s: %s",
-		nc.Opts.Name, sub.Subject, err)
+	if sub != nil {
+		s.log.Errorf("Asynchronous error on connection %s, subject %s: %v",
+			nc.Opts.Name, sub.Subject, err)
+	} else {
+		s.log.Errorf("Asynchronous error on connection %s: %v",
+			nc.Opts.Name, err)
+	}
 }
 
 func (s *StanServer) buildServerURLs() ([]string, error) {
