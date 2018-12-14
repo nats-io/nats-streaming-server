@@ -1174,7 +1174,7 @@ sc.exe create nss1 binPath="\"c:\nats-io\nats-streaming\nats-streaming-server.ex
 
 sc.exe create nss2 binPath="\"c:\nats-io\nats-streaming\nats-streaming-server.exe\" --syslog --syslog_name=nss2 -p 4223"
 ```
-By default, wif no logfile is specified, the server will use the system log. The default event source name is `NATS-Streaming-Server`.
+By default, when no logfile is specified, the server will use the system log. The default event source name is `NATS-Streaming-Server`.
 However, you can specify the name you want, which is especially useful when installing more than one service as described above.
 
 Once the service is running, it can be controlled using `sc.exe` or `nats-streaming-server.exe -sl`:
