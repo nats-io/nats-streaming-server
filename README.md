@@ -717,7 +717,7 @@ If no server is handling this channel, no specific error is returned, instead th
 Same goes for message acknowledgements. Only the server handling the subscription on this channel should
 receive those.
 
-However, other client requests (such has connection and subscription requests) are received by all servers.
+However, other client requests (such as connection and subscription requests) are received by all servers.
 For connections, all servers handle them and the client library will receive a response from all servers in the
 cluster, but use the first one that it received.<br>
 For subscriptions, a server receiving the request for a channel that it does not handle will simply ignore
