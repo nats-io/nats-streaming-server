@@ -1336,6 +1336,8 @@ Streaming Server Options:
     -hbf, --hb_fail_count <int>       Number of failed heartbeats before server closes the client connection
           --ft_group <string>         Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
     -sl,  --signal <signal>[=<pid>]   Send signal to nats-streaming-server process (stop, quit, reopen)
+    -npi, --nc_ping_interval <uint>   NATS Client ping interval in seconds. If not informed, NATS Streaming considers the NATS Client default value.
+    -npo, --nc_max_pings_out <int>    NATS Client max pings out. If not informed, NATS Streaming considers the NATS Client default value.
 
 Streaming Server Clustering Options:
     --clustered <bool>                   Run the server in a clustered configuration (default: false)
@@ -1491,6 +1493,9 @@ In general the configuration parameters are the same as the command line argumen
 | hb_interval | Interval at which the server sends an heartbeat to a client | Duration | `hb_interval: "10s"` |
 | hb_timeout | How long the server waits for a heartbeat response from the client before considering it a failed heartbeat | Duration | `hb_timeout: "10s"` |
 | hb_fail_count | Count of failed heartbeats before server closes the client connection. The actual total wait is: (fail count + 1) * (hb interval + hb timeout) | Number | `hb_fail_count: 2` |
+| nc_ping_interval | NATS Client ping interval in seconds. If not informed, NATS Streaming considers the NATS Client default value. | Number > 0 | `nc_ping_interval: 2` |
+| nc_max_pings_out | NATS Client max pings out. If not informed, NATS Streaming considers the NATS Client default value. | Number > 0 | `nc_max_pings_out: 4` |
+
 | ft_group | In Fault Tolerance mode, you can start a group of streaming servers with only one server being active while others are running in standby mode. This is the name of this FT group | String | `ft_group: "my_ft_group"` |
 | partitioning | If set to true, a list of channels must be defined in store_limits/channels section. This section then serves two purposes, overriding limits for a given channel or adding it to the partition | `true` or `false` | `partitioning: true` |
 | cluster | Cluster Configuration | Map: `cluster: { ... }` | **See details below** |

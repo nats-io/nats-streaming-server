@@ -123,6 +123,9 @@ const (
 	// Interval at which server goes through list of subscriptions with
 	// pending sent/ack operations that needs to be replicated.
 	defaultLazyReplicationInterval = time.Second
+
+	defaultNatsClientMaxPingsOut  = 0
+	defaultNatsClientPingInterval = 0
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -1119,6 +1122,8 @@ type Options struct {
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
 	SyslogName         string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
 	Clustering         ClusteringOptions
+	NCPingInterval     uint //Optional config that change value Ping interval of nats client. This config is defined in seconds. Default value is 2 minutes.
+	NCMaxPingsOut      int  //Optional config that change value Max  pings out of nats client. Default value is 2.
 }
 
 // Clone returns a deep copy of the Options object.
@@ -1286,6 +1291,15 @@ func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 			return nil, err
 		}
 	}
+
+	if s.opts.NCPingInterval > 0 {
+		ncOpts.PingInterval = time.Duration(s.opts.NCPingInterval) * time.Second
+	}
+
+	if s.opts.NCMaxPingsOut > 0 {
+		ncOpts.MaxPingsOut = s.opts.NCMaxPingsOut
+	}
+
 	// Shorten the time we wait to try to reconnect.
 	// Don't make it too often because it may exhaust the number of FDs.
 	ncOpts.ReconnectWait = 250 * time.Millisecond

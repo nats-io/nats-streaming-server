@@ -154,6 +154,16 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.SyslogName = v.(string)
+		case "npo", "nc_max_pings_out", "nats_client_max_pings_out":
+			if err := checkType(k, reflect.Int, v); err != nil {
+				return err
+			}
+			opts.NCMaxPingsOut = v.(int)
+		case "npi", "nc_ping_interval", "nats_client_ping_interval":
+			if err := checkType(k, reflect.Uint, v); err != nil {
+				return err
+			}
+			opts.NCPingInterval = v.(uint)
 		}
 	}
 	return nil
@@ -600,6 +610,8 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.BoolVar(&sopts.SQLStoreOpts.NoCaching, "sql_no_caching", defSQLOpts.NoCaching, "Enable/Disable caching")
 	fs.IntVar(&sopts.SQLStoreOpts.MaxOpenConns, "sql_max_open_conns", defSQLOpts.MaxOpenConns, "Max opened connections to the database")
 	fs.StringVar(&sopts.SyslogName, "syslog_name", "", "Syslog Name")
+	fs.IntVar(&sopts.NCMaxPingsOut, "nc_max_pings_out", defaultNatsClientMaxPingsOut, "NATS Client max pings out before try to reconnect")
+	fs.UintVar(&sopts.NCPingInterval, "nc_ping_interval", defaultNatsClientPingInterval, "NATS Client ping interval in seconds")
 
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
 	// It will be augmented with NATS specific flags and call fs.Parse(args) for us.
