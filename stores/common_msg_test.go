@@ -536,6 +536,19 @@ func TestCSGetSeqFromStartTime(t *testing.T) {
 			if seq != msgs[count-1].Sequence+1 {
 				t.Fatalf("Expected seq to be %v, got %v", msgs[count-1].Sequence+1, seq)
 			}
+
+			lastMsg := msgs[len(msgs)-1]
+			seq = msgStoreGetSequenceFromTimestamp(t, cs.Msgs, lastMsg.Timestamp)
+			if seq != lastMsg.Sequence {
+				t.Fatalf("Invalid last sequence. Expected %v got %v", lastMsg.Sequence, seq)
+			}
+
+			firstMsg := msgs[0]
+			seq = msgStoreGetSequenceFromTimestamp(t, cs.Msgs, firstMsg.Timestamp)
+			if seq != firstMsg.Sequence {
+				t.Fatalf("Invalid first sequence. Expected %v got %v", firstMsg.Sequence, seq)
+			}
+
 			// Wait for all messages to expire
 			deadline := time.Now().Add(2 * time.Second)
 			var n int
