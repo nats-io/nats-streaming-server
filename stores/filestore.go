@@ -3232,53 +3232,59 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error
 		return ms.last + 1, nil
 	}
 	// If we have some state, try to quickly get the sequence
-	if ms.firstMsg != nil && ms.firstMsg.Timestamp >= timestamp {
+	if ms.firstMsg != nil && timestamp <= ms.firstMsg.Timestamp {
 		return ms.first, nil
 	}
 	if ms.lastMsg != nil {
-		if timestamp > ms.lastMsg.Timestamp {
-			return ms.last + 1, nil
-		}
 		if timestamp == ms.lastMsg.Timestamp {
 			return ms.last, nil
 		}
+		if timestamp > ms.lastMsg.Timestamp {
+			return ms.last + 1, nil
+		}
 	}
-
-	smallest := int64(-1)
 	// This will require disk access.
-	for _, slice := range ms.files {
+	for i := ms.firstFSlSeq; i <= ms.lastFSlSeq; i++ {
+		// support possible missing slices
+		slice := ms.files[i]
+		if slice == nil {
+			continue
+		}
 		if err := ms.lockIndexFile(slice); err != nil {
 			return 0, err
 		}
-		mindex := ms.getMsgIndex(slice, slice.firstSeq)
-		if timestamp == mindex.timestamp {
-			ms.unlockIndexFile(slice)
-			return slice.firstSeq, nil
-		} else if timestamp > mindex.timestamp {
-			mindex = ms.getMsgIndex(slice, slice.lastSeq)
-			if timestamp <= mindex.timestamp {
+		seq := slice.firstSeq
+		firstMsgInSlice := ms.getMsgIndex(slice, seq)
+		if timestamp > firstMsgInSlice.timestamp {
+			seq = slice.lastSeq
+			lastMsgInSlice := ms.getMsgIndex(slice, seq)
+			if timestamp > lastMsgInSlice.timestamp {
+				// Not there, move to the next slice.
+				ms.unlockIndexFile(slice)
+				continue
+			}
+			// It may be equal, so search only if strictly lower
+			if timestamp < lastMsgInSlice.timestamp {
+				// We know that the timestamp is somewhere in this slice.
+
 				// Could do binary search, but will be probably more efficient
 				// to do sequential disk reads. The index records are small,
 				// so read of a record will probably bring many consecutive ones
 				// in the system's disk cache, resulting in memory-only access
 				// for the following indexes...
-				for seq := slice.firstSeq + 1; seq < slice.lastSeq; seq++ {
-					mindex = ms.getMsgIndex(slice, seq)
+				for seq = slice.firstSeq + 1; seq <= slice.lastSeq-1; seq++ {
+					mindex := ms.getMsgIndex(slice, seq)
 					if mindex.timestamp >= timestamp {
-						ms.unlockIndexFile(slice)
-						return seq, nil
+						break
 					}
 				}
-				ms.unlockIndexFile(slice)
-				return slice.lastSeq, nil
 			}
-		} else if smallest == -1 || mindex.timestamp < smallest {
-			smallest = mindex.timestamp
 		}
 		ms.unlockIndexFile(slice)
-	}
-	if timestamp < smallest {
-		return ms.first, nil
+		// We are here if the timestamp is smaller than the first
+		// message in the first slice, or we have found the first
+		// sequence that is >= timestamp.
+		return seq, nil
 	}
 	return ms.last + 1, nil
 }
