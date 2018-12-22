@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -909,4 +910,76 @@ func TestGetNATSOptions(t *testing.T) {
 		t.Fatalf("Error on connect: %v", err)
 	}
 	sc.Close()
+}
+
+func TestRunServerWithCrypto(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	opts := getTestDefaultOptsForPersistentStore()
+	opts.Encrypt = true
+
+	s, err := RunServerWithOpts(opts, nil)
+	if s != nil || err == nil {
+		if s != nil {
+			s.Shutdown()
+		}
+		t.Fatalf("Expected no server and error, got %v %v", s, err)
+	}
+
+	opts.EncryptionKey = []byte("testkey")
+	s = runServerWithOpts(t, opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc, nc := createConnectionWithNatsOpts(t, clientName, nats.ReconnectWait(50*time.Millisecond))
+	defer sc.Close()
+	defer nc.Close()
+
+	msg := []byte("hello")
+	if err := sc.Publish("foo", msg); err != nil {
+		t.Fatalf("Unexpected error on publish: %v", err)
+	}
+
+	msgCh := make(chan *stan.Msg, 1)
+	if _, err := sc.Subscribe("foo", func(m *stan.Msg) {
+		msgCh <- m
+		m.Sub.Close()
+	}, stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	select {
+	case m := <-msgCh:
+		if !reflect.DeepEqual(m.Data, msg) {
+			t.Fatalf("Unexpected message, got %s", m.Data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Did not receive message")
+	}
+
+	s.Shutdown()
+
+	// Restart without encryption, should get encrypted content.
+	// Do not use test's runServerWithOpts() because it would
+	// set the encryption key by default.
+	opts.Encrypt = false
+	opts.EncryptionKey = nil
+	s, err = RunServerWithOpts(opts, nil)
+	if err != nil {
+		t.Fatalf("Error starting server: %v", err)
+	}
+
+	if _, err := sc.Subscribe("foo", func(m *stan.Msg) {
+		msgCh <- m
+		m.Sub.Close()
+	}, stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	select {
+	case m := <-msgCh:
+		if reflect.DeepEqual(m.Data, msg) {
+			t.Fatalf("Unexpected message, got %s", m.Data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Did not receive message")
+	}
 }

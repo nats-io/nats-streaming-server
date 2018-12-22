@@ -25,6 +25,7 @@ NATS Streaming provides the following high-level feature set.
             * [Queue Group](#queue-group)
             * [Redelivery](#redelivery)
     * [Store Interface](#store-interface)
+    * [Store Encryption](#store-encryption)
     * [Clustering](#clustering)
         * [Supported Stores](#supported-stores)
         * [Clustering Configuration](#clustering-configuration)
@@ -316,6 +317,52 @@ If you wish to contribute to a new store type, your implementation must include 
 The memory and the provided file store implementations both use a generic store implementation to avoid code duplication.
 When writing your own store implementation, you can do the same for APIs that don't need to do more than what the generic implementation provides.
 You can check [MemStore](https://github.com/nats-io/nats-streaming-server/blob/master/stores/memstore.go) and [FileStore](https://github.com/nats-io/nats-streaming-server/blob/master/stores/filestore.go) implementations for more details.
+
+## Store Encryption
+
+The server can be configured to encrypt a message's payload when storing them, providing encryption at rest.
+This can be done from the command line or from the configuration file. Check `encrypt` and `encryption_key`
+in the [Configuring](#configuring) section.
+
+It is recommended to provide the encryption key through the environment variable `NATS_STREAMING_ENCRYPTION_KEY`
+instead of `encryption_key`. If encryption is enabled and `NATS_STREAMING_ENCRYPTION_KEY` is found, this
+will take precedence over `encryption_key` value.
+
+You can pass this from the command line this way:
+```
+$ env NATS_STREAMING_ENCRYPTION_KEY="mykey" nats-streaming-server -store file -dir datastore -encrypt
+```
+
+We currently support two ciphers for encryption: [AES](https://godoc.org/crypto/aes) and [CHACHA](https://godoc.org/golang.org/x/crypto/chacha20poly1305).
+The default selected cipher depends on the platform. For ARM, we use `CHACHA`, otherwise
+we default to `AES`. You can always override that decision by explicitly specifying the cipher like this:
+```
+$ env NATS_STREAMING_ENCRYPTION_KEY="mykey" nats-streaming-server -store file -dir datastore -encrypt -encryption_cipher "CHACHA"
+```
+or, to select `AES`:
+```
+$ env NATS_STREAMING_ENCRYPTION_KEY="mykey" nats-streaming-server -store file -dir datastore -encrypt -encryption_cipher "AES"
+```
+
+Note that only message payload is encrypted, all other data stored by NATS Streaming server is not.
+
+When running in clustering mode (see below), the server uses RAFT, which uses its own log files.
+Those will be encrypted too.
+
+Starting a server with `encrypt` against a datastore that was not encrypted may result in failures
+when it comes to decrypt a message, which may not happen immediately upon startup. Instead,
+it will happen when attempting to deliver messages to consumers. However, when possible, the
+server will detect if the data was not encrypted and return the data without attempting to decrypt it.
+The server will also detect which cipher was used to encrypt the data and use the proper cipher
+to decrypt, even if this is not the currently selected cipher.
+
+If the data is encrypted with a key and the server is restarted with a different key, the
+server will fail to decrypt messages when attempting to load them from the store.
+
+Performance considerations: As expected, encryption is likely to decrease performance, but by how much is hard
+to define. In some performance tests on a MacbookPro 2.8 GHz Intel Core i7 with SSD, we have
+observed as little as 1% decrease to more than 30%. In addition to CPU cycles required for encryption,
+the encrypted payload is bigger, which result in more data being stored or read.
 
 ## Clustering
 
@@ -1320,22 +1367,25 @@ The NATS Streaming Server accepts command line arguments to control its behavior
 Usage: nats-streaming-server [options]
 
 Streaming Server Options:
-    -cid, --cluster_id  <string>      Cluster ID (default: test-cluster)
-    -st,  --store <string>            Store type: MEMORY|FILE|SQL (default: MEMORY)
-          --dir <string>              For FILE store type, this is the root directory
-    -mc,  --max_channels <int>        Max number of channels (0 for unlimited)
-    -msu, --max_subs <int>            Max number of subscriptions per channel (0 for unlimited)
-    -mm,  --max_msgs <int>            Max number of messages per channel (0 for unlimited)
-    -mb,  --max_bytes <size>          Max messages total size per channel (0 for unlimited)
-    -ma,  --max_age <duration>        Max duration a message can be stored ("0s" for unlimited)
-    -mi,  --max_inactivity <duration> Max inactivity (no new message, no subscription) after which a channel can be garbage collected (0 for unlimited)
-    -ns,  --nats_server <string>      Connect to this external NATS Server URL (embedded otherwise)
-    -sc,  --stan_config <string>      Streaming server configuration file
-    -hbi, --hb_interval <duration>    Interval at which server sends heartbeat to a client
-    -hbt, --hb_timeout <duration>     How long server waits for a heartbeat response
-    -hbf, --hb_fail_count <int>       Number of failed heartbeats before server closes the client connection
-          --ft_group <string>         Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
-    -sl,  --signal <signal>[=<pid>]   Send signal to nats-streaming-server process (stop, quit, reopen)
+    -cid, --cluster_id  <string>         Cluster ID (default: test-cluster)
+    -st,  --store <string>               Store type: MEMORY|FILE|SQL (default: MEMORY)
+          --dir <string>                 For FILE store type, this is the root directory
+    -mc,  --max_channels <int>           Max number of channels (0 for unlimited)
+    -msu, --max_subs <int>               Max number of subscriptions per channel (0 for unlimited)
+    -mm,  --max_msgs <int>               Max number of messages per channel (0 for unlimited)
+    -mb,  --max_bytes <size>             Max messages total size per channel (0 for unlimited)
+    -ma,  --max_age <duration>           Max duration a message can be stored ("0s" for unlimited)
+    -mi,  --max_inactivity <duration>    Max inactivity (no new message, no subscription) after which a channel can be garbage collected (0 for unlimited)
+    -ns,  --nats_server <string>         Connect to this external NATS Server URL (embedded otherwise)
+    -sc,  --stan_config <string>         Streaming server configuration file
+    -hbi, --hb_interval <duration>       Interval at which server sends heartbeat to a client
+    -hbt, --hb_timeout <duration>        How long server waits for a heartbeat response
+    -hbf, --hb_fail_count <int>          Number of failed heartbeats before server closes the client connection
+          --ft_group <string>            Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore
+    -sl,  --signal <signal>[=<pid>]      Send signal to nats-streaming-server process (stop, quit, reopen)
+          --encrypt <bool>               Specify if server should use encryption at rest
+          --encryption_cipher <string>   Cipher to use for encryption. Currently support AES and CHAHA (ChaChaPoly). Defaults to AES
+          --encryption_key <sting>       Encryption Key. It is recommended to specify it through the NATS_STREAMING_ENCRYPTION_KEY environment variable instead
 
 Streaming Server Clustering Options:
     --clustered <bool>                   Run the server in a clustered configuration (default: false)
@@ -1494,6 +1544,9 @@ In general the configuration parameters are the same as the command line argumen
 | ft_group | In Fault Tolerance mode, you can start a group of streaming servers with only one server being active while others are running in standby mode. This is the name of this FT group | String | `ft_group: "my_ft_group"` |
 | partitioning | If set to true, a list of channels must be defined in store_limits/channels section. This section then serves two purposes, overriding limits for a given channel or adding it to the partition | `true` or `false` | `partitioning: true` |
 | cluster | Cluster Configuration | Map: `cluster: { ... }` | **See details below** |
+| encrypt | Specify if server should encrypt messages (only the payload) when storing them | `true` or `false` | `encrypt: true` |
+| encryption_cipher | Cipher to use for encryption. Currently support AES and CHAHA (ChaChaPoly). Defaults to AES | `AES` or `CHACHA` | `encryption_cipher: "AES"` |
+| encryption_key | Encryption key. It is recommended to specify the key through the `NATS_STREAMING_ENCRYPTION_KEY` environment variable instead | String | `encryption_key: "mykey"` |
 
 TLS Configuration:
 

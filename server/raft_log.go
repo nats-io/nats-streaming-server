@@ -14,9 +14,13 @@
 package server
 
 import (
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	mrand "math/rand"
 	"os"
 	"sync"
 	"time"
@@ -25,6 +29,8 @@ import (
 	"github.com/hashicorp/go-msgpack/codec"
 	"github.com/hashicorp/raft"
 	"github.com/nats-io/nats-streaming-server/logger"
+	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/nats-io/nats-streaming-server/util"
 )
 
 // Bucket names
@@ -50,9 +56,21 @@ type raftLog struct {
 	simpleDelThresholdLow  int
 	codec                  *codec.MsgpackHandle
 	closed                 bool
+
+	// Crypto specific fields
+	cipherCode     byte
+	gcm            cipher.AEAD
+	aesgcm         cipher.AEAD
+	chachagcm      cipher.AEAD
+	cryptoOverhead int
+	encryptBuf     []byte
+	nonce          []byte
+	nonceSize      int
+	nonceUsed      int64
+	nonceLimit     int64
 }
 
-func newRaftLog(log logger.Logger, fileName string, sync bool, trailingLogs int) (*raftLog, error) {
+func newRaftLog(log logger.Logger, fileName string, sync bool, trailingLogs int, encrypt bool, encryptionCipher string, encryptionKey []byte) (*raftLog, error) {
 	r := &raftLog{
 		log:                    log,
 		fileName:               fileName,
@@ -62,6 +80,27 @@ func newRaftLog(log logger.Logger, fileName string, sync bool, trailingLogs int)
 		simpleDelThresholdLow:  1000,
 		simpleDelThresholdHigh: 100000,
 		codec:                  &codec.MsgpackHandle{},
+	}
+	if encrypt {
+		code, ciphers, err := stores.CreateGCMs(encryptionCipher, encryptionKey)
+		if err != nil {
+			return nil, err
+		}
+		r.cipherCode = code
+		r.aesgcm = ciphers[stores.CryptoCodeAES]
+		r.chachagcm = ciphers[stores.CryptoCodeChaCha]
+		switch r.cipherCode {
+		case stores.CryptoCodeAES:
+			r.gcm = r.aesgcm
+		case stores.CryptoCodeChaCha:
+			r.gcm = r.chachagcm
+		}
+		// These values are same for the 2 ciphers we support.
+		r.cryptoOverhead = r.gcm.Overhead()
+		r.nonceSize = r.gcm.NonceSize()
+		if err := r.generateNewNonce(); err != nil {
+			return nil, err
+		}
 	}
 	conn, err := r.openAndSetOptions(fileName)
 	if err != nil {
@@ -73,6 +112,16 @@ func newRaftLog(log logger.Logger, fileName string, sync bool, trailingLogs int)
 		return nil, err
 	}
 	return r, nil
+}
+
+func (r *raftLog) generateNewNonce() error {
+	r.nonce = make([]byte, r.nonceSize)
+	if _, err := io.ReadFull(rand.Reader, r.nonce); err != nil {
+		return err
+	}
+	r.nonceUsed = 0
+	r.nonceLimit = mrand.Int63n(1e6) + 100000
+	return nil
 }
 
 func (r *raftLog) init() error {
@@ -101,16 +150,74 @@ func (r *raftLog) openAndSetOptions(fileName string) (*bolt.DB, error) {
 	return db, nil
 }
 
+func (r *raftLog) encrypt(data []byte) ([]byte, error) {
+	// Here we can reuse a buffer to encrypt because we know
+	// that the underlying is going to make a copy of the
+	// slice.
+	r.encryptBuf = util.EnsureBufBigEnough(r.encryptBuf, 1+r.nonceSize+r.cryptoOverhead+len(data))
+	r.encryptBuf[0] = r.cipherCode
+	copy(r.encryptBuf[1:], r.nonce)
+	copy(r.encryptBuf[1+r.nonceSize:], data)
+	dst := r.encryptBuf[1+r.nonceSize : 1+r.nonceSize+len(data)]
+	ret := r.gcm.Seal(dst[:0], r.nonce, dst, nil)
+	r.nonceUsed++
+	if r.nonceUsed >= r.nonceLimit {
+		if err := r.generateNewNonce(); err != nil {
+			return nil, err
+		}
+	}
+	return r.encryptBuf[:1+r.nonceSize+len(ret)], nil
+}
+
 func (r *raftLog) encodeRaftLog(in *raft.Log) ([]byte, error) {
+	var orgData []byte
+	if r.gcm != nil && len(in.Data) > 0 && in.Type == raft.LogCommand {
+		orgData = in.Data
+		ed, err := r.encrypt(in.Data)
+		if err != nil {
+			return nil, err
+		}
+		in.Data = ed
+	}
 	var buf []byte
 	enc := codec.NewEncoderBytes(&buf, r.codec)
 	err := enc.Encode(in)
+	if orgData != nil {
+		in.Data = orgData
+	}
 	return buf, err
 }
 
 func (r *raftLog) decodeRaftLog(buf []byte, log *raft.Log) error {
 	dec := codec.NewDecoderBytes(buf, r.codec)
-	return dec.Decode(log)
+	err := dec.Decode(log)
+	if err == nil && len(log.Data) > 0 && r.gcm != nil && log.Type == raft.LogCommand {
+		var gcm cipher.AEAD
+		if len(log.Data) > 0 {
+			switch log.Data[0] {
+			case stores.CryptoCodeAES:
+				gcm = r.aesgcm
+			case stores.CryptoCodeChaCha:
+				gcm = r.chachagcm
+			default:
+				// Anything else, assume no algo or something we don't know how to decrypt.
+				return nil
+			}
+		}
+		if len(log.Data) <= 1+r.nonceSize {
+			return fmt.Errorf("trying to decrypt data that is not (len=%v)", len(log.Data))
+		}
+		// My understanding is that log.Data is empty at beginning of this
+		// function and dec.Decode(log) will make a copy from buffer that
+		// comes from boltdb. So we can decrypt in place since we "own" log.Data.
+		cipherText := log.Data[1+r.nonceSize:]
+		dd, err := gcm.Open(cipherText[:0], log.Data[1:1+r.nonceSize], cipherText, nil)
+		if err != nil {
+			return err
+		}
+		log.Data = dd
+	}
+	return err
 }
 
 // Close implements the LogStore interface
@@ -195,10 +302,18 @@ func (r *raftLog) StoreLog(log *raft.Log) error {
 
 // StoreLogs implements the LogStore interface
 func (r *raftLog) StoreLogs(logs []*raft.Log) error {
-	r.RLock()
+	if r.gcm != nil {
+		r.Lock()
+	} else {
+		r.RLock()
+	}
 	tx, err := r.conn.Begin(true)
 	if err != nil {
-		r.RUnlock()
+		if r.gcm != nil {
+			r.Unlock()
+		} else {
+			r.RUnlock()
+		}
 		return err
 	}
 	for _, log := range logs {
@@ -222,7 +337,11 @@ func (r *raftLog) StoreLogs(logs []*raft.Log) error {
 	} else {
 		err = tx.Commit()
 	}
-	r.RUnlock()
+	if r.gcm != nil {
+		r.Unlock()
+	} else {
+		r.RUnlock()
+	}
 	return err
 }
 

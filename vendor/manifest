@@ -231,12 +231,57 @@
 			"notests": true
 		},
 		{
+			"importpath": "golang.org/x/crypto/chacha20poly1305",
+			"repository": "https://go.googlesource.com/crypto",
+			"vcs": "git",
+			"revision": "505ab145d0a99da450461ae2c1a9f6cd10d1f447",
+			"branch": "master",
+			"path": "/chacha20poly1305",
+			"notests": true
+		},
+		{
+			"importpath": "golang.org/x/crypto/internal/chacha20",
+			"repository": "https://go.googlesource.com/crypto",
+			"vcs": "git",
+			"revision": "505ab145d0a99da450461ae2c1a9f6cd10d1f447",
+			"branch": "master",
+			"path": "internal/chacha20",
+			"notests": true
+		},
+		{
+			"importpath": "golang.org/x/crypto/internal/subtle",
+			"repository": "https://go.googlesource.com/crypto",
+			"vcs": "git",
+			"revision": "505ab145d0a99da450461ae2c1a9f6cd10d1f447",
+			"branch": "master",
+			"path": "internal/subtle",
+			"notests": true
+		},
+		{
+			"importpath": "golang.org/x/crypto/poly1305",
+			"repository": "https://go.googlesource.com/crypto",
+			"vcs": "git",
+			"revision": "505ab145d0a99da450461ae2c1a9f6cd10d1f447",
+			"branch": "master",
+			"path": "poly1305",
+			"notests": true
+		},
+		{
 			"importpath": "golang.org/x/net/context",
 			"repository": "https://go.googlesource.com/net",
 			"vcs": "git",
 			"revision": "1c05540f6879653db88113bc4a2b70aec4bd491f",
 			"branch": "master",
 			"path": "/context",
+			"notests": true
+		},
+		{
+			"importpath": "golang.org/x/sys/cpu",
+			"repository": "https://go.googlesource.com/sys",
+			"vcs": "git",
+			"revision": "b4a75ba826a64a70990f11a225237acd6ef35c9f",
+			"branch": "master",
+			"path": "/cpu",
 			"notests": true
 		},
 		{
