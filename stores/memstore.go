@@ -167,7 +167,7 @@ func (ms *MemoryMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, err
 	if ms.first > ms.last {
 		return ms.last + 1, nil
 	}
-	if ms.msgs[ms.first].Timestamp >= timestamp {
+	if timestamp <= ms.msgs[ms.first].Timestamp {
 		return ms.first, nil
 	}
 	if timestamp == ms.msgs[ms.last].Timestamp {

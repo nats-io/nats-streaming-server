@@ -1743,3 +1743,49 @@ func TestFSRecoverEmptyIndexMsgFile(t *testing.T) {
 		t.Fatalf("Expected %v, got %v", msg, rm)
 	}
 }
+
+func TestFSGetSeqFromTimestamp(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t, SliceConfig(3, 0, 0, ""))
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+
+	var msgs []*pb.MsgProto
+	for i := 0; i < 7; i++ {
+		if i > 0 {
+			time.Sleep(50 * time.Millisecond)
+		}
+		msg := storeMsg(t, c, "foo", uint64(i+1), []byte("msg"))
+		msgs = append(msgs, msg)
+	}
+
+	for i := 0; i < 2; i++ {
+		seq := msgStoreGetSequenceFromTimestamp(t, c.Msgs, msgs[0].Timestamp-int64(time.Duration(time.Second)))
+		if seq != 1 {
+			t.Fatalf("Expected to get seq 1, got %v", seq)
+		}
+		seq = msgStoreGetSequenceFromTimestamp(t, c.Msgs, msgs[6].Timestamp+int64(time.Duration(time.Second)))
+		if seq != 8 {
+			t.Fatalf("Expected to get seq 8, got %v", seq)
+		}
+		seq = msgStoreGetSequenceFromTimestamp(t, c.Msgs, msgs[3].Timestamp+int64(10*time.Millisecond))
+		if seq != 5 {
+			t.Fatalf("Expected to get seq 5, got %v", seq)
+		}
+		seq = msgStoreGetSequenceFromTimestamp(t, c.Msgs, msgs[5].Timestamp)
+		if seq != 6 {
+			t.Fatalf("Expected to get seq 6, got %v", seq)
+		}
+
+		// Set firstMsg and lastMsg to nil and repeat those tests.
+		if i == 0 {
+			ms := getFileMsgStore(c.Msgs)
+			ms.Lock()
+			ms.firstMsg, ms.lastMsg = nil, nil
+			ms.Unlock()
+		}
+	}
+}
