@@ -315,7 +315,7 @@ func startTest(t tLogger, ts *testStore) Store {
 		// Because tests work on parallel, and NewCryptoStore would clear
 		// the key, make a copy here to avoid races.
 		key := append([]byte(nil), testEncryptionKey...)
-		s, err = NewCryptoStore(s, key)
+		s, err = NewCryptoStore(s, CryptoCipherAES, key)
 		if err != nil {
 			stackFatalf(t, "Error creating crypto store: %v", err)
 		}

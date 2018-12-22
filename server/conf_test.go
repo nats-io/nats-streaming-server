@@ -257,6 +257,9 @@ func TestParseConfig(t *testing.T) {
 	if !opts.Encrypt {
 		t.Fatal("Expected Encrypt to be true")
 	}
+	if string(opts.EncryptionCipher) != "AES" {
+		t.Fatalf("Expected EncryptionCipher to be %q, got %q", "AES", opts.EncryptionCipher)
+	}
 	if string(opts.EncryptionKey) != "key" {
 		t.Fatalf("Expected EncryptionKey to be %q, got %q", "key", opts.EncryptionKey)
 	}
@@ -463,6 +466,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "sql:{no_caching:123}", wrongTypeErr)
 	expectFailureFor(t, "sql:{max_open_conns:false}", wrongTypeErr)
 	expectFailureFor(t, "encrypt: 123", wrongTypeErr)
+	expectFailureFor(t, "encryption_cipher: 123", wrongTypeErr)
 	expectFailureFor(t, "encryption_key: 123", wrongTypeErr)
 }
 

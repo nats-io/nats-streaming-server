@@ -35,7 +35,7 @@ func TestCryptoStoreKeyIsCleared(t *testing.T) {
 
 	orgStr := "thisisthekey"
 	key := []byte(orgStr)
-	cs, err := NewCryptoStore(s, key)
+	cs, err := NewCryptoStore(s, "", key)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -52,12 +52,17 @@ func TestCryptoStore(t *testing.T) {
 	s := createDefaultFileStore(t)
 	defer s.Close()
 
-	cs, err := NewCryptoStore(s, nil)
+	cs, err := NewCryptoStore(s, "", nil)
 	if cs != nil || err != ErrCryptoStoreRequiresKey {
 		t.Fatalf("Expected no store and error %q, got %v - %v", ErrCryptoStoreRequiresKey.Error(), cs, err)
 	}
+	cs, err = NewCryptoStore(s, "not supported cipher", []byte("mykey"))
+	if cs != nil || err != ErrCipherNotSupported {
+		t.Fatalf("Expected no store and error %q, got %v - %v", ErrCipherNotSupported.Error(), cs, err)
+	}
+
 	goodKey := []byte("testkey")
-	cs, err = NewCryptoStore(s, goodKey)
+	cs, err = NewCryptoStore(s, CryptoCipherAES, goodKey)
 	if err != nil {
 		t.Fatalf("Unable to create crypto store: %v", err)
 	}
@@ -94,7 +99,7 @@ func TestCryptoStore(t *testing.T) {
 			t.Fatalf("Error opening store: %v", err)
 		}
 		defer s.Close()
-		cs, err = NewCryptoStore(s, k)
+		cs, err = NewCryptoStore(s, CryptoCipherAES, k)
 		if err != nil {
 			t.Fatalf("Error creating crypto store: %v", err)
 		}
@@ -136,10 +141,12 @@ func TestCryptoStore(t *testing.T) {
 	cleanupFSDatastore(t)
 	s = createDefaultFileStore(t)
 	defer s.Close()
-	// Add some messages
+	// Add a plain text message
 	c = storeCreateChannel(t, s, "foo")
-	// Use small payload less than nonceSize
 	storeMsg(t, c, "foo", 1, []byte("abcd"))
+	// Add a message with payload that matches one of the algo,
+	// but is not encrypted
+	storeMsg(t, c, "foo", 2, []byte{CryptoCodeAES, 'a', 'b', 'c', 'd'})
 	s.Close()
 
 	// Now re-open and use crypto store
@@ -148,7 +155,7 @@ func TestCryptoStore(t *testing.T) {
 		t.Fatalf("Error opening file: %v", err)
 	}
 	defer s.Close()
-	cs, err = NewCryptoStore(s, []byte("testkey"))
+	cs, err = NewCryptoStore(s, CryptoCipherAES, []byte("testkey"))
 	if err != nil {
 		t.Fatalf("Error creating crypto store: %v", err)
 	}
@@ -158,6 +165,13 @@ func TestCryptoStore(t *testing.T) {
 	}
 	rc = getRecoveredChannel(t, state, "foo")
 	rm, err := rc.Msgs.Lookup(1)
+	if err != nil {
+		t.Fatalf("Expected to get plain text message, got %v", err)
+	}
+	if string(rm.Data) != "abcd" {
+		t.Fatalf("Expected message data to be %q, got %q", "abcd", rm.Data)
+	}
+	rm, err = rc.Msgs.Lookup(2)
 	if err == nil || rm != nil {
 		t.Fatalf("Expected error and no message, but got %v", rm)
 	}
@@ -170,7 +184,7 @@ func TestCryptoStoreEmptyMsg(t *testing.T) {
 	s := createDefaultMemStore(t)
 	defer s.Close()
 
-	cs, err := NewCryptoStore(s, []byte("testkey"))
+	cs, err := NewCryptoStore(s, CryptoCipherAES, []byte("testkey"))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -210,7 +224,7 @@ func TestCryptoStoreUseEnvKey(t *testing.T) {
 	s := createDefaultFileStore(t)
 	defer s.Close()
 
-	cs, err := NewCryptoStore(s, nil)
+	cs, err := NewCryptoStore(s, CryptoCipherAES, nil)
 	if err != nil {
 		t.Fatalf("Unable to create crypto store: %v", err)
 	}
@@ -242,7 +256,7 @@ func TestCryptoStoreUseEnvKey(t *testing.T) {
 		t.Fatalf("Error opening file: %v", err)
 	}
 	defer s.Close()
-	cs, err = NewCryptoStore(s, []byte("wrongkey"))
+	cs, err = NewCryptoStore(s, CryptoCipherAES, []byte("wrongkey"))
 	if err != nil {
 		t.Fatalf("Unable to create crypto store: %v", err)
 	}
@@ -263,7 +277,7 @@ func TestCryptoStoreRenewNonce(t *testing.T) {
 	s := createDefaultMemStore(t)
 	defer s.Close()
 
-	cs, err := NewCryptoStore(s, []byte("testkey"))
+	cs, err := NewCryptoStore(s, CryptoCipherAES, []byte("testkey"))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -334,7 +348,7 @@ func TestCryptoStoreCheckEncryptedStore(t *testing.T) {
 			}
 			var s Store
 			if test.encrypt {
-				s, err = NewCryptoStore(fs, []byte("testkey"))
+				s, err = NewCryptoStore(fs, CryptoCipherAES, []byte("testkey"))
 				if err != nil {
 					t.Fatalf("Error creating crypto store: %v", err)
 				}
@@ -388,5 +402,77 @@ func TestCryptoStoreCheckEncryptedStore(t *testing.T) {
 				t.Fatalf("Should have found content of subscription in plaintext, got %s", subContent)
 			}
 		})
+	}
+}
+
+func TestCryptoStoreMultipleCiphers(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	payloads := [][]byte{
+		[]byte("this is a plain text message"),
+		[]byte("this is a message encrypted with AES cipher"),
+		[]byte("this is a message encrypted with CHACHA cipher"),
+	}
+
+	c := storeCreateChannel(t, s, "foo")
+	storeMsg(t, c, "foo", 1, payloads[0])
+
+	s.Close()
+
+	storeWithEncryption := func(t *testing.T, encryptionCipher string, payloadIdx int) {
+		t.Helper()
+		s, err := NewFileStore(testLogger, testFSDefaultDatastore, nil)
+		if err != nil {
+			t.Fatalf("Error opening store: %v", err)
+		}
+		defer s.Close()
+
+		cs, err := NewCryptoStore(s, encryptionCipher, []byte("mykey"))
+		if err != nil {
+			t.Fatalf("Error creating crypto store: %v", err)
+		}
+		defer cs.Close()
+
+		state, err := cs.Recover()
+		if err != nil {
+			t.Fatalf("Error recovering store: %v", err)
+		}
+		c = getRecoveredChannel(t, state, "foo")
+		storeMsg(t, c, "foo", uint64(payloadIdx+1), payloads[payloadIdx])
+		s.Close()
+	}
+	storeWithEncryption(t, CryptoCipherAES, 1)
+	storeWithEncryption(t, CryptoCipherChaChaPoly, 2)
+
+	// Now re-open with any cipher, use "" to use default.
+	// We should be able to get all 3 messages correctly.
+	s, err := NewFileStore(testLogger, testFSDefaultDatastore, nil)
+	if err != nil {
+		t.Fatalf("Error opening store: %v", err)
+	}
+	defer s.Close()
+
+	cs, err := NewCryptoStore(s, "", []byte("mykey"))
+	if err != nil {
+		t.Fatalf("Error creating crypto store: %v", err)
+	}
+	defer cs.Close()
+	state, err := cs.Recover()
+	if err != nil {
+		t.Fatalf("Error recovering store: %v", err)
+	}
+	c = getRecoveredChannel(t, state, "foo")
+	for i := 0; i < 3; i++ {
+		rm, err := c.Msgs.Lookup(uint64(i + 1))
+		if err != nil {
+			t.Fatalf("Error getting message: %v", err)
+		}
+		if !bytes.Equal(rm.Data, payloads[i]) {
+			t.Fatalf("Expected message %q, got %q", payloads[i], rm.Data)
+		}
 	}
 }

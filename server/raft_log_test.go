@@ -32,7 +32,7 @@ func createTestRaftLog(t tLogger, sync bool, trailingLogs int) *raftLog {
 		stackFatalf(t, "Unable to create raft log directory: %v", err)
 	}
 	fileName := filepath.Join(defaultRaftLog, raftLogFile)
-	store, err := newRaftLog(testLogger, fileName, sync, trailingLogs, false, nil)
+	store, err := newRaftLog(testLogger, fileName, sync, trailingLogs, false, "", nil)
 	if err != nil {
 		stackFatalf(t, "Error creating store: %v", err)
 	}
@@ -244,22 +244,32 @@ func TestRaftLogWithEncryption(t *testing.T) {
 
 	store := createTestRaftLog(t, false, 0)
 	defer store.Close()
-	// Make sure to use payload smaller than nonceSize
+	// Plain text log
 	store.StoreLog(&raft.Log{Index: 1, Term: 1, Type: raft.LogCommand, Data: []byte("abcd")})
+	// Log with marker that says AES but content is not encrypted
+	store.StoreLog(&raft.Log{Index: 2, Term: 1, Type: raft.LogCommand, Data: []byte{stores.CryptoCodeAES, 'a', 'b', 'c', 'd'}})
 	store.RLock()
 	fileName := store.fileName
 	store.RUnlock()
 	store.Close()
 
 	// Re-open as encrypted store
-	store, err := newRaftLog(testLogger, fileName, false, 0, true, []byte("testkey"))
+	store, err := newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, []byte("testkey"))
 	if err != nil {
 		t.Fatalf("Error opening store: %v", err)
 	}
 	defer store.Close()
-	// Attempt to get the log, it should fail
+	// Attempt to get the log, it should be ok
 	rl := &raft.Log{}
-	if err := store.GetLog(uint64(1), rl); err == nil || !strings.Contains(err.Error(), "trying") {
+	if err := store.GetLog(uint64(1), rl); err != nil {
+		t.Fatalf("Error getting log: %v", err)
+	}
+	if string(rl.Data) != "abcd" {
+		t.Fatalf("Expected %q, got %q", "abcd", rl.Data)
+	}
+	// Attempt to get the log, it should fail
+	rl = &raft.Log{}
+	if err := store.GetLog(uint64(2), rl); err == nil || !strings.Contains(err.Error(), "trying") {
 		t.Fatalf("Expected error about trying to decrypt data that is not, got %v", err)
 	}
 	store.Close()
@@ -271,7 +281,7 @@ func TestRaftLogWithEncryption(t *testing.T) {
 	fileName = filepath.Join(defaultRaftLog, raftLogFile)
 
 	key := []byte("testkey")
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, key)
+	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, key)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -321,7 +331,7 @@ func TestRaftLogWithEncryption(t *testing.T) {
 	if err := os.Setenv(stores.CryptoStoreEnvKeyName, "testkey"); err != nil {
 		t.Fatalf("Unable to set environment variable: %v", err)
 	}
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, nil)
+	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, nil)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -337,7 +347,7 @@ func TestRaftLogWithEncryption(t *testing.T) {
 
 	// Ensure that env key override config by providing a wrong key
 	// and notice that we have correct decrypt.
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, []byte("wrongkey"))
+	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, []byte("wrongkey"))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -353,7 +363,7 @@ func TestRaftLogWithEncryption(t *testing.T) {
 
 	// Now unset env variable and re-open with wrong key
 	os.Unsetenv(stores.CryptoStoreEnvKeyName)
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, []byte("wrongkey"))
+	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, []byte("wrongkey"))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -365,7 +375,7 @@ func TestRaftLogWithEncryption(t *testing.T) {
 	store.Close()
 
 	// Re-open with encryption but no key, this should fail.
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, nil)
+	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, nil)
 	if err == nil || !strings.Contains(err.Error(), stores.ErrCryptoStoreRequiresKey.Error()) {
 		if store != nil {
 			store.Close()
@@ -384,7 +394,7 @@ func TestRaftLogRenewNonce(t *testing.T) {
 	fileName := filepath.Join(defaultRaftLog, raftLogFile)
 
 	key := []byte("testkey")
-	store, err := newRaftLog(testLogger, fileName, false, 0, true, key)
+	store, err := newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, key)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -438,6 +448,66 @@ func TestRaftLogRenewNonce(t *testing.T) {
 		}
 		if string(log.Data) != fmt.Sprintf("msg%d", i+1) {
 			t.Fatalf("Expected content to be \"msg%d\", got %q", i+1, log.Data)
+		}
+	}
+}
+
+func TestRaftLogMultipleCiphers(t *testing.T) {
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	if err := os.MkdirAll(defaultRaftLog, os.ModeDir+os.ModePerm); err != nil {
+		t.Fatalf("Unable to create raft log directory: %v", err)
+	}
+	fileName := filepath.Join(defaultRaftLog, raftLogFile)
+
+	store, err := newRaftLog(testLogger, fileName, false, 0, false, "", nil)
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer store.Close()
+
+	payloads := [][]byte{
+		[]byte("this is a plain text message"),
+		[]byte("this is a message encrypted with AES cipher"),
+		[]byte("this is a message encrypted with CHACHA cipher"),
+	}
+
+	if err := store.StoreLog(&raft.Log{Index: 1, Term: 1, Type: raft.LogCommand, Data: payloads[0]}); err != nil {
+		t.Fatalf("Error storing log: %v", err)
+	}
+	store.Close()
+
+	storeWithEncryption := func(t *testing.T, encryptionCipher string, payloadIdx int) {
+		t.Helper()
+		store, err := newRaftLog(testLogger, fileName, false, 0, true, encryptionCipher, []byte("mykey"))
+		if err != nil {
+			t.Fatalf("Error creating store: %v", err)
+		}
+		defer store.Close()
+
+		if err := store.StoreLog(&raft.Log{Index: uint64(payloadIdx + 1), Term: 1, Type: raft.LogCommand, Data: payloads[payloadIdx]}); err != nil {
+			t.Fatalf("Error storing log: %v", err)
+		}
+		store.Close()
+	}
+	storeWithEncryption(t, stores.CryptoCipherAES, 1)
+	storeWithEncryption(t, stores.CryptoCipherChaChaPoly, 2)
+
+	// Now re-open with any cipher, use "" to use default.
+	// We should be able to get all 3 messages correctly.
+	store, err = newRaftLog(testLogger, fileName, false, 0, true, "", []byte("mykey"))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer store.Close()
+	for i := 0; i < 3; i++ {
+		l := &raft.Log{}
+		if err := store.GetLog(uint64(i+1), l); err != nil {
+			t.Fatalf("Error getting log: %v", err)
+		}
+		if !bytes.Equal(l.Data, payloads[i]) {
+			t.Fatalf("Expected message %q, got %q", payloads[i], l.Data)
 		}
 	}
 }

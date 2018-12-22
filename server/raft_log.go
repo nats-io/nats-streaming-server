@@ -16,7 +16,6 @@ package server
 import (
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -32,7 +31,6 @@ import (
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nats-streaming-server/util"
-	"golang.org/x/crypto/chacha20poly1305"
 )
 
 // Bucket names
@@ -60,7 +58,10 @@ type raftLog struct {
 	closed                 bool
 
 	// Crypto specific fields
+	cipherCode     byte
 	gcm            cipher.AEAD
+	aesgcm         cipher.AEAD
+	chachagcm      cipher.AEAD
 	cryptoOverhead int
 	encryptBuf     []byte
 	nonce          []byte
@@ -69,7 +70,7 @@ type raftLog struct {
 	nonceLimit     int64
 }
 
-func newRaftLog(log logger.Logger, fileName string, sync bool, trailingLogs int, encrypt bool, encryptionKey []byte) (*raftLog, error) {
+func newRaftLog(log logger.Logger, fileName string, sync bool, trailingLogs int, encrypt bool, encryptionCipher string, encryptionKey []byte) (*raftLog, error) {
 	r := &raftLog{
 		log:                    log,
 		fileName:               fileName,
@@ -81,30 +82,22 @@ func newRaftLog(log logger.Logger, fileName string, sync bool, trailingLogs int,
 		codec:                  &codec.MsgpackHandle{},
 	}
 	if encrypt {
-		// Always check env variable first.
-		key := []byte(os.Getenv(stores.CryptoStoreEnvKeyName))
-		if len(key) == 0 {
-			key = encryptionKey
-			if len(key) == 0 {
-				return nil, stores.ErrCryptoStoreRequiresKey
-			}
-		}
-		defer func() {
-			for i := 0; i < len(encryptionKey); i++ {
-				encryptionKey[i] = 'x'
-			}
-		}()
-
-		h := sha256.New()
-		h.Write(key)
-		keyHash := h.Sum(nil)
-		gcm, err := chacha20poly1305.New(keyHash)
+		code, ciphers, err := stores.CreateGCMs(encryptionCipher, encryptionKey)
 		if err != nil {
 			return nil, err
 		}
-		r.gcm = gcm
-		r.cryptoOverhead = gcm.Overhead()
-		r.nonceSize = gcm.NonceSize()
+		r.cipherCode = code
+		r.aesgcm = ciphers[stores.CryptoCodeAES]
+		r.chachagcm = ciphers[stores.CryptoCodeChaCha]
+		switch r.cipherCode {
+		case stores.CryptoCodeAES:
+			r.gcm = r.aesgcm
+		case stores.CryptoCodeChaCha:
+			r.gcm = r.chachagcm
+		}
+		// These values are same for the 2 ciphers we support.
+		r.cryptoOverhead = r.gcm.Overhead()
+		r.nonceSize = r.gcm.NonceSize()
 		if err := r.generateNewNonce(); err != nil {
 			return nil, err
 		}
@@ -161,10 +154,11 @@ func (r *raftLog) encrypt(data []byte) ([]byte, error) {
 	// Here we can reuse a buffer to encrypt because we know
 	// that the underlying is going to make a copy of the
 	// slice.
-	r.encryptBuf = util.EnsureBufBigEnough(r.encryptBuf, r.nonceSize+r.cryptoOverhead+len(data))
-	copy(r.encryptBuf, r.nonce)
-	copy(r.encryptBuf[r.nonceSize:], data)
-	dst := r.encryptBuf[r.nonceSize : r.nonceSize+len(data)]
+	r.encryptBuf = util.EnsureBufBigEnough(r.encryptBuf, 1+r.nonceSize+r.cryptoOverhead+len(data))
+	r.encryptBuf[0] = r.cipherCode
+	copy(r.encryptBuf[1:], r.nonce)
+	copy(r.encryptBuf[1+r.nonceSize:], data)
+	dst := r.encryptBuf[1+r.nonceSize : 1+r.nonceSize+len(data)]
 	ret := r.gcm.Seal(dst[:0], r.nonce, dst, nil)
 	r.nonceUsed++
 	if r.nonceUsed >= r.nonceLimit {
@@ -172,7 +166,7 @@ func (r *raftLog) encrypt(data []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return r.encryptBuf[:r.nonceSize+len(ret)], nil
+	return r.encryptBuf[:1+r.nonceSize+len(ret)], nil
 }
 
 func (r *raftLog) encodeRaftLog(in *raft.Log) ([]byte, error) {
@@ -198,14 +192,26 @@ func (r *raftLog) decodeRaftLog(buf []byte, log *raft.Log) error {
 	dec := codec.NewDecoderBytes(buf, r.codec)
 	err := dec.Decode(log)
 	if err == nil && len(log.Data) > 0 && r.gcm != nil && log.Type == raft.LogCommand {
-		if len(log.Data) <= r.nonceSize {
+		var gcm cipher.AEAD
+		if len(log.Data) > 0 {
+			switch log.Data[0] {
+			case stores.CryptoCodeAES:
+				gcm = r.aesgcm
+			case stores.CryptoCodeChaCha:
+				gcm = r.chachagcm
+			default:
+				// Anything else, assume no algo or something we don't know how to decrypt.
+				return nil
+			}
+		}
+		if len(log.Data) <= 1+r.nonceSize {
 			return fmt.Errorf("trying to decrypt data that is not (len=%v)", len(log.Data))
 		}
 		// My understanding is that log.Data is empty at beginning of this
 		// function and dec.Decode(log) will make a copy from buffer that
 		// comes from boltdb. So we can decrypt in place since we "own" log.Data.
-		cipherText := log.Data[r.nonceSize:]
-		dd, err := r.gcm.Open(cipherText[:0], log.Data[:r.nonceSize], cipherText, nil)
+		cipherText := log.Data[1+r.nonceSize:]
+		dd, err := gcm.Open(cipherText[:0], log.Data[1:1+r.nonceSize], cipherText, nil)
 		if err != nil {
 			return err
 		}

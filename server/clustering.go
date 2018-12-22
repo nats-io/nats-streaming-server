@@ -274,7 +274,7 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 
 	raftLogFileName := filepath.Join(path, raftLogFile)
 	store, err := newRaftLog(s.log, raftLogFileName, s.opts.Clustering.Sync, int(s.opts.Clustering.TrailingLogs),
-		s.opts.Encrypt, s.opts.EncryptionKey)
+		s.opts.Encrypt, s.opts.EncryptionCipher, s.opts.EncryptionKey)
 	if err != nil {
 		return false, err
 	}

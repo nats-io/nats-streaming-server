@@ -26,7 +26,7 @@ import (
 func getCryptoOverhead(s Store) uint64 {
 	if cs, ok := s.(*CryptoStore); ok {
 		cs.Lock()
-		overhead := cs.nonceSize + cs.cryptoOverhead
+		overhead := 1 + cs.nonceSize + cs.cryptoOverhead
 		cs.Unlock()
 		return uint64(overhead)
 	}

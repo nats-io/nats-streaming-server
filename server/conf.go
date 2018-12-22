@@ -159,6 +159,11 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.Encrypt = v.(bool)
+		case "encryption_cipher":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.EncryptionCipher = v.(string)
 		case "encryption_key":
 			if err := checkType(k, reflect.String, v); err != nil {
 				return err
@@ -613,6 +618,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&sopts.SQLStoreOpts.MaxOpenConns, "sql_max_open_conns", defSQLOpts.MaxOpenConns, "Max opened connections to the database")
 	fs.StringVar(&sopts.SyslogName, "syslog_name", "", "Syslog Name")
 	fs.BoolVar(&sopts.Encrypt, "encrypt", false, "Specify if server should use encryption at rest")
+	fs.StringVar(&sopts.EncryptionCipher, "encryption_cipher", "aes", "Encryption cipher. Supported are AES and CHACHA (default is AES)")
 	fs.StringVar(&encryptionKey, "encryption_key", "", "Encryption Key. It is recommended to specify it through the NATS_STREAMING_ENCRYPTION_KEY environment variable instead")
 
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
