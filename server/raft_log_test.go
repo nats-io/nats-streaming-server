@@ -32,7 +32,7 @@ func createTestRaftLog(t tLogger, sync bool, trailingLogs int) *raftLog {
 		stackFatalf(t, "Unable to create raft log directory: %v", err)
 	}
 	fileName := filepath.Join(defaultRaftLog, raftLogFile)
-	store, err := newRaftLog(testLogger, fileName, sync, trailingLogs, false, "", nil)
+	store, err := newRaftLog(testLogger, fileName, sync, trailingLogs, false, stores.CryptoCipherAutoSelect, nil)
 	if err != nil {
 		stackFatalf(t, "Error creating store: %v", err)
 	}
@@ -461,7 +461,7 @@ func TestRaftLogMultipleCiphers(t *testing.T) {
 	}
 	fileName := filepath.Join(defaultRaftLog, raftLogFile)
 
-	store, err := newRaftLog(testLogger, fileName, false, 0, false, "", nil)
+	store, err := newRaftLog(testLogger, fileName, false, 0, false, stores.CryptoCipherAutoSelect, nil)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -494,9 +494,9 @@ func TestRaftLogMultipleCiphers(t *testing.T) {
 	storeWithEncryption(t, stores.CryptoCipherAES, 1)
 	storeWithEncryption(t, stores.CryptoCipherChaChaPoly, 2)
 
-	// Now re-open with any cipher, use "" to use default.
+	// Now re-open with any cipher, use the auto-select one.
 	// We should be able to get all 3 messages correctly.
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, "", []byte("mykey"))
+	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAutoSelect, []byte("mykey"))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}

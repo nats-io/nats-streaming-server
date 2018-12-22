@@ -35,7 +35,7 @@ func TestCryptoStoreKeyIsCleared(t *testing.T) {
 
 	orgStr := "thisisthekey"
 	key := []byte(orgStr)
-	cs, err := NewCryptoStore(s, "", key)
+	cs, err := NewCryptoStore(s, CryptoCipherAutoSelect, key)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestCryptoStore(t *testing.T) {
 	s := createDefaultFileStore(t)
 	defer s.Close()
 
-	cs, err := NewCryptoStore(s, "", nil)
+	cs, err := NewCryptoStore(s, CryptoCipherAutoSelect, nil)
 	if cs != nil || err != ErrCryptoStoreRequiresKey {
 		t.Fatalf("Expected no store and error %q, got %v - %v", ErrCryptoStoreRequiresKey.Error(), cs, err)
 	}
@@ -448,7 +448,7 @@ func TestCryptoStoreMultipleCiphers(t *testing.T) {
 	storeWithEncryption(t, CryptoCipherAES, 1)
 	storeWithEncryption(t, CryptoCipherChaChaPoly, 2)
 
-	// Now re-open with any cipher, use "" to use default.
+	// Now re-open with any cipher, use the auto-select one.
 	// We should be able to get all 3 messages correctly.
 	s, err := NewFileStore(testLogger, testFSDefaultDatastore, nil)
 	if err != nil {
@@ -456,7 +456,7 @@ func TestCryptoStoreMultipleCiphers(t *testing.T) {
 	}
 	defer s.Close()
 
-	cs, err := NewCryptoStore(s, "", []byte("mykey"))
+	cs, err := NewCryptoStore(s, CryptoCipherAutoSelect, []byte("mykey"))
 	if err != nil {
 		t.Fatalf("Error creating crypto store: %v", err)
 	}

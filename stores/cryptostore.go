@@ -23,6 +23,7 @@ import (
 	"io"
 	mrand "math/rand"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -47,8 +48,13 @@ const (
 
 	// CryptoCipherChaChaPoly is the name of the ChaChaPoly cipher to use for encryption
 	CryptoCipherChaChaPoly = "CHACHA"
+
+	// CryptoCipherAutoSelect if passed to NewCryptoStore() will cause the cipher to
+	// be auto-selected based on the platform the executable is built for.
+	CryptoCipherAutoSelect = ""
 )
 
+// These constants define a code for each of the supported ciphers
 const (
 	CryptoCodeAES    = byte(1)
 	CryptoCodeChaCha = byte(2)
@@ -95,17 +101,25 @@ type CryptoMsgStore struct {
 // or an error occurs when creating the cipher.AEADs.
 // The returned cipher.AEAD are in the following order:
 func CreateGCMs(encryptionCipher string, encryptionKey []byte) (byte, map[byte]cipher.AEAD, error) {
-	selectedCipher := CryptoCipherAES
-	code := CryptoCodeAES
-	if encryptionCipher != "" {
-		selectedCipher = strings.ToUpper(encryptionCipher)
-		switch selectedCipher {
+	var code byte
+	// If user provides cipher, use that.
+	if encryptionCipher != CryptoCipherAutoSelect {
+		switch strings.ToUpper(encryptionCipher) {
 		case CryptoCipherAES:
 			code = CryptoCodeAES
 		case CryptoCipherChaChaPoly:
 			code = CryptoCodeChaCha
 		default:
 			return 0, nil, ErrCipherNotSupported
+		}
+	} else {
+		// Otherwise default to AES on intel (there is hardware
+		// acceleration for that) and chacha20poly1305 on ARM
+		// (the two arch'es that we build docker images for).
+		if runtime.GOARCH == "amd64" || runtime.GOARCH == "386" {
+			code = CryptoCodeAES
+		} else {
+			fmt.Printf("@@IK: selected CHACHA\n")
 		}
 	}
 	// Always check env variable first

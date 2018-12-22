@@ -1119,7 +1119,7 @@ type Options struct {
 	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
 	SyslogName         string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
 	Encrypt            bool          // Specify if server should encrypt messages payload when storing them
-	EncryptionCipher   string        // Cipher used for encryption. Supported are "AES" and "CHACHA". If none is specified, defaults to AES.
+	EncryptionCipher   string        // Cipher used for encryption. Supported are "AES" and "CHACHA". If none is specified, defaults to AES on platforms with Intel processors, CHACHA otherwise.
 	EncryptionKey      []byte        // Encryption key. The environment NATS_STREAMING_ENCRYPTION_KEY takes precedence and is the preferred way to provide the key.
 	Clustering         ClusteringOptions
 }
