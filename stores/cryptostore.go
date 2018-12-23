@@ -119,7 +119,7 @@ func CreateGCMs(encryptionCipher string, encryptionKey []byte) (byte, map[byte]c
 		if runtime.GOARCH == "amd64" || runtime.GOARCH == "386" {
 			code = CryptoCodeAES
 		} else {
-			fmt.Printf("@@IK: selected CHACHA\n")
+			code = CryptoCodeChaCha
 		}
 	}
 	// Always check env variable first
