@@ -3652,7 +3652,7 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 					if err := f.Error(); err != nil {
 						lastSeq, lerr := c.store.Msgs.LastSequence()
 						if lerr != nil {
-							panic(fmt.Errorf("Error during message replication (%v), unable to get store last sequence: %v", err, lerr))
+							panic(fmt.Errorf("error during message replication (%v), unable to get store last sequence: %v", err, lerr))
 						}
 						c.nextSequence = lastSeq + 1
 					} else {
@@ -3773,13 +3773,13 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 			for c := range storesToFlush {
 				if err := c.store.Msgs.Flush(); err != nil {
 					// TODO: Attempt recovery, notify publishers of error.
-					panic(fmt.Errorf("Unable to flush msg store: %v", err))
+					panic(fmt.Errorf("unable to flush msg store: %v", err))
 				}
 				// Call this here, so messages are sent to subscribers,
 				// which means that msg seq is added to subscription file
 				s.processMsg(c)
 				if err := c.store.Subs.Flush(); err != nil {
-					panic(fmt.Errorf("Unable to flush sub store: %v", err))
+					panic(fmt.Errorf("unable to flush sub store: %v", err))
 				}
 				// Remove entry from map (this is safe in Go)
 				delete(storesToFlush, c)

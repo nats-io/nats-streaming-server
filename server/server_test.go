@@ -54,7 +54,7 @@ type tLogger interface {
 var (
 	defaultDataStore    string
 	testLogger          logger.Logger
-	errOnPurpose        = errors.New("On purpose")
+	errOnPurpose        = errors.New("on purpose")
 	benchStoreType      = stores.TypeMemory
 	persistentStoreType = stores.TypeFile
 	testUseEncryption   bool
