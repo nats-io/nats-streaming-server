@@ -1825,7 +1825,7 @@ func (fs *FileStore) handleUnexpectedEOF(recoveryErr error, f *file, offset int6
 		fs.log.Errorf("Corrupted record in file %q: %v", f.name, recoveryErr)
 	}
 	if _, err := f.handle.Seek(offset, io.SeekStart); err != nil {
-		panic(fmt.Errorf("Unable to set position of file %q to %v: %v", f.name, offset, err))
+		panic(fmt.Errorf("unable to set position of file %q to %v: %v", f.name, offset, err))
 	}
 	var (
 		expectedSize int
@@ -2262,7 +2262,7 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 				if err != nil {
 					ms.fstore.log.Errorf(err.Error())
 					if _, serr := fslice.file.handle.Seek(4, io.SeekStart); serr != nil {
-						panic(fmt.Errorf("File %q: unable to set position to beginning of file: %v", fslice.file.name, serr))
+						panic(fmt.Errorf("file %q: unable to set position to beginning of file: %v", fslice.file.name, serr))
 					}
 				}
 			} else {
@@ -2278,7 +2278,7 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 		if err != nil {
 			ms.fstore.log.Errorf("Error with index file %q: %v. Truncating and recovering from data file", fslice.idxFile.name, err)
 			if terr := ms.fm.truncateFile(fslice.idxFile, 4); terr != nil {
-				panic(fmt.Errorf("Error during recovery of file %q: %v, you need "+
+				panic(fmt.Errorf("error during recovery of file %q: %v, you need "+
 					"to manually remove index file %q (truncate failed with err: %v)",
 					fslice.file.name, err, fslice.idxFile.name, terr))
 			}
@@ -2361,7 +2361,7 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 			ms.fm.remove(fslice.idxFile)
 			// Remove it, and panic if we can't
 			if rmErr := os.Remove(fslice.idxFile.name); rmErr != nil {
-				panic(fmt.Errorf("Error during recovery of file %q: %v, you need "+
+				panic(fmt.Errorf("error during recovery of file %q: %v, you need "+
 					"to manually remove index file %q (remove failed with err: %v)",
 					fslice.file.name, err, fslice.idxFile.name, rmErr))
 			}
@@ -4017,7 +4017,7 @@ func (ss *FileSubStore) writeRecord(w io.Writer, recType recordType, rec record)
 	case subRecDel:
 		ss.delRecs++
 	default:
-		panic(fmt.Errorf("Record type %v unknown", recType))
+		panic(fmt.Errorf("record type %v unknown", recType))
 	}
 	ss.fileSize += int64(totalSize)
 	if needsUnlock {

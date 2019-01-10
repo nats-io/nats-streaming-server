@@ -32,28 +32,28 @@ const (
 func CreateSQLDatabase(driver, sourceAdmin, source, dbName string) error {
 	db, err := sql.Open(driver, sourceAdmin)
 	if err != nil {
-		return fmt.Errorf("Error opening connection to SQL datastore %q: %v", sourceAdmin, err)
+		return fmt.Errorf("error opening connection to SQL datastore %q: %v", sourceAdmin, err)
 	}
 	defer db.Close()
 	if _, err := db.Exec("DROP DATABASE IF EXISTS " + dbName); err != nil {
-		return fmt.Errorf("Error dropping database: %v", err)
+		return fmt.Errorf("error dropping database: %v", err)
 	}
 	switch driver {
 	case DriverMySQL:
 		if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS " + dbName); err != nil {
-			return fmt.Errorf("Error creating database: %v", err)
+			return fmt.Errorf("error creating database: %v", err)
 		}
 		if _, err = db.Exec("USE " + dbName); err != nil {
-			return fmt.Errorf("Error using database %q: %v", dbName, err)
+			return fmt.Errorf("error using database %q: %v", dbName, err)
 		}
 	case DriverPostgres:
 		if _, err := db.Exec("CREATE DATABASE " + dbName); err != nil {
-			return fmt.Errorf("Error creating database: %v", err)
+			return fmt.Errorf("error creating database: %v", err)
 		}
 		db.Close()
 		db, err = sql.Open(driver, source)
 		if err != nil {
-			return fmt.Errorf("Error connecting to database: %v", err)
+			return fmt.Errorf("error connecting to database: %v", err)
 		}
 		defer db.Close()
 	default:
@@ -65,7 +65,7 @@ func CreateSQLDatabase(driver, sourceAdmin, source, dbName string) error {
 	}
 	for _, stmt := range sqlCreateDatabase {
 		if _, err := db.Exec(stmt); err != nil {
-			return fmt.Errorf("Error executing statement (%s): %v", stmt, err)
+			return fmt.Errorf("error executing statement (%s): %v", stmt, err)
 		}
 	}
 	return nil
@@ -75,7 +75,7 @@ func loadCreateDatabaseStmts(driver string) ([]string, error) {
 	fileName := "../" + driver + ".db.sql"
 	file, err := os.Open(fileName)
 	if err != nil {
-		return nil, fmt.Errorf("Error opening file: %v", err)
+		return nil, fmt.Errorf("error opening file: %v", err)
 	}
 	defer file.Close()
 	stmts := []string{}
@@ -89,7 +89,7 @@ func loadCreateDatabaseStmts(driver string) ([]string, error) {
 		stmts = append(stmts, line)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("Error scanning file: %v", err)
+		return nil, fmt.Errorf("error scanning file: %v", err)
 	}
 	return stmts, nil
 }
@@ -147,7 +147,7 @@ func ProcessSQLFlags(fs *flag.FlagSet, defaults map[string][]string) error {
 	switch driver {
 	case DriverMySQL, DriverPostgres:
 	default:
-		return fmt.Errorf("Unsupported SQL driver %q", driver)
+		return fmt.Errorf("unsupported SQL driver %q", driver)
 	}
 	defaultsSources := defaults[driver]
 	source := fs.Lookup("sql_source")
