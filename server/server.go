@@ -956,7 +956,8 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 			if sub.stalled && qs.stalledSubCount > 0 {
 				qs.stalledSubCount--
 			}
-			now := time.Now().UnixNano()
+			// Set expiration in the past to force redelivery
+			expirationTime := time.Now().UnixNano() - int64(time.Second)
 			// If there are pending messages in this sub, they need to be
 			// transferred to remaining queue subscribers.
 			numQSubs := len(qs.subs)
@@ -985,14 +986,6 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 				// Update LastSent if applicable
 				if pm.seq > qsub.LastSent {
 					qsub.LastSent = pm.seq
-				}
-				// As of now, members can have different AckWait values.
-				expirationTime := pm.expire
-				// If the member the message is transferred to has a higher AckWait,
-				// keep original expiration time, otherwise check that it is smaller
-				// than the new AckWait.
-				if sub.ackWait > qsub.ackWait && expirationTime-now > 0 {
-					expirationTime = now + int64(qsub.ackWait)
 				}
 				// Store in ackPending.
 				qsub.acksPending[pm.seq] = expirationTime
@@ -3122,13 +3115,11 @@ type byExpire []*pendingMsg
 func (a byExpire) Len() int      { return (len(a)) }
 func (a byExpire) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 func (a byExpire) Less(i, j int) bool {
-	// If expire is 0, it means the server was restarted
-	// and we don't have the expiration time, which will
-	// be set later. Order by sequence instead.
-	if a[i].expire == 0 || a[j].expire == 0 {
-		return a[i].seq < a[j].seq
-	}
-	return a[i].expire < a[j].expire
+	// Always order by sequence since expire could be 0 (in
+	// case of a server restart) but even if it is not, if
+	// expire time happens to be the same, we still want
+	// messages to be ordered by sequence.
+	return a[i].seq < a[j].seq
 }
 
 // Returns an array of pendingMsg ordered by expiration date, unless
