@@ -1442,3 +1442,93 @@ func TestQueueAckRemovesFromOwningMember(t *testing.T) {
 	waitForAcks(t, s, clientName, 1, 0)
 	waitForAcks(t, s, clientName, 2, 0)
 }
+
+func TestQueueRedeliveryAfterMembersCrash(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	// Need to create NATS connections to simulate crash
+	// by closing NATS connection and preventing connection close
+	// to be sent.
+	sc1, nc1 := createConnectionWithNatsOpts(t, "member1")
+	defer nc1.Close()
+	defer sc1.Close()
+
+	total := 20
+	count := int32(0)
+	ch := make(chan bool, 1)
+	cb := func(_ *stan.Msg) {
+		if n := int(atomic.AddInt32(&count, 1)); n == total {
+			ch <- true
+		}
+	}
+	if _, err := sc1.QueueSubscribe("foo", "bar", cb,
+		stan.DeliverAllAvailable(),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1),
+		stan.AckWait(60*time.Second)); err != nil {
+		t.Fatalf("Error on queue subscribe: %v", err)
+	}
+
+	sc2, nc2 := createConnectionWithNatsOpts(t, "member2")
+	defer nc2.Close()
+	defer sc2.Close()
+	if _, err := sc2.QueueSubscribe("foo", "bar", cb,
+		stan.DeliverAllAvailable(),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1),
+		stan.AckWait(60*time.Second)); err != nil {
+		t.Fatalf("Error on queue subscribe: %v", err)
+	}
+
+	// Wait for 2 queue members to be registered
+	waitForNumSubs(t, s, "member1", 1)
+	waitForNumSubs(t, s, "member2", 1)
+
+	// Simulate crash by closing the NATS connections.
+	nc1.Close()
+	nc2.Close()
+
+	// Produce messages
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	for i := 0; i < total; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	sc.Close()
+
+	// Recreate the 2 queue members
+	sc1, err := stan.Connect(clusterName, "member1")
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc1.Close()
+
+	sc2, err = stan.Connect(clusterName, "member2")
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc2.Close()
+
+	if _, err := sc1.QueueSubscribe("foo", "bar", cb,
+		stan.DeliverAllAvailable(),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1),
+		stan.AckWait(60*time.Second)); err != nil {
+		t.Fatalf("Error on queue subscribe: %v", err)
+	}
+	if _, err := sc2.QueueSubscribe("foo", "bar", cb,
+		stan.DeliverAllAvailable(),
+		stan.DurableName("dur"),
+		stan.MaxInflight(1),
+		stan.AckWait(60*time.Second)); err != nil {
+		t.Fatalf("Error on queue subscribe: %v", err)
+	}
+
+	// Wait for messages. It should not take the 60 seconds of AckWait.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get redelivered messages on time")
+	}
+}
