@@ -654,11 +654,31 @@ func checkWaitOnRegisterMap(t tLogger, s *StanServer, size int) {
 	}
 }
 
+func checkKnownInvalidMap(t *testing.T, s *StanServer, size int, id string) {
+	t.Helper()
+	waitFor(t, clientCheckTimeout+50*time.Millisecond, 15*time.Millisecond, func() error {
+		var ki bool
+		s.clients.RLock()
+		if id != "" {
+			_, ki = s.clients.knownInvalid[id]
+		}
+		mlen := len(s.clients.knownInvalid)
+		s.clients.RUnlock()
+		if size != mlen {
+			return fmt.Errorf("expected map size to be %v, got %v", size, mlen)
+		}
+		if size > 0 && !ki {
+			return fmt.Errorf("expected %q to be in the map, it was not", id)
+		}
+		return nil
+	})
+}
+
 func TestPartitionsRaceOnPub(t *testing.T) {
 	setPartitionsVarsForTest()
 	defer resetDefaultPartitionsVars()
 
-	clientCheckTimeout = 150 * time.Millisecond
+	clientCheckTimeout = 250 * time.Millisecond
 	defer func() { clientCheckTimeout = defaultClientCheckTimeout }()
 
 	opts := GetDefaultOptions()
@@ -690,11 +710,6 @@ func TestPartitionsRaceOnPub(t *testing.T) {
 	pubReq := &pb.PubMsg{ClientID: clientName, Subject: "foo", Data: []byte("hello")}
 	pubNuid := nuid.New()
 
-	pubSub, err := nc.SubscribeSync(nats.NewInbox())
-	if err != nil {
-		t.Fatalf("Error creating sub on pub response: %v", err)
-	}
-
 	// Repeat the test, because even with bug, it would be possible
 	// that the connection request is still processed first, which
 	// would make the test pass.
@@ -716,23 +731,40 @@ func TestPartitionsRaceOnPub(t *testing.T) {
 			}
 			// Ensure that the notification map has been created, but is empty.
 			checkWaitOnRegisterMap(t, s, 0)
+			checkKnownInvalidMap(t, s, 1, clientName)
 
-			// Now resend a message, but this time don't wait for the response here,
-			// instead connect, which should cause the PubMsg to be processed correctly.
-			if err := nc.PublishRequest(pubSubj, pubSub.Subject, pubBytes); err != nil {
-				t.Fatalf("Error sending PubMsg: %v", err)
+			// Now resend a message and it should fail quickly since server
+			// should have recorded this as an invalid client ID.
+			start := time.Now()
+			resp, err = nc.Request(pubSubj, pubBytes, clientCheckTimeout)
+			if err != nil {
+				t.Fatalf("Error on request: %v", err)
 			}
-			checkWaitOnRegisterMap(t, s, 1)
+			dur := time.Since(start)
+			pubResp = &pb.PubAck{}
+			pubResp.Unmarshal(resp.Data)
+			if pubResp.Error != ErrInvalidPubReq.Error() {
+				t.Fatalf("Expected error %q, got %q", ErrInvalidPubReq, pubResp.Error)
+			}
+			// It is expected to have taken less than the clientCheckTimeout this time
+			if dur > clientCheckTimeout {
+				t.Fatalf("Second failure should not have take longer than %v, took %v", clientCheckTimeout, dur)
+			}
+			checkKnownInvalidMap(t, s, 1, clientName)
+
+			// Now connect
 			sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
 			if err != nil {
 				t.Fatalf("Error on connect: %v", err)
 			}
 			defer sc.Close()
+			// This should clear the knownInvalid map
+			checkKnownInvalidMap(t, s, 0, "")
 
-			// Now we should get the OK for the PubMsg.
-			resp, err = pubSub.NextMsg(clientCheckTimeout + 100*time.Millisecond)
+			// Verify that we can send ok now..
+			resp, err = nc.Request(pubSubj, pubBytes, clientCheckTimeout)
 			if err != nil {
-				t.Fatalf("Error waiting for pub response: %v", err)
+				t.Fatalf("Error on request: %v", err)
 			}
 			pubResp = &pb.PubAck{}
 			pubResp.Unmarshal(resp.Data)
@@ -748,7 +780,7 @@ func TestPartitionsRaceOnSub(t *testing.T) {
 	setPartitionsVarsForTest()
 	defer resetDefaultPartitionsVars()
 
-	clientCheckTimeout = 150 * time.Millisecond
+	clientCheckTimeout = 250 * time.Millisecond
 	defer func() { clientCheckTimeout = defaultClientCheckTimeout }()
 
 	opts := GetDefaultOptions()
@@ -771,11 +803,6 @@ func TestPartitionsRaceOnSub(t *testing.T) {
 	subSubj := s.info.Subscribe
 	subReq := &pb.SubscriptionRequest{ClientID: clientName, Subject: "foo", AckWaitInSecs: 30, MaxInFlight: 1}
 
-	subSub, err := nc.SubscribeSync(nats.NewInbox())
-	if err != nil {
-		t.Fatalf("Error creating sub on sub response: %v", err)
-	}
-
 	// Repeat the test, because even with bug, it would be possible
 	// that the connection request is still processed first, which
 	// would make the test pass.
@@ -797,23 +824,40 @@ func TestPartitionsRaceOnSub(t *testing.T) {
 			}
 			// Ensure that the notification map has been created, but is empty.
 			checkWaitOnRegisterMap(t, s, 0)
+			checkKnownInvalidMap(t, s, 1, clientName)
 
-			// Now resend the subscription, but this time don't wait for the response here,
-			// instead connect, which should cause the SubscriptionRequest to be processed correctly.
-			if err := nc.PublishRequest(subSubj, subSub.Subject, subBytes); err != nil {
-				t.Fatalf("Error sending PubMsg: %v", err)
+			// Now resend the subscription and it should fail quickly since server
+			// should have recorded this as an invalid client ID.
+			start := time.Now()
+			resp, err = nc.Request(subSubj, subBytes, clientCheckTimeout)
+			if err != nil {
+				t.Fatalf("Error on request: %v", err)
 			}
-			checkWaitOnRegisterMap(t, s, 1)
+			dur := time.Since(start)
+			subResp = &pb.SubscriptionResponse{}
+			subResp.Unmarshal(resp.Data)
+			if subResp.Error != ErrInvalidSubReq.Error() {
+				t.Fatalf("Expected error %q, got %q", ErrInvalidSubReq, subResp.Error)
+			}
+			// It is expected to have taken less than the clientCheckTimeout this time
+			if dur > clientCheckTimeout {
+				t.Fatalf("Second failure should not have take longer than %v, took %v", clientCheckTimeout, dur)
+			}
+			checkKnownInvalidMap(t, s, 1, clientName)
+
+			// Now connect
 			sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
 			if err != nil {
 				t.Fatalf("Error on connect: %v", err)
 			}
 			defer sc.Close()
+			// SHould be removed from map
+			checkKnownInvalidMap(t, s, 0, "")
 
-			// Now we should get the OK for the PubMsg.
-			resp, err = subSub.NextMsg(clientCheckTimeout + 100*time.Millisecond)
+			// Now we should get the OK for the subscription.
+			resp, err = nc.Request(subSubj, subBytes, clientCheckTimeout)
 			if err != nil {
-				t.Fatalf("Error waiting for pub response: %v", err)
+				t.Fatalf("Error on request: %v", err)
 			}
 			subResp = &pb.SubscriptionResponse{}
 			subResp.Unmarshal(resp.Data)
@@ -891,4 +935,47 @@ func TestPartitionsClientPings(t *testing.T) {
 	defer s2.Shutdown()
 
 	testClientPings(t, s1)
+}
+
+func TestPartitionsCleanInvalidConns(t *testing.T) {
+	setPartitionsVarsForTest()
+	defer resetDefaultPartitionsVars()
+
+	clientCheckTimeout = 1 * time.Millisecond
+	defer func() { clientCheckTimeout = defaultClientCheckTimeout }()
+
+	opts := GetDefaultOptions()
+	opts.Partitioning = true
+	opts.AddPerChannel("foo", &stores.ChannelLimits{})
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	// Create a direct NATS connection
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unable to connect: %v", err)
+	}
+	defer nc.Close()
+
+	total := 300
+
+	pubSubj := fmt.Sprintf("%s.foo", s.info.Publish)
+	for i := 0; i < total; i++ {
+		pubReq := &pb.PubMsg{
+			ClientID: fmt.Sprintf("%s%d", clientName, i),
+			Subject:  "foo",
+			Data:     []byte("hello"),
+			Guid:     fmt.Sprintf("guid%d", i),
+		}
+		b, _ := pubReq.Marshal()
+		nc.Request(pubSubj, b, time.Second)
+	}
+	// The map should not have grown to 300
+	s.clients.RLock()
+	mlen := len(s.clients.knownInvalid)
+	s.clients.RUnlock()
+
+	if mlen > maxKnownInvalidConns {
+		t.Fatalf("Should not be more than %v, got %v", maxKnownInvalidConns, mlen)
+	}
 }

@@ -21,12 +21,18 @@ import (
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
+const (
+	maxKnownInvalidConns   = 256
+	pruneKnownInvalidConns = 32
+)
+
 // This is a proxy to the store interface.
 type clientStore struct {
 	sync.RWMutex
 	clients        map[string]*client
 	connIDs        map[string]*client
 	waitOnRegister map[string]chan struct{}
+	knownInvalid   map[string]struct{}
 	store          stores.Store
 }
 
@@ -43,9 +49,10 @@ type client struct {
 // newClientStore creates a new clientStore instance using `store` as the backing storage.
 func newClientStore(store stores.Store) *clientStore {
 	return &clientStore{
-		clients: make(map[string]*client),
-		connIDs: make(map[string]*client),
-		store:   store,
+		clients:      make(map[string]*client),
+		connIDs:      make(map[string]*client),
+		knownInvalid: make(map[string]struct{}),
+		store:        store,
 	}
 }
 
@@ -73,7 +80,10 @@ func (cs *clientStore) register(info *spb.ClientInfo) (*client, error) {
 	cs.clients[c.info.ID] = c
 	if len(c.info.ConnID) > 0 {
 		cs.connIDs[string(c.info.ConnID)] = c
+		// Delete from being possibly in knownInvalid
+		delete(cs.knownInvalid, string(c.info.ConnID))
 	}
+	delete(cs.knownInvalid, info.ID)
 	if cs.waitOnRegister != nil {
 		ch := cs.waitOnRegister[c.info.ID]
 		if ch != nil {
@@ -132,6 +142,10 @@ func (cs *clientStore) isValidWithTimeout(ID string, connID []byte, timeout time
 		cs.Unlock()
 		return true
 	}
+	if cs.knownToBeInvalid(ID, connID) {
+		cs.Unlock()
+		return false
+	}
 	if cs.waitOnRegister == nil {
 		cs.waitOnRegister = make(map[string]chan struct{})
 	}
@@ -145,9 +159,39 @@ func (cs *clientStore) isValidWithTimeout(ID string, connID []byte, timeout time
 		// We timed out, remove the entry in the map
 		cs.Lock()
 		delete(cs.waitOnRegister, ID)
+		cs.addToKnownInvalid(ID, connID)
 		cs.Unlock()
 		return false
 	}
+}
+
+func (cs *clientStore) addToKnownInvalid(ID string, connID []byte) {
+	cID := string(connID)
+	if cID == "" {
+		cID = ID
+	}
+	cs.knownInvalid[cID] = struct{}{}
+	if len(cs.knownInvalid) >= maxKnownInvalidConns {
+		r := 0
+		for id := range cs.knownInvalid {
+			if id != cID {
+				delete(cs.knownInvalid, id)
+				if r++; r > pruneKnownInvalidConns {
+					break
+				}
+			}
+		}
+	}
+}
+
+func (cs *clientStore) knownToBeInvalid(ID string, connID []byte) bool {
+	var invalid bool
+	if len(connID) > 0 {
+		_, invalid = cs.knownInvalid[string(connID)]
+	} else {
+		_, invalid = cs.knownInvalid[ID]
+	}
+	return invalid
 }
 
 // Lookup client by ConnID if not nil, otherwise by clientID.

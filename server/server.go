@@ -118,7 +118,7 @@ const (
 	// To prevent that, when checking if a client exists, in this particular
 	// mode we will possibly wait to be notified when the client has been
 	// registered. This is the default duration for this wait.
-	defaultClientCheckTimeout = 4 * time.Second
+	defaultClientCheckTimeout = time.Second
 
 	// Interval at which server goes through list of subscriptions with
 	// pending sent/ack operations that needs to be replicated.
@@ -2931,11 +2931,15 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 		return
 	}
 
+	if s.debug {
+		s.log.Tracef("[Client:%s] Received message from publisher subj=%s guid=%s", pm.ClientID, pm.Subject, pm.Guid)
+	}
+
 	// Check if the client is valid. We do this after the clustered check so
 	// that only the leader performs this check.
 	valid := false
-	if s.partitions != nil || s.isClustered {
-		// In partitioning or clustering it is possible that we get there
+	if s.partitions != nil {
+		// In partitioning mode it is possible that we get there
 		// before the connect request is processed. If so, make sure we wait
 		// for conn request	to be processed first. Check clientCheckTimeout
 		// doc for details.
