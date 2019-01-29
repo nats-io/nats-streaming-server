@@ -539,7 +539,7 @@ Here is an example of starting three servers in a cluster by starting one as
 the seed and letting the others automatically join:
 
 ```
-nats-streaming-server -store file -dir store-a -clustered -cluster_bootstrap -nats_server nats://localhost:4222
+nats-streaming-server -store file -dir store-a -clustered -cluster_bootstrap
 
 nats-streaming-server -store file -dir store-b -clustered -nats_server nats://localhost:4222
 
