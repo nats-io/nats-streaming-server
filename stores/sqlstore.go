@@ -1823,7 +1823,6 @@ func (ss *SQLSubStore) ackSeq(subid, seqno uint64) (bool, error) {
 	ap := ss.getOrCreateAcksPending(subid, seqno)
 	// If still in cache and not persisted into a row,
 	// then simply remove from map and do not persist the ack.
-	//lint:ignore S1033 we want to act differently based on existence
 	if _, exists := ap.msgs[seqno]; exists {
 		delete(ap.msgs, seqno)
 	} else if row := ap.msgToRow[seqno]; row != nil {
