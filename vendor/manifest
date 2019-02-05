@@ -226,7 +226,7 @@
 			"importpath": "github.com/prometheus/procfs",
 			"repository": "https://github.com/prometheus/procfs",
 			"vcs": "git",
-			"revision": "e645f4e5aaa8506fc71d6edbc5c4ff02c04c46f2",
+			"revision": "488faf799f863e27e50c516468f76ae8f1da20a5",
 			"branch": "master",
 			"notests": true
 		},
