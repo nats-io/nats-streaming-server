@@ -21,13 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	mrand "math/rand"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats-streaming-server/util"
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
@@ -65,19 +65,8 @@ const (
 type CryptoStore struct {
 	sync.Mutex
 	Store
-
-	// These are set when the store is created. They are then
-	// passed to a CryptoMsgStore so that there is no need
-	// to reference back to these.
-	// Note that nonceSize and cryptoOverhead are same for
-	// those 2 ciphers. If we add more and those are different,
-	// will need to be stored differently or call the appropriate
-	// gcm.NonceSize() and gcm.Overhead() functions.
-	cipherCode     byte
-	aesgcm         cipher.AEAD
-	chachagcm      cipher.AEAD
-	nonceSize      int
-	cryptoOverhead int
+	code byte
+	mkh  []byte
 }
 
 // CryptoMsgStore is a store wrappeing a SubStore implementation
@@ -85,24 +74,40 @@ type CryptoStore struct {
 type CryptoMsgStore struct {
 	sync.Mutex
 	MsgStore
-	cipherCode     byte
+	eds *EDStore
+}
+
+// EDStore provides encryption and decryption of data
+type EDStore struct {
+	code           byte
 	gcm            cipher.AEAD // Use this one to encrypt
 	aesgcm         cipher.AEAD // This is to decrypt data encrypted with this AES cipher
 	chachagcm      cipher.AEAD // This is to decrypt data encrypted with this Chacha cipher
 	cryptoOverhead int
 	nonce          []byte
 	nonceSize      int
-	nonceUsed      int64
-	nonceLimit     int64
 }
 
-// CreateGCMs is creating the cipher.AEADs and return the code for
-// the selected cipher, or an error if the given cipher is not supported
-// or an error occurs when creating the cipher.AEADs.
-// The returned cipher.AEAD are in the following order:
-func CreateGCMs(encryptionCipher string, encryptionKey []byte) (byte, map[byte]cipher.AEAD, error) {
+// NewEDStore returns an instance of EDStore that adds Encrypt/Decrypt
+// capabilities.
+func NewEDStore(encryptionCipher string, encryptionKey []byte, idx uint64) (*EDStore, error) {
+	code, keyHash, err := createMasterKeyHash(encryptionCipher, encryptionKey)
+	if err != nil {
+		return nil, err
+	}
+	s, err := newEDStore(code, keyHash, idx)
+	if err != nil {
+		return nil, err
+	}
+	// On success, erase the key
+	for i := 0; i < len(encryptionKey); i++ {
+		encryptionKey[i] = 'x'
+	}
+	return s, nil
+}
+
+func createMasterKeyHash(encryptionCipher string, encryptionKey []byte) (byte, []byte, error) {
 	var code byte
-	// If user provides cipher, use that.
 	if encryptionCipher != CryptoCipherAutoSelect {
 		switch strings.ToUpper(encryptionCipher) {
 		case CryptoCipherAES:
@@ -130,75 +135,160 @@ func CreateGCMs(encryptionCipher string, encryptionKey []byte) (byte, map[byte]c
 			return 0, nil, ErrCryptoStoreRequiresKey
 		}
 	}
-
-	ciphers := make(map[byte]cipher.AEAD)
-
 	h := sha256.New()
 	h.Write(key)
-	keyHash := h.Sum(nil)
+	return code, h.Sum(nil), nil
+}
+
+func newEDStore(cipherCode byte, keyHash []byte, idx uint64) (*EDStore, error) {
+	s := &EDStore{code: cipherCode}
 
 	block, err := aes.NewCipher(keyHash)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
-	ciphers[CryptoCodeAES] = gcm
+	s.aesgcm = gcm
+
+	s.nonceSize = gcm.NonceSize()
+	if s.nonceSize < 8 {
+		return nil, fmt.Errorf("nonce size too small: %v", s.nonceSize)
+	}
+	s.cryptoOverhead = gcm.Overhead()
 
 	gcm, err = chacha20poly1305.New(keyHash)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
-	ciphers[CryptoCodeChaCha] = gcm
-
-	// On success, erase the key
-	for i := 0; i < len(encryptionKey); i++ {
-		encryptionKey[i] = 'x'
+	s.chachagcm = gcm
+	if gcm.NonceSize() != s.nonceSize {
+		return nil, fmt.Errorf("chacha nonce size different than aes (%v vs %v)",
+			gcm.NonceSize(), s.nonceSize)
 	}
 
-	return code, ciphers, nil
+	switch s.code {
+	case CryptoCodeAES:
+		s.gcm = s.aesgcm
+	case CryptoCodeChaCha:
+		s.gcm = s.chachagcm
+	}
+
+	s.nonce = make([]byte, s.nonceSize)
+	if _, err := io.ReadFull(rand.Reader, s.nonce); err != nil {
+		return nil, err
+	}
+	idx++
+	pos := s.nonceSize - 8
+	b := uint8(56)
+	for i := 0; i < 8; i++ {
+		s.nonce[pos] = byte(idx >> b)
+		pos++
+		b -= 8
+	}
+	return s, nil
+}
+
+// EncryptionOffset returns the encrypted data actually starts in
+// an encrypted buffer.
+func (s *EDStore) EncryptionOffset() int {
+	return 1 + s.nonceSize
+}
+
+// Encrypt returns the encrypted data or an error
+func (s *EDStore) Encrypt(pbuf *[]byte, data []byte) ([]byte, error) {
+	var buf []byte
+	// If given a buffer, use that one
+	if pbuf != nil {
+		buf = *pbuf
+	}
+	// Make sure size is ok, expand if necessary
+	buf = util.EnsureBufBigEnough(buf, 1+s.nonceSize+s.cryptoOverhead+len(data))
+	// If buffer was passed, update the reference
+	if pbuf != nil {
+		*pbuf = buf
+	}
+	buf[0] = s.code
+	copy(buf[1:], s.nonce)
+	copy(buf[1+s.nonceSize:], data)
+	dst := buf[1+s.nonceSize : 1+s.nonceSize+len(data)]
+	ed := s.gcm.Seal(dst[:0], s.nonce, dst, nil)
+	for i := s.nonceSize - 1; i >= 0; i-- {
+		s.nonce[i]++
+		if s.nonce[i] != 0 {
+			break
+		}
+	}
+	return buf[:1+s.nonceSize+len(ed)], nil
+}
+
+// Decrypt returns the decrypted data or an error
+func (s *EDStore) Decrypt(dst []byte, cipherText []byte) ([]byte, error) {
+	var gcm cipher.AEAD
+	if len(cipherText) > 0 {
+		switch cipherText[0] {
+		case CryptoCodeAES:
+			gcm = s.aesgcm
+		case CryptoCodeChaCha:
+			gcm = s.chachagcm
+		default:
+			// Anything else, assume no algo or something we don't know how to decrypt.
+			return cipherText, nil
+		}
+	}
+	if len(cipherText) <= 1+s.nonceSize {
+		return nil, fmt.Errorf("trying to decrypt data that is not (len=%v)", len(cipherText))
+	}
+	dd, err := gcm.Open(dst, cipherText[1:1+s.nonceSize], cipherText[1+s.nonceSize:], nil)
+	if err != nil {
+		return nil, err
+	}
+	return dd, nil
 }
 
 // NewCryptoStore returns a CryptoStore instance with
 // given underlying store.
 func NewCryptoStore(s Store, encryptionCipher string, encryptionKey []byte) (*CryptoStore, error) {
-	code, ciphers, err := CreateGCMs(encryptionCipher, encryptionKey)
+	code, mkh, err := createMasterKeyHash(encryptionCipher, encryptionKey)
 	if err != nil {
 		return nil, err
 	}
 	cs := &CryptoStore{
-		Store:      s,
-		cipherCode: code,
-		aesgcm:     ciphers[CryptoCodeAES],
-		chachagcm:  ciphers[CryptoCodeChaCha],
+		Store: s,
+		code:  code,
+		mkh:   mkh,
 	}
-	// These values are same for the 2 ciphers we support,
-	// so use any of the gcm.
-	cs.cryptoOverhead = cs.aesgcm.Overhead()
-	cs.nonceSize = cs.aesgcm.NonceSize()
-
+	// On success, erase the key
+	for i := 0; i < len(encryptionKey); i++ {
+		encryptionKey[i] = 'x'
+	}
 	return cs, nil
 }
 
-func (cs *CryptoStore) newCryptoMsgStore(ms MsgStore) *CryptoMsgStore {
-	cms := &CryptoMsgStore{
-		MsgStore:       ms,
-		cipherCode:     cs.cipherCode,
-		aesgcm:         cs.aesgcm,
-		chachagcm:      cs.chachagcm,
-		nonceSize:      cs.nonceSize,
-		cryptoOverhead: cs.cryptoOverhead,
+func (cs *CryptoStore) newCryptoMsgStore(channel string, ms MsgStore) (*CryptoMsgStore, error) {
+	idx, err := ms.LastSequence()
+	if err != nil {
+		return nil, err
 	}
-	switch cs.cipherCode {
-	case CryptoCodeAES:
-		cms.gcm = cs.aesgcm
-	case CryptoCodeChaCha:
-		cms.gcm = cs.chachagcm
+	// Construct a key based of the master key hash and
+	// the channel name, then get the hash for that.
+	key := make([]byte, len(cs.mkh)+1+len(channel))
+	key = append(key, cs.mkh...)
+	key = append(key, '.')
+	key = append(key, channel...)
+	h := sha256.New()
+	h.Write(key)
+	keyHash := h.Sum(nil)
+	for i := 0; i < len(key); i++ {
+		key[i] = 'x'
 	}
-	cms.generateNewNonce()
-	return cms
+	eds, err := newEDStore(cs.code, keyHash, idx)
+	if err != nil {
+		return nil, err
+	}
+	return &CryptoMsgStore{MsgStore: ms, eds: eds}, nil
 }
 
 // Recover implements the Store interface
@@ -207,10 +297,14 @@ func (cs *CryptoStore) Recover() (*RecoveredState, error) {
 	defer cs.Unlock()
 	rs, err := cs.Store.Recover()
 	if rs == nil || err != nil {
-		return rs, err
+		return nil, err
 	}
-	for _, rc := range rs.Channels {
-		rc.Channel.Msgs = cs.newCryptoMsgStore(rc.Channel.Msgs)
+	for cn, rc := range rs.Channels {
+		cms, err := cs.newCryptoMsgStore(cn, rc.Channel.Msgs)
+		if err != nil {
+			return nil, err
+		}
+		rc.Channel.Msgs = cms
 	}
 	return rs, nil
 }
@@ -224,7 +318,11 @@ func (cs *CryptoStore) CreateChannel(channel string) (*Channel, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.Msgs = cs.newCryptoMsgStore(c.Msgs)
+	cms, err := cs.newCryptoMsgStore(channel, c.Msgs)
+	if err != nil {
+		return nil, err
+	}
+	c.Msgs = cms
 	return c, nil
 }
 
@@ -241,57 +339,23 @@ func (cms *CryptoMsgStore) Store(msg *pb.MsgProto) (uint64, error) {
 	return cms.MsgStore.Store(msg)
 }
 
-func (cms *CryptoMsgStore) generateNewNonce() error {
-	cms.nonce = make([]byte, cms.nonceSize)
-	if _, err := io.ReadFull(rand.Reader, cms.nonce); err != nil {
-		return err
-	}
-	cms.nonceUsed = 0
-	cms.nonceLimit = mrand.Int63n(1e6) + 100000
-	return nil
-}
-
 func (cms *CryptoMsgStore) encrypt(data []byte) ([]byte, error) {
+	cms.Lock()
 	// We can't reuse a buffer since when we pass the data to
 	// the underlying store, we don't know if this is retained
 	// in some cache, etc..
-	buf := make([]byte, 1+cms.nonceSize+cms.cryptoOverhead+len(data))
-	cms.Lock()
-	buf[0] = cms.cipherCode
-	copy(buf[1:], cms.nonce)
-	copy(buf[1+cms.nonceSize:], data)
-	dst := buf[1+cms.nonceSize : 1+cms.nonceSize+len(data)]
-	ed := cms.gcm.Seal(dst[:0], cms.nonce, dst, nil)
-	cms.nonceUsed++
-	if cms.nonceUsed >= cms.nonceLimit {
-		cms.generateNewNonce()
-	}
+	ed, err := cms.eds.Encrypt(nil, data)
 	cms.Unlock()
-	return buf[:1+cms.nonceSize+len(ed)], nil
+	return ed, err
 }
 
 func (cms *CryptoMsgStore) decryptedMsg(m *pb.MsgProto) (*pb.MsgProto, error) {
-	var gcm cipher.AEAD
-	if len(m.Data) > 0 {
-		switch m.Data[0] {
-		case CryptoCodeAES:
-			gcm = cms.aesgcm
-		case CryptoCodeChaCha:
-			gcm = cms.chachagcm
-		default:
-			// Anything else, assume no algo or something we don't know how to decrypt.
-			return m, nil
-		}
-	}
-	if len(m.Data) <= 1+cms.nonceSize {
-		return nil, fmt.Errorf("trying to decrypt data that is not (len=%v)", len(m.Data))
-	}
 	// When decrypting we can't do it in the original buffer because
 	// the store's copy may be in a cache and so this would decipher
 	// the encrypted copy and during the next call to decryptedMsg()
 	// for the same message, there would be attempt to decrypt something
 	// that is not, which would fail.
-	dd, err := gcm.Open(nil, m.Data[1:1+cms.nonceSize], m.Data[1+cms.nonceSize:], nil)
+	dd, err := cms.eds.Decrypt(nil, m.Data)
 	if err != nil {
 		return nil, err
 	}
