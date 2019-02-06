@@ -14,6 +14,7 @@
 package server
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -64,6 +65,13 @@ func (c *client) getSubsCopy() []*subState {
 	return subs
 }
 
+func getKnownInvalidKey(ID string, connID []byte) string {
+	// The character `:` is not allowed for a client ID,
+	// so we don't even care if connID is present or not,
+	// we create the key as clientID+":"(+connID).
+	return fmt.Sprintf("%s:%s", ID, connID)
+}
+
 // Register a new client. Returns ErrInvalidClient if client is already registered.
 func (cs *clientStore) register(info *spb.ClientInfo) (*client, error) {
 	cs.Lock()
@@ -80,10 +88,8 @@ func (cs *clientStore) register(info *spb.ClientInfo) (*client, error) {
 	cs.clients[c.info.ID] = c
 	if len(c.info.ConnID) > 0 {
 		cs.connIDs[string(c.info.ConnID)] = c
-		// Delete from being possibly in knownInvalid
-		delete(cs.knownInvalid, string(c.info.ConnID))
 	}
-	delete(cs.knownInvalid, info.ID)
+	delete(cs.knownInvalid, getKnownInvalidKey(info.ID, info.ConnID))
 	if cs.waitOnRegister != nil {
 		ch := cs.waitOnRegister[c.info.ID]
 		if ch != nil {
@@ -166,15 +172,12 @@ func (cs *clientStore) isValidWithTimeout(ID string, connID []byte, timeout time
 }
 
 func (cs *clientStore) addToKnownInvalid(ID string, connID []byte) {
-	cID := string(connID)
-	if cID == "" {
-		cID = ID
-	}
-	cs.knownInvalid[cID] = struct{}{}
+	key := getKnownInvalidKey(ID, connID)
+	cs.knownInvalid[key] = struct{}{}
 	if len(cs.knownInvalid) >= maxKnownInvalidConns {
 		r := 0
 		for id := range cs.knownInvalid {
-			if id != cID {
+			if id != key {
 				delete(cs.knownInvalid, id)
 				if r++; r > pruneKnownInvalidConns {
 					break
@@ -185,12 +188,7 @@ func (cs *clientStore) addToKnownInvalid(ID string, connID []byte) {
 }
 
 func (cs *clientStore) knownToBeInvalid(ID string, connID []byte) bool {
-	var invalid bool
-	if len(connID) > 0 {
-		_, invalid = cs.knownInvalid[string(connID)]
-	} else {
-		_, invalid = cs.knownInvalid[ID]
-	}
+	_, invalid := cs.knownInvalid[getKnownInvalidKey(ID, connID)]
 	return invalid
 }
 

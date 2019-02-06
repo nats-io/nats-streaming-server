@@ -660,7 +660,7 @@ func checkKnownInvalidMap(t *testing.T, s *StanServer, size int, id string) {
 		var ki bool
 		s.clients.RLock()
 		if id != "" {
-			_, ki = s.clients.knownInvalid[id]
+			_, ki = s.clients.knownInvalid[id+":"]
 		}
 		mlen := len(s.clients.knownInvalid)
 		s.clients.RUnlock()
