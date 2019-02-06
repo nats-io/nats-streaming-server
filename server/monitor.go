@@ -204,7 +204,7 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Error getting process limits: %v", err), http.StatusInternalServerError)
 			return
 		}
-		maxFDs = limits.OpenFiles
+		maxFDs = int(limits.OpenFiles)
 	}
 
 	serverz := &Serverz{
