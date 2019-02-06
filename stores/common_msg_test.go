@@ -23,11 +23,11 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 )
 
-func getCryptoOverhead(s Store) uint64 {
-	if cs, ok := s.(*CryptoStore); ok {
-		cs.Lock()
-		overhead := 1 + cs.nonceSize + cs.cryptoOverhead
-		cs.Unlock()
+func getCryptoOverhead(s MsgStore) uint64 {
+	if cms, ok := s.(*CryptoMsgStore); ok {
+		cms.Lock()
+		overhead := 1 + cms.eds.nonceSize + cms.eds.cryptoOverhead
+		cms.Unlock()
 		return uint64(overhead)
 	}
 	return 0
@@ -134,7 +134,7 @@ func TestCSBasicMsgStore(t *testing.T) {
 				// FileStore counts more toward the number of bytes
 				expectedBytes += 2 * (msgRecordOverhead)
 			}
-			expectedBytes += 2 * getCryptoOverhead(s)
+			expectedBytes += 2 * getCryptoOverhead(ms)
 			if count != 2 || bytes != expectedBytes {
 				t.Fatalf("Unexpected counts: %v, %v vs %v, %v", count, bytes, 2, expectedBytes)
 			}
@@ -173,7 +173,7 @@ func TestCSMsgsState(t *testing.T) {
 			if isFileStore {
 				expectedBytes += msgRecordOverhead
 			}
-			expectedBytes += getCryptoOverhead(s)
+			expectedBytes += getCryptoOverhead(cs1.Msgs)
 			if count != 1 || bytes != expectedBytes {
 				t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v", count, 1, bytes, expectedBytes)
 			}
@@ -183,7 +183,7 @@ func TestCSMsgsState(t *testing.T) {
 			if isFileStore {
 				expectedBytes += msgRecordOverhead
 			}
-			expectedBytes += getCryptoOverhead(s)
+			expectedBytes += getCryptoOverhead(cs2.Msgs)
 			if count != 1 || bytes != expectedBytes {
 				t.Fatalf("Unexpected counts: count=%v vs %v - bytes=%v vs %v", count, 1, bytes, expectedBytes)
 			}
@@ -200,6 +200,8 @@ func TestCSMaxMsgs(t *testing.T) {
 			s := startTest(t, st)
 			defer s.Close()
 
+			oc := storeCreateChannel(t, s, "overhead")
+
 			payload := []byte("hello")
 
 			isFileStore := isStorageBasedOnFile(s)
@@ -214,7 +216,7 @@ func TestCSMaxMsgs(t *testing.T) {
 				if isFileStore {
 					expectedBytes += msgRecordOverhead
 				}
-				expectedBytes += getCryptoOverhead(s)
+				expectedBytes += getCryptoOverhead(oc.Msgs)
 				limitCount++
 				if expectedBytes >= stopBytes {
 					break
@@ -269,7 +271,7 @@ func TestCSMaxMsgs(t *testing.T) {
 			if isFileStore {
 				expectedBytes += msgRecordOverhead
 			}
-			expectedBytes += getCryptoOverhead(s)
+			expectedBytes += getCryptoOverhead(cs.Msgs)
 
 			count, bytes = msgStoreState(t, cs.Msgs)
 			if count != 1 || bytes != expectedBytes {
@@ -287,7 +289,7 @@ func TestCSMaxMsgs(t *testing.T) {
 				if isFileStore {
 					expectedBytes += msgRecordOverhead
 				}
-				expectedBytes += getCryptoOverhead(s)
+				expectedBytes += getCryptoOverhead(cs.Msgs)
 			}
 			limits.MaxMsgs = expectedCount
 			limits.MaxBytes = 0
@@ -316,7 +318,7 @@ func TestCSMaxMsgs(t *testing.T) {
 				if isFileStore {
 					expectedBytes += msgRecordOverhead
 				}
-				expectedBytes += getCryptoOverhead(s)
+				expectedBytes += getCryptoOverhead(cs.Msgs)
 				expectedCount++
 				if expectedBytes >= 1000 {
 					break

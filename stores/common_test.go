@@ -978,6 +978,8 @@ func TestCSPerChannelLimits(t *testing.T) {
 			s := startTest(t, st)
 			defer s.Close()
 
+			oc := storeCreateChannel(t, s, "overhead")
+
 			storeLimits := &StoreLimits{MaxChannels: 10}
 			storeLimits.MaxSubscriptions = 10
 			storeLimits.MaxMsgs = 100
@@ -1019,7 +1021,7 @@ func TestCSPerChannelLimits(t *testing.T) {
 				0,
 			}
 			if testUseEncryption {
-				noMaxMsgOverrideLimits.MaxBytes += int64(100 * getCryptoOverhead(s))
+				noMaxMsgOverrideLimits.MaxBytes += int64(100 * getCryptoOverhead(oc.Msgs))
 			}
 			noMaxBytesOverrideLimits := ChannelLimits{
 				MsgStoreLimits{

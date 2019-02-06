@@ -20,7 +20,6 @@ import (
 	"os"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/nats-io/go-nats-streaming/pb"
@@ -274,7 +273,10 @@ func TestCryptoStoreUseEnvKey(t *testing.T) {
 }
 
 func TestCryptoStoreRenewNonce(t *testing.T) {
-	s := createDefaultMemStore(t)
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
 	defer s.Close()
 
 	cs, err := NewCryptoStore(s, CryptoCipherAES, []byte("testkey"))
@@ -284,40 +286,55 @@ func TestCryptoStoreRenewNonce(t *testing.T) {
 	defer cs.Close()
 
 	c := storeCreateChannel(t, cs, "foo")
+
+	nr := 200
+	for i := 0; i < nr; i++ {
+		storeMsg(t, c, "foo", uint64(i+1), []byte("hello"))
+	}
+	c.Msgs.Flush()
+
 	cms := c.Msgs.(*CryptoMsgStore)
 	cms.Lock()
-	oldNonce := cms.nonce
-	oldLimit := cms.nonceLimit
-	cms.nonceLimit = 5
+	val := cms.eds.nonce[cms.eds.nonceSize-1]
 	cms.Unlock()
-
-	if len(oldNonce) == 0 || oldLimit == 0 {
-		t.Fatalf("Unexpected nonce and/or limit: %v - %v", oldNonce, oldLimit)
+	if val != byte(nr+1) {
+		t.Fatalf("Unexpected nonce counter: %v", val)
 	}
 
-	nr := 20
-	wg := sync.WaitGroup{}
-	wg.Add(nr)
-	for i := 0; i < nr; i++ {
-		go func() {
-			defer wg.Done()
-			for i := 0; i < 10; i++ {
-				storeMsg(t, c, "foo", uint64(i+1), []byte("hello"))
-			}
-		}()
-	}
-	wg.Wait()
+	cs.Close()
 
+	s, err = NewFileStore(testLogger, testFSDefaultDatastore, nil)
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+	cs, err = NewCryptoStore(s, CryptoCipherAES, []byte("testkey"))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer cs.Close()
+
+	rs, err := cs.Recover()
+	if err != nil {
+		t.Fatalf("Error recovering file: %v", err)
+	}
+	c = getRecoveredChannel(t, rs, "foo")
+	cms = c.Msgs.(*CryptoMsgStore)
 	cms.Lock()
-	currentNonce := cms.nonce
-	currentLimit := cms.nonceLimit
+	val = cms.eds.nonce[cms.eds.nonceSize-1]
 	cms.Unlock()
-
-	if bytes.Equal(currentNonce, oldNonce) {
-		t.Fatal("Expected nonce to have changed, it did not")
+	if val != byte(nr+1) {
+		t.Fatalf("Unexpected nonce counter: %v", val)
 	}
-	if currentLimit == 0 || currentLimit == oldLimit {
-		t.Fatalf("Expected limit to be different, was %v is now %v", oldLimit, currentLimit)
+	for i := 0; i < 100; i++ {
+		storeMsg(t, c, "foo", uint64(i+1), []byte("hello"))
+	}
+	cms.Lock()
+	val1 := cms.eds.nonce[cms.eds.nonceSize-2]
+	val2 := cms.eds.nonce[cms.eds.nonceSize-1]
+	cms.Unlock()
+	if val1 != 1 || val2 != 45 {
+		t.Fatalf("Expected values %v, %v", val1, val2)
 	}
 }
 
