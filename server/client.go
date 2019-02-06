@@ -14,11 +14,17 @@
 package server
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
+)
+
+const (
+	maxKnownInvalidConns   = 256
+	pruneKnownInvalidConns = 32
 )
 
 // This is a proxy to the store interface.
@@ -27,6 +33,7 @@ type clientStore struct {
 	clients        map[string]*client
 	connIDs        map[string]*client
 	waitOnRegister map[string]chan struct{}
+	knownInvalid   map[string]struct{}
 	store          stores.Store
 }
 
@@ -43,9 +50,10 @@ type client struct {
 // newClientStore creates a new clientStore instance using `store` as the backing storage.
 func newClientStore(store stores.Store) *clientStore {
 	return &clientStore{
-		clients: make(map[string]*client),
-		connIDs: make(map[string]*client),
-		store:   store,
+		clients:      make(map[string]*client),
+		connIDs:      make(map[string]*client),
+		knownInvalid: make(map[string]struct{}),
+		store:        store,
 	}
 }
 
@@ -55,6 +63,13 @@ func (c *client) getSubsCopy() []*subState {
 	subs := make([]*subState, len(c.subs))
 	copy(subs, c.subs)
 	return subs
+}
+
+func getKnownInvalidKey(ID string, connID []byte) string {
+	// The character `:` is not allowed for a client ID,
+	// so we don't even care if connID is present or not,
+	// we create the key as clientID+":"(+connID).
+	return fmt.Sprintf("%s:%s", ID, connID)
 }
 
 // Register a new client. Returns ErrInvalidClient if client is already registered.
@@ -74,6 +89,7 @@ func (cs *clientStore) register(info *spb.ClientInfo) (*client, error) {
 	if len(c.info.ConnID) > 0 {
 		cs.connIDs[string(c.info.ConnID)] = c
 	}
+	delete(cs.knownInvalid, getKnownInvalidKey(info.ID, info.ConnID))
 	if cs.waitOnRegister != nil {
 		ch := cs.waitOnRegister[c.info.ID]
 		if ch != nil {
@@ -132,6 +148,10 @@ func (cs *clientStore) isValidWithTimeout(ID string, connID []byte, timeout time
 		cs.Unlock()
 		return true
 	}
+	if cs.knownToBeInvalid(ID, connID) {
+		cs.Unlock()
+		return false
+	}
 	if cs.waitOnRegister == nil {
 		cs.waitOnRegister = make(map[string]chan struct{})
 	}
@@ -145,9 +165,31 @@ func (cs *clientStore) isValidWithTimeout(ID string, connID []byte, timeout time
 		// We timed out, remove the entry in the map
 		cs.Lock()
 		delete(cs.waitOnRegister, ID)
+		cs.addToKnownInvalid(ID, connID)
 		cs.Unlock()
 		return false
 	}
+}
+
+func (cs *clientStore) addToKnownInvalid(ID string, connID []byte) {
+	key := getKnownInvalidKey(ID, connID)
+	cs.knownInvalid[key] = struct{}{}
+	if len(cs.knownInvalid) >= maxKnownInvalidConns {
+		r := 0
+		for id := range cs.knownInvalid {
+			if id != key {
+				delete(cs.knownInvalid, id)
+				if r++; r > pruneKnownInvalidConns {
+					break
+				}
+			}
+		}
+	}
+}
+
+func (cs *clientStore) knownToBeInvalid(ID string, connID []byte) bool {
+	_, invalid := cs.knownInvalid[getKnownInvalidKey(ID, connID)]
+	return invalid
 }
 
 // Lookup client by ConnID if not nil, otherwise by clientID.
