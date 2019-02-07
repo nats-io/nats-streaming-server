@@ -47,11 +47,6 @@ func TestRaftLogDeleteRange(t *testing.T) {
 	store := createTestRaftLog(t, false, 0)
 	defer store.Close()
 
-	// Save reference to bolt connection
-	store.RLock()
-	orgConn := store.conn
-	store.RUnlock()
-
 	// Store in dbConf bucket
 	k1 := []byte("1")
 	if err := store.SetUint64(k1, 1); err != nil {
@@ -112,11 +107,6 @@ func TestRaftLogDeleteRange(t *testing.T) {
 		}
 	}
 
-	// Now change the limit to cause re-creation of the bolt DB store.
-	store.Lock()
-	store.simpleDelThresholdLow = 0
-	store.Unlock()
-
 	// Delete just one element
 	if err := store.DeleteRange(6, 6); err != nil {
 		t.Fatalf("Error on delete: %v", err)
@@ -143,17 +133,6 @@ func TestRaftLogDeleteRange(t *testing.T) {
 		if !reflect.DeepEqual(log, logs[i-1]) {
 			t.Fatalf("Unexpected log at index %v: %v", i, log)
 		}
-	}
-	// The store should have been replaced
-	store.RLock()
-	newConn := store.conn
-	noSyncValue := store.conn.NoSync
-	store.RUnlock()
-	if newConn == orgConn {
-		t.Fatalf("Looks like store was not recreated")
-	}
-	if !noSyncValue {
-		t.Fatalf("bolt conn NoSync should be true")
 	}
 
 	// Check close:
