@@ -19,14 +19,6 @@
 			"notests": true
 		},
 		{
-			"importpath": "github.com/boltdb/bolt",
-			"repository": "https://github.com/boltdb/bolt",
-			"vcs": "git",
-			"revision": "2f1ce7a837dcb8da3ec595b1dac9d0632f0f99e8",
-			"branch": "master",
-			"notests": true
-		},
-		{
 			"importpath": "github.com/circonus-labs/circonusllhist",
 			"repository": "https://github.com/circonus-labs/circonusllhist",
 			"vcs": "git",
@@ -227,6 +219,14 @@
 			"repository": "https://github.com/prometheus/procfs",
 			"vcs": "git",
 			"revision": "488faf799f863e27e50c516468f76ae8f1da20a5",
+			"branch": "master",
+			"notests": true
+		},
+		{
+			"importpath": "go.etcd.io/bbolt",
+			"repository": "https://github.com/etcd-io/bbolt",
+			"vcs": "git",
+			"revision": "63597a96ec0ad9e6d43c3fc81e809909e0237461",
 			"branch": "master",
 			"notests": true
 		},
