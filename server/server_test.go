@@ -512,6 +512,7 @@ func (d *dummyLogger) Debugf(format string, args ...interface{})  { d.log(format
 func (d *dummyLogger) Tracef(format string, args ...interface{})  { d.log(format, args...) }
 func (d *dummyLogger) Errorf(format string, args ...interface{})  { d.log(format, args...) }
 func (d *dummyLogger) Fatalf(format string, args ...interface{})  { d.log(format, args...) }
+func (d *dummyLogger) Warnf(format string, args ...interface{})   { d.log(format, args...) }
 
 func TestVersionMatchesTag(t *testing.T) {
 	tag := os.Getenv("TRAVIS_TAG")

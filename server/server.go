@@ -2247,7 +2247,7 @@ func (s *StanServer) recoverOneSub(c *channel, recSub *spb.SubState, pendingAcks
 		// Do not recover a queue durable subscriber that still
 		// has ClientID but for which connection was closed (=>!added)
 		if !added && sub.isQueueDurableSubscriber() && !sub.isShadowQueueDurable() {
-			s.log.Noticef("WARN: Not recovering ghost durable queue subscriber: [%s]:[%s] subject=%s inbox=%s", sub.ClientID, sub.QGroup, sub.subject, sub.Inbox)
+			s.log.Warnf("Not recovering ghost durable queue subscriber: [%s]:[%s] subject=%s inbox=%s", sub.ClientID, sub.QGroup, sub.subject, sub.Inbox)
 			c.store.Subs.DeleteSub(sub.ID)
 			return nil
 		}

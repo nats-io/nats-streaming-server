@@ -56,6 +56,10 @@ func (d *dummyLogger) Fatalf(format string, args ...interface{}) {
 	d.msg = fmt.Sprintf(format, args...)
 }
 
+func (d *dummyLogger) Warnf(format string, args ...interface{}) {
+	d.msg = fmt.Sprintf(format, args...)
+}
+
 func (d *dummyLogger) Close() error {
 	return errors.New("dummy error")
 }
