@@ -136,7 +136,7 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		} else {
 			sortOpt = opts.Sort
 			if !sortOpt.IsValid() {
-				return nil, fmt.Errorf("Invalid sorting option: %s", sortOpt)
+				return nil, fmt.Errorf("invalid sorting option: %s", sortOpt)
 			}
 		}
 		auth = opts.Username
@@ -154,11 +154,11 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 
 		// ByStop only makes sense on closed connections
 		if sortOpt == ByStop && state != ConnClosed {
-			return nil, fmt.Errorf("Sort by stop only valid on closed connections")
+			return nil, fmt.Errorf("sort by stop only valid on closed connections")
 		}
 		// ByReason is the same.
 		if sortOpt == ByReason && state != ConnClosed {
-			return nil, fmt.Errorf("Sort by reason only valid on closed connections")
+			return nil, fmt.Errorf("sort by reason only valid on closed connections")
 		}
 
 		// If searching by CID
@@ -193,9 +193,10 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 	case ConnClosed:
 		c.Total = s.closed.len()
 		closedClients = s.closed.closedClients()
+		c.Total = len(closedClients)
 	case ConnAll:
-		c.Total = len(s.clients) + s.closed.len()
 		closedClients = s.closed.closedClients()
+		c.Total = len(s.clients) + len(closedClients)
 	}
 
 	totalClients := c.Total
@@ -394,8 +395,8 @@ func (ci *ConnInfo) fill(client *client, nc net.Conn, now time.Time) {
 func (c *client) getRTT() string {
 	if c.rtt == 0 {
 		// If a real client, go ahead and send ping now to get a value
-		// for RTT. For tests and telnet, etc skip.
-		if c.flags.isSet(connectReceived) && c.opts.Lang != "" {
+		// for RTT. For tests and telnet, or if client is closing, etc skip.
+		if !c.flags.isSet(clearConnection) && c.flags.isSet(connectReceived) && c.opts.Lang != "" {
 			c.sendPing()
 		}
 		return ""
@@ -466,7 +467,7 @@ func decodeState(w http.ResponseWriter, r *http.Request) (ConnState, error) {
 	}
 	// We do not understand intended state here.
 	w.WriteHeader(http.StatusBadRequest)
-	err := fmt.Errorf("Error decoding state for %s", str)
+	err := fmt.Errorf("error decoding state for %s", str)
 	w.Write([]byte(err.Error()))
 	return 0, err
 }
@@ -530,10 +531,12 @@ func (s *Server) HandleConnz(w http.ResponseWriter, r *http.Request) {
 
 // Routez represents detailed information on current client connections.
 type Routez struct {
-	ID        string       `json:"server_id"`
-	Now       time.Time    `json:"now"`
-	NumRoutes int          `json:"num_routes"`
-	Routes    []*RouteInfo `json:"routes"`
+	ID        string             `json:"server_id"`
+	Now       time.Time          `json:"now"`
+	Import    *SubjectPermission `json:"import,omitempty"`
+	Export    *SubjectPermission `json:"export,omitempty"`
+	NumRoutes int                `json:"num_routes"`
+	Routes    []*RouteInfo       `json:"routes"`
 }
 
 // RoutezOptions are options passed to Routez
@@ -544,19 +547,21 @@ type RoutezOptions struct {
 
 // RouteInfo has detailed information on a per connection basis.
 type RouteInfo struct {
-	Rid          uint64   `json:"rid"`
-	RemoteID     string   `json:"remote_id"`
-	DidSolicit   bool     `json:"did_solicit"`
-	IsConfigured bool     `json:"is_configured"`
-	IP           string   `json:"ip"`
-	Port         int      `json:"port"`
-	Pending      int      `json:"pending_size"`
-	InMsgs       int64    `json:"in_msgs"`
-	OutMsgs      int64    `json:"out_msgs"`
-	InBytes      int64    `json:"in_bytes"`
-	OutBytes     int64    `json:"out_bytes"`
-	NumSubs      uint32   `json:"subscriptions"`
-	Subs         []string `json:"subscriptions_list,omitempty"`
+	Rid          uint64             `json:"rid"`
+	RemoteID     string             `json:"remote_id"`
+	DidSolicit   bool               `json:"did_solicit"`
+	IsConfigured bool               `json:"is_configured"`
+	IP           string             `json:"ip"`
+	Port         int                `json:"port"`
+	Import       *SubjectPermission `json:"import,omitempty"`
+	Export       *SubjectPermission `json:"export,omitempty"`
+	Pending      int                `json:"pending_size"`
+	InMsgs       int64              `json:"in_msgs"`
+	OutMsgs      int64              `json:"out_msgs"`
+	InBytes      int64              `json:"in_bytes"`
+	OutBytes     int64              `json:"out_bytes"`
+	NumSubs      uint32             `json:"subscriptions"`
+	Subs         []string           `json:"subscriptions_list,omitempty"`
 }
 
 // Routez returns a Routez struct containing inormation about routes.
@@ -566,13 +571,19 @@ func (s *Server) Routez(routezOpts *RoutezOptions) (*Routez, error) {
 
 	subs := routezOpts != nil && routezOpts.Subscriptions
 
-	// Walk the list
 	s.mu.Lock()
 	rs.NumRoutes = len(s.routes)
 
 	// copy the server id for monitoring
 	rs.ID = s.info.ID
 
+	// Check for defined permissions for all connected routes.
+	if perms := s.getOpts().Cluster.Permissions; perms != nil {
+		rs.Import = perms.Import
+		rs.Export = perms.Export
+	}
+
+	// Walk the list
 	for _, r := range s.routes {
 		r.mu.Lock()
 		ri := &RouteInfo{
@@ -585,6 +596,8 @@ func (s *Server) Routez(routezOpts *RoutezOptions) (*Routez, error) {
 			InBytes:      atomic.LoadInt64(&r.inBytes),
 			OutBytes:     r.outBytes,
 			NumSubs:      uint32(len(r.subs)),
+			Import:       r.opts.Import,
+			Export:       r.opts.Export,
 		}
 
 		if subs && len(r.subs) > 0 {
@@ -692,7 +705,7 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 			testSub = opts.Test
 			test = true
 			if !IsValidLiteralSubject(testSub) {
-				return nil, fmt.Errorf("Invalid test subject, must be valid publish subject: %s", testSub)
+				return nil, fmt.Errorf("invalid test subject, must be valid publish subject: %s", testSub)
 			}
 		}
 	}

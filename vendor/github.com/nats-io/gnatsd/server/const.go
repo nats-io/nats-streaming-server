@@ -26,6 +26,9 @@ const (
 	CommandQuit   = Command("quit")
 	CommandReopen = Command("reopen")
 	CommandReload = Command("reload")
+
+	// private for now
+	commandLDMode = Command("ldm")
 )
 
 var (
@@ -35,7 +38,7 @@ var (
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "1.3.0"
+	VERSION = "1.4.1"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
@@ -55,15 +58,15 @@ const (
 	DEFAULT_HOST = "0.0.0.0"
 
 	// MAX_CONTROL_LINE_SIZE is the maximum allowed protocol control line size.
-	// 1k should be plenty since payloads sans connect string are separate
-	MAX_CONTROL_LINE_SIZE = 1024
+	// 4k should be plenty since payloads sans connect/info string are separate.
+	MAX_CONTROL_LINE_SIZE = 4096
 
 	// MAX_PAYLOAD_SIZE is the maximum allowed payload size. Should be using
 	// something different if > 1MB payloads are needed.
 	MAX_PAYLOAD_SIZE = (1024 * 1024)
 
 	// MAX_PENDING_SIZE is the maximum outbound pending bytes per client.
-	MAX_PENDING_SIZE = (256 * 1024 * 1024)
+	MAX_PENDING_SIZE = (64 * 1024 * 1024)
 
 	// DEFAULT_MAX_CONNECTIONS is the default maximum connections allowed.
 	DEFAULT_MAX_CONNECTIONS = (64 * 1024)
@@ -121,4 +124,8 @@ const (
 
 	// DEFAULT_MAX_CLOSED_CLIENTS
 	DEFAULT_MAX_CLOSED_CLIENTS = 10000
+
+	// DEFAULT_LAME_DUCK_DURATION is the time in which the server spreads
+	// the closing of clients when signaled to go in lame duck mode.
+	DEFAULT_LAME_DUCK_DURATION = 30 * time.Second
 )

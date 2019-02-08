@@ -1302,6 +1302,7 @@ func (d *getExclusiveLockLogger) log(format string, args ...interface{}) {
 func (d *getExclusiveLockLogger) Noticef(format string, args ...interface{}) {}
 func (d *getExclusiveLockLogger) Debugf(format string, args ...interface{})  {}
 func (d *getExclusiveLockLogger) Tracef(format string, args ...interface{})  {}
+func (d *getExclusiveLockLogger) Warnf(format string, args ...interface{})   {}
 func (d *getExclusiveLockLogger) Errorf(format string, args ...interface{})  { d.log(format, args...) }
 func (d *getExclusiveLockLogger) Fatalf(format string, args ...interface{})  { d.log(format, args...) }
 

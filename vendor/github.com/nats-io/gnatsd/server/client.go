@@ -21,6 +21,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"regexp"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,6 +69,7 @@ type clientFlag byte
 // Some client state represented as flags
 const (
 	connectReceived   clientFlag = 1 << iota // The CONNECT proto has been received
+	infoReceived                             // The INFO protocol has been received
 	firstPongSent                            // The first PONG has been sent
 	handshakeComplete                        // For TLS clients, indicate that the handshake is complete
 	clearConnection                          // Marks that clearConnection has already been called.
@@ -175,13 +177,13 @@ type outbound struct {
 	s   []byte        // Secondary for use post flush
 	nb  net.Buffers   // net.Buffers for writev IO
 	sz  int           // limit size per []byte, uses variable BufSize constants, start, min, max.
-	sws int           // Number of short writes, used for dyanmic resizing.
+	sws int           // Number of short writes, used for dynamic resizing.
 	pb  int64         // Total pending/queued bytes.
 	pm  int64         // Total pending/queued messages.
 	sg  *sync.Cond    // Flusher conditional for signaling.
-	fsp int           // Flush signals that are pending from readLoop's pcd.
-	mp  int64         // snapshot of max pending.
 	wdl time.Duration // Snapshot fo write deadline.
+	mp  int64         // snapshot of max pending.
+	fsp int           // Flush signals that are pending from readLoop's pcd.
 	lft time.Duration // Last flush time.
 }
 
@@ -253,6 +255,10 @@ type clientOpts struct {
 	Lang          string `json:"lang"`
 	Version       string `json:"version"`
 	Protocol      int    `json:"protocol"`
+
+	// Routes only
+	Import *SubjectPermission `json:"import,omitempty"`
+	Export *SubjectPermission `json:"export,omitempty"`
 }
 
 var defaultOpts = clientOpts{Verbose: true, Pedantic: true, Echo: true}
@@ -302,6 +308,19 @@ func (c *client) initClient() {
 	case ROUTER:
 		c.ncs = fmt.Sprintf("%s - rid:%d", conn, c.cid)
 	}
+}
+
+// RemoteAddress expose the Address of the client connection,
+// nil when not connected or unknown
+func (c *client) RemoteAddress() net.Addr {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.nc == nil {
+		return nil
+	}
+
+	return c.nc.RemoteAddr()
 }
 
 // RegisterUser allows auth to call back into a new client
@@ -458,7 +477,7 @@ func (c *client) readLoop() {
 		// Budget to spend in place flushing outbound data.
 		// Client will be checked on several fronts to see
 		// if applicable. Routes will never wait in place.
-		budget := 500 * time.Microsecond
+		budget := time.Millisecond
 		if c.typ == ROUTER {
 			budget = 0
 		}
@@ -562,8 +581,18 @@ func (c *client) flushOutbound() bool {
 	attempted := c.out.pb
 	apm := c.out.pm
 
-	// Do NOT hold lock during actual IO
-	c.mu.Unlock()
+	// What we are doing here is seeing if we are getting behind. This is
+	// generally not a gradual thing and will spike quickly. Use some basic
+	// logic to try to understand when this is happening through no fault of
+	// our own. How we attempt to get back into a more balanced state under
+	// load will be to hold our lock during IO, forcing others to wait and
+	// applying back pressure to the publishers sending to us.
+	releaseLock := c.out.pb < maxBufSize*4
+
+	// Do NOT hold lock during actual IO unless we are behind
+	if releaseLock {
+		c.mu.Unlock()
+	}
 
 	// flush here
 	now := time.Now()
@@ -575,15 +604,17 @@ func (c *client) flushOutbound() bool {
 	nc.SetWriteDeadline(time.Time{})
 	lft := time.Since(now)
 
-	// Re-acquire client lock
-	c.mu.Lock()
+	// Re-acquire client lock if we let it go during IO
+	if releaseLock {
+		c.mu.Lock()
+	}
 
 	// Update flush time statistics
 	c.out.lft = lft
 
 	// Subtract from pending bytes and messages.
 	c.out.pb -= n
-	c.out.pm -= apm // FIXME(dlc) - this will not be accurate.
+	c.out.pm -= apm // FIXME(dlc) - this will not be totally accurate.
 
 	// Check for partial writes
 	if n != attempted && n > 0 {
@@ -597,9 +628,30 @@ func (c *client) flushOutbound() bool {
 			c.out.pb -= attempted
 		}
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
-			atomic.AddInt64(&srv.slowConsumers, 1)
-			c.clearConnection(SlowConsumerWriteDeadline)
-			c.Noticef("Slow Consumer Detected: WriteDeadline of %v Exceeded", c.out.wdl)
+			// report slow consumer error
+			sce := true
+			if tlsConn, ok := c.nc.(*tls.Conn); ok {
+				if !tlsConn.ConnectionState().HandshakeComplete {
+					// Likely a TLSTimeout error instead...
+					c.clearConnection(TLSHandshakeError)
+					// Would need to coordinate with tlstimeout()
+					// to avoid double logging, so skip logging
+					// here, and don't report a slow consumer error.
+					sce = false
+				}
+			} else if !c.flags.isSet(connectReceived) {
+				// Under some conditions, a client may hit a slow consumer write deadline
+				// before the authorization or TLS handshake timeout. If that is the case,
+				// then we handle as slow consumer though we do not increase the counter
+				// as that can be misleading.
+				c.clearConnection(SlowConsumerWriteDeadline)
+				sce = false
+			}
+			if sce {
+				atomic.AddInt64(&srv.slowConsumers, 1)
+				c.clearConnection(SlowConsumerWriteDeadline)
+				c.Noticef("Slow Consumer Detected: WriteDeadline of %v Exceeded", c.out.wdl)
+			}
 		} else {
 			c.clearConnection(WriteError)
 			c.Debugf("Error flushing: %v", err)
@@ -635,6 +687,12 @@ func (c *client) flushOutbound() bool {
 			}
 		}
 	}
+
+	// Signal again if there is still data to send
+	if c.out.pb > 0 {
+		c.out.sg.Signal()
+	}
+
 	return true
 }
 
@@ -697,8 +755,43 @@ func (c *client) processErr(errStr string) {
 	c.closeConnection(ParseError)
 }
 
+// Password pattern matcher.
+var passPat = regexp.MustCompile(`"?\s*pass\S*?"?\s*[:=]\s*"?(([^",\r\n}])*)`)
+
+// removePassFromTrace removes any notion of passwords from trace
+// messages for logging.
+func removePassFromTrace(arg []byte) []byte {
+	if !bytes.Contains(arg, []byte(`pass`)) {
+		return arg
+	}
+	// Take a copy of the connect proto just for the trace message.
+	var _arg [4096]byte
+	buf := append(_arg[:0], arg...)
+
+	m := passPat.FindAllSubmatchIndex(buf, -1)
+	if len(m) == 0 {
+		return arg
+	}
+
+	redactedPass := []byte("[REDACTED]")
+	for _, i := range m {
+		if len(i) < 4 {
+			continue
+		}
+		start := i[2]
+		end := i[3]
+
+		// Replace password substring.
+		buf = append(buf[:start], append(redactedPass, buf[end:]...)...)
+		break
+	}
+	return buf
+}
+
 func (c *client) processConnect(arg []byte) error {
-	c.traceInOp("CONNECT", arg)
+	if c.trace {
+		c.traceInOp("CONNECT", removePassFromTrace(arg))
+	}
 
 	c.mu.Lock()
 	// If we can't stop the timer because the callback is in progress...
@@ -769,8 +862,13 @@ func (c *client) processConnect(arg []byte) error {
 
 	// Grab connection name of remote route.
 	if typ == ROUTER && r != nil {
+		var routePerms *RoutePermissions
+		if srv != nil {
+			routePerms = srv.getOpts().Cluster.Permissions
+		}
 		c.mu.Lock()
 		c.route.remoteID = c.opts.Name
+		c.setRoutePermissions(routePerms)
 		c.mu.Unlock()
 	}
 
@@ -819,6 +917,10 @@ func (c *client) maxPayloadViolation(sz int, max int64) {
 // Return pending length.
 // Lock should be held.
 func (c *client) queueOutbound(data []byte) {
+	// Do not keep going if closed or cleared via a slow consumer
+	if c.flags.isSet(clearConnection) {
+		return
+	}
 	// Add to pending bytes total.
 	c.out.pb += int64(len(data))
 
@@ -1394,6 +1496,9 @@ func (c *client) deliverMsg(sub *subscription, mh, msg []byte) bool {
 	client.out.pm++
 
 	// Check outbound threshold and queue IO flush if needed.
+	// This is specifically looking at situations where we are getting behind and may want
+	// to intervene before this producer goes back to top of readloop. We are in the producer's
+	// readloop go routine at this point.
 	if client.out.pm > 1 && client.out.pb > maxBufSize*2 {
 		client.flushSignal()
 	}
@@ -1770,9 +1875,9 @@ func (c *client) closeConnection(reason ClosedState) {
 	c.mu.Unlock()
 
 	if srv != nil {
-		// This is a route that disconnected...
-		if len(connectURLs) > 0 {
-			// Unless disabled, possibly update the server's INFO protcol
+		// This is a route that disconnected, but we are not in lame duck mode...
+		if len(connectURLs) > 0 && !srv.isLameDuckMode() {
+			// Unless disabled, possibly update the server's INFO protocol
 			// and send to clients that know how to handle async INFOs.
 			if !srv.getOpts().Cluster.NoAdvertise {
 				srv.removeClientConnectURLsAndSendINFOToClients(connectURLs)

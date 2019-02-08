@@ -246,7 +246,7 @@ func (rl *raftLogger) Write(b []byte) (int, error) {
 		case 'I': // [INFO]
 			rl.log.Noticef("%s", b[levelStart+7:])
 		case 'W': // [WARN]
-			rl.log.Noticef("%s", b[levelStart+7:])
+			rl.log.Warnf("%s", b[levelStart+7:])
 		case 'E': // [ERR]
 			rl.log.Errorf("%s", b[levelStart+6:])
 		default:

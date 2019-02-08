@@ -135,6 +135,13 @@ func (s *StanLogger) Tracef(format string, v ...interface{}) {
 	}, format, v...)
 }
 
+// Warnf logs a warning statement
+func (s *StanLogger) Warnf(format string, v ...interface{}) {
+	s.executeLogCall(func(logger Logger, format string, v ...interface{}) {
+		logger.Warnf(format, v...)
+	}, format, v...)
+}
+
 func (s *StanLogger) executeLogCall(f func(logger Logger, format string, v ...interface{}), format string, args ...interface{}) {
 	s.mu.Lock()
 	if s.log == nil {

@@ -16,6 +16,7 @@ package server
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -35,6 +36,8 @@ type ClientAuthentication interface {
 	GetTLSConnectionState() *tls.ConnectionState
 	// Optionally map a user after auth.
 	RegisterUser(*User)
+	// RemoteAddress expose the connection information of the client
+	RemoteAddress() net.Addr
 }
 
 // User is for multiple accounts/users.
@@ -59,8 +62,8 @@ func (u *User) clone() *User {
 // SubjectPermission is an individual allow and deny struct for publish
 // and subscribe authorizations.
 type SubjectPermission struct {
-	Allow []string `json:"allow"`
-	Deny  []string `json:"deny"`
+	Allow []string `json:"allow,omitempty"`
+	Deny  []string `json:"deny,omitempty"`
 }
 
 // Permissions are the allowed subjects on a per
@@ -109,6 +112,25 @@ func (p *Permissions) clone() *Permissions {
 		clone.Subscribe = p.Subscribe.clone()
 	}
 	return clone
+}
+
+// checkAuthforWarnings will look for insecure settings and log concerns.
+// Lock is assumed held.
+func (s *Server) checkAuthforWarnings() {
+	warn := false
+	if s.opts.Password != "" && !isBcrypt(s.opts.Password) {
+		warn = true
+	}
+	for _, u := range s.users {
+		if !isBcrypt(u.Password) {
+			warn = true
+			break
+		}
+	}
+	if warn {
+		// Warning about using plaintext passwords.
+		s.Warnf("Plaintext passwords detected. Use Nkeys or Bcrypt passwords in config files.")
+	}
 }
 
 // configureAuthorization will do any setup needed for authorization.
@@ -217,7 +239,6 @@ func (s *Server) isRouterAuthorized(c *client) bool {
 	if !comparePasswords(opts.Cluster.Password, c.opts.Password) {
 		return false
 	}
-	c.setRoutePermissions(opts.Cluster.Permissions)
 	return true
 }
 
