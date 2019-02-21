@@ -4092,3 +4092,82 @@ func TestClusteringDeleteChannelLeaksSnapshotSubs(t *testing.T) {
 		t.Fatalf("Snapshot subscription for channel still exists")
 	}
 }
+
+func TestClusteringDeadlockOnChannelDelete(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	maxInactivity := 1000 * time.Millisecond
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.MaxInactivity = maxInactivity
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	// No defer in case deadlock is detected, it would
+	// prevent the print of t.Fatalf()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.MaxInactivity = maxInactivity
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	// No defer in case deadlock is detected, it would
+	// prevent the print of t.Fatalf()
+
+	servers := []*StanServer{s1, s2}
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unable to connect")
+	}
+	defer nc.Close()
+
+	leader.mu.RLock()
+	newSubSubject := leader.info.Subscribe
+	leader.mu.RUnlock()
+
+	req := pb.SubscriptionRequest{
+		ClientID:      "me",
+		AckWaitInSecs: 30,
+		Inbox:         nats.NewInbox(),
+		MaxInFlight:   1,
+	}
+
+	for i := 0; i < 1000; i++ {
+		leader.lookupOrCreateChannel(fmt.Sprintf("foo.%d", i))
+	}
+
+	time.Sleep(990 * time.Millisecond)
+
+	for i := 0; i < 1000; i++ {
+		req.Subject = fmt.Sprintf("foo.%d", i)
+		b, _ := req.Marshal()
+		nc.Publish(newSubSubject, b)
+	}
+
+	ch := make(chan struct{}, 1)
+	go func() {
+		for {
+			if leader.channels.count() != 0 {
+				time.Sleep(15 * time.Millisecond)
+				continue
+			}
+			ch <- struct{}{}
+			return
+		}
+	}()
+	select {
+	case <-ch:
+		s2.Shutdown()
+		s1.Shutdown()
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Deadlock likely!!!")
+	}
+}

@@ -629,10 +629,10 @@ func TestDeleteChannelStoreError(t *testing.T) {
 		t.Fatalf("Channel should have been removed")
 	}
 	// Check that timer is off
-	s.channels.lockDelete()
+	s.channels.RLock()
 	dip := c.activity.deleteInProgress
 	tset := c.activity.timerSet
-	s.channels.unlockDelete()
+	s.channels.RUnlock()
 	if !dip {
 		t.Fatalf("DeleteInProgress not expected to have been reset")
 	}
@@ -670,10 +670,10 @@ func TestDeleteChannelStoreError(t *testing.T) {
 		return nil
 	})
 	// Check that the activity struct has been reset properly
-	s.channels.lockDelete()
+	s.channels.RLock()
 	dip = c.activity.deleteInProgress
 	tset = c.activity.timerSet
-	s.channels.unlockDelete()
+	s.channels.RUnlock()
 	if dip {
 		t.Fatalf("DeleteInProgress should have been reset")
 	}
@@ -693,10 +693,10 @@ func TestDeleteChannelStoreError(t *testing.T) {
 		t.Fatalf("Channel should have been removed")
 	}
 	// Check that timer is off
-	s.channels.lockDelete()
+	s.channels.RLock()
 	dip = c.activity.deleteInProgress
 	tset = c.activity.timerSet
-	s.channels.unlockDelete()
+	s.channels.RUnlock()
 	if !dip {
 		t.Fatalf("DeleteInProgress not expected to have been reset")
 	}

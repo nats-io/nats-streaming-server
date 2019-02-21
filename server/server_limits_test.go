@@ -728,9 +728,9 @@ func TestMaxInactivity(t *testing.T) {
 	// Check that channel was not deleted
 	verifyChannelExist(t, s, "c10", true, 2*opts.MaxInactivity)
 	c = s.channels.get("c10")
-	s.channels.lockDelete()
+	s.channels.RLock()
 	tset := c.activity.timerSet
-	s.channels.unlockDelete()
+	s.channels.RUnlock()
 	if tset {
 		t.Fatalf("Timer should not be set")
 	}
