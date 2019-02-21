@@ -259,7 +259,6 @@ func (state State) String() string {
 
 type channelStore struct {
 	sync.RWMutex
-	delMu    sync.Mutex
 	channels map[string]*channel
 	store    stores.Store
 	stan     *StanServer
@@ -283,13 +282,21 @@ func (cs *channelStore) get(name string) *channel {
 
 func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, error) {
 	cs.Lock()
-	defer cs.Unlock()
+	c, err := cs.createChannelLocked(s, name)
+	cs.Unlock()
+	return c, err
+}
+
+func (cs *channelStore) createChannelLocked(s *StanServer, name string) (*channel, error) {
 	// It is possible that there were 2 concurrent calls to lookupOrCreateChannel
 	// which first uses `channelStore.get()` and if not found, calls this function.
 	// So we need to check now that we have the write lock that the channel has
 	// not already been created.
 	c := cs.channels[name]
 	if c != nil {
+		if c.activity != nil && c.activity.deleteInProgress {
+			return nil, ErrChanDelInProgress
+		}
 		return c, nil
 	}
 	sc, err := cs.store.CreateChannel(name)
@@ -377,25 +384,29 @@ func (cs *channelStore) count() int {
 	return count
 }
 
-func (cs *channelStore) lockDelete() {
-	cs.delMu.Lock()
-}
-
-func (cs *channelStore) unlockDelete() {
-	cs.delMu.Unlock()
-}
-
 func (cs *channelStore) maybeStartChannelDeleteTimer(name string, c *channel) {
-	cs.delMu.Lock()
-	cs.RLock()
+	cs.Lock()
 	if c == nil {
 		c = cs.channels[name]
 	}
 	if c != nil && c.activity != nil && !c.activity.deleteInProgress && !c.ss.hasActiveSubs() {
 		c.startDeleteTimer()
 	}
-	cs.RUnlock()
-	cs.delMu.Unlock()
+	cs.Unlock()
+}
+
+func (cs *channelStore) stopDeleteTimer(c *channel) {
+	cs.Lock()
+	c.stopDeleteTimer()
+	cs.Unlock()
+}
+
+func (cs *channelStore) turnOffPreventDelete(c *channel) {
+	cs.Lock()
+	if c != nil && c.activity != nil {
+		c.activity.preventDelete = false
+	}
+	cs.Unlock()
 }
 
 type channel struct {
@@ -414,19 +425,20 @@ type channelActivity struct {
 	maxInactivity    time.Duration
 	timer            *time.Timer
 	deleteInProgress bool
+	preventDelete    bool
 	timerSet         bool
 }
 
 // Starts the delete timer that when firing will post
 // a channel delete request to the ioLoop.
-// The channelStore's delMu mutex must be held on entry.
+// The channelStore's mutex must be held on entry.
 func (c *channel) startDeleteTimer() {
 	c.activity.last = time.Now()
 	c.resetDeleteTimer(c.activity.maxInactivity)
 }
 
 // Stops the delete timer.
-// The channelStore's delMu mutex must be held on entry.
+// The channelStore's mutex must be held on entry.
 func (c *channel) stopDeleteTimer() {
 	if c.activity.timer != nil {
 		c.activity.timer.Stop()
@@ -709,14 +721,44 @@ func (sa *subSentAndAck) reset() {
 
 // Looks up, or create a new channel if it does not exist
 func (s *StanServer) lookupOrCreateChannel(name string) (*channel, error) {
-	c := s.channels.get(name)
+	cs := s.channels
+	cs.RLock()
+	c := cs.channels[name]
 	if c != nil {
 		if c.activity != nil && c.activity.deleteInProgress {
+			cs.RUnlock()
 			return nil, ErrChanDelInProgress
 		}
+		cs.RUnlock()
 		return c, nil
 	}
-	return s.channels.createChannel(s, name)
+	cs.RUnlock()
+	return cs.createChannel(s, name)
+}
+
+func (s *StanServer) lookupOrCreateChannelPreventDelete(name string) (*channel, bool, error) {
+	cs := s.channels
+	cs.Lock()
+	c := cs.channels[name]
+	if c != nil {
+		if c.activity != nil && c.activity.deleteInProgress {
+			cs.Unlock()
+			return nil, false, ErrChanDelInProgress
+		}
+	} else {
+		var err error
+		c, err = cs.createChannelLocked(s, name)
+		if err != nil {
+			cs.Unlock()
+			return nil, false, err
+		}
+	}
+	if c.activity != nil {
+		c.activity.preventDelete = true
+		c.stopDeleteTimer()
+	}
+	cs.Unlock()
+	return c, true, nil
 }
 
 // createSubStore creates a new instance of `subStore`.
@@ -1974,9 +2016,7 @@ func (s *StanServer) leadershipLost() {
 			c.snapshotSub = nil
 		}
 		if c.activity != nil {
-			s.channels.lockDelete()
-			c.stopDeleteTimer()
-			s.channels.unlockDelete()
+			s.channels.stopDeleteTimer(c)
 		}
 	}
 
@@ -2596,13 +2636,12 @@ func (s *StanServer) replicateDeleteChannel(channel string) {
 func (s *StanServer) handleChannelDelete(c *channel) {
 	delete := false
 	cs := s.channels
-	cs.lockDelete()
 	cs.Lock()
 	a := c.activity
-	if a.deleteInProgress || c.ss.hasActiveSubs() {
+	if a.preventDelete || a.deleteInProgress || c.ss.hasActiveSubs() {
 		if s.debug {
-			s.log.Debugf("Channel %q cannot be deleted: inProgress=%v hasActiveSubs=%v",
-				c.name, a.deleteInProgress, c.ss.hasActiveSubs())
+			s.log.Debugf("Channel %q cannot be deleted: preventDelete=%v inProgress=%v hasActiveSubs=%v",
+				c.name, a.preventDelete, a.deleteInProgress, c.ss.hasActiveSubs())
 		}
 		c.stopDeleteTimer()
 	} else {
@@ -2633,7 +2672,6 @@ func (s *StanServer) handleChannelDelete(c *channel) {
 		}
 	}
 	cs.Unlock()
-	cs.unlockDelete()
 	if delete {
 		if testDeleteChannel {
 			time.Sleep(time.Second)
@@ -2649,31 +2687,33 @@ func (s *StanServer) handleChannelDelete(c *channel) {
 // Actual deletetion of the channel.
 func (s *StanServer) processDeleteChannel(channel string) {
 	cs := s.channels
-	cs.lockDelete()
-	defer cs.unlockDelete()
 	cs.Lock()
 	defer cs.Unlock()
+	c := cs.channels[channel]
+	if c == nil {
+		s.log.Errorf("Error deleting channel %q: not found", channel)
+		return
+	}
+	if c.activity != nil && c.activity.preventDelete {
+		s.log.Errorf("The channel %q cannot be deleted at this time since a subscription has been created", channel)
+		return
+	}
 	// Delete from store
 	if err := cs.store.DeleteChannel(channel); err != nil {
 		s.log.Errorf("Error deleting channel %q: %v", channel, err)
-		c := cs.channels[channel]
-		if c != nil && c.activity != nil {
+		if c.activity != nil {
 			c.activity.deleteInProgress = false
 			c.startDeleteTimer()
 		}
 		return
 	}
-	// If no error, remove channel
-	c := s.channels.channels[channel]
-	if c != nil {
-		// If there was a subscription for snapshots requests,
-		// we need to unsubscribe.
-		if c.snapshotSub != nil {
-			c.snapshotSub.Unsubscribe()
-			c.snapshotSub = nil
-		}
-		delete(s.channels.channels, channel)
+	// If there was a subscription for snapshots requests,
+	// we need to unsubscribe.
+	if c.snapshotSub != nil {
+		c.snapshotSub.Unsubscribe()
+		c.snapshotSub = nil
 	}
+	delete(s.channels.channels, channel)
 	s.log.Noticef("Channel %q has been deleted", channel)
 }
 
@@ -4531,13 +4571,16 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		ackInbox = nats.NewInbox()
 	)
 
-	c, err := s.lookupOrCreateChannel(sr.Subject)
+	// Lookup/create the channel and prevent this channel to be deleted
+	// until we are done with this subscription. This will also stop
+	// the delete timer if one was set.
+	c, preventDelete, err := s.lookupOrCreateChannelPreventDelete(sr.Subject)
+	// Immediately register a defer action to turn off preventing the
+	// deletion of the channel if it was turned on
+	if preventDelete {
+		defer s.channels.turnOffPreventDelete(c)
+	}
 	if err == nil {
-		// Keep the channel delete mutex to ensure that channel cannot be
-		// deleted while we are about to add a subscription.
-		s.channels.lockDelete()
-		defer s.channels.unlockDelete()
-
 		// If clustered, thread operations through Raft.
 		if s.isClustered {
 			// For start requests other than SequenceStart, we MUST convert the request
@@ -4569,14 +4612,9 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 	}
 	if err != nil {
+		s.channels.maybeStartChannelDeleteTimer(sr.Subject, c)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
-	}
-	// If the channel has a MaxInactivity limit, stop the timer since we know that there
-	// is at least one active subscription.
-	if c.activity != nil {
-		// We are under the channelStore delete mutex
-		c.stopDeleteTimer()
 	}
 
 	// In case this is a durable, sub already exists so we need to protect access
