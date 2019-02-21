@@ -4498,6 +4498,18 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 	return sub, nil
 }
 
+func NewClientInbox(clientId string) string {
+	InboxPrefix := fmt.Sprintf("_INBOX.%s.", clientId)
+	inboxPrefixLen := len(InboxPrefix)
+	const nuidSize = 22
+	b := make([]byte, inboxPrefixLen+nuidSize)
+	pres := b[:inboxPrefixLen]
+	copy(pres, InboxPrefix)
+	ns := b[inboxPrefixLen:]
+	copy(ns, nuid.Next())
+	return string(b[:])
+}
+
 // processSubscriptionRequest will process a subscription request.
 func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	sr := &pb.SubscriptionRequest{}
@@ -4568,7 +4580,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	var (
 		sub      *subState
-		ackInbox = nats.NewInbox()
+		ackInbox = NewClientInbox(sr.ClientID)
 	)
 
 	// Lookup/create the channel and prevent this channel to be deleted
