@@ -2664,7 +2664,16 @@ func (s *StanServer) processDeleteChannel(channel string) {
 		return
 	}
 	// If no error, remove channel
-	delete(s.channels.channels, channel)
+	c := s.channels.channels[channel]
+	if c != nil {
+		// If there was a subscription for snapshots requests,
+		// we need to unsubscribe.
+		if c.snapshotSub != nil {
+			c.snapshotSub.Unsubscribe()
+			c.snapshotSub = nil
+		}
+		delete(s.channels.channels, channel)
+	}
 	s.log.Noticef("Channel %q has been deleted", channel)
 }
 

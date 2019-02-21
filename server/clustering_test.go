@@ -4049,3 +4049,46 @@ func TestClusteringWithCryptoStore(t *testing.T) {
 	check(t, "s1", fname1)
 	check(t, "s2", fname2)
 }
+
+func TestClusteringDeleteChannelLeaksSnapshotSubs(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	maxInactivity := 10 * time.Millisecond
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.MaxInactivity = maxInactivity
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.MaxInactivity = maxInactivity
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	sc.Publish("foo", []byte("hello"))
+	c := leader.channels.get("foo")
+	time.Sleep(2 * maxInactivity)
+
+	leader.channels.RLock()
+	snapshotSubExists := c.snapshotSub != nil
+	leader.channels.RUnlock()
+	if snapshotSubExists {
+		t.Fatalf("Snapshot subscription for channel still exists")
+	}
+}
