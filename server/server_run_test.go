@@ -110,6 +110,9 @@ func TestServerLoggerDebugAndTrace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error running server: %v", err)
 	}
+	sc := NewDefaultConnection(t)
+	sc.Publish("foo", []byte("hello"))
+	sc.Close()
 	s.Shutdown()
 	// Signal that we are done (the channel is buffered)
 	done <- true
@@ -121,7 +124,7 @@ func TestServerLoggerDebugAndTrace(t *testing.T) {
 	// This is a bit dependent on what we currently print with
 	// trace and debug. May need to be adjusted.
 	str := string(out)
-	if !strings.Contains(str, "NATS conn opts") || !strings.Contains(str, "Publish subject") {
+	if !strings.Contains(str, "Received message from publisher") || !strings.Contains(str, "Publish subject") {
 		t.Fatalf("Expected tracing to include debug and trace, got %v", str)
 	}
 }
@@ -459,7 +462,7 @@ func TestDontEmbedNATSMultipleURLs(t *testing.T) {
 	}
 	for _, url := range notWorkingURLs {
 		sOpts.NATSServerURL = url
-		s, err := RunServerWithOpts(sOpts, &nOpts)
+		s, err := RunServerWithOpts(sOpts, nil)
 		if s != nil || err == nil {
 			s.Shutdown()
 			t.Fatalf("Expected streaming server to fail to start with url=%v", url)
@@ -993,5 +996,67 @@ func TestRunServerWithCrypto(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("Did not receive message")
+	}
+}
+
+func TestDontExposeUserPassword(t *testing.T) {
+	ns := natsdTest.RunDefaultServer()
+	defer shutdownRestartedNATSServerOnTestExit(&ns)
+
+	l := &captureNoticesLogger{}
+	sOpts := GetDefaultOptions()
+	sOpts.CustomLogger = l
+	sOpts.NATSServerURL = "nats://localhost:4222"
+	nOpts := natsdTest.DefaultTestOptions
+	nOpts.Username = "ivan"
+	nOpts.Password = "password"
+	s := runServerWithOpts(t, sOpts, &nOpts)
+	defer s.Shutdown()
+
+	// Restart the NATS server that should cause streaming
+	// to reconnect and log the connected url.
+	ns.Shutdown()
+	ns = natsdTest.RunDefaultServer()
+
+	collectNotice := func(t *testing.T) string {
+		t.Helper()
+		var msg string
+		waitFor(t, 2*time.Second, 15*time.Millisecond, func() error {
+			l.Lock()
+			for _, n := range l.notices {
+				if strings.Contains(n, "reconnected to NATS Server at") {
+					msg = n
+					l.Unlock()
+					return nil
+				}
+			}
+			l.Unlock()
+			return fmt.Errorf("did not get proper notices")
+		})
+		return msg
+	}
+	// Now make sure that this string does not contain our user/password
+	msg := collectNotice(t)
+	if strings.Contains(msg, "ivan:password@") {
+		t.Fatalf("Password exposed in url: %v", msg)
+	}
+
+	// Now try again but with nats_server_url that contains user/pass
+	s.Shutdown()
+	l.Lock()
+	l.notices = l.notices[:0]
+	l.Unlock()
+	sOpts.NATSServerURL = "nats://ivan:password@localhost:4222"
+	s = runServerWithOpts(t, sOpts, nil)
+	defer s.Shutdown()
+
+	// Restart the NATS server that should cause streaming
+	// to reconnect and log the connected url.
+	ns.Shutdown()
+	ns = natsdTest.RunDefaultServer()
+
+	msg = collectNotice(t)
+	if !strings.Contains(msg, "nats://[REDACTED]@localhost:") {
+		t.Fatalf("Password exposed in url: %v", msg)
 	}
 }

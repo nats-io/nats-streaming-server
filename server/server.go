@@ -1210,9 +1210,24 @@ func (s *StanServer) stanDisconnectedHandler(nc *nats.Conn) {
 	}
 }
 
+func obfuscatePasswordInURL(url string) string {
+	atPos := strings.Index(url, "@")
+	if atPos == -1 {
+		return url
+	}
+	start := strings.Index(url, "://")
+	if start == -1 {
+		return "invalid url"
+	}
+	newurl := url[:start+3]
+	newurl += "[REDACTED]"
+	newurl += url[atPos:]
+	return newurl
+}
+
 func (s *StanServer) stanReconnectedHandler(nc *nats.Conn) {
 	s.log.Noticef("connection %q reconnected to NATS Server at %q",
-		nc.Opts.Name, nc.ConnectedUrl())
+		nc.Opts.Name, obfuscatePasswordInURL(nc.ConnectedUrl()))
 }
 
 func (s *StanServer) stanClosedHandler(nc *nats.Conn) {
@@ -1244,8 +1259,6 @@ func (s *StanServer) buildServerURLs() ([]string, error) {
 			}
 			return urls, nil
 		}
-		// Otherwise, prepare the host and port and continue to see
-		// if user/pass needs to be added.
 
 		// First trim the protocol.
 		parts := strings.Split(natsURL, "://")
@@ -1272,15 +1285,6 @@ func (s *StanServer) buildServerURLs() ([]string, error) {
 			hostport = net.JoinHostPort(opts.Host, sport)
 		}
 	}
-	var userpart string
-	if opts.Authorization != "" {
-		userpart = opts.Authorization
-	} else if opts.Username != "" {
-		userpart = fmt.Sprintf("%s:%s", opts.Username, opts.Password)
-	}
-	if userpart != "" {
-		return []string{fmt.Sprintf("nats://%s@%s", userpart, hostport)}, nil
-	}
 	return []string{fmt.Sprintf("nats://%s", hostport)}, nil
 }
 
@@ -1295,6 +1299,10 @@ func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	ncOpts.User = s.natsOpts.Username
+	ncOpts.Password = s.natsOpts.Password
+	ncOpts.Token = s.natsOpts.Authorization
+
 	ncOpts.Name = fmt.Sprintf("_NSS-%s-%s", s.opts.ID, name)
 
 	if err = nats.ErrorHandler(s.stanErrorHandler)(&ncOpts); err != nil {
@@ -1333,8 +1341,6 @@ func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 	// buffer to -1 to avoid any buffering in the nats library and flush
 	// on reconnect.
 	ncOpts.ReconnectBufSize = -1
-
-	s.log.Tracef(" NATS conn opts: %v", ncOpts)
 
 	var nc *nats.Conn
 	if nc, err = ncOpts.Connect(); err != nil {
