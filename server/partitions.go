@@ -86,7 +86,7 @@ func (s *StanServer) initPartitions() error {
 		return fmt.Errorf("unable to subscribe: %v", err)
 	}
 	p.processChanSub.SetPendingLimits(-1, -1)
-	p.inboxSub, err = p.nc.SubscribeSync(nats.NewInbox())
+	p.inboxSub, err = p.nc.SubscribeSync(nats.NewInbox("_PARTITIONS."))
 	if err != nil {
 		return fmt.Errorf("unable to subscribe: %v", err)
 	}

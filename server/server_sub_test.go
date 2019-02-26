@@ -15,6 +15,7 @@ package server
 
 import (
 	"fmt"
+	"github.com/nats-io/gnatsd/server"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1071,7 +1072,7 @@ func TestSubAckInboxFromOlderStore(t *testing.T) {
 	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
-	if _, err := s.clients.register(&spb.ClientInfo{ID: "me2", HbInbox: nats.NewInbox()}); err != nil {
+	if _, err := s.clients.register(&spb.ClientInfo{ID: "me2", HbInbox: nats.NewInbox("_TMP")}); err != nil {
 		t.Fatalf("Error registering client: %v", err)
 	}
 	c, err := s.lookupOrCreateChannel("foo")
@@ -1080,8 +1081,8 @@ func TestSubAckInboxFromOlderStore(t *testing.T) {
 	}
 	sub := &spb.SubState{
 		ClientID:      "me2",
-		AckInbox:      nats.NewInbox(),
-		Inbox:         nats.NewInbox(),
+		AckInbox:      nats.NewInbox("_TMP"),
+		Inbox:         nats.NewInbox("_TMP"),
 		MaxInFlight:   10,
 		AckWaitInSecs: 1,
 	}
@@ -1143,4 +1144,122 @@ func TestSubAckInboxFromOlderStore(t *testing.T) {
 	case <-time.After(1500 * time.Millisecond):
 		// ok...
 	}
+}
+
+func TestSubWithCredentials(t *testing.T) {
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+	sOpts.Debug = true
+	sOpts.Trace = true
+	sOpts.EnableLogging = true
+	sOpts.ID = clusterName
+	sOpts.MaxMsgs = 10
+	sOpts.StanClients = []StanClient{
+		{
+			ClientId: "req123",
+			Permissions: &StanPermissions{
+				Publish: &StanSubjectPermission{
+					Allow: []string{"foo123"},
+				},
+				Subscribe: &StanSubjectPermission{
+					Allow: []string{"foo123"},
+				},
+			},
+		},
+	}
+
+	nOpts := DefaultNatsServerOptions
+	nOpts.Debug = true
+	nOpts.Trace = true
+	nOpts.NoLog = false
+	nOpts.NoSigs = false
+	nOpts.Username = "admin"
+	nOpts.Password = "admin"
+	nOpts.Users = []*server.User{
+		{
+			Username: "req",
+			Password: "pass123",
+			Permissions: &server.Permissions{
+				Clients: &server.ClientPermission{AllowedClientIds: []string{"req123"}},
+				Publish: &server.SubjectPermission{Allow: []string{}},
+				Subscribe: &server.SubjectPermission{Allow: []string{}},
+			},
+		},
+		{
+			Username: "admin",
+			Password: "admin",
+			Permissions: &server.Permissions{
+				Publish:   &server.SubjectPermission{Allow: []string{">"}},
+				Subscribe: &server.SubjectPermission{Allow: []string{">"}},
+			},
+		},
+	}
+
+
+
+	/*
+						//"_INBOX._CLIENTS.req123.>",
+		//"_STAN.acks.req123.>"}},
+		//"_INBOX._CLIENTS.req123.>",
+		//"_STAN.discover.test-cluster.req123",
+		//"_STAN.discover.*.req123",
+		//"_STAN.close.*.req123",
+		//"_STAN.pub.*.foo123",
+		//
+		//"_STAN.sub.*.foo123",
+		//"_STAN.unsub.*.foo123",
+		//"_STAN.subclose.*.foo123"
+		DefaultDiscoverPrefix = "_STAN.discover"
+DefaultSubClosePrefix = "_STAN.subclose"
+DefaultUnSubPrefix    = "_STAN.unsub"
+DefaultClosePrefix    = "_STAN.close"
+defaultAcksPrefix     = "_STAN.ack"
+defaultSnapshotPrefix = "_STAN.snap"
+defaultRaftPrefix     = "_STAN.raft"
+	*/
+	
+	s := runServerWithOpts(t, sOpts, &nOpts)
+	defer s.Shutdown()
+
+	sc, nc := createConnectionWithNatsOpts(t, "req123",
+		nats.UserInfo("req", "pass123"),
+		nats.ReconnectWait(50*time.Millisecond))
+	defer nc.Close()
+	defer sc.Close()
+
+	// Send more messages than max so that first is not 1
+	for i := 0; i < sOpts.MaxMsgs+10; i++ {
+		if err := sc.Publish("foo123", []byte("hello")); err != nil {
+			t.Fatalf("Unexpected error on publish: %v", err)
+		}
+	}
+	// Check first/last
+	firstSeq, lastSeq := msgStoreFirstAndLastSequence(t, channelsGet(t, s.channels, "foo123").store.Msgs)
+	if firstSeq != uint64(sOpts.MaxMsgs+1) {
+		t.Fatalf("Expected first sequence to be %v, got %v", uint64(sOpts.MaxMsgs+1), firstSeq)
+	}
+	if lastSeq != uint64(sOpts.MaxMsgs+10) {
+		t.Fatalf("Expected last sequence to be %v, got %v", uint64(sOpts.MaxMsgs+10), lastSeq)
+	}
+
+	rch := make(chan bool)
+	first := int32(1)
+	// Create subscriber with sequence below firstSeq, it should not fail
+	// and receive message with sequence == firstSeq
+	sub, err := sc.Subscribe("foo123", func(m *stan.Msg) {
+		if m.Sequence == firstSeq {
+			rch <- true
+		} else if atomic.LoadInt32(&first) == 1 {
+			t.Fatalf("First message should be sequence %v, got %v", firstSeq, m.Sequence)
+		}
+		atomic.StoreInt32(&first, 0)
+	}, stan.StartAtSequence(1), stan.SetManualAckMode(), stan.MaxInflight(1))
+	if err != nil {
+		t.Fatalf("Unexpected error on subscribe: %v", err)
+	}
+	// Make sure correct msg is received
+	if err := Wait(rch); err != nil {
+		t.Fatal("Did not get our message")
+	}
+	sub.Unsubscribe()
 }

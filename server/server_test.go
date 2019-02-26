@@ -1070,7 +1070,7 @@ func TestAckPublisherBufSize(t *testing.T) {
 	defer nc.Close()
 
 	errCh := make(chan error)
-	inbox := nats.NewInbox()
+	inbox := nats.NewInbox("_TMP")
 	iopm := &ioPendingMsg{m: &nats.Msg{Reply: inbox}}
 	nc.Subscribe(inbox, func(m *nats.Msg) {
 		pubAck := pb.PubAck{}
@@ -1157,7 +1157,7 @@ func TestMsgsNotSentToSubBeforeSubReqResponse(t *testing.T) {
 	connSubj := fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, clusterName)
 	connReq := &pb.ConnectRequest{
 		ClientID:       clientName,
-		HeartbeatInbox: nats.NewInbox(),
+		HeartbeatInbox: nats.NewInbox("_TMP"),
 	}
 	crb, _ := connReq.Marshal()
 	respMsg, err := nc.Request(connSubj, crb, 5*time.Second)
@@ -1190,7 +1190,7 @@ func TestMsgsNotSentToSubBeforeSubReqResponse(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		// Use the same subscriber for subscription request response and data,
 		// so we can reliably check if data comes before response.
-		inbox := nats.NewInbox()
+		inbox := nats.NewInbox("_TMP")
 		sub, err := nc.SubscribeSync(inbox)
 		if err != nil {
 			t.Fatalf("Unable to create nats subscriber: %v", err)

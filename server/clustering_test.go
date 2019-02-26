@@ -4136,7 +4136,7 @@ func TestClusteringDeadlockOnChannelDelete(t *testing.T) {
 	req := pb.SubscriptionRequest{
 		ClientID:      "me",
 		AckWaitInSecs: 30,
-		Inbox:         nats.NewInbox(),
+		Inbox:         nats.NewInbox("_TMP"),
 		MaxInFlight:   1,
 	}
 

@@ -662,8 +662,8 @@ func TestPersistentStoreMultipleShadowQSubs(t *testing.T) {
 	}
 	sub := spb.SubState{
 		ID:            1,
-		AckInbox:      nats.NewInbox(),
-		Inbox:         nats.NewInbox(),
+		AckInbox:      nats.NewInbox("_TMP"),
+		Inbox:         nats.NewInbox("_TMP"),
 		AckWaitInSecs: 30,
 		MaxInFlight:   10,
 		LastSent:      1,

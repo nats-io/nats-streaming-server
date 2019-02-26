@@ -235,7 +235,7 @@ func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration
 
 	connect := &connectRequestProto{
 		ID:    n.localAddr.String(),
-		Inbox: fmt.Sprintf(natsRequestInbox, n.localAddr.String(), nats.NewInbox()),
+		Inbox: fmt.Sprintf(natsRequestInbox, n.localAddr.String(), nats.NewInbox("_RAFT._DIAL")),
 	}
 	data, err := json.Marshal(connect)
 	if err != nil {
@@ -297,7 +297,7 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 		peerConn.outbox = connect.Inbox
 
 		// Setup inbox for peer.
-		inbox := fmt.Sprintf(natsRequestInbox, n.localAddr.String(), nats.NewInbox())
+		inbox := fmt.Sprintf(natsRequestInbox, n.localAddr.String(), nats.NewInbox("_RAFT._PEERS."))
 		sub, err := n.conn.Subscribe(inbox, peerConn.msgHandler)
 		if err != nil {
 			n.logger.Printf("[ERR] raft-nats: Failed to create inbox for remote peer: %v", err)

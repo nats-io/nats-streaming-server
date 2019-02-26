@@ -361,8 +361,8 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64) error 
 		// at our next sequence.
 		first = storeLast + 1
 	}
-	inbox := nats.NewInbox()
-	sub, err := c.stan.ncsr.SubscribeSync(inbox)
+	inbox := nats.NewInbox("snapshot")
+	sub, err := c.stan.ncsr.SubscribeSync("_RAFT._RESTORE.")
 	if err != nil {
 		return err
 	}

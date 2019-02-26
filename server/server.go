@@ -56,7 +56,7 @@ const (
 	DefaultSubClosePrefix = "_STAN.subclose"
 	DefaultUnSubPrefix    = "_STAN.unsub"
 	DefaultClosePrefix    = "_STAN.close"
-	defaultAcksPrefix     = "_STAN.ack"
+	DefaultAcksPrefix     = "_STAN.acks"
 	defaultSnapshotPrefix = "_STAN.snap"
 	defaultRaftPrefix     = "_STAN.raft"
 	DefaultStoreType      = stores.TypeMemory
@@ -688,13 +688,13 @@ type pendingMsg struct {
 type subState struct {
 	sync.RWMutex
 	spb.SubState // Embedded protobuf. Used for storage.
-	subject      string
-	qstate       *queueState
-	ackWait      time.Duration // SubState.AckWaitInSecs expressed as a time.Duration
-	ackTimer     *time.Timer
-	ackSub       *nats.Subscription
-	acksPending  map[uint64]int64 // key is message sequence, value is expiration time.
-	store        stores.SubStore  // for easy access to the store interface
+	subject     string
+	qstate      *queueState
+	ackWait     time.Duration // SubState.AckWaitInSecs expressed as a time.Duration
+	ackTimer    *time.Timer
+	ackSub      *nats.Subscription
+	acksPending map[uint64]int64 // key is message sequence, value is expiration time.
+	store       stores.SubStore  // for easy access to the store interface
 
 	savedClientID string // Used only for closed durables in Clustering mode and monitoring endpoints.
 
@@ -1128,35 +1128,50 @@ func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 
 // Options for NATS Streaming Server
 type Options struct {
-	ID                 string
-	DiscoverPrefix     string
-	StoreType          string
-	FilestoreDir       string
-	FileStoreOpts      stores.FileStoreOptions
-	SQLStoreOpts       stores.SQLStoreOptions
-	stores.StoreLimits               // Store limits (MaxChannels, etc..)
-	EnableLogging      bool          // Enables logging
-	CustomLogger       logger.Logger // Server will start with the provided logger
-	Trace              bool          // Verbose trace
-	Debug              bool          // Debug trace
-	HandleSignals      bool          // Should the server setup a signal handler (for Ctrl+C, etc...)
-	Secure             bool          // Create a TLS enabled connection w/o server verification
-	ClientCert         string        // Client Certificate for TLS
-	ClientKey          string        // Client Key for TLS
-	ClientCA           string        // Client CAs for TLS
-	IOBatchSize        int           // Maximum number of messages collected from clients before starting their processing.
-	IOSleepTime        int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
-	NATSServerURL      string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
-	ClientHBInterval   time.Duration // Interval at which server sends heartbeat to a client.
-	ClientHBTimeout    time.Duration // How long server waits for a heartbeat response.
-	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
-	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
-	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
-	SyslogName         string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
-	Encrypt            bool          // Specify if server should encrypt messages payload when storing them
-	EncryptionCipher   string        // Cipher used for encryption. Supported are "AES" and "CHACHA". If none is specified, defaults to AES on platforms with Intel processors, CHACHA otherwise.
-	EncryptionKey      []byte        // Encryption key. The environment NATS_STREAMING_ENCRYPTION_KEY takes precedence and is the preferred way to provide the key.
-	Clustering         ClusteringOptions
+	ID                string
+	DiscoverPrefix    string
+	StoreType         string
+	FilestoreDir      string
+	FileStoreOpts     stores.FileStoreOptions
+	SQLStoreOpts      stores.SQLStoreOptions
+	stores.StoreLimits              // Store limits (MaxChannels, etc..)
+	EnableLogging     bool          // Enables logging
+	CustomLogger      logger.Logger // Server will start with the provided logger
+	Trace             bool          // Verbose trace
+	Debug             bool          // Debug trace
+	HandleSignals     bool          // Should the server setup a signal handler (for Ctrl+C, etc...)
+	Secure            bool          // Create a TLS enabled connection w/o server verification
+	ClientCert        string        // Client Certificate for TLS
+	ClientKey         string        // Client Key for TLS
+	ClientCA          string        // Client CAs for TLS
+	IOBatchSize       int           // Maximum number of messages collected from clients before starting their processing.
+	IOSleepTime       int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
+	NATSServerURL     string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
+	ClientHBInterval  time.Duration // Interval at which server sends heartbeat to a client.
+	ClientHBTimeout   time.Duration // How long server waits for a heartbeat response.
+	ClientHBFailCount int           // Number of failed heartbeats before server closes client connection.
+	FTGroupName       string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+	Partitioning      bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
+	SyslogName        string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
+	Encrypt           bool          // Specify if server should encrypt messages payload when storing them
+	EncryptionCipher  string        // Cipher used for encryption. Supported are "AES" and "CHACHA". If none is specified, defaults to AES on platforms with Intel processors, CHACHA otherwise.
+	EncryptionKey     []byte        // Encryption key. The environment NATS_STREAMING_ENCRYPTION_KEY takes precedence and is the preferred way to provide the key.
+	Clustering        ClusteringOptions
+	StanClients       []StanClient
+}
+
+type StanClient struct {
+	ClientId    string           `json:"client"`
+	Permissions *StanPermissions `json:"permissions,omitempty"`
+}
+
+type StanPermissions struct {
+	Publish   *StanSubjectPermission `json:"publish"`
+	Subscribe *StanSubjectPermission `json:"subscribe"`
+}
+
+type StanSubjectPermission struct {
+	Allow []string `json:"allow,omitempty"`
 }
 
 // Clone returns a deep copy of the Options object.
@@ -1424,6 +1439,64 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		}
 	}
 
+	if sOpts.StanClients != nil {
+		for _, user := range sOpts.StanClients {
+			if user.Permissions == nil {
+				continue
+			}
+
+			for _, u := range nOpts.Users {
+				if u.Permissions == nil || u.Permissions.Clients == nil || u.Permissions.Clients.AllowedClientIds == nil {
+					continue
+				}
+
+				for _, c := range u.Permissions.Clients.AllowedClientIds {
+					if c == user.ClientId {
+						u.Permissions.Publish.Allow = append(u.Permissions.Publish.Allow, sOpts.DiscoverPrefix+".*."+c)
+						u.Permissions.Publish.Allow = append(u.Permissions.Publish.Allow, sOpts.DiscoverPrefix+".*."+c +".pings")
+						u.Permissions.Publish.Allow = append(u.Permissions.Publish.Allow, DefaultClosePrefix+".*."+c)
+						u.Permissions.Subscribe.Allow = append(u.Permissions.Subscribe.Allow, DefaultAcksPrefix+"."+c+".>")
+					}
+				}
+
+				if user.Permissions.Publish != nil {
+					for _, publishChannel := range user.Permissions.Publish.Allow {
+						u.Permissions.Publish.Allow = append(u.Permissions.Publish.Allow, DefaultPubPrefix+".*."+publishChannel)
+					}
+				}
+
+				if user.Permissions.Subscribe != nil {
+					for _, subscribeChannel := range user.Permissions.Subscribe.Allow {
+						u.Permissions.Publish.Allow = append(u.Permissions.Publish.Allow, DefaultSubPrefix+".*."+subscribeChannel)
+						u.Permissions.Publish.Allow = append(u.Permissions.Publish.Allow, DefaultSubClosePrefix+".*."+subscribeChannel)
+						u.Permissions.Publish.Allow = append(u.Permissions.Publish.Allow, DefaultUnSubPrefix+".*."+subscribeChannel)
+					}
+				}
+			}
+
+			//var v = server.User{
+			//	Username: "req",
+			//	Password: "pass123",
+			//	Permissions: &server.Permissions{
+			//		Clients: &server.ClientPermission{AllowedClientIds: []string{"req123"}},
+			//		Publish: &server.SubjectPermission{Allow: []string{
+			//			"_STAN.discover.*.req123",
+			//			"_STAN.close.*.req123",
+			//
+			//			"_STAN.pub.*.foo123",
+			//
+			//			"_STAN.sub.*.foo123",
+			//			"_STAN.unsub.*.foo123",
+			//			"_STAN.subclose.*.foo123"}},
+			//		Subscribe: &server.SubjectPermission{Allow: []string{
+			//			"_STAN.acks.req123.>"}},
+			//	},
+			//}
+			//
+
+		}
+	}
+
 	s := StanServer{
 		serverID:      nuid.Next(),
 		opts:          sOpts,
@@ -1580,6 +1653,54 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 			return nil, err
 		}
 	}
+
+	//if stanOpts.StanClients != nil{
+	//	for _,user := range stanOpts.StanClients {
+	//		if user.Permissions == nil{
+	//			continue
+	//		}
+	//
+	//		for _, u := range s.natsOpts.Users {
+	//			if u.Permissions == nil || u.Permissions.Clients == nil || u.Permissions.Clients.AllowedClientIds == nil{
+	//				continue
+	//			}
+	//
+	//			for _, c := range u.Permissions.Clients.AllowedClientIds {
+	//				if c == user.ClientId {
+	//					u.Permissions.Publish.Allow = append(u.Permissions.Subscribe.Allow, sOpts.DiscoverPrefix + ".*." + u.Username)
+	//					u.Permissions.Publish.Allow = append(u.Permissions.Subscribe.Allow, DefaultClosePrefix  + ".*." + u.Username)
+	//					u.Permissions.Subscribe.Allow = append(u.Permissions.Subscribe.Allow, defaultAcksPrefix  + ".*." + u.Username)
+	//				}
+	//			}
+	//		}
+	//		//var v = server.User{
+	//		//	Username: "req",
+	//		//	Password: "pass123",
+	//		//	Permissions: &server.Permissions{
+	//		//		Clients: &server.ClientPermission{AllowedClientIds: []string{"req123"}},
+	//		//		Publish: &server.SubjectPermission{Allow: []string{
+	//		//			"_STAN.discover.*.req123",
+	//		//			"_STAN.close.*.req123",
+	//		//
+	//		//			"_STAN.pub.*.foo123",
+	//		//
+	//		//			"_STAN.sub.*.foo123",
+	//		//			"_STAN.unsub.*.foo123",
+	//		//			"_STAN.subclose.*.foo123"}},
+	//		//		Subscribe: &server.SubjectPermission{Allow: []string{
+	//		//			"_STAN.acks.req123.>"}},
+	//		//	},
+	//		//}
+	//
+	//		//if user.Permissions.Publish !=nil {
+	//		//	for _, publish := range user.Permissions.Publish {
+	//		//
+	//		//	}
+	//		//}
+	//
+	//	}
+	//}
+
 	if s.opts.HandleSignals {
 		s.handleSignals()
 	}
@@ -1736,7 +1857,7 @@ func (s *StanServer) start(runningState State) error {
 		s.info.SubClose = fmt.Sprintf("%s.%s", DefaultSubClosePrefix, subjID)
 		s.info.Unsubscribe = fmt.Sprintf("%s.%s", DefaultUnSubPrefix, subjID)
 		s.info.Close = fmt.Sprintf("%s.%s", DefaultClosePrefix, subjID)
-		s.info.AcksSubs = fmt.Sprintf("%s.%s", defaultAcksPrefix, subjID)
+		s.info.AcksSubs = fmt.Sprintf("%s.%s", DefaultAcksPrefix, subjID)
 
 		if s.opts.Clustering.Clustered {
 			// If clustered, assign a random cluster node ID if not provided.
@@ -2152,7 +2273,7 @@ func (s *StanServer) startNATSServer() error {
 // This runs under sever's lock so nothing should grab the server lock here.
 func (s *StanServer) ensureRunningStandAlone() error {
 	clusterID := s.info.ClusterID
-	hbInbox := nats.NewInbox()
+	hbInbox := nats.NewInbox(fmt.Sprintf("_HeartBeet._CLUSTER.%s", clusterID))
 	timeout := time.Millisecond * 250
 
 	// We cannot use the client's API here as it will create a dependency
@@ -2426,7 +2547,7 @@ func (s *StanServer) initSubscriptions() error {
 func (s *StanServer) initInternalSubs(createPub bool) error {
 	var err error
 	// Listen for connection requests.
-	s.connectSub, err = s.createSub(s.info.Discovery, s.connectCB, "discover")
+	s.connectSub, err = s.createSub(s.info.Discovery+".*", s.connectCB, "discover")
 	if err != nil {
 		return err
 	}
@@ -2440,27 +2561,27 @@ func (s *StanServer) initInternalSubs(createPub bool) error {
 		s.pubSub.SetPendingLimits(-1, -1)
 	}
 	// Receive subscription requests from clients.
-	s.subSub, err = s.createSub(s.info.Subscribe, s.processSubscriptionRequest, "subscribe request")
+	s.subSub, err = s.createSub(s.info.Subscribe+".>", s.processSubscriptionRequest, "subscribe request")
 	if err != nil {
 		return err
 	}
 	// Receive unsubscribe requests from clients.
-	s.subUnsubSub, err = s.createSub(s.info.Unsubscribe, s.processUnsubscribeRequest, "subscription unsubscribe")
+	s.subUnsubSub, err = s.createSub(s.info.Unsubscribe+".>", s.processUnsubscribeRequest, "subscription unsubscribe")
 	if err != nil {
 		return err
 	}
 	// Receive subscription close requests from clients.
-	s.subCloseSub, err = s.createSub(s.info.SubClose, s.processSubCloseRequest, "subscription close request")
+	s.subCloseSub, err = s.createSub(s.info.SubClose+".>", s.processSubCloseRequest, "subscription close request")
 	if err != nil {
 		return err
 	}
 	// Receive close requests from clients.
-	s.closeSub, err = s.createSub(s.info.Close, s.processCloseRequest, "close request")
+	s.closeSub, err = s.createSub(s.info.Close+".>", s.processCloseRequest, "close request")
 	if err != nil {
 		return err
 	}
 	// Receive PINGs from clients.
-	s.cliPingSub, err = s.createSub(s.info.Discovery+".pings", s.processClientPings, "client pings")
+	s.cliPingSub, err = s.createSub(s.info.Discovery+".*.pings", s.processClientPings, "client pings")
 	return err
 }
 
@@ -2776,14 +2897,14 @@ func (s *StanServer) finishConnectRequest(req *pb.ConnectRequest, replyInbox str
 		SubRequests:      s.info.Subscribe,
 		UnsubRequests:    s.info.Unsubscribe,
 		SubCloseRequests: s.info.SubClose,
-		CloseRequests:    s.info.Close,
+		CloseRequests:    s.info.Close + "." + clientID,
 		Protocol:         protocolOne,
 	}
 	// We could set those unconditionally since even with
 	// older clients, the protobuf Unmarshal would simply not
 	// decode them.
 	if req.Protocol >= protocolOne {
-		cr.PingRequests = s.info.Discovery + ".pings"
+		cr.PingRequests = s.info.Discovery + "." + clientID + ".pings"
 		// In the future, we may want to return different values
 		// than the one the client sent in the connect request.
 		// For now, return the values from the request.
@@ -2919,7 +3040,7 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 
 	s.barrier(func() {
 		var err error
-		// If clustered, thread operations through Raft.
+		// If clustered, thread operations through Raft.Permissions
 		if s.isClustered {
 			err = s.replicateConnClose(req)
 		} else {
@@ -4498,18 +4619,6 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 	return sub, nil
 }
 
-func NewClientInbox(clientId string) string {
-	InboxPrefix := fmt.Sprintf("_INBOX.%s.", clientId)
-	inboxPrefixLen := len(InboxPrefix)
-	const nuidSize = 22
-	b := make([]byte, inboxPrefixLen+nuidSize)
-	pres := b[:inboxPrefixLen]
-	copy(pres, InboxPrefix)
-	ns := b[inboxPrefixLen:]
-	copy(ns, nuid.Next())
-	return string(b[:])
-}
-
 // processSubscriptionRequest will process a subscription request.
 func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	sr := &pb.SubscriptionRequest{}
@@ -4580,7 +4689,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 
 	var (
 		sub      *subState
-		ackInbox = NewClientInbox(sr.ClientID)
+		ackInbox = nats.NewClientInbox(sr.ClientID)
 	)
 
 	// Lookup/create the channel and prevent this channel to be deleted
