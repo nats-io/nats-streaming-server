@@ -490,7 +490,7 @@ func testClientPings(t *testing.T, s *StanServer) {
 	}
 	defer nc.Close()
 
-	hbInbox := nats.NewInbox("_TMP")
+	hbInbox := nats.NewInboxWithPath("_TMP")
 	creq := &pb.ConnectRequest{
 		ClientID:       "me",
 		HeartbeatInbox: hbInbox,
@@ -598,7 +598,7 @@ func testClientPings(t *testing.T, s *StanServer) {
 	// will be accepted.
 	creq = &pb.ConnectRequest{
 		ClientID:       "me",
-		HeartbeatInbox: nats.NewInbox("_TMP"),
+		HeartbeatInbox: nats.NewInboxWithPath("_TMP"),
 		ConnID:         []byte(nuid.Next()),
 		Protocol:       protocolOne,
 		PingInterval:   1,
@@ -664,7 +664,7 @@ func testClientPings(t *testing.T, s *StanServer) {
 			Data:     []byte("hello"),
 		}
 		msgBytes, _ := msg.Marshal()
-		pubAckSubj := nats.NewInbox("_TMP")
+		pubAckSubj := nats.NewInboxWithPath("_TMP")
 		ch := make(chan bool, 1)
 		sub, err := nc.Subscribe(pubAckSubj, func(m *nats.Msg) {
 			pubAck := &pb.PubAck{}
@@ -712,7 +712,7 @@ func TestPersistentStoreRecoverClientInfo(t *testing.T) {
 
 	creq := &pb.ConnectRequest{
 		ClientID:       "me",
-		HeartbeatInbox: nats.NewInbox("_TMP"),
+		HeartbeatInbox: nats.NewInboxWithPath("_TMP"),
 		ConnID:         []byte(nuid.Next()),
 		Protocol:       protocolOne,
 		PingInterval:   1,
@@ -788,7 +788,7 @@ func TestPersistentStoreClientPings(t *testing.T) {
 	}
 	defer nc.Close()
 
-	hbInbox := nats.NewInbox("_TMP")
+	hbInbox := nats.NewInboxWithPath("_TMP")
 	creq := &pb.ConnectRequest{
 		ClientID:       "me",
 		HeartbeatInbox: hbInbox,

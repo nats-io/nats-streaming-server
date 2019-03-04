@@ -1072,7 +1072,7 @@ func TestSubAckInboxFromOlderStore(t *testing.T) {
 	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
-	if _, err := s.clients.register(&spb.ClientInfo{ID: "me2", HbInbox: nats.NewInbox("_TMP")}); err != nil {
+	if _, err := s.clients.register(&spb.ClientInfo{ID: "me2", HbInbox: nats.NewInboxWithPath("_TMP")}); err != nil {
 		t.Fatalf("Error registering client: %v", err)
 	}
 	c, err := s.lookupOrCreateChannel("foo")
@@ -1081,8 +1081,8 @@ func TestSubAckInboxFromOlderStore(t *testing.T) {
 	}
 	sub := &spb.SubState{
 		ClientID:      "me2",
-		AckInbox:      nats.NewInbox("_TMP"),
-		Inbox:         nats.NewInbox("_TMP"),
+		AckInbox:      nats.NewInboxWithPath("_TMP"),
+		Inbox:         nats.NewInboxWithPath("_TMP"),
 		MaxInFlight:   10,
 		AckWaitInSecs: 1,
 	}
@@ -1180,8 +1180,8 @@ func TestSubWithCredentials(t *testing.T) {
 			Username: "req",
 			Password: "pass123",
 			Permissions: &server.Permissions{
-				Clients: &server.ClientPermission{AllowedClientIds: []string{"req123"}},
-				Publish: &server.SubjectPermission{Allow: []string{}},
+				Clients:   &server.ClientsPermission{AllowedClientIds: []string{"req123"}},
+				Publish:   &server.SubjectPermission{Allow: []string{}},
 				Subscribe: &server.SubjectPermission{Allow: []string{}},
 			},
 		},
@@ -1195,29 +1195,27 @@ func TestSubWithCredentials(t *testing.T) {
 		},
 	}
 
-
-
 	/*
-						//"_INBOX._CLIENTS.req123.>",
-		//"_STAN.acks.req123.>"}},
-		//"_INBOX._CLIENTS.req123.>",
-		//"_STAN.discover.test-cluster.req123",
-		//"_STAN.discover.*.req123",
-		//"_STAN.close.*.req123",
-		//"_STAN.pub.*.foo123",
-		//
-		//"_STAN.sub.*.foo123",
-		//"_STAN.unsub.*.foo123",
-		//"_STAN.subclose.*.foo123"
-		DefaultDiscoverPrefix = "_STAN.discover"
-DefaultSubClosePrefix = "_STAN.subclose"
-DefaultUnSubPrefix    = "_STAN.unsub"
-DefaultClosePrefix    = "_STAN.close"
-defaultAcksPrefix     = "_STAN.ack"
-defaultSnapshotPrefix = "_STAN.snap"
-defaultRaftPrefix     = "_STAN.raft"
+								//"_INBOX._CLIENTS.req123.>",
+				//"_STAN.acks.req123.>"}},
+				//"_INBOX._CLIENTS.req123.>",
+				//"_STAN.discover.test-cluster.req123",
+				//"_STAN.discover.*.req123",
+				//"_STAN.close.*.req123",
+				//"_STAN.pub.*.foo123",
+				//
+				//"_STAN.sub.*.foo123",
+				//"_STAN.unsub.*.foo123",
+				//"_STAN.subclose.*.foo123"
+				DefaultDiscoverPrefix = "_STAN.discover"
+		DefaultSubClosePrefix = "_STAN.subclose"
+		DefaultUnSubPrefix    = "_STAN.unsub"
+		DefaultClosePrefix    = "_STAN.close"
+		defaultAcksPrefix     = "_STAN.ack"
+		defaultSnapshotPrefix = "_STAN.snap"
+		defaultRaftPrefix     = "_STAN.raft"
 	*/
-	
+
 	s := runServerWithOpts(t, sOpts, &nOpts)
 	defer s.Shutdown()
 

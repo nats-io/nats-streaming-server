@@ -105,7 +105,7 @@ func TestPartitionsInvalidRequest(t *testing.T) {
 	// Sending those invalid requests should not make the server crash
 	// and we should not get a response back
 	msgCh := make(chan *nats.Msg)
-	inbox := nats.NewInbox("_TMP")
+	inbox := nats.NewInboxWithPath("_TMP")
 	if _, err := nc.Subscribe(inbox, func(m *nats.Msg) {
 		msgCh <- m
 	}); err != nil {
@@ -808,7 +808,7 @@ func TestPartitionsRaceOnSub(t *testing.T) {
 	// would make the test pass.
 	for i := 0; i < 5; i++ {
 		func() {
-			subReq.Inbox = nats.NewInbox("_TMP")
+			subReq.Inbox = nats.NewInboxWithPath("_TMP")
 			subBytes, _ := subReq.Marshal()
 
 			// First case is to make sure that we get the failure if

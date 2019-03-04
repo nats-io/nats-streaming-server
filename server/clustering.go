@@ -210,7 +210,7 @@ func (s *StanServer) detectBootstrapMisconfig(name string) {
 			}
 		}
 	})
-	inbox := nats.NewInbox("_CLUSTERING.")
+	inbox := nats.NewInboxWithPath("_CLUSTERING.")
 	s.ncr.Subscribe(inbox, func(m *nats.Msg) {
 		s.log.Fatalf("Server %s was also started with -cluster_bootstrap", string(m.Data))
 	})

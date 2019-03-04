@@ -688,13 +688,13 @@ type pendingMsg struct {
 type subState struct {
 	sync.RWMutex
 	spb.SubState // Embedded protobuf. Used for storage.
-	subject     string
-	qstate      *queueState
-	ackWait     time.Duration // SubState.AckWaitInSecs expressed as a time.Duration
-	ackTimer    *time.Timer
-	ackSub      *nats.Subscription
-	acksPending map[uint64]int64 // key is message sequence, value is expiration time.
-	store       stores.SubStore  // for easy access to the store interface
+	subject      string
+	qstate       *queueState
+	ackWait      time.Duration // SubState.AckWaitInSecs expressed as a time.Duration
+	ackTimer     *time.Timer
+	ackSub       *nats.Subscription
+	acksPending  map[uint64]int64 // key is message sequence, value is expiration time.
+	store        stores.SubStore  // for easy access to the store interface
 
 	savedClientID string // Used only for closed durables in Clustering mode and monitoring endpoints.
 
@@ -1128,36 +1128,36 @@ func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 
 // Options for NATS Streaming Server
 type Options struct {
-	ID                string
-	DiscoverPrefix    string
-	StoreType         string
-	FilestoreDir      string
-	FileStoreOpts     stores.FileStoreOptions
-	SQLStoreOpts      stores.SQLStoreOptions
-	stores.StoreLimits              // Store limits (MaxChannels, etc..)
-	EnableLogging     bool          // Enables logging
-	CustomLogger      logger.Logger // Server will start with the provided logger
-	Trace             bool          // Verbose trace
-	Debug             bool          // Debug trace
-	HandleSignals     bool          // Should the server setup a signal handler (for Ctrl+C, etc...)
-	Secure            bool          // Create a TLS enabled connection w/o server verification
-	ClientCert        string        // Client Certificate for TLS
-	ClientKey         string        // Client Key for TLS
-	ClientCA          string        // Client CAs for TLS
-	IOBatchSize       int           // Maximum number of messages collected from clients before starting their processing.
-	IOSleepTime       int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
-	NATSServerURL     string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
-	ClientHBInterval  time.Duration // Interval at which server sends heartbeat to a client.
-	ClientHBTimeout   time.Duration // How long server waits for a heartbeat response.
-	ClientHBFailCount int           // Number of failed heartbeats before server closes client connection.
-	FTGroupName       string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
-	Partitioning      bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
-	SyslogName        string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
-	Encrypt           bool          // Specify if server should encrypt messages payload when storing them
-	EncryptionCipher  string        // Cipher used for encryption. Supported are "AES" and "CHACHA". If none is specified, defaults to AES on platforms with Intel processors, CHACHA otherwise.
-	EncryptionKey     []byte        // Encryption key. The environment NATS_STREAMING_ENCRYPTION_KEY takes precedence and is the preferred way to provide the key.
-	Clustering        ClusteringOptions
-	StanClients       []StanClient
+	ID                 string
+	DiscoverPrefix     string
+	StoreType          string
+	FilestoreDir       string
+	FileStoreOpts      stores.FileStoreOptions
+	SQLStoreOpts       stores.SQLStoreOptions
+	stores.StoreLimits               // Store limits (MaxChannels, etc..)
+	EnableLogging      bool          // Enables logging
+	CustomLogger       logger.Logger // Server will start with the provided logger
+	Trace              bool          // Verbose trace
+	Debug              bool          // Debug trace
+	HandleSignals      bool          // Should the server setup a signal handler (for Ctrl+C, etc...)
+	Secure             bool          // Create a TLS enabled connection w/o server verification
+	ClientCert         string        // Client Certificate for TLS
+	ClientKey          string        // Client Key for TLS
+	ClientCA           string        // Client CAs for TLS
+	IOBatchSize        int           // Maximum number of messages collected from clients before starting their processing.
+	IOSleepTime        int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
+	NATSServerURL      string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
+	ClientHBInterval   time.Duration // Interval at which server sends heartbeat to a client.
+	ClientHBTimeout    time.Duration // How long server waits for a heartbeat response.
+	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
+	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
+	SyslogName         string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
+	Encrypt            bool          // Specify if server should encrypt messages payload when storing them
+	EncryptionCipher   string        // Cipher used for encryption. Supported are "AES" and "CHACHA". If none is specified, defaults to AES on platforms with Intel processors, CHACHA otherwise.
+	EncryptionKey      []byte        // Encryption key. The environment NATS_STREAMING_ENCRYPTION_KEY takes precedence and is the preferred way to provide the key.
+	Clustering         ClusteringOptions
+	StanClients        []StanClient
 }
 
 type StanClient struct {
@@ -1459,7 +1459,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 				for _, c := range u.Permissions.Clients.AllowedClientIds {
 					if c == user.ClientId {
 						u.Permissions.Publish.Allow = append(u.Permissions.Publish.Allow, sOpts.DiscoverPrefix+".*."+c)
-						u.Permissions.Publish.Allow = append(u.Permissions.Publish.Allow, sOpts.DiscoverPrefix+".*."+c +".pings")
+						u.Permissions.Publish.Allow = append(u.Permissions.Publish.Allow, sOpts.DiscoverPrefix+".*."+c+".pings")
 						u.Permissions.Publish.Allow = append(u.Permissions.Publish.Allow, DefaultClosePrefix+".*."+c)
 						u.Permissions.Subscribe.Allow = append(u.Permissions.Subscribe.Allow, DefaultAcksPrefix+"."+c+".>")
 					}
@@ -1484,7 +1484,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 			//	Username: "req",
 			//	Password: "pass123",
 			//	Permissions: &server.Permissions{
-			//		Clients: &server.ClientPermission{AllowedClientIds: []string{"req123"}},
+			//		Clients: &server.ClientsPermission{AllowedClientIds: []string{"req123"}},
 			//		Publish: &server.SubjectPermission{Allow: []string{
 			//			"_STAN.discover.*.req123",
 			//			"_STAN.close.*.req123",
@@ -1683,7 +1683,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	//		//	Username: "req",
 	//		//	Password: "pass123",
 	//		//	Permissions: &server.Permissions{
-	//		//		Clients: &server.ClientPermission{AllowedClientIds: []string{"req123"}},
+	//		//		Clients: &server.ClientsPermission{AllowedClientIds: []string{"req123"}},
 	//		//		Publish: &server.SubjectPermission{Allow: []string{
 	//		//			"_STAN.discover.*.req123",
 	//		//			"_STAN.close.*.req123",
@@ -2279,7 +2279,7 @@ func (s *StanServer) startNATSServer() error {
 // This runs under sever's lock so nothing should grab the server lock here.
 func (s *StanServer) ensureRunningStandAlone() error {
 	clusterID := s.info.ClusterID
-	hbInbox := nats.NewInbox(fmt.Sprintf("_HeartBeet._CLUSTER.%s", clusterID))
+	hbInbox := nats.NewInboxWithPath(fmt.Sprintf("_HeartBeet._CLUSTER.%s", clusterID))
 	timeout := time.Millisecond * 250
 
 	// We cannot use the client's API here as it will create a dependency

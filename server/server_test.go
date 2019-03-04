@@ -381,13 +381,14 @@ func waitForAcks(t tLogger, s *StanServer, ID string, subID uint64, expected int
 
 func createConnectionWithNatsOpts(t tLogger, clientName string,
 	natsOpts ...nats.Option) (stan.Conn, *nats.Conn) {
-	opts := nats.DefaultOptions
+	opts := nats.GetDefaultOptions()
 	opts.Servers = []string{nats.DefaultURL}
 	for _, opt := range natsOpts {
 		if err := opt(&opts); err != nil {
 			stackFatalf(t, "Unexpected error on setting options: %v", err)
 		}
 	}
+	opts.Name = clientName
 	nc, err := opts.Connect()
 	if err != nil {
 		stackFatalf(t, "Unexpected error on connect: %v", err)
@@ -486,7 +487,16 @@ func runServerWithOpts(t *testing.T, sOpts *Options, nOpts *natsd.Options) *Stan
 func runServer(t *testing.T, clusterName string) *StanServer {
 	sOpts := GetDefaultOptions()
 	sOpts.ID = clusterName
+	sOpts.Debug = true
+	sOpts.Trace = true
+	sOpts.EnableLogging = true
+
 	nOpts := DefaultNatsServerOptions
+	nOpts.Debug = true
+	nOpts.Trace = true
+	nOpts.NoLog = false
+	nOpts.NoSigs = false
+
 	return runServerWithOpts(t, sOpts, &nOpts)
 }
 
@@ -1070,7 +1080,7 @@ func TestAckPublisherBufSize(t *testing.T) {
 	defer nc.Close()
 
 	errCh := make(chan error)
-	inbox := nats.NewInbox("_TMP")
+	inbox := nats.NewInboxWithPath("_TMP")
 	iopm := &ioPendingMsg{m: &nats.Msg{Reply: inbox}}
 	nc.Subscribe(inbox, func(m *nats.Msg) {
 		pubAck := pb.PubAck{}
@@ -1157,7 +1167,7 @@ func TestMsgsNotSentToSubBeforeSubReqResponse(t *testing.T) {
 	connSubj := fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, clusterName)
 	connReq := &pb.ConnectRequest{
 		ClientID:       clientName,
-		HeartbeatInbox: nats.NewInbox("_TMP"),
+		HeartbeatInbox: nats.NewInboxWithPath("_TMP"),
 	}
 	crb, _ := connReq.Marshal()
 	respMsg, err := nc.Request(connSubj, crb, 5*time.Second)
@@ -1190,7 +1200,7 @@ func TestMsgsNotSentToSubBeforeSubReqResponse(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		// Use the same subscriber for subscription request response and data,
 		// so we can reliably check if data comes before response.
-		inbox := nats.NewInbox("_TMP")
+		inbox := nats.NewInboxWithPath("_TMP")
 		sub, err := nc.SubscribeSync(inbox)
 		if err != nil {
 			t.Fatalf("Unable to create nats subscriber: %v", err)
