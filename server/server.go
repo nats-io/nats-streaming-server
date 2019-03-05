@@ -1176,6 +1176,7 @@ type Options struct {
 	EncryptionCipher   string        // Cipher used for encryption. Supported are "AES" and "CHACHA". If none is specified, defaults to AES on platforms with Intel processors, CHACHA otherwise.
 	EncryptionKey      []byte        // Encryption key. The environment NATS_STREAMING_ENCRYPTION_KEY takes precedence and is the preferred way to provide the key.
 	Clustering         ClusteringOptions
+	NATSClientOpts     []nats.Option
 }
 
 // Clone returns a deep copy of the Options object.
@@ -1313,6 +1314,10 @@ func (s *StanServer) buildServerURLs() ([]string, error) {
 func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 	var err error
 	ncOpts := nats.DefaultOptions
+
+	for _, o := range s.opts.NATSClientOpts {
+		o(&ncOpts)
+	}
 
 	ncOpts.Servers, err = s.buildServerURLs()
 	if err != nil {
