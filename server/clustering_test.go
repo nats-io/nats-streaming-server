@@ -82,6 +82,7 @@ func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
 		opts.SQLStoreOpts.Source = testSQLSource + suffix
 	}
 	opts.Clustering.Clustered = true
+	opts.Clustering.NodeID = id
 	opts.Clustering.Bootstrap = bootstrap
 	opts.Clustering.RaftLogPath = filepath.Join(defaultRaftLog, id)
 	opts.Clustering.LogCacheSize = DefaultLogCacheSize
@@ -4051,49 +4052,6 @@ func TestClusteringWithCryptoStore(t *testing.T) {
 	check(t, "s2", fname2)
 }
 
-func TestClusteringDeleteChannelLeaksSnapshotSubs(t *testing.T) {
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
-	cleanupRaftLog(t)
-	defer cleanupRaftLog(t)
-
-	// For this test, use a central NATS server.
-	ns := natsdTest.RunDefaultServer()
-	defer ns.Shutdown()
-
-	maxInactivity := 10 * time.Millisecond
-
-	// Configure first server
-	s1sOpts := getTestDefaultOptsForClustering("a", true)
-	s1sOpts.MaxInactivity = maxInactivity
-	s1 := runServerWithOpts(t, s1sOpts, nil)
-	defer s1.Shutdown()
-
-	// Configure second server.
-	s2sOpts := getTestDefaultOptsForClustering("b", false)
-	s2sOpts.MaxInactivity = maxInactivity
-	s2 := runServerWithOpts(t, s2sOpts, nil)
-	defer s2.Shutdown()
-
-	servers := []*StanServer{s1, s2}
-	// Wait for leader to be elected.
-	leader := getLeader(t, 10*time.Second, servers...)
-
-	sc := NewDefaultConnection(t)
-	defer sc.Close()
-
-	sc.Publish("foo", []byte("hello"))
-	c := leader.channels.get("foo")
-	time.Sleep(2 * maxInactivity)
-
-	leader.channels.RLock()
-	snapshotSubExists := c.snapshotSub != nil
-	leader.channels.RUnlock()
-	if snapshotSubExists {
-		t.Fatalf("Snapshot subscription for channel still exists")
-	}
-}
-
 func TestClusteringDeadlockOnChannelDelete(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -4445,4 +4403,131 @@ func TestClusteringNoPanicOnChannelDelete(t *testing.T) {
 
 	close(done)
 	wg.Wait()
+}
+
+func TestClusteringInstallSnapshotFailure(t *testing.T) {
+	if persistentStoreType != stores.TypeFile {
+		t.Skip("Test written for FILE stores only...")
+	}
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	barLimits := &stores.ChannelLimits{MaxInactivity: 50 * time.Millisecond}
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", false)
+	s1sOpts.AddPerChannel("bar.*", barLimits)
+	s1sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s1sOpts.FileStoreOpts.FileDescriptorsLimit = 5
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.AddPerChannel("bar.*", barLimits)
+	s2sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s2sOpts.FileStoreOpts.FileDescriptorsLimit = 5
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.AddPerChannel("bar.*", barLimits)
+	s3sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s3sOpts.FileStoreOpts.FileDescriptorsLimit = 5
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	leader := getLeader(t, 10*time.Second, s1, s2, s3)
+	followers := removeServer(servers, leader)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	for ns := 0; ns < 2; ns++ {
+		for i := 0; i < 25; i++ {
+			sc.Publish(fmt.Sprintf("foo.%d", ns*25+i), []byte("hello"))
+		}
+		if err := s2.raft.Snapshot().Error(); err != nil {
+			t.Fatalf("Error during snapshot: %v", err)
+		}
+	}
+
+	// Start by shuting down one of the follower
+	follower := followers[0]
+	follower.Shutdown()
+
+	remaining := followers[1]
+
+	// Produce more data
+	for ns := 0; ns < 2; ns++ {
+		for i := 0; i < 25; i++ {
+			sc.Publish(fmt.Sprintf("bar.%d", ns*25+i), []byte("hello"))
+		}
+		if err := remaining.raft.Snapshot().Error(); err != nil {
+			t.Fatalf("Error during snapshot: %v", err)
+		}
+	}
+	sc.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Now shutdown the leader...
+	leader.Shutdown()
+
+	// Remove their state
+	removeState := func(s *StanServer) {
+		var nodeID string
+		switch s {
+		case s1:
+			nodeID = "a"
+		case s2:
+			nodeID = "b"
+		case s3:
+			nodeID = "c"
+		}
+		os.RemoveAll(filepath.Join(defaultDataStore, nodeID))
+		os.RemoveAll(filepath.Join(defaultRaftLog, nodeID))
+	}
+	removeState(leader)
+	removeState(follower)
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Restart the 2 previously stopped servers.
+	restartSrv := func(s *StanServer) *StanServer {
+		var opts *Options
+		switch s {
+		case s1:
+			opts = s1sOpts
+		case s2:
+			opts = s2sOpts
+		case s3:
+			opts = s3sOpts
+		}
+		return runServerWithOpts(t, opts, nil)
+	}
+	s4 := restartSrv(leader)
+	defer s4.Shutdown()
+
+	time.Sleep(500 * time.Millisecond)
+
+	s5 := restartSrv(follower)
+	defer s5.Shutdown()
+
+	getLeader(t, 10*time.Second, remaining, s4, s5)
+
+	sc = NewDefaultConnection(t)
+	// explicitly close/shutdown to make test faster.
+	sc.Close()
+	s4.Shutdown()
+	s5.Shutdown()
+	remaining.Shutdown()
 }
