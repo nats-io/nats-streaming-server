@@ -1621,6 +1621,10 @@ Cluster Configuration:
 | trailing_logs | Number of log entries to leave after a snapshot and compaction | Number >= 0 | `trailing_logs: 256` |
 | sync | Do a file sync after every write to the replication log and message store | `true` or `false` | `sync: true` |
 | raft_logging | Enable logging from the Raft library (disabled by default) | `true` or `false` | `raft_logging: true` |
+| raft_heartbeat_timeout | Specifies the time in follower state without a leader before attempting an election | Duration | `raft_heartbeat_timeout: "2s"` |
+| raft_election_timeout | Specifies the time in candidate state without a leader before attempting an election | Duration | `raft_election_timeout: "2s"` |
+| raft_lease_timeout | Specifies how long a leader waits without being able to contact a quorum of nodes before stepping down as leader | Duration | `raft_lease_timeout: "1s"` |
+| raft_commit_timeout | Specifies the time without an Apply() operation before sending an heartbeat to ensure timely commit. Due to random staggering, may be delayed as much as 2x this value | Duration | `raft_commit_timeout: "100ms"` |
 
 SQL Options Configuration:
 
