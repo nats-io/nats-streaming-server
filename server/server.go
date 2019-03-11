@@ -180,6 +180,11 @@ var (
 	testDeleteChannel          bool
 )
 
+var (
+	// gitCommit injected at build
+	gitCommit string
+)
+
 func computeAckWait(wait int32) time.Duration {
 	unit := time.Second
 	if testAckWaitIsInMillisecond && wait < 0 {
@@ -1463,6 +1468,11 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// regarding other instance's ID, so print it on startup.
 	s.log.Noticef("ServerID: %v", s.serverID)
 	s.log.Noticef("Go version: %v", runtime.Version())
+	gc := gitCommit
+	if gc == "" {
+		gc = "not set"
+	}
+	s.log.Noticef("Git commit: [%s]", gc)
 
 	// Ensure that we shutdown the server if there is a panic/error during startup.
 	// This will ensure that stores are closed (which otherwise would cause
