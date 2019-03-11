@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math/rand"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -4170,4 +4171,278 @@ func TestClusteringDeadlockOnChannelDelete(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("Deadlock likely!!!")
 	}
+}
+
+func TestClusteringChannelDeleteReplicationFailure(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	maxInactivity := 100 * time.Millisecond
+	testDeleteChannel = true
+	defer func() { testDeleteChannel = false }()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.MaxInactivity = maxInactivity
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.MaxInactivity = maxInactivity
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	s1.lookupOrCreateChannel("foo")
+	// Wait for it to be scheduled for deletion...
+	time.Sleep(150 * time.Millisecond)
+	// Since we have an artificial wait before replication
+	// (with the use of testDeleteChannel), shutdown the
+	// follower so that the replication of the delete event
+	// fails.
+	s2.Shutdown()
+
+	// We need to wait for the replication to fail
+	// (we pause 1sec before starting the replication)
+	time.Sleep(1200 * time.Millisecond)
+
+	// Now restart the follower
+	s2 = runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Wait for leader
+	getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Publish a message to channel foo, this should work.
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+}
+
+type myProxy struct {
+	sync.Mutex
+	connectTo string
+	addr      string
+	c         net.Conn
+	doPause   bool
+}
+
+func newProxy(connectTo string) (*myProxy, error) {
+	p := &myProxy{connectTo: connectTo}
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	p.addr = fmt.Sprintf("nats://%s", l.Addr().String())
+	go func() {
+		c, _ := l.Accept()
+		p.Lock()
+		p.c = c
+		p.Unlock()
+		go p.proxy(c)
+		l.Close()
+	}()
+	return p, nil
+}
+
+func (p *myProxy) proxy(c net.Conn) {
+	p.Lock()
+	dest, err := net.Dial("tcp", p.connectTo)
+	if err != nil {
+		p.c.Close()
+		p.Unlock()
+		return
+	}
+	p.Unlock()
+
+	pauseIfAsked := func() {
+		for {
+			p.Lock()
+			pause := p.doPause
+			p.Unlock()
+			if pause {
+				time.Sleep(10 * time.Millisecond)
+			} else {
+				break
+			}
+		}
+	}
+
+	go func() {
+		defer dest.Close()
+		var destBuf [1024]byte
+		for {
+			n, err := dest.Read(destBuf[:])
+			if err != nil {
+				return
+			}
+			if _, err := c.Write(destBuf[:n]); err != nil {
+				return
+			}
+			pauseIfAsked()
+		}
+	}()
+
+	defer dest.Close()
+	defer c.Close()
+	var buf [1024]byte
+	for {
+		n, err := c.Read(buf[:])
+		if err != nil {
+			return
+		}
+		if _, err := dest.Write(buf[:n]); err != nil {
+			return
+		}
+		pauseIfAsked()
+	}
+}
+
+func (p *myProxy) getAddr() string {
+	p.Lock()
+	defer p.Unlock()
+	return p.addr
+}
+
+func (p *myProxy) pause() {
+	p.Lock()
+	defer p.Unlock()
+	p.doPause = true
+}
+
+func (p *myProxy) resume() {
+	p.Lock()
+	defer p.Unlock()
+	p.doPause = false
+}
+
+func (p *myProxy) close() {
+	p.Lock()
+	defer p.Unlock()
+	p.c.Close()
+}
+
+func TestClusteringNoPanicOnChannelDelete(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, we need 2 NATS Servers
+	do := natsdTest.DefaultTestOptions
+	ns1Opts := do.Clone()
+	ns1Opts.Cluster.Host = "127.0.0.1"
+	ns1Opts.Cluster.Port = -1
+	ns1 := natsdTest.RunServer(ns1Opts)
+	defer ns1.Shutdown()
+
+	// Start a proxy to which ns2 will connect to.
+	// We want the two to be split at one point.
+	proxy, err := newProxy(fmt.Sprintf("%s:%d", ns1Opts.Cluster.Host, ns1Opts.Cluster.Port))
+	if err != nil {
+		t.Fatalf("Error creating proxy: %v", err)
+	}
+	defer proxy.close()
+	// Wait for it to be ready to accept connection.
+	time.Sleep(200 * time.Millisecond)
+
+	ns2Opts := do.Clone()
+	ns2Opts.Port = 4223
+	ns2Opts.Cluster.Host = "127.0.0.1"
+	ns2Opts.Cluster.Port = -1
+	ns2Opts.Routes = natsd.RoutesFromStr(proxy.getAddr())
+	ns2 := natsdTest.RunServer(ns2Opts)
+	defer ns2.Shutdown()
+
+	maxInactivity := 100 * time.Millisecond
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.MaxInactivity = maxInactivity
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.MaxInactivity = maxInactivity
+	s2sOpts.NATSServerURL = "nats://127.0.0.1:4223"
+	// Make it connect to ns2
+	s2 := runServerWithOpts(t, s2sOpts, ns2Opts)
+	defer s2.Shutdown()
+
+	// Configure a third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.MaxInactivity = maxInactivity
+	s3sOpts.NATSServerURL = "nats://127.0.0.1:4223"
+	// Make it connect to ns2
+	s3 := runServerWithOpts(t, s3sOpts, ns2Opts)
+	defer s3.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2, s3)
+
+	// Create a connection that connects to ns2
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsURL("nats://127.0.0.1:4223"))
+	if err != nil {
+		t.Fatalf("Unable to connect: %v", err)
+	}
+	defer sc.Close()
+
+	if _, err := s1.lookupOrCreateChannel("foo"); err != nil {
+		t.Fatalf("Error creating channel: %v", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Now cause split between s1 and s2/s3 before the channel expires.
+	proxy.pause()
+
+	// Wait for a new leader election
+	verifyNoLeader(t, 3*time.Second, s1)
+	getLeader(t, 10*time.Second, s2, s3)
+
+	// Start publishing
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	done := make(chan struct{}, 1)
+	go func() {
+		defer wg.Done()
+		for {
+			sc.PublishAsync("foo", []byte("hello"), nil)
+			select {
+			case <-done:
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	proxy.resume()
+
+	// Make sure s1 does not crash. It should catch up on
+	// getting some of the messages.
+	waitFor(t, 3*time.Second, 15*time.Millisecond, func() error {
+		c := s1.channels.get("foo")
+		if c != nil {
+			if seq, _ := c.store.Msgs.LastSequence(); seq > 30 {
+				return nil
+			}
+		}
+		return fmt.Errorf("s1 is not catching up")
+	})
+
+	close(done)
+	wg.Wait()
 }

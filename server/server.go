@@ -403,6 +403,9 @@ func (cs *channelStore) maybeStartChannelDeleteTimer(name string, c *channel) {
 func (cs *channelStore) stopDeleteTimer(c *channel) {
 	cs.Lock()
 	c.stopDeleteTimer()
+	if c.activity != nil {
+		c.activity.deleteInProgress = false
+	}
 	cs.Unlock()
 }
 
@@ -2644,7 +2647,16 @@ func (s *StanServer) replicateDeleteChannel(channel string) {
 		panic(err)
 	}
 	// Wait on result of replication.
-	s.raft.Apply(data, 0).Error()
+	if err = s.raft.Apply(data, 0).Error(); err != nil {
+		// If we have lost leadership, clear the deleteInProgress flag.
+		cs := s.channels
+		cs.Lock()
+		c := cs.channels[channel]
+		if c != nil && c.activity != nil {
+			c.activity.deleteInProgress = false
+		}
+		cs.Unlock()
+	}
 }
 
 // Check if the channel can be deleted. If so, do it in place.
