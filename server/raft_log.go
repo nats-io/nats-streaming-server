@@ -64,7 +64,9 @@ func newRaftLog(log logger.Logger, fileName string, sync bool, _ int, encrypt bo
 		return nil, err
 	}
 	db.NoSync = !sync
-	db.NoFreelistSync = true
+	// Don't use this for now.
+	// See https://github.com/etcd-io/bbolt/issues/152
+	// db.NoFreelistSync = true
 	db.FreelistType = bolt.FreelistMapType
 	r.conn = db
 	if err := r.init(); err != nil {
