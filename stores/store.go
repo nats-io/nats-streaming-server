@@ -61,7 +61,7 @@ type ChannelLimits struct {
 	SubStoreLimits
 	// How long without any active subscription and no new message
 	// before this channel can be deleted.
-	MaxInactivity time.Duration
+	MaxInactivity time.Duration `json:"max_inactivity"`
 }
 
 // MsgStoreLimits defines limits for a MsgStore.
