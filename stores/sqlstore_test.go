@@ -1288,23 +1288,23 @@ func TestSQLMaxConnections(t *testing.T) {
 	}
 }
 
-type getExclusiveLockLogger struct {
+type captureErrAndFatalLogger struct {
 	sync.Mutex
 	msgs []string
 }
 
-func (d *getExclusiveLockLogger) log(format string, args ...interface{}) {
+func (d *captureErrAndFatalLogger) log(format string, args ...interface{}) {
 	d.Lock()
 	d.msgs = append(d.msgs, fmt.Sprintf(format, args...))
 	d.Unlock()
 }
 
-func (d *getExclusiveLockLogger) Noticef(format string, args ...interface{}) {}
-func (d *getExclusiveLockLogger) Debugf(format string, args ...interface{})  {}
-func (d *getExclusiveLockLogger) Tracef(format string, args ...interface{})  {}
-func (d *getExclusiveLockLogger) Warnf(format string, args ...interface{})   {}
-func (d *getExclusiveLockLogger) Errorf(format string, args ...interface{})  { d.log(format, args...) }
-func (d *getExclusiveLockLogger) Fatalf(format string, args ...interface{})  { d.log(format, args...) }
+func (d *captureErrAndFatalLogger) Noticef(format string, args ...interface{}) {}
+func (d *captureErrAndFatalLogger) Debugf(format string, args ...interface{})  {}
+func (d *captureErrAndFatalLogger) Tracef(format string, args ...interface{})  {}
+func (d *captureErrAndFatalLogger) Warnf(format string, args ...interface{})   {}
+func (d *captureErrAndFatalLogger) Errorf(format string, args ...interface{})  { d.log(format, args...) }
+func (d *captureErrAndFatalLogger) Fatalf(format string, args ...interface{})  { d.log(format, args...) }
 
 func TestSQLGetExclusiveLock(t *testing.T) {
 	if !doSQL {
@@ -1334,7 +1334,7 @@ func TestSQLGetExclusiveLock(t *testing.T) {
 		}
 	}
 
-	dl := &getExclusiveLockLogger{}
+	dl := &captureErrAndFatalLogger{}
 	s2, err := NewSQLStore(dl, testSQLDriver, testSQLSource, nil, SQLNoCaching(true))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)

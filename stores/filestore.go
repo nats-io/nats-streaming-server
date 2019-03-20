@@ -2827,7 +2827,16 @@ func (ms *FileMsgStore) expireMsgs(now, maxAge int64) int64 {
 				}
 			}
 			if slice != nil {
-				m = ms.getMsgIndex(slice, ms.first)
+				var err error
+				if m, err = ms.getMsgIndex(slice, ms.first); err != nil {
+					ms.log.Errorf("Error during expiration: %v", err)
+					if slice != nil {
+						ms.unlockIndexFile(slice)
+					}
+					// Try again in 5 secs.
+					ms.expiration = now + int64(5*time.Second)
+					return ms.expiration
+				}
 			}
 		}
 		if m == nil {
@@ -2867,7 +2876,13 @@ func (ms *FileMsgStore) enforceLimits(reportHitLimit, lockFile bool) error {
 
 		// Remove first message from first slice, potentially removing
 		// the slice, etc...
-		ms.removeFirstMsg(nil, lockFile)
+		if err := ms.removeFirstMsg(nil, lockFile); err != nil {
+			// We are not going to fail the publish, just report
+			// the error removing the first message.
+			// TODO: Is this the right thing to do?
+			ms.log.Errorf("Unable to remove first message: %v", err)
+			return nil
+		}
 		if reportHitLimit && !ms.hitLimit {
 			ms.hitLimit = true
 			ms.log.Warnf(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs,
@@ -2883,10 +2898,10 @@ func (ms *FileMsgStore) enforceLimits(reportHitLimit, lockFile bool) error {
 // This call first checks that the record is not present in
 // ms.bufferedMsgs since it is possible that message and index are not
 // yet stored on disk.
-func (ms *FileMsgStore) getMsgIndex(slice *fileSlice, seq uint64) *msgIndex {
+func (ms *FileMsgStore) getMsgIndex(slice *fileSlice, seq uint64) (*msgIndex, error) {
 	bm := ms.bufferedMsgs[seq]
 	if bm != nil {
-		return bm.index
+		return bm.index, nil
 	}
 	return ms.readMsgIndex(slice, seq)
 }
@@ -2894,24 +2909,27 @@ func (ms *FileMsgStore) getMsgIndex(slice *fileSlice, seq uint64) *msgIndex {
 // readMsgIndex reads a message index record from disk and returns a msgIndex
 // object. Same than getMsgIndex but without checking for message in
 // ms.bufferedMsgs first.
-func (ms *FileMsgStore) readMsgIndex(slice *fileSlice, seq uint64) *msgIndex {
+func (ms *FileMsgStore) readMsgIndex(slice *fileSlice, seq uint64) (*msgIndex, error) {
 	// Compute the offset in the index file itself.
 	idxFileOffset := 4 + (int64(seq-slice.firstSeq)+int64(slice.rmCount))*msgIndexRecSize
 	// Then position the file pointer of the index file.
 	if _, err := slice.idxFile.handle.Seek(idxFileOffset, io.SeekStart); err != nil {
-		return nil
+		return nil, err
 	}
 	// Read the index record and ensure we have what we expect
 	seqInIndexFile, msgIndex, err := ms.readIndex(slice.idxFile.handle)
-	if seqInIndexFile != seq || err != nil {
-		return nil
+	if err != nil {
+		return nil, err
 	}
-	return msgIndex
+	if seqInIndexFile != seq {
+		return nil, fmt.Errorf("wrong sequence, wanted %v got %v", seq, seqInIndexFile)
+	}
+	return msgIndex, nil
 }
 
 // removeFirstMsg "removes" the first message of the first slice.
 // If the slice is "empty" the file slice is removed.
-func (ms *FileMsgStore) removeFirstMsg(mindex *msgIndex, lockFile bool) {
+func (ms *FileMsgStore) removeFirstMsg(mindex *msgIndex, lockFile bool) error {
 	// Work with the first slice
 	slice := ms.files[ms.firstFSlSeq]
 	// Get the message index for the first valid message in this slice
@@ -2919,9 +2937,13 @@ func (ms *FileMsgStore) removeFirstMsg(mindex *msgIndex, lockFile bool) {
 		if lockFile || slice != ms.writeSlice {
 			ms.lockIndexFile(slice)
 		}
-		mindex = ms.getMsgIndex(slice, slice.firstSeq)
+		var err error
+		mindex, err = ms.getMsgIndex(slice, slice.firstSeq)
 		if lockFile || slice != ms.writeSlice {
 			ms.unlockIndexFile(slice)
+		}
+		if err != nil {
+			return err
 		}
 	}
 	// Size of the first message in this slice
@@ -2949,6 +2971,7 @@ func (ms *FileMsgStore) removeFirstMsg(mindex *msgIndex, lockFile bool) {
 		// This is the new first message in this slice.
 		slice.firstSeq = ms.first
 	}
+	return nil
 }
 
 // removeFirstSlice removes the first file slice.
@@ -3161,7 +3184,7 @@ func (ms *FileMsgStore) lookup(seq uint64) (*pb.MsgProto, error) {
 		if err != nil {
 			return nil, err
 		}
-		msgIndex := ms.readMsgIndex(fslice, seq)
+		msgIndex, err := ms.readMsgIndex(fslice, seq)
 		if msgIndex != nil {
 			file := fslice.file.handle
 			// Position file to message's offset. 0 means from start.
@@ -3254,10 +3277,16 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error
 			return 0, err
 		}
 		seq := slice.firstSeq
-		firstMsgInSlice := ms.getMsgIndex(slice, seq)
-		if timestamp > firstMsgInSlice.timestamp {
+		if firstMsgInSlice, err := ms.getMsgIndex(slice, seq); err != nil {
+			ms.unlockIndexFile(slice)
+			return 0, err
+		} else if timestamp > firstMsgInSlice.timestamp {
 			seq = slice.lastSeq
-			lastMsgInSlice := ms.getMsgIndex(slice, seq)
+			lastMsgInSlice, err := ms.getMsgIndex(slice, seq)
+			if err != nil {
+				ms.unlockIndexFile(slice)
+				return 0, err
+			}
 			if timestamp > lastMsgInSlice.timestamp {
 				// Not there, move to the next slice.
 				ms.unlockIndexFile(slice)
@@ -3273,7 +3302,11 @@ func (ms *FileMsgStore) GetSequenceFromTimestamp(timestamp int64) (uint64, error
 				// in the system's disk cache, resulting in memory-only access
 				// for the following indexes...
 				for seq = slice.firstSeq + 1; seq <= slice.lastSeq-1; seq++ {
-					mindex := ms.getMsgIndex(slice, seq)
+					mindex, err := ms.getMsgIndex(slice, seq)
+					if err != nil {
+						ms.unlockIndexFile(slice)
+						return 0, err
+					}
 					if mindex.timestamp >= timestamp {
 						break
 					}
