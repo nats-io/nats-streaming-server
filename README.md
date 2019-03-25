@@ -1391,7 +1391,7 @@ Streaming Server Clustering Options:
     --clustered <bool>                   Run the server in a clustered configuration (default: false)
     --cluster_node_id <string>           ID of the node within the cluster if there is no stored ID (default: random UUID)
     --cluster_bootstrap <bool>           Bootstrap the cluster if there is no existing state by electing self as leader (default: false)
-    --cluster_peers <string>             List of cluster peer node IDs to bootstrap cluster state.
+    --cluster_peers <string, ...>        Comma separated list of cluster peer node IDs to bootstrap cluster state
     --cluster_log_path <string>          Directory to store log replication data
     --cluster_log_cache_size <int>       Number of log entries to cache in memory to reduce disk IO (default: 512)
     --cluster_log_snapshots <int>        Number of log snapshots to retain (default: 2)
