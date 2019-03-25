@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1787,5 +1788,56 @@ func TestFSGetSeqFromTimestamp(t *testing.T) {
 			ms.firstMsg, ms.lastMsg = nil, nil
 			ms.Unlock()
 		}
+	}
+}
+
+func TestFSNoPanicOnRemoveMsg(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	l := &captureErrAndFatalLogger{}
+
+	limits := testDefaultStoreLimits
+	limits.MaxMsgs = 5
+	s, err := NewFileStore(l, testFSDefaultDatastore, &limits, BufferSize(0), DoCRC(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	cs := storeCreateChannel(t, s, "foo")
+	seq := uint64(1)
+	for i := 0; i < 5; i++ {
+		storeMsg(t, cs, "foo", seq, []byte("hello"))
+		seq++
+	}
+
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.Lock()
+	idxFile := ms.files[1].idxFile
+	ms.fm.closeLockedOrOpenedFile(idxFile)
+	content, err := ioutil.ReadFile(idxFile.name)
+	if err != nil {
+		t.Fatalf("Error reading file: %v", err)
+	}
+	util.ByteOrder.PutUint64(content[4:], 2)
+	if err := ioutil.WriteFile(idxFile.name, content, 0600); err != nil {
+		t.Fatalf("Error writing file: %v", err)
+	}
+	ms.Unlock()
+
+	storeMsg(t, cs, "foo", seq, []byte("hello"))
+
+	gotIt := false
+	l.Lock()
+	for _, m := range l.msgs {
+		if strings.Contains(m, "Unable to remove") {
+			gotIt = true
+			break
+		}
+	}
+	l.Unlock()
+	if !gotIt {
+		t.Fatal("Did not get error about removing message")
 	}
 }
