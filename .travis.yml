@@ -1,7 +1,6 @@
 language: go
 sudo: false
 go:
-- 1.10.x
 - 1.11.x
 - 1.12.x
 install:
@@ -17,13 +16,13 @@ services:
 before_script:
 - EXCLUDE_VENDOR=$(go list ./... | grep -v "/vendor/")
 - go install
-- if [[ "$TRAVIS_GO_VERSION" =~ 1.11 ]]; then $(exit $(go fmt $EXCLUDE_VENDOR | wc -l)); fi
+- $(exit $(go fmt $EXCLUDE_VENDOR | wc -l))
 - go vet $EXCLUDE_VENDOR
 - $(exit $(misspell -locale US . | grep -v "vendor/" | wc -l))
 - staticcheck -ignore "$(cat staticcheck.ignore)" $EXCLUDE_VENDOR
 script:
 - mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;"
 - go test -i $EXCLUDE_VENDOR
-- if [[ "$TRAVIS_GO_VERSION" =~ 1.11 ]]; then ./scripts/cov.sh TRAVIS; else go test -failfast $EXCLUDE_VENDOR; fi
+- if [[ "$TRAVIS_GO_VERSION" =~ 1.12 ]]; then ./scripts/cov.sh TRAVIS; else go test -failfast $EXCLUDE_VENDOR; fi
 after_success:
-- if [[ "$TRAVIS_GO_VERSION" =~ 1.11 ]] && [ "$TRAVIS_TAG" != "" ]; then ./scripts/cross_compile.sh $TRAVIS_TAG; ghr --owner nats-io --token $GITHUB_TOKEN --draft --replace $TRAVIS_TAG pkg/; fi
+- if [[ "$TRAVIS_GO_VERSION" =~ 1.12 ]] && [ "$TRAVIS_TAG" != "" ]; then ./scripts/cross_compile.sh $TRAVIS_TAG; ghr --owner nats-io --token $GITHUB_TOKEN --draft --replace $TRAVIS_TAG pkg/; fi
