@@ -16,6 +16,7 @@ package server
 import (
 	"fmt"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -214,6 +215,7 @@ func (s *serverSnapshot) Release() {}
 // concurrently with any other command. The FSM must discard all previous
 // state.
 func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
+	s := r.server
 	defer snapshot.Close()
 
 	r.Lock()
@@ -244,8 +246,10 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 				r.snapshotsOnInit = 0
 			}
 		}()
+	} else {
+		s.log.Noticef("restoring from snapshot")
+		defer s.log.Noticef("done restoring from snapshot")
 	}
-	s := r.server
 
 	// We need to drop current state. The server will recover from snapshot
 	// and all newer Raft entry logs (basically the entire state is being
@@ -322,6 +326,23 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 			}
 			delete(channelsBeforeRestore, sc.Channel)
 		}
+		// Only set nextSequence if new value is greater than what
+		// is currently set.
+		if c.nextSequence <= sc.Last {
+			c.nextSequence = sc.Last + 1
+			if sc.Last > 0 {
+				// If store's seq is 0 but sc.Last is not, it likely means
+				// that all messages expired and our store is empty. We
+				// need to report to monitoring page the value of nextSequence
+				// instead of 0.
+				// We use a different field in the channel structure that
+				// uses atomic since it can be read concurrently in monitor's
+				// channelsz endpoint.
+				if seq, _ := c.store.Msgs.FirstSequence(); seq == 0 {
+					atomic.StoreUint64(&c.firstSeq, c.nextSequence)
+				}
+			}
+		}
 		for _, ss := range sc.Subscriptions {
 			s.recoverOneSub(c, ss.State, nil, ss.AcksPending)
 		}
@@ -361,6 +382,12 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64) error 
 		// at our next sequence.
 		first = storeLast + 1
 	}
+	// All messages were expired, we still need to save some information
+	// that will allow us to remember the last sequence.
+	if first > last {
+		return nil
+	}
+
 	inbox := nats.NewInbox()
 	sub, err := c.stan.ncsr.SubscribeSync(inbox)
 	if err != nil {
