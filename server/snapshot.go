@@ -147,12 +147,13 @@ func (s *serverSnapshot) snapshotChannels(snap *spb.RaftSnapshot) error {
 		if err != nil {
 			return err
 		}
-		snapChannel := &spb.ChannelSnapshot{
-			Channel: c.name,
-			First:   first,
-			Last:    last,
-		}
 		c.ss.RLock()
+		snapChannel := &spb.ChannelSnapshot{
+			Channel:   c.name,
+			First:     first,
+			Last:      last,
+			NextSubID: c.nextSubID,
+		}
 
 		// Start with count of all plain subs...
 		snapSubs := make([]*spb.SubscriptionSnapshot, len(c.ss.psubs))
@@ -345,7 +346,17 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 		}
 		for _, ss := range sc.Subscriptions {
 			s.recoverOneSub(c, ss.State, nil, ss.AcksPending)
+			c.ss.Lock()
+			if ss.State.ID >= c.nextSubID {
+				c.nextSubID = ss.State.ID + 1
+			}
+			c.ss.Unlock()
 		}
+		c.ss.Lock()
+		if sc.NextSubID > c.nextSubID {
+			c.nextSubID = sc.NextSubID
+		}
+		c.ss.Unlock()
 	}
 	if !inNewRaftCall {
 		// Now delete channels that we had before the restore.

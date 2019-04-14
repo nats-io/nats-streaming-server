@@ -495,7 +495,7 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 		return s.closeClient(op.ClientDisconnect.ClientID)
 	case spb.RaftOperation_Subscribe:
 		// Subscription replication.
-		sub, err := s.processSub(nil, op.Sub.Request, op.Sub.AckInbox)
+		sub, err := s.processSub(nil, op.Sub.Request, op.Sub.AckInbox, op.Sub.ID)
 		return &replicatedSub{sub: sub, err: err}
 	case spb.RaftOperation_RemoveSubscription:
 		fallthrough
