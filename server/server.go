@@ -422,6 +422,11 @@ func (cs *channelStore) turnOffPreventDelete(c *channel) {
 }
 
 type channel struct {
+	// This is used in clustering mode in a specific situation where
+	// all messages may have been expired so the store reports 0,0
+	// but we know that the firstSeq should be something else.
+	// Used with atomic operation.
+	firstSeq     uint64
 	nextSequence uint64
 	name         string
 	store        *stores.Channel
@@ -1970,7 +1975,11 @@ func (s *StanServer) leadershipAcquired() error {
 		if err != nil {
 			return err
 		}
-		c.nextSequence = lastSequence + 1
+		// It is possible that nextSequence be set when restoring
+		// from snapshots. Set it to the max value.
+		if c.nextSequence <= lastSequence {
+			c.nextSequence = lastSequence + 1
+		}
 	}
 
 	// Setup client heartbeats and subscribe to acks for each sub.

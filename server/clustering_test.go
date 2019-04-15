@@ -15,6 +15,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -4530,4 +4531,205 @@ func TestClusteringInstallSnapshotFailure(t *testing.T) {
 	s4.Shutdown()
 	s5.Shutdown()
 	remaining.Shutdown()
+}
+
+func TestClusteringSubDontStallDueToMsgExpiration(t *testing.T) {
+	resetPreviousHTTPConnections()
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.MaxAge = 50 * time.Millisecond
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.MaxAge = 50 * time.Millisecond
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.MaxAge = 50 * time.Millisecond
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2, s3)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	ch := make(chan struct{}, 1)
+	firstBatch := 5
+	firstSeq := uint64(firstBatch)
+	secondBatch := 5
+	secondSeq := uint64(firstBatch + secondBatch)
+	thirdSeq := secondSeq + 1
+
+	if _, err := sc.Subscribe("foo", func(m *stan.Msg) {
+		if m.Sequence == firstSeq || m.Sequence == secondSeq || m.Sequence == thirdSeq {
+			ch <- struct{}{}
+		}
+	}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	for i := 0; i < firstBatch; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+
+	checkReceived := func() {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Failed to receive messages")
+		}
+	}
+	checkReceived()
+
+	s2.Shutdown()
+	// We aremove all state from node "b", but even if we didn't, on restart,
+	// since "b" store would be behind the rest, it would be emptied because
+	// the current first message is move than the "b"'s last sequence.
+	// For DB, let it recover its state...
+	if persistentStoreType == stores.TypeFile {
+		os.RemoveAll(filepath.Join(defaultDataStore, "b"))
+		os.RemoveAll(filepath.Join(defaultRaftLog, "b"))
+	}
+
+	for i := 0; i < secondBatch; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+
+	checkReceived()
+
+	// Wait for messages to expire
+	time.Sleep(100 * time.Millisecond)
+
+	// Perform snapshot
+	if err := s1.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error during snapshot: %v", err)
+	}
+	if err := s3.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error during snapshot: %v", err)
+	}
+
+	// Restart node "b" (s2) with monitoring port opened
+	s2nOpts := defaultMonitorOptions
+	s2 = runServerWithOpts(t, s2sOpts, &s2nOpts)
+	defer s2.Shutdown()
+
+	// Wait for "foo" to be re-created on node "b"
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		s2.channels.RLock()
+		_, ok := s2.channels.channels["foo"]
+		s2.channels.RUnlock()
+		if !ok {
+			return fmt.Errorf("Channel foo still not created")
+		}
+		return nil
+	})
+
+	// Stop leader s1, and we want s2 to become leader, so possibly
+	// stop/restart s3 until that happens.
+	s1.Shutdown()
+	for {
+		leader := getLeader(t, 10*time.Second, s2, s3)
+		if leader == s2 {
+			break
+		}
+		s3.Shutdown()
+		s3 = runServerWithOpts(t, s3sOpts, nil)
+		defer s3.Shutdown()
+	}
+
+	// Now that s2 is leader, check its channel monitor endpoint.
+	resp, body := getBody(t, ChannelsPath+"?channel=foo", expectedJSON)
+	defer resp.Body.Close()
+
+	cz := Channelz{}
+	if err := json.Unmarshal(body, &cz); err != nil {
+		t.Fatalf("Got an error unmarshalling the body: %v", err)
+	}
+	resp.Body.Close()
+	// Since all have expired, we expect FirstSeq to be `thirdSeq`
+	// and LastSeq one less.
+	if cz.FirstSeq != thirdSeq || cz.LastSeq != thirdSeq-1 {
+		t.Fatalf("Expected first/last seq to be %v, %v, got %v, %v",
+			thirdSeq, thirdSeq-1, cz.FirstSeq, cz.LastSeq)
+	}
+
+	// Now publish one more message, and it should be received.
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	checkReceived()
+
+	sc.Close()
+	s3.Shutdown()
+}
+
+func TestClusteringNoRaceOnChannelMonitor(t *testing.T) {
+	resetPreviousHTTPConnections()
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1nOpts := defaultMonitorOptions
+	s1 := runServerWithOpts(t, s1sOpts, &s1nOpts)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	ch := make(chan struct{}, 1)
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			resp, _ := getBody(t, ChannelsPath+"?channel=foo", expectedJSON)
+			defer resp.Body.Close()
+			select {
+			case <-ch:
+				return
+			default:
+			}
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	sc.Publish("foo", []byte("hello"))
+
+	close(ch)
+	wg.Wait()
 }
