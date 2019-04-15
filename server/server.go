@@ -337,7 +337,7 @@ func (cs *channelStore) createChannelLocked(s *StanServer, name string) (*channe
 // low-level creation and storage in memory of a *channel
 // Lock is held on entry or not needed.
 func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (*channel, error) {
-	c := &channel{name: name, store: sc, ss: s.createSubStore(), stan: s}
+	c := &channel{name: name, store: sc, ss: s.createSubStore(), stan: s, nextSubID: 1}
 	lastSequence, err := c.store.Msgs.LastSequence()
 	if err != nil {
 		return nil, err
@@ -434,6 +434,7 @@ type channel struct {
 	lTimestamp   int64
 	stan         *StanServer
 	activity     *channelActivity
+	nextSubID    uint64
 }
 
 type channelActivity struct {
@@ -808,8 +809,18 @@ func (ss *subStore) Store(sub *subState) error {
 	// Adds to storage.
 	// Use sub lock to avoid race with waitForAcks in some tests
 	sub.Lock()
+	// In cluster mode (after 0.12.2), we need to set the sub.ID to
+	// what is set prior to the call (overwrite anything that is set
+	// by the backend store).
+	subID := sub.ID
 	err := sub.store.CreateSub(&sub.SubState)
+	if err == nil && subID > 0 {
+		sub.ID = subID
+	}
 	sub.Unlock()
+	if err == nil {
+		err = sub.store.Flush()
+	}
 	if err != nil {
 		ss.stan.log.Errorf("Unable to store subscription [%v:%v] on [%s]: %v", sub.ClientID, sub.Inbox, sub.subject, err)
 		return err
@@ -4330,12 +4341,13 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 
 // replicateSub replicates the SubscriptionRequest to nodes in the cluster via
 // Raft.
-func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string) (*subState, error) {
+func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string, subID uint64) (*subState, error) {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Subscribe,
 		Sub: &spb.AddSubscription{
 			Request:  sr,
 			AckInbox: ackInbox,
+			ID:       subID,
 		},
 	}
 	data, err := op.Marshal()
@@ -4394,7 +4406,7 @@ func (s *StanServer) updateDurable(ss *subStore, sub *subState) error {
 }
 
 // processSub adds the subscription to the server.
-func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox string) (*subState, error) {
+func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox string, subID uint64) (*subState, error) {
 	// If channel not provided, we have to look it up
 	var err error
 	if c == nil {
@@ -4521,8 +4533,19 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 		}
 
 		if err == nil {
-			// add the subscription to stan
+			// add the subscription to stan.
+			// In cluster mode, the server decides of the subscription ID
+			// (so that subscriptions have the same ID on replay). So
+			// set it prior to this call.
+			sub.ID = subID
 			err = s.addSubscription(ss, sub)
+			if err == nil && subID > 0 {
+				ss.Lock()
+				if subID >= c.nextSubID {
+					c.nextSubID = subID + 1
+				}
+				ss.Unlock()
+			}
 		}
 	}
 	if err == nil && (!s.isClustered || s.isLeader()) {
@@ -4661,10 +4684,13 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 				}
 			}
 			if err == nil {
-				sub, err = s.replicateSub(sr, ackInbox)
+				c.ss.Lock()
+				subID := c.nextSubID
+				c.ss.Unlock()
+				sub, err = s.replicateSub(sr, ackInbox, subID)
 			}
 		} else {
-			sub, err = s.processSub(c, sr, ackInbox)
+			sub, err = s.processSub(c, sr, ackInbox, 0)
 		}
 	}
 	if err != nil {

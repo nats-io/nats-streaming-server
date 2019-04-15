@@ -4839,3 +4839,165 @@ func TestClusteringNoRaceOnChannelMonitor(t *testing.T) {
 	close(ch)
 	wg.Wait()
 }
+
+func TestClusteringKeepSubIDOnReplay(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	leader := getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	waitForNumSubs(t, leader, clientName, 2)
+
+	subs := leader.clients.getSubs(clientName)
+
+	subsMap := map[uint64]string{}
+	for _, sub := range subs {
+		sub.RLock()
+		subsMap[sub.ID] = sub.Inbox
+		sub.RUnlock()
+	}
+
+	// Shutdown the cluster and restart it.
+	s2.Shutdown()
+	s1.Shutdown()
+
+	s1 = runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+	s2 = runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	leader = getLeader(t, 10*time.Second, s1, s2)
+
+	checkSubIDsAfterRestart := func(t *testing.T, leader *StanServer) {
+		t.Helper()
+		subs = leader.clients.getSubs(clientName)
+		for _, sub := range subs {
+			sub.RLock()
+			id := sub.ID
+			ibx := sub.Inbox
+			sub.RUnlock()
+
+			mibx, ok := subsMap[id]
+			if !ok {
+				t.Fatalf("Sub.ID %v is new", id)
+			} else {
+				if ibx != mibx {
+					t.Fatalf("Sub.ID %v's inbox should be %v, got %v", id, mibx, ibx)
+				}
+			}
+		}
+	}
+	checkSubIDsAfterRestart(t, leader)
+
+	// Create a new subscription, ensure it does not reuse same subID.
+	sub3, err := sc.Subscribe("foo", func(_ *stan.Msg) {})
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	subs = leader.clients.getSubs(clientName)
+	var newID uint64
+	var maxSubID uint64
+	for _, sub := range subs {
+		sub.RLock()
+		id := sub.ID
+		ibx := sub.Inbox
+		sub.RUnlock()
+
+		mibx, ok := subsMap[id]
+		if ok {
+			if ibx != mibx {
+				t.Fatalf("Sub.ID %v's inbox should be %v, got %v", id, mibx, ibx)
+			}
+			if id > maxSubID {
+				maxSubID = id
+			}
+		} else {
+			newID = id
+		}
+	}
+	if newID <= maxSubID {
+		t.Fatalf("Max subID for existing subscriptions was %v, new ID is: %v", maxSubID, newID)
+	}
+	sub3.Close()
+
+	waitForNumSubs(t, leader, clientName, 2)
+
+	if err := s1.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+	if err := s2.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+
+	// Shutdown the cluster and restart it.
+	s2.Shutdown()
+	s1.Shutdown()
+
+	s1 = runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+	s2 = runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	leader = getLeader(t, 10*time.Second, s1, s2)
+	checkSubIDsAfterRestart(t, leader)
+
+	// During snapshot, we should have stored the max sub ID, so we should not
+	// be reusing sub3's ID.
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	subs = leader.clients.getSubs(clientName)
+	var newNewID uint64
+	maxSubID = 0
+	for _, sub := range subs {
+		sub.RLock()
+		id := sub.ID
+		ibx := sub.Inbox
+		sub.RUnlock()
+
+		mibx, ok := subsMap[id]
+		if ok {
+			if ibx != mibx {
+				t.Fatalf("Sub.ID %v's inbox should be %v, got %v", id, mibx, ibx)
+			}
+			if id > maxSubID {
+				maxSubID = id
+			}
+		} else {
+			newNewID = id
+		}
+	}
+	if newNewID <= maxSubID {
+		t.Fatalf("Max subID for existing subscriptions was %v, new ID is: %v", maxSubID, newID)
+	}
+	if newNewID <= newID {
+		t.Fatalf("subID is less or equal to the last deleted subscription prev=%v last=%v", newID, newNewID)
+	}
+	sc.Close()
+}

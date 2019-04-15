@@ -135,6 +135,7 @@ message Batch {
 message AddSubscription {
   pb.SubscriptionRequest Request  = 1; // Subscription request to replicate.
   string                 AckInbox = 2; // Ack inbox for the subscription.
+  uint64                 ID       = 3; // Subscription ID.
 }
 
 // SubSentAndAck is used to replicate a sent and/or ack messages.
@@ -164,6 +165,7 @@ message ChannelSnapshot {
   uint64                        First         = 2;
   uint64                        Last          = 3;
   repeated SubscriptionSnapshot Subscriptions = 4;
+  uint64                        NextSubID     = 5;
 }
 
 // SubscriptionSnaphot is the snapshot of a subscription
