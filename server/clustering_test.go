@@ -445,6 +445,8 @@ func TestClusteringBootstrapAutoConfig(t *testing.T) {
 	if len(configServers) != 2 {
 		t.Fatalf("Expected 2 servers, got %d", len(configServers))
 	}
+	// Speed-up shutdown
+	s1.Shutdown()
 }
 
 // Ensure starting a cluster with manual configuration works when we provide
@@ -719,7 +721,7 @@ func TestClusteringBasic(t *testing.T) {
 	defer s.Shutdown()
 
 	// Ensure there is still a leader.
-	getLeader(t, 10*time.Second, servers...)
+	leader = getLeader(t, 10*time.Second, servers...)
 
 	// Publish one more message.
 	if err := sc.Publish(channel, []byte("goodbye")); err != nil {
@@ -739,6 +741,11 @@ func TestClusteringBasic(t *testing.T) {
 	verifyChannelConsistency(t, channel, 10*time.Second, 1, 12, expected, servers...)
 
 	sc.Close()
+	// Speed-up shutdown
+	leader.Shutdown()
+	s1.Shutdown()
+	s2.Shutdown()
+	s3.Shutdown()
 }
 
 func TestClusteringNoPanicOnShutdown(t *testing.T) {
@@ -811,6 +818,7 @@ func TestClusteringNoPanicOnShutdown(t *testing.T) {
 	// first and then client close will timeout since only 1 node
 	// in cluster (no leader)
 	sc.Close()
+	leader.Shutdown()
 }
 
 func TestClusteringLeaderFlap(t *testing.T) {
@@ -3191,6 +3199,8 @@ func TestClusteringDifferentClusters(t *testing.T) {
 		s3.Shutdown()
 		t.Fatal("Server s3 should have failed to start")
 	}
+	// Speed-up shutdown
+	s1.Shutdown()
 }
 
 func TestClusteringDeleteChannel(t *testing.T) {
@@ -3421,6 +3431,9 @@ func TestClusteringNodeIDInPeersArray(t *testing.T) {
 	defer s3.Shutdown()
 
 	getLeader(t, 10*time.Second, s1, s2, s3)
+	// Speed-up shutdown
+	s3.Shutdown()
+	s1.Shutdown()
 }
 
 func TestClusteringUnableToContactPeer(t *testing.T) {
@@ -3494,9 +3507,6 @@ func TestClusteringClientPings(t *testing.T) {
 	cleanupRaftLog(t)
 	defer cleanupRaftLog(t)
 
-	clientCheckTimeout = 150 * time.Millisecond
-	defer func() { clientCheckTimeout = defaultClientCheckTimeout }()
-
 	// For this test, use a central NATS server.
 	ns := natsdTest.RunDefaultServer()
 	defer ns.Shutdown()
@@ -3516,6 +3526,102 @@ func TestClusteringClientPings(t *testing.T) {
 	leader := getLeader(t, 10*time.Second, servers...)
 
 	testClientPings(t, leader)
+}
+
+func TestClusteringSetClientHB(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.ClientHBInterval = 15 * time.Millisecond
+	s1sOpts.ClientHBTimeout = 50 * time.Millisecond
+	s1sOpts.ClientHBFailCount = 5
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.ClientHBInterval = 15 * time.Millisecond
+	s2sOpts.ClientHBTimeout = 50 * time.Millisecond
+	s2sOpts.ClientHBFailCount = 5
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	leader := getLeader(t, 10*time.Second, s1, s2)
+
+	// Create a low level NATS connection so that we can
+	// cause the client to stop HB.
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	for i := 0; i < 10; i++ {
+		cname := fmt.Sprintf("%s-%d", clientName, i)
+		sc, err := stan.Connect(clusterName, cname,
+			stan.NatsConn(nc), stan.ConnectWait(100*time.Millisecond))
+		if err != nil {
+			t.Fatalf("Expected to connect correctly, got err %v", err)
+		}
+		defer sc.Close()
+	}
+
+	waitForNumClients(t, leader, 10)
+
+	s2.Shutdown()
+
+	verifyNoLeader(t, 2*time.Second, leader)
+
+	// Wait for clients HB timers to be removed
+	waitFor(t, 2*time.Second, 15*time.Millisecond, func() error {
+		clients := leader.clients.getClients()
+		for _, c := range clients {
+			c.RLock()
+			timerSet := c.hbt != nil
+			c.RUnlock()
+			if timerSet {
+				return fmt.Errorf("timer still set")
+			}
+		}
+		return nil
+	})
+	// Now close NATS connection. When restarting one of the server,
+	// the leader will set the client HB timers and we should realize
+	// that the clients are gone.
+	nc.Close()
+
+	// Now take one of the client and hold its lock for a bit.
+	clients := leader.clients.getClients()
+	var client *client
+	for _, c := range clients {
+		client = c
+		client.Lock()
+		break
+	}
+
+	s2 = runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Release the lock in a bit.
+	go func() {
+		time.Sleep(time.Second)
+		client.Unlock()
+	}()
+
+	leader = getLeader(t, 10*time.Second, s1, s2)
+
+	waitForNumClients(t, leader, 0)
+
+	// Speed-up shutdown
+	leader.Shutdown()
 }
 
 func TestClusteringSubCorrectStartSeqAfterClusterRestart(t *testing.T) {
@@ -4125,8 +4231,8 @@ func TestClusteringDeadlockOnChannelDelete(t *testing.T) {
 	}()
 	select {
 	case <-ch:
-		s2.Shutdown()
 		s1.Shutdown()
+		s2.Shutdown()
 	case <-time.After(5 * time.Second):
 		t.Fatalf("Deadlock likely!!!")
 	}

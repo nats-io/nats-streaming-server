@@ -2859,7 +2859,15 @@ func (s *StanServer) checkClientHealth(clientID string) {
 	// If clustered and we lost leadership, we should stop
 	// heartbeating as the new leader will take over.
 	if s.isClustered && !s.isLeader() {
-		s.clients.removeClientHB(client)
+		// Do not remove client HB here. We do that in
+		// leadershipLost. We could be here because the
+		// callback fired while we are not yet finished
+		// acquiring leadership.
+		client.Lock()
+		if client.hbt != nil {
+			client.hbt.Reset(s.opts.ClientHBInterval)
+		}
+		client.Unlock()
 		return
 	}
 
