@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/raft"
 	natsd "github.com/nats-io/gnatsd/server"
 	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats"
@@ -1157,5 +1158,61 @@ func TestMonitorDurableSubs(t *testing.T) {
 			// There shouldn't be any sub now
 			getAndCheck(false, 0)
 		}
+	}
+}
+
+func TestMonitorClusterRole(t *testing.T) {
+	nOpts := defaultMonitorOptions
+	for _, test := range []struct {
+		name         string
+		expectedRole string
+		n1Opts       *natsd.Options
+		n2Opts       *natsd.Options
+	}{
+		{
+			"leader",
+			raft.Leader.String(),
+			&nOpts,
+			nil,
+		},
+		{
+			"follower",
+			raft.Follower.String(),
+			nil,
+			&nOpts,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetPreviousHTTPConnections()
+
+			cleanupDatastore(t)
+			defer cleanupDatastore(t)
+			cleanupRaftLog(t)
+			defer cleanupRaftLog(t)
+
+			// For this test, use a central NATS server.
+			ns := natsdTest.RunDefaultServer()
+			defer ns.Shutdown()
+
+			s1sOpts := getTestDefaultOptsForClustering("a", true)
+			s1 := runServerWithOpts(t, s1sOpts, test.n1Opts)
+			defer s1.Shutdown()
+
+			s2sOpts := getTestDefaultOptsForClustering("b", false)
+			s2 := runServerWithOpts(t, s2sOpts, test.n2Opts)
+			defer s2.Shutdown()
+
+			getLeader(t, 10*time.Second, s1, s2)
+
+			resp, body := getBody(t, ServerPath, expectedJSON)
+			resp.Body.Close()
+			sz := Serverz{}
+			if err := json.Unmarshal(body, &sz); err != nil {
+				t.Fatalf("Got an error unmarshalling the body: %v", err)
+			}
+			if sz.Role != test.expectedRole {
+				t.Fatalf("Expected role to be %v, gt %v", test.expectedRole, sz.Role)
+			}
+		})
 	}
 }
