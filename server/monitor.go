@@ -47,6 +47,7 @@ type Serverz struct {
 	Version       string    `json:"version"`
 	GoVersion     string    `json:"go"`
 	State         string    `json:"state"`
+	Role          string    `json:"role,omitempty"`
 	Now           time.Time `json:"now"`
 	Start         time.Time `json:"start_time"`
 	Uptime        string    `json:"uptime"`
@@ -184,8 +185,12 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Error getting information about channels state: %v", err), http.StatusInternalServerError)
 		return
 	}
+	var role string
 	s.mu.RLock()
 	state := s.state
+	if s.raft != nil {
+		role = s.raft.State().String()
+	}
 	s.mu.RUnlock()
 	s.monMu.RLock()
 	numSubs := s.numSubs
@@ -214,6 +219,7 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 		Version:       VERSION,
 		GoVersion:     runtime.Version(),
 		State:         state.String(),
+		Role:          role,
 		Now:           now,
 		Start:         s.startTime,
 		Uptime:        myUptime(now.Sub(s.startTime)),

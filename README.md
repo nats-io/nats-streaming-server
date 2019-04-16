@@ -840,6 +840,28 @@ various general statistics.
 }
 ```
 
+In clustering mode, there is an additional field that indicates the RAFT role of the given node.
+Here is an example:
+```
+{
+  "cluster_id": "test-cluster",
+  "server_id": "5bJdRWJW4dSxrfjKSUOgOH",
+  "version": "0.12.2",
+  "go": "go1.12.1",
+  "state": "CLUSTERED",
+  "role": "Leader",
+  "now": "2019-04-15T19:25:39.350491-06:00",
+  "start_time": "2019-04-15T19:25:30.75881-06:00",
+  "uptime": "8s",
+  "clients": 0,
+  "subscriptions": 0,
+  "channels": 0,
+  "total_msgs": 0,
+  "total_bytes": 0
+}
+```
+The possible values are: `Leader`, `Follower` or `Candidate`.
+
 #### /storez
 
 The endpoint [http://localhost:8222/streaming/storez](http://localhost:8222/streaming/storez) reports
