@@ -55,6 +55,7 @@ func TestCSMaxSubs(t *testing.T) {
 				var err error
 				lastSubID := uint64(0)
 				for i := 0; i < total; i++ {
+					sub.ID = 0
 					err = cs.Subs.CreateSub(sub)
 					if err != nil {
 						break
@@ -80,10 +81,12 @@ func TestCSMaxSubs(t *testing.T) {
 					}
 					// Now try to add back 2 subscriptions...
 					// First should be fine
+					sub.ID = 0
 					if err := cs.Subs.CreateSub(sub); err != nil {
 						t.Fatalf("Error on create: %v", err)
 					}
 					// This one should fail:
+					sub.ID = 0
 					if err := cs.Subs.CreateSub(sub); err == nil || err != ErrTooManySubs {
 						t.Fatalf("Error should have been ErrTooManySubs, got %v", err)
 					}
@@ -145,6 +148,7 @@ func TestCSBasicSubStore(t *testing.T) {
 			}
 
 			// Create a new subscription, make sure subID is not reused
+			sub.ID = 0
 			err = ss.CreateSub(sub)
 			if err != nil {
 				t.Fatalf("Error on create sub: %v", err)
@@ -155,6 +159,7 @@ func TestCSBasicSubStore(t *testing.T) {
 			subToDelete := sub.ID
 			subID = sub.ID
 			// Create another
+			sub.ID = 0
 			err = ss.CreateSub(sub)
 			if err != nil {
 				t.Fatalf("Error on create sub: %v", err)
@@ -169,6 +174,7 @@ func TestCSBasicSubStore(t *testing.T) {
 			}
 			// Create a last one and make sure it does not collide with the
 			// second sub we created.
+			sub.ID = 0
 			err = ss.CreateSub(sub)
 			if err != nil {
 				t.Fatalf("Error on create sub: %v", err)

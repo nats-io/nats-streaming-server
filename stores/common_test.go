@@ -519,7 +519,7 @@ func TestCSInit(t *testing.T) {
 			case TypeRaft:
 				s, err = NewFileStore(testLogger, testRSDefaultDatastore, nil)
 				if err == nil {
-					s = NewRaftStore(s)
+					s = NewRaftStore(testLogger, s, nil)
 				}
 			default:
 				panic(fmt.Errorf("Add store type %q in this test", st.name))

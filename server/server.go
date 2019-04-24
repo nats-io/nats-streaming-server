@@ -47,7 +47,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.14.0"
+	VERSION = "0.14.1"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -803,20 +803,11 @@ func (ss *subStore) Store(sub *subState) error {
 	if sub == nil {
 		return nil
 	}
-	// `sub` has just been created and can't be referenced anywhere else in
-	// the code, so we don't need locking.
 
 	// Adds to storage.
 	// Use sub lock to avoid race with waitForAcks in some tests
 	sub.Lock()
-	// In cluster mode (after 0.12.2), we need to set the sub.ID to
-	// what is set prior to the call (overwrite anything that is set
-	// by the backend store).
-	subID := sub.ID
 	err := sub.store.CreateSub(&sub.SubState)
-	if err == nil && subID > 0 {
-		sub.ID = subID
-	}
 	sub.Unlock()
 	if err == nil {
 		err = sub.store.Flush()
@@ -1567,7 +1558,7 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		// Wrap our store with a RaftStore instance that avoids persisting
 		// data that we don't need because they are handled by the actual
 		// raft logs.
-		store = stores.NewRaftStore(store)
+		store = stores.NewRaftStore(s.log, store, storeLimits)
 	}
 	if sOpts.Encrypt || len(sOpts.EncryptionKey) > 0 {
 		// In clustering mode, RAFT is using its own logs (not the one above),
