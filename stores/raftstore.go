@@ -16,6 +16,7 @@ package stores
 import (
 	"sync"
 
+	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
 )
 
@@ -27,16 +28,17 @@ import (
 type RaftStore struct {
 	sync.Mutex
 	Store
+	log logger.Logger
 }
 
 // RaftSubStore implements the SubStore interface
 type RaftSubStore struct {
-	SubStore
+	genericSubStore
 }
 
 // NewRaftStore returns an instarce of a RaftStore
-func NewRaftStore(s Store) *RaftStore {
-	return &RaftStore{Store: s}
+func NewRaftStore(log logger.Logger, s Store, limits *StoreLimits) *RaftStore {
+	return &RaftStore{Store: s, log: log}
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -51,8 +53,20 @@ func (s *RaftStore) CreateChannel(channel string) (*Channel, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.Subs = &RaftSubStore{SubStore: c.Subs}
+	c.Subs = s.replaceSubStore(channel, c.Subs, 0)
 	return c, nil
+}
+
+func (s *RaftStore) replaceSubStore(channel string, realSubStore SubStore, maxSubID uint64) *RaftSubStore {
+	// Close underlying sub store.
+	realSubStore.Close()
+	// We need the subs limits for this channel
+	cl := s.Store.GetChannelLimits(channel)
+	// Create and initialize our sub store.
+	rss := &RaftSubStore{}
+	rss.init(s.log, &cl.SubStoreLimits)
+	rss.maxSubID = maxSubID
+	return rss
 }
 
 // Name implements the Store interface
@@ -69,7 +83,16 @@ func (s *RaftStore) Recover() (*RecoveredState, error) {
 		return nil, err
 	}
 	if state != nil {
-		for _, rc := range state.Channels {
+		for channel, rc := range state.Channels {
+			// Note that this is when recovering the underlying sub store
+			// that would be the case for a RaftSubStore prior to 0.14.1
+			var maxSubID uint64
+			for _, rs := range rc.Subscriptions {
+				if rs.Sub.ID > maxSubID {
+					maxSubID = rs.Sub.ID
+				}
+			}
+			rc.Channel.Subs = s.replaceSubStore(channel, rc.Channel.Subs, maxSubID)
 			rc.Subscriptions = nil
 		}
 		state.Clients = nil
@@ -92,6 +115,45 @@ func (s *RaftStore) DeleteClient(clientID string) error {
 ////////////////////////////////////////////////////////////////////////////
 // RaftSubStore methods
 ////////////////////////////////////////////////////////////////////////////
+
+// CreateSub implements the SubStore interface
+func (ss *RaftSubStore) CreateSub(sub *spb.SubState) error {
+	gss := &ss.genericSubStore
+
+	gss.Lock()
+	defer gss.Unlock()
+
+	// This store does not persist subscriptions, since it is done
+	// in the actual RAFT log. This is just a wrapper to the streaming
+	// sub store. We still need to apply limits.
+
+	// If sub.ID is provided, check if already present, in which case
+	// don't check limit.
+	if sub.ID > 0 {
+		if _, ok := gss.subs[sub.ID]; ok {
+			return nil
+		}
+	}
+	// Check limits
+	if gss.limits.MaxSubscriptions > 0 && len(gss.subs) >= gss.limits.MaxSubscriptions {
+		return ErrTooManySubs
+	}
+
+	// With new server, the sub.ID is set before this call is invoked,
+	// and if that is the case, this is what we use. But let's support
+	// not having one (in case we recover an existing store, or run a
+	// mix of servers with different versions where the leader would
+	// not be at a version that sets the sub.ID).
+	if sub.ID == 0 {
+		gss.maxSubID++
+		sub.ID = gss.maxSubID
+	} else if sub.ID > gss.maxSubID {
+		gss.maxSubID = sub.ID
+	}
+	gss.subs[sub.ID] = emptySub
+
+	return nil
+}
 
 // UpdateSub implements the SubStore interface
 func (ss *RaftSubStore) UpdateSub(*spb.SubState) error {
