@@ -465,8 +465,9 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 	case spb.RaftOperation_Publish:
 		// Message replication.
 		var (
-			c   *channel
-			err error
+			c       *channel
+			err     error
+			lastSeq uint64
 		)
 		for _, msg := range op.PublishBatch.Messages {
 			// This is a batch for a given channel, so lookup channel once.
@@ -477,13 +478,17 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 				if err == ErrChanDelInProgress {
 					return nil
 				}
+				lastSeq, err = c.store.Msgs.LastSequence()
+			}
+			if err == nil && lastSeq < msg.Sequence-1 {
+				err = s.raft.fsm.restoreMsgsFromSnapshot(c, lastSeq+1, msg.Sequence-1)
 			}
 			if err == nil {
 				_, err = c.store.Msgs.Store(msg)
 			}
 			if err != nil {
-				panic(fmt.Errorf("failed to store replicated message %d on channel %s: %v",
-					msg.Sequence, msg.Subject, err))
+				return fmt.Errorf("failed to store replicated message %d on channel %s: %v",
+					msg.Sequence, msg.Subject, err)
 			}
 		}
 		return nil
