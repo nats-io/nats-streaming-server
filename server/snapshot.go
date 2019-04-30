@@ -143,6 +143,13 @@ func (s *serverSnapshot) snapshotChannels(snap *spb.RaftSnapshot) error {
 	snap.Channels = make([]*spb.ChannelSnapshot, numChannels)
 	numChannel := 0
 	for _, c := range s.channels.channels {
+		// Flush msg and sub stores before persisting snapshot
+		if err := c.store.Subs.Flush(); err != nil {
+			return err
+		}
+		if err := c.store.Msgs.Flush(); err != nil {
+			return err
+		}
 		first, last, err := c.store.Msgs.FirstAndLastSequence()
 		if err != nil {
 			return err
