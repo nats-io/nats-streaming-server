@@ -753,11 +753,20 @@ func TestPartitionsRaceOnPub(t *testing.T) {
 			checkKnownInvalidMap(t, s, 1, clientName)
 
 			// Now connect
-			sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
-			if err != nil {
-				t.Fatalf("Error on connect: %v", err)
+			connReq := &pb.ConnectRequest{
+				ClientID:       clientName,
+				HeartbeatInbox: "hbInbox",
 			}
-			defer sc.Close()
+			connReqBytes, _ := connReq.Marshal()
+			resp, err = nc.Request(DefaultDiscoverPrefix+"."+clusterName, connReqBytes, time.Second)
+			if err != nil {
+				t.Fatalf("Error on request: %v", err)
+			}
+			connResp := &pb.ConnectResponse{}
+			connResp.Unmarshal(resp.Data)
+			if connResp.Error != "" {
+				t.Fatalf("Error on connect: %v", connResp.Error)
+			}
 			// This should clear the knownInvalid map
 			checkKnownInvalidMap(t, s, 0, "")
 
@@ -772,6 +781,10 @@ func TestPartitionsRaceOnPub(t *testing.T) {
 				t.Fatalf("Connection %d - Error on publish: %v", (i + 1), pubResp.Error)
 			}
 			checkWaitOnRegisterMap(t, s, 0)
+
+			connCloseReq := &pb.ConnectRequest{ClientID: clientName}
+			connCloseReqBytes, _ := connCloseReq.Marshal()
+			nc.Request(connResp.CloseRequests, connCloseReqBytes, time.Second)
 		}()
 	}
 }
@@ -846,11 +859,20 @@ func TestPartitionsRaceOnSub(t *testing.T) {
 			checkKnownInvalidMap(t, s, 1, clientName)
 
 			// Now connect
-			sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
-			if err != nil {
-				t.Fatalf("Error on connect: %v", err)
+			connReq := &pb.ConnectRequest{
+				ClientID:       clientName,
+				HeartbeatInbox: "hbInbox",
 			}
-			defer sc.Close()
+			connReqBytes, _ := connReq.Marshal()
+			resp, err = nc.Request(DefaultDiscoverPrefix+"."+clusterName, connReqBytes, time.Second)
+			if err != nil {
+				t.Fatalf("Error on request: %v", err)
+			}
+			connResp := &pb.ConnectResponse{}
+			connResp.Unmarshal(resp.Data)
+			if connResp.Error != "" {
+				t.Fatalf("Error on connect: %v", connResp.Error)
+			}
 			// SHould be removed from map
 			checkKnownInvalidMap(t, s, 0, "")
 
@@ -865,6 +887,10 @@ func TestPartitionsRaceOnSub(t *testing.T) {
 				t.Fatalf("Connection %d - Error on subscribe: %v", (i + 1), subResp.Error)
 			}
 			checkWaitOnRegisterMap(t, s, 0)
+
+			connCloseReq := &pb.ConnectRequest{ClientID: clientName}
+			connCloseReqBytes, _ := connCloseReq.Marshal()
+			nc.Request(connResp.CloseRequests, connCloseReqBytes, time.Second)
 		}()
 	}
 }
