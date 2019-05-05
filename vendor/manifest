@@ -157,7 +157,7 @@
 			"importpath": "github.com/nats-io/go-nats-streaming",
 			"repository": "https://github.com/nats-io/go-nats-streaming",
 			"vcs": "git",
-			"revision": "c6a960c17758f63fdbbb01d26f77f28e501b528c",
+			"revision": "3e2ff0719c7a6219b4e791e19c782de98c701f4a",
 			"branch": "master",
 			"notests": true
 		},

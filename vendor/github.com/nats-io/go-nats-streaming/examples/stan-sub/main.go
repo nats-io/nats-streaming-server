@@ -99,7 +99,10 @@ func main() {
 		usage()
 	}
 
-	sc, err := stan.Connect(clusterID, clientID, stan.NatsURL(URL))
+	sc, err := stan.Connect(clusterID, clientID, stan.NatsURL(URL),
+		stan.SetConnectionLostHandler(func(_ stan.Conn, reason error) {
+			log.Fatalf("Connection lost, reason: %v", reason)
+		}))
 	if err != nil {
 		log.Fatalf("Can't connect: %v.\nMake sure a NATS Streaming Server is running at: %s", err, URL)
 	}
