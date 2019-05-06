@@ -776,12 +776,14 @@ func (s *StanServer) lookupOrCreateChannelPreventDelete(name string) (*channel, 
 			return nil, false, err
 		}
 	}
+	preventDelete := false
 	if c.activity != nil {
 		c.activity.preventDelete = true
 		c.stopDeleteTimer()
+		preventDelete = true
 	}
 	cs.Unlock()
-	return c, true, nil
+	return c, preventDelete, nil
 }
 
 // createSubStore creates a new instance of `subStore`.
@@ -4741,11 +4743,6 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// until we are done with this subscription. This will also stop
 	// the delete timer if one was set.
 	c, preventDelete, err := s.lookupOrCreateChannelPreventDelete(sr.Subject)
-	// Immediately register a defer action to turn off preventing the
-	// deletion of the channel if it was turned on
-	if preventDelete {
-		defer s.channels.turnOffPreventDelete(c)
-	}
 	if err == nil {
 		// If clustered, thread operations through Raft.
 		if s.isClustered {
@@ -4781,9 +4778,13 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 	}
 	if err != nil {
+		s.channels.turnOffPreventDelete(c)
 		s.channels.maybeStartChannelDeleteTimer(sr.Subject, c)
 		s.sendSubscriptionResponseErr(m.Reply, err)
 		return
+	}
+	if preventDelete {
+		defer s.channels.turnOffPreventDelete(c)
 	}
 
 	// In case this is a durable, sub already exists so we need to protect access
