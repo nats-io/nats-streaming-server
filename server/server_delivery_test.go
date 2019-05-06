@@ -19,10 +19,12 @@ import (
 	"testing"
 	"time"
 
+	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/nats-io/nats-streaming-server/test"
 )
 
 func testStalledDelivery(t *testing.T, typeSub string) {
@@ -252,4 +254,70 @@ func TestDeliveryWithGapsInSequence(t *testing.T) {
 		t.Fatalf(e.Error())
 	default:
 	}
+}
+
+func TestPersistentStoreSQLSubsPendingRows(t *testing.T) {
+	source := testSQLSource
+	if persistentStoreType != stores.TypeSQL {
+		// If not running tests with `-persistent_store sql`,
+		// initialize few things and default to MySQL.
+		source = testDefaultMySQLSource
+		sourceAdmin := testDefaultMySQLSourceAdmin
+		if err := test.CreateSQLDatabase(testSQLDriver, sourceAdmin,
+			source, testSQLDatabaseName); err != nil {
+			t.Fatalf("Error setting up test for SQL: %v", err)
+		}
+		defer test.DeleteSQLDatabase(testSQLDriver, sourceAdmin, testSQLDatabaseName)
+	}
+
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	opts := GetDefaultOptions()
+	opts.NATSServerURL = "nats://localhost:4222"
+	opts.StoreType = stores.TypeSQL
+	opts.SQLStoreOpts.Driver = testSQLDriver
+	opts.SQLStoreOpts.Source = source
+	s := runServerWithOpts(t, opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// Create a regular sub and a durable.
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {},
+		stan.SetManualAckMode(),
+		stan.MaxInflight(5000)); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	ch := make(chan bool, 1)
+	dur, err := sc.Subscribe("foo",
+		func(_ *stan.Msg) {
+			ch <- true
+		},
+		stan.SetManualAckMode(),
+		stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	// Publish a message
+	sc.Publish("foo", []byte("hello"))
+	if err := Wait(ch); err != nil {
+		t.Fatalf("Did not get our message")
+	}
+	dur.Close()
+	// Produce another message
+	sc.Publish("foo", []byte("hello"))
+
+	// Restart the server
+	s.Shutdown()
+	s = runServerWithOpts(t, opts, nil)
+	// Bombard the running subscriber with messages.
+	for i := 0; i < 3000; i++ {
+		sc.PublishAsync("foo", []byte("hello"), nil)
+	}
+	waitForAcks(t, s, clientName, 1, 3002)
 }
