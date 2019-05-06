@@ -727,6 +727,7 @@ type subState struct {
 	savedClientID string // Used only for closed durables in Clustering mode and monitoring endpoints.
 
 	replicate *subSentAndAck // Used in Clustering mode
+	norepl    bool           // When a sub is being closed, prevents collectSentOrAck to recreate `replicate`.
 
 	// So far, compacting these booleans into a byte flag would not save space.
 	// May change if we need to add more.
@@ -2007,6 +2008,7 @@ func (s *StanServer) leadershipAcquired() error {
 		client.RLock()
 		cID := client.info.ID
 		for _, sub := range client.subs {
+			s.subChangesOnLeadershipAcquired(sub)
 			if err := sub.startAckSub(s.nca, s.processAckMsg); err != nil {
 				client.RUnlock()
 				return err
@@ -2066,11 +2068,7 @@ func (s *StanServer) leadershipLost() {
 		// Ensure subs ackTimer is stopped
 		subs := client.getSubsCopy()
 		for _, sub := range subs {
-			sub.Lock()
-			sub.stopAckSub()
-			sub.clearAckTimer()
-			s.clearSentAndAck(sub)
-			sub.Unlock()
+			s.subChangesOnLeadershipLost(sub)
 		}
 	}
 
@@ -3476,12 +3474,29 @@ func signalCh(c chan struct{}) {
 	}
 }
 
+func (s *StanServer) subChangesOnLeadershipAcquired(sub *subState) {
+	sub.Lock()
+	sub.norepl = false
+	sub.Unlock()
+}
+
+func (s *StanServer) subChangesOnLeadershipLost(sub *subState) {
+	sub.Lock()
+	sub.stopAckSub()
+	sub.clearAckTimer()
+	s.clearSentAndAck(sub)
+	sub.Unlock()
+}
+
 // Keep track of sent or ack messages.
 // If the number of operations reach a certain threshold,
 // the sub is added to list of subs that should be flushed asap.
 // This call does not do actual RAFT replication and should not block.
 // Caller holds the sub's Lock.
 func (s *StanServer) collectSentOrAck(sub *subState, sent bool, sequence uint64) {
+	if sub.norepl {
+		return
+	}
 	sr := s.ssarepl
 	if sub.replicate == nil {
 		sub.replicate = &subSentAndAck{
@@ -3574,6 +3589,8 @@ func createSubSentAndAckProto(sub *subState, r *subSentAndAck) []byte {
 func (s *StanServer) endSubSentAndAckReplication(sub *subState, unsub bool) {
 	var ch chan struct{}
 	var data []byte
+	var subID uint64
+	var inbox string
 
 	sub.Lock()
 	r := sub.replicate
@@ -3590,12 +3607,21 @@ func (s *StanServer) endSubSentAndAckReplication(sub *subState, unsub bool) {
 	if r.applying {
 		ch = make(chan struct{}, 1)
 		s.ssarepl.gates.Store(sub, ch)
+		subID = sub.ID
+		inbox = sub.Inbox
 	}
 	s.clearSentAndAck(sub)
 	sub.Unlock()
 
 	if ch != nil {
-		<-ch
+		select {
+		case <-ch:
+		case <-s.shutdownCh:
+			return
+		case <-time.After(5 * time.Second):
+			s.log.Errorf("Timeout waiting for subscription's sent/ack to be replicated - subid=%d inbox=%s", subID, inbox)
+			return
+		}
 	}
 	if data != nil {
 		s.raft.Apply(data, 0)
@@ -3608,6 +3634,7 @@ func (s *StanServer) clearSentAndAck(sub *subState) {
 	sr.waiting.Delete(sub)
 	sr.ready.Delete(sub)
 	sub.replicate = nil
+	sub.norepl = true
 }
 
 // long-lived go-routine that performs RAFT replication of subscriptions'
@@ -4588,6 +4615,10 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 		}
 		// Clear the IsClosed flags that were set during a Close()
 		sub.IsClosed = false
+		// In cluster mode, need to reset this flag.
+		if s.isClustered {
+			sub.norepl = false
+		}
 		sub.Unlock()
 
 		// Case of restarted durable subscriber, or first durable queue

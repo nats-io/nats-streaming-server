@@ -357,20 +357,23 @@ func waitForNumSubs(t tLogger, s *StanServer, ID string, expected int) {
 }
 
 func waitForAcks(t tLogger, s *StanServer, ID string, subID uint64, expected int) {
-	subs := s.clients.getSubs(ID)
 	var sub *subState
-	for _, s := range subs {
-		s.RLock()
-		sID := s.ID
-		s.RUnlock()
-		if sID == subID {
-			sub = s
-			break
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		subs := s.clients.getSubs(ID)
+		for _, s := range subs {
+			s.RLock()
+			sID := s.ID
+			s.RUnlock()
+			if sID == subID {
+				sub = s
+				break
+			}
 		}
-	}
-	if sub == nil {
-		stackFatalf(t, "Subscription %v not found", subID)
-	}
+		if sub == nil {
+			return fmt.Errorf("Subscription %v not found", subID)
+		}
+		return nil
+	})
 	waitForCount(t, expected, func() (string, int) {
 		sub.RLock()
 		count := len(sub.acksPending)
