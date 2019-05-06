@@ -605,10 +605,6 @@ type StanServer struct {
 	// Store
 	store stores.Store
 
-	// Monitoring
-	monMu   sync.RWMutex
-	numSubs int
-
 	// IO Channel
 	ioChannel     chan *ioPendingMsg
 	ioChannelQuit chan struct{}
@@ -740,6 +736,36 @@ type subSentAndAck struct {
 	sent     []uint64
 	ack      []uint64
 	applying bool
+}
+
+// Returns the total number of subscriptions (including offline (queue) durables).
+// This is used essentially for the monitoring endpoint /streaming/serverz.
+func (s *StanServer) numSubs() int {
+	total := 0
+	s.channels.RLock()
+	for _, c := range s.channels.channels {
+		c.ss.RLock()
+		total += len(c.ss.psubs)
+		// Need to add offline durables
+		for _, sub := range c.ss.durables {
+			if sub.ClientID == "" {
+				total++
+			}
+		}
+		for _, qsub := range c.ss.qsubs {
+			qsub.RLock()
+			total += len(qsub.subs)
+			// If this is a durable queue subscription and all members
+			// are offline, qsub.shadow will be not nil. Report this one.
+			if qsub.shadow != nil {
+				total++
+			}
+			qsub.RUnlock()
+		}
+		c.ss.RUnlock()
+	}
+	s.channels.RUnlock()
+	return total
 }
 
 // Looks up, or create a new channel if it does not exist
@@ -984,10 +1010,6 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 
 	var qsubs map[uint64]*subState
 
-	// Assume we are removing a subscription for good.
-	// This will be set to false in some cases like durables, etc..
-	decrementNumSubs := true
-
 	// Delete ourselves from the list
 	if qs != nil {
 		storageUpdate := false
@@ -1023,8 +1045,6 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 				// Will need to update the LastSent and clear the ClientID
 				// with a storage update.
 				storageUpdate = true
-				// Don't decrement count
-				decrementNumSubs = false
 			}
 		} else {
 			if sub.stalled && qs.stalledSubCount > 0 {
@@ -1123,16 +1143,9 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 			// After storage, clear the ClientID.
 			sub.ClientID = ""
 			sub.Unlock()
-			decrementNumSubs = false
 		}
 	}
 	ss.Unlock()
-
-	if decrementNumSubs {
-		ss.stan.monMu.Lock()
-		ss.stan.numSubs--
-		ss.stan.monMu.Unlock()
-	}
 
 	if !ss.stan.isClustered || ss.stan.isLeader() {
 		// Calling this will sort current pending messages and ensure
@@ -2294,9 +2307,6 @@ func (s *StanServer) recoverOneSub(c *channel, recSub *spb.SubState, pendingAcks
 		// durable would not be able to be restarted.
 		sub.savedClientID = sub.ClientID
 		sub.ClientID = ""
-		s.monMu.Lock()
-		s.numSubs++
-		s.monMu.Unlock()
 	}
 
 	// Create a subState
@@ -2366,9 +2376,6 @@ func (s *StanServer) recoverOneSub(c *channel, recSub *spb.SubState, pendingAcks
 			// Add to the array, unless this is the shadow durable queue sub that
 			// was left in the store in order to maintain the group's state.
 			if !sub.isShadowQueueDurable() {
-				s.monMu.Lock()
-				s.numSubs++
-				s.monMu.Unlock()
 				return sub
 			}
 		}
@@ -4646,12 +4653,6 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 			// connection to send the response)
 			s.nca.Flush()
 		}
-	}
-	// Do this before so that if we have to remove, count will be ok.
-	if subIsNew {
-		s.monMu.Lock()
-		s.numSubs++
-		s.monMu.Unlock()
 	}
 	if err != nil {
 		// Try to undo what has been done.
