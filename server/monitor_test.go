@@ -1216,3 +1216,113 @@ func TestMonitorClusterRole(t *testing.T) {
 		})
 	}
 }
+
+func TestMonitorNumSubs(t *testing.T) {
+	resetPreviousHTTPConnections()
+	s := runMonitorServer(t, GetDefaultOptions())
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	checkNumSubs := func(t *testing.T, expected int) {
+		waitFor(t, 2*time.Second, 15*time.Millisecond, func() error {
+			resp, body := getBody(t, ServerPath, expectedJSON)
+			resp.Body.Close()
+			sz := Serverz{}
+			if err := json.Unmarshal(body, &sz); err != nil {
+				t.Fatalf("Got an error unmarshalling the body: %v", err)
+			}
+			if sz.Subscriptions != expected {
+				return fmt.Errorf("Expected %v subscriptions, got %v", expected, sz.Subscriptions)
+			}
+			return nil
+		})
+	}
+
+	cb := func(_ *stan.Msg) {}
+
+	dur, err := sc.Subscribe("foo", cb, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	checkNumSubs(t, 1)
+
+	qsub1, err := sc.QueueSubscribe("foo", "queue", cb, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	checkNumSubs(t, 2)
+
+	qsub2, err := sc.QueueSubscribe("foo", "queue", cb, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	checkNumSubs(t, 3)
+
+	// Closing one of the durable queue member will get the count down.
+	qsub1.Close()
+	checkNumSubs(t, 2)
+
+	// But the last one should keep the count since the durable interest stays.
+	qsub2.Close()
+	checkNumSubs(t, 2)
+
+	// Same for closing the durable
+	dur.Close()
+	checkNumSubs(t, 2)
+
+	// Create a non-durable, count should increase, then close, count should go down.
+	sub, err := sc.Subscribe("foo", cb)
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	checkNumSubs(t, 3)
+	sub.Close()
+	checkNumSubs(t, 2)
+
+	// Try with non durable queue group
+	qs1, err := sc.QueueSubscribe("foo", "ndqueue", cb)
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	checkNumSubs(t, 3)
+
+	qs2, err := sc.QueueSubscribe("foo", "ndqueue", cb)
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	checkNumSubs(t, 4)
+
+	qs1.Close()
+	checkNumSubs(t, 3)
+	qs2.Close()
+	checkNumSubs(t, 2)
+
+	// Now resume the durable, count should remain same.
+	dur, err = sc.Subscribe("foo", cb, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	checkNumSubs(t, 2)
+
+	// Restart a queue member, same story
+	qsub1, err = sc.QueueSubscribe("foo", "queue", cb, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	checkNumSubs(t, 2)
+
+	// Now a second and then count should go up.
+	qsub2, err = sc.QueueSubscribe("foo", "queue", cb, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	checkNumSubs(t, 3)
+
+	// Unsubscribe them all and count should go to 0.
+	qsub2.Unsubscribe()
+	qsub1.Unsubscribe()
+	dur.Unsubscribe()
+	checkNumSubs(t, 0)
+}

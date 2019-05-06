@@ -982,6 +982,10 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 
 	var qsubs map[uint64]*subState
 
+	// Assume we are removing a subscription for good.
+	// This will be set to false in some cases like durables, etc..
+	decrementNumSubs := true
+
 	// Delete ourselves from the list
 	if qs != nil {
 		storageUpdate := false
@@ -1017,6 +1021,8 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 				// Will need to update the LastSent and clear the ClientID
 				// with a storage update.
 				storageUpdate = true
+				// Don't decrement count
+				decrementNumSubs = false
 			}
 		} else {
 			if sub.stalled && qs.stalledSubCount > 0 {
@@ -1115,9 +1121,16 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 			// After storage, clear the ClientID.
 			sub.ClientID = ""
 			sub.Unlock()
+			decrementNumSubs = false
 		}
 	}
 	ss.Unlock()
+
+	if decrementNumSubs {
+		ss.stan.monMu.Lock()
+		ss.stan.numSubs--
+		ss.stan.monMu.Unlock()
+	}
 
 	if !ss.stan.isClustered || ss.stan.isLeader() {
 		// Calling this will sort current pending messages and ensure
@@ -4254,9 +4267,6 @@ func (s *StanServer) unsubscribeSub(c *channel, clientID, action string, sub *su
 		sub.RUnlock()
 		err = ss.Flush()
 	}
-	s.monMu.Lock()
-	s.numSubs--
-	s.monMu.Unlock()
 	return err
 }
 
@@ -4645,9 +4655,11 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 		traceSubState(s.log, sub, &traceCtx)
 	}
 
-	s.monMu.Lock()
-	s.numSubs++
-	s.monMu.Unlock()
+	if subIsNew {
+		s.monMu.Lock()
+		s.numSubs++
+		s.monMu.Unlock()
+	}
 
 	return sub, nil
 }
