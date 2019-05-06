@@ -2292,6 +2292,9 @@ func (s *StanServer) recoverOneSub(c *channel, recSub *spb.SubState, pendingAcks
 		// durable would not be able to be restarted.
 		sub.savedClientID = sub.ClientID
 		sub.ClientID = ""
+		s.monMu.Lock()
+		s.numSubs++
+		s.monMu.Unlock()
 	}
 
 	// Create a subState
@@ -4642,10 +4645,17 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 			s.nca.Flush()
 		}
 	}
+	// Do this before so that if we have to remove, count will be ok.
+	if subIsNew {
+		s.monMu.Lock()
+		s.numSubs++
+		s.monMu.Unlock()
+	}
 	if err != nil {
 		// Try to undo what has been done.
+		s.clients.removeSub(sr.ClientID, sub)
 		s.closeMu.Lock()
-		ss.Remove(c, sub, false)
+		ss.Remove(c, sub, subIsNew)
 		s.closeMu.Unlock()
 		s.log.Errorf("Unable to add subscription for %s: %v", sr.Subject, err)
 		return nil, err
@@ -4653,12 +4663,6 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 	if s.debug {
 		traceCtx := subStateTraceCtx{clientID: sr.ClientID, isNew: subIsNew, startTrace: subStartTrace}
 		traceSubState(s.log, sub, &traceCtx)
-	}
-
-	if subIsNew {
-		s.monMu.Lock()
-		s.numSubs++
-		s.monMu.Unlock()
 	}
 
 	return sub, nil

@@ -250,6 +250,16 @@ func TestMsgLookupFailures(t *testing.T) {
 	sub.Unsubscribe()
 }
 
+func (ss *mockedSubStore) CreateSub(sub *spb.SubState) error {
+	ss.RLock()
+	fail := ss.fail
+	ss.RUnlock()
+	if fail {
+		return fmt.Errorf("On purpose")
+	}
+	return ss.SubStore.CreateSub(sub)
+}
+
 func (ss *mockedSubStore) AddSeqPending(subid, seq uint64) error {
 	ss.RLock()
 	fail := ss.fail
