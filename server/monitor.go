@@ -192,9 +192,8 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 		role = s.raft.State().String()
 	}
 	s.mu.RUnlock()
-	s.monMu.RLock()
-	numSubs := s.numSubs
-	s.monMu.RUnlock()
+
+	numSubs := s.numSubs()
 	now := time.Now()
 
 	fds := 0

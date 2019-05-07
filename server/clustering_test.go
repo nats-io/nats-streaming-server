@@ -5642,3 +5642,72 @@ func TestClusteringGapsAfterSnapshotAndNoFlush(t *testing.T) {
 		}
 	}
 }
+
+func TestClusteringNumSubs(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.TrailingLogs = 3
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	var subs []stan.Subscription
+	for i := 0; i < 10; i++ {
+		sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {})
+		if err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		subs = append(subs, sub)
+	}
+
+	for i := 0; i < 8; i++ {
+		if err := subs[i].Close(); err != nil {
+			t.Fatalf("Error on sub close: %v", err)
+		}
+	}
+	if err := s1.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error during snapshot: %v", err)
+	}
+	for i := 8; i < 10; i++ {
+		if err := subs[i].Close(); err != nil {
+			t.Fatalf("Error on sub close: %v", err)
+		}
+	}
+
+	checkNumSubs(t, s1, 0)
+	checkNumSubs(t, s2, 0)
+
+	s1.Shutdown()
+	s2.Shutdown()
+
+	s1 = runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	s2 = runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	leader := getLeader(t, 10*time.Second, s1, s2)
+
+	waitForNumClients(t, leader, 1)
+	checkNumSubs(t, leader, 0)
+	sc.Close()
+	leader.Shutdown()
+}

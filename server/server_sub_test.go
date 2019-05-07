@@ -1148,9 +1148,7 @@ func TestSubAckInboxFromOlderStore(t *testing.T) {
 func checkNumSubs(t *testing.T, s *StanServer, expected int) {
 	t.Helper()
 	waitFor(t, 2*time.Second, 15*time.Millisecond, func() error {
-		s.monMu.Lock()
-		count := s.numSubs
-		s.monMu.Unlock()
+		count := s.numSubs()
 		if count != expected {
 			return fmt.Errorf("Expected %v subscriptions, got %v", expected, count)
 		}
