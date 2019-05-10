@@ -1239,6 +1239,73 @@ func TestSQLSubStoreCachingAndRecovery(t *testing.T) {
 	testSQLCheckPendingRow(t, db, subID)
 }
 
+func TestSQLSubStoreSubsPendingNoDuplicateForRowID(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+	sqlMaxPendingAcks = 5
+	// "disable" timer based flusing for now
+	sqlSubStoreFlushInterval = time.Hour
+	defer func() {
+		sqlMaxPendingAcks = sqlDefaultMaxPendingAcks
+		sqlSubStoreFlushInterval = sqlDefaultSubStoreFlushInterval
+	}()
+
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	// Tests are by default not using caching, so this
+	// test has to be explicit.
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+	info := testDefaultServerInfo
+	if err := s.Init(&info); err != nil {
+		s.Close()
+		t.Fatalf("Error on Init: %v", err)
+	}
+
+	cname := "foo"
+
+	cs := storeCreateChannel(t, s, cname)
+	for i := uint64(1); i < 10; i++ {
+		storeMsg(t, cs, cname, i, []byte("hello"))
+	}
+
+	subID1 := storeSub(t, cs, cname)
+	subID2 := storeSub(t, cs, cname)
+
+	storeSubPending(t, cs, cname, subID1, 1)
+	storeSubFlush(t, cs, cname)
+
+	storeSubPending(t, cs, cname, subID2, 1)
+	storeSubFlush(t, cs, cname)
+
+	storeSubPending(t, cs, cname, subID1, 2)
+	storeSubFlush(t, cs, cname)
+
+	s.Close()
+	s, err = NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+	state, err := s.Recover()
+	if err != nil {
+		t.Fatalf("Error recovering state: %v", err)
+	}
+	cs = getRecoveredChannel(t, state, cname)
+
+	// We have sub1 that has row 1 and 3, and sub2 that has row 2.
+	// We now cause sub1 to add a new row since we had up to the max.
+	// We want to make sure that we don't use "3" for the new row id
+	// but use a new one (otherwise there would be a duplicate entry
+	// "1-3" for primary key in subspending table).
+	storeSubPending(t, cs, cname, subID1, 3, 4, 5, 6, 7)
+}
+
 func TestSQLMaxConnections(t *testing.T) {
 	if !doSQL {
 		t.SkipNow()

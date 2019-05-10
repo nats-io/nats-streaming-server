@@ -104,10 +104,10 @@ var sqlStmts = []string{
 	"INSERT INTO Channels (id, name, maxmsgs, maxbytes, maxage) VALUES (?, ?, ?, ?, ?)",                          // sqlAddChannel
 	"INSERT INTO Messages VALUES (?, ?, ?, ?, ?)",                                                                // sqlStoreMsg
 	"SELECT timestamp, data FROM Messages WHERE id=? AND seq=?",                                                  // sqlLookupMsg
-	"SELECT seq FROM Messages WHERE id=? AND timestamp>=? LIMIT 1",                                               // sqlGetSequenceFromTimestamp
+	"SELECT seq FROM Messages WHERE id=? AND timestamp>=? ORDER BY seq LIMIT 1",                                  // sqlGetSequenceFromTimestamp
 	"UPDATE Channels SET maxseq=? WHERE id=?",                                                                    // sqlUpdateChannelMaxSeq
 	"SELECT COUNT(seq), COALESCE(MAX(seq), 0), COALESCE(SUM(size), 0) FROM Messages WHERE id=? AND timestamp<=?", // sqlGetExpiredMessages
-	"SELECT timestamp FROM Messages WHERE id=? AND seq>=? LIMIT 1",                                               // sqlGetFirstMsgTimestamp
+	"SELECT timestamp FROM Messages WHERE id=? AND seq>=? ORDER BY seq LIMIT 1",                                  // sqlGetFirstMsgTimestamp
 	"DELETE FROM Messages WHERE id=? AND seq<=?",                                                                 // sqlDeletedMsgsWithSeqLowerThan
 	"SELECT size FROM Messages WHERE id=? AND seq=?",                                                             // sqlGetSizeOfMessage
 	"DELETE FROM Messages WHERE id=? AND seq=?",                                                                  // sqlDeleteMessage
@@ -1947,11 +1947,14 @@ func (ss *SQLSubStore) deleteSubPendingRow(subid, rowid uint64) error {
 func (ss *SQLSubStore) recoverPendingRow(rows *sql.Rows, sub *spb.SubState, ap *sqlSubAcksPending, pendingAcks PendingAcks,
 	gcedRows map[uint64]struct{}) error {
 	var (
-		seq, lastSent           uint64
+		rowID, seq, lastSent    uint64
 		pendingBytes, acksBytes []byte
 	)
-	if err := rows.Scan(&ss.curRow, &seq, &lastSent, &pendingBytes, &acksBytes); err != nil && err != sql.ErrNoRows {
+	if err := rows.Scan(&rowID, &seq, &lastSent, &pendingBytes, &acksBytes); err != nil && err != sql.ErrNoRows {
 		return err
+	}
+	if rowID > ss.curRow {
+		ss.curRow = rowID
 	}
 	// If seq is non zero, this was created from a non-buffered run.
 	if seq > 0 {
@@ -1963,7 +1966,7 @@ func (ss *SQLSubStore) recoverPendingRow(rows *sql.Rows, sub *spb.SubState, ap *
 		var row *sqlSubsPendingRow
 		if ap != nil {
 			row = &sqlSubsPendingRow{
-				ID:   ss.curRow,
+				ID:   rowID,
 				msgs: sqlSeqMapPool.Get().(map[uint64]struct{}),
 			}
 			ap.lastSent = lastSent
