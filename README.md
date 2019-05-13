@@ -1555,7 +1555,7 @@ In general the configuration parameters are the same as the command line argumen
 | dir | When using a file store, this is the root directory | File path | `dir: "/path/to/storage` |
 | sd | Enable debug logging | `true` or `false` | `sd: true` |
 | sv | Enable trace logging | `true` or `false` | `sv: true` |
-| nats_server_url | If specified, connects to an external NATS Server, otherwise stats an embedded one | NATS URL | `nats_server_url: "nats://localhost:4222"` |
+| nats_server_url | If specified, connects to an external NATS Server, otherwise starts an embedded one | NATS URL | `nats_server_url: "nats://localhost:4222"` |
 | secure | If true, creates a TLS connection to the server but without the need to use TLS configuration (no NATS Server certificate verification) | `true` or `false` | `secure: true` |
 | tls | TLS Configuration | Map: `tls: { ... }` | **See details below** |
 | store_limits | Store Limits | Map: `store_limits: { ... }` | **See details below** |
