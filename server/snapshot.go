@@ -445,17 +445,16 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64) error 
 			return err
 		}
 		// It is possible that the leader does not have this message because of
-		// channel limits. If resp.Data is empty, we are in this situation and
-		// we are done recovering snapshot.
-		if len(resp.Data) == 0 {
-			break
-		}
-		msg := &pb.MsgProto{}
-		if err := msg.Unmarshal(resp.Data); err != nil {
-			panic(err)
-		}
-		if _, err := c.store.Msgs.Store(msg); err != nil {
-			return err
+		// channel limits. If resp.Data is empty, we are in this situation.
+		// We need to continue to see if more recent messages are available though.
+		if len(resp.Data) != 0 {
+			msg := &pb.MsgProto{}
+			if err := msg.Unmarshal(resp.Data); err != nil {
+				panic(err)
+			}
+			if _, err := c.store.Msgs.Store(msg); err != nil {
+				return err
+			}
 		}
 		select {
 		case <-r.server.shutdownCh:
