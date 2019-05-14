@@ -37,6 +37,7 @@ import (
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/nats-io/nats-streaming-server/test"
 )
 
 var defaultRaftLog string
@@ -56,6 +57,20 @@ func init() {
 func cleanupRaftLog(t *testing.T) {
 	if err := os.RemoveAll(defaultRaftLog); err != nil {
 		stackFatalf(t, "Error cleaning up raft log: %v", err)
+	}
+}
+
+func shutdownAndCleanupState(t *testing.T, s *StanServer, nodeID string) {
+	t.Helper()
+	s.Shutdown()
+	switch persistentStoreType {
+	case stores.TypeFile:
+		os.RemoveAll(filepath.Join(defaultDataStore, nodeID))
+		os.RemoveAll(filepath.Join(defaultRaftLog, nodeID))
+	case stores.TypeSQL:
+		test.CleanupSQLDatastore(t, testSQLDriver, testSQLSource+nodeID)
+	default:
+		t.Fatalf("This test needs to be updated for store type: %v", persistentStoreType)
 	}
 }
 
@@ -4707,15 +4722,10 @@ func TestClusteringSubDontStallDueToMsgExpiration(t *testing.T) {
 	}
 	checkReceived()
 
-	s2.Shutdown()
 	// We aremove all state from node "b", but even if we didn't, on restart,
 	// since "b" store would be behind the rest, it would be emptied because
 	// the current first message is move than the "b"'s last sequence.
-	// For DB, let it recover its state...
-	if persistentStoreType == stores.TypeFile {
-		os.RemoveAll(filepath.Join(defaultDataStore, "b"))
-		os.RemoveAll(filepath.Join(defaultRaftLog, "b"))
-	}
+	shutdownAndCleanupState(t, s2, "b")
 
 	for i := 0; i < secondBatch; i++ {
 		if err := sc.Publish("foo", []byte("hello")); err != nil {
@@ -5710,4 +5720,86 @@ func TestClusteringNumSubs(t *testing.T) {
 	checkNumSubs(t, leader, 0)
 	sc.Close()
 	leader.Shutdown()
+}
+
+func TestClusteringRestoreSnapshotWithSomeMsgsNoLongerAvail(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.MaxMsgs = 10
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.MaxMsgs = 10
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.MaxMsgs = 10
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2, s3)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+
+	// Create a snapshot that will indicate that there is messages from 1 to 10.
+	if err := s1.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+
+	// Shutdown s3 and cleanup its state so it will have nothing in its stores
+	// and will restore from the snapshot.
+	shutdownAndCleanupState(t, s3, "c")
+
+	// Send 2 more messages that will make messages 1 and 2 disappear
+	for i := 0; i < 2; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	sc.Close()
+
+	// Start s3. It will restore from the snapshot that says that
+	// channel has message 1 to 10, and then should receive 2 raft
+	// logs with messages 11 and 12.
+	// When s3 will ask the leader for messages 1 and 2, it should
+	// get empty responses indicating that these messages are gone,
+	// but should be able to request messages 3 to 10, then 11 and
+	// 12 will be replayed from raft logs.
+	s3 = runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		c := s3.channels.get("foo")
+		if c == nil {
+			return fmt.Errorf("Channel foo not recreated yet")
+		}
+		first, last, err := c.store.Msgs.FirstAndLastSequence()
+		if err != nil {
+			return fmt.Errorf("Error getting first/last seq: %v", err)
+		}
+		if first != 3 || last != 12 {
+			return fmt.Errorf("Expected first=3 last=12, got %v and %v", first, last)
+		}
+		return nil
+	})
 }

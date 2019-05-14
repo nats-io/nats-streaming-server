@@ -545,9 +545,6 @@ func (s *StanServer) subToSnapshotRestoreRequests() error {
 			if err := s.ncsr.Publish(m.Reply, buf); err != nil {
 				s.log.Errorf("Snapshot restore request error for channel %q, unable to send response for seq %v: %v", c.name, seq, err)
 			}
-			if buf == nil {
-				return
-			}
 			select {
 			case <-s.shutdownCh:
 				return
