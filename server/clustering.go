@@ -101,23 +101,18 @@ func (r *raftNode) shutdown() error {
 	}
 	r.closed = true
 	r.Unlock()
-	if r.Raft != nil {
-		if err := r.Raft.Shutdown().Error(); err != nil {
-			return err
-		}
-	}
 	if r.transport != nil {
 		if err := r.transport.Close(); err != nil {
 			return err
 		}
 	}
-	if r.store != nil {
-		if err := r.store.Close(); err != nil {
+	if r.Raft != nil {
+		if err := r.Raft.Shutdown().Error(); err != nil {
 			return err
 		}
 	}
-	if r.joinSub != nil {
-		if err := r.joinSub.Unsubscribe(); err != nil {
+	if r.store != nil {
+		if err := r.store.Close(); err != nil {
 			return err
 		}
 	}

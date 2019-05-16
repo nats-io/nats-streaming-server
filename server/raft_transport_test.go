@@ -124,7 +124,9 @@ func TestRAFTTransportHeartbeatFastPath(t *testing.T) {
 	trans1.SetHeartbeatHandler(fastpath)
 
 	// Transport 2 makes outbound request
-	trans2, err := newNATSTransportWithLogger("b", nc, time.Second, newTestLogger(t))
+	nc2 := newNatsConnection(t)
+	defer nc2.Close()
+	trans2, err := newNATSTransportWithLogger("b", nc2, time.Second, newTestLogger(t))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -204,7 +206,9 @@ func TestRAFTTransportAppendEntries(t *testing.T) {
 	}()
 
 	// Transport 2 makes outbound request
-	trans2, err := newNATSTransportWithLogger("b", nc, time.Second, newTestLogger(t))
+	nc2 := newNatsConnection(t)
+	defer nc2.Close()
+	trans2, err := newNATSTransportWithLogger("b", nc2, time.Second, newTestLogger(t))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -285,7 +289,9 @@ func TestRAFTTransportAppendEntriesPipeline(t *testing.T) {
 	}()
 
 	// Transport 2 makes outbound request
-	trans2, err := newNATSTransportWithLogger("b", nc, time.Second, newTestLogger(t))
+	nc2 := newNatsConnection(t)
+	defer nc2.Close()
+	trans2, err := newNATSTransportWithLogger("b", nc2, time.Second, newTestLogger(t))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -372,7 +378,9 @@ func TestRAFTTransportRequestVote(t *testing.T) {
 	}()
 
 	// Transport 2 makes outbound request
-	trans2, err := newNATSTransportWithLogger("b", nc, time.Second, newTestLogger(t))
+	nc2 := newNatsConnection(t)
+	defer nc2.Close()
+	trans2, err := newNATSTransportWithLogger("b", nc2, time.Second, newTestLogger(t))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -455,7 +463,9 @@ func TestRAFTTransportInstallSnapshot(t *testing.T) {
 	}()
 
 	// Transport 2 makes outbound request
-	trans2, err := newNATSTransportWithLogger("b", nc, time.Second, newTestLogger(t))
+	nc2 := newNatsConnection(t)
+	defer nc2.Close()
+	trans2, err := newNATSTransportWithLogger("b", nc2, time.Second, newTestLogger(t))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -583,7 +593,9 @@ func TestRAFTTransportPooledConn(t *testing.T) {
 	}()
 
 	// Transport 2 makes outbound request, 3 conn pool
-	trans2, err := newNATSTransportWithLogger("b", nc, time.Second, newTestLogger(t))
+	nc2 := newNatsConnection(t)
+	defer nc2.Close()
+	trans2, err := newNATSTransportWithLogger("b", nc2, time.Second, newTestLogger(t))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
