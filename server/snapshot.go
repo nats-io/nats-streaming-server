@@ -16,7 +16,6 @@ package server
 import (
 	"fmt"
 	"io"
-	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -52,6 +51,11 @@ func (s *serverSnapshot) Persist(sink raft.SnapshotSink) (err error) {
 	}()
 
 	snap := &spb.RaftSnapshot{}
+
+	// We don't want Persit() and Apply() to be invoked concurrently,
+	// so use common lock.
+	s.raft.fsm.Lock()
+	defer s.raft.fsm.Unlock()
 
 	s.snapshotClients(snap, sink)
 
@@ -150,7 +154,7 @@ func (s *serverSnapshot) snapshotChannels(snap *spb.RaftSnapshot) error {
 		if err := c.store.Msgs.Flush(); err != nil {
 			return err
 		}
-		first, last, err := c.store.Msgs.FirstAndLastSequence()
+		first, last, err := s.getChannelFirstAndlLastSeqLocked(c)
 		if err != nil {
 			return err
 		}
@@ -334,23 +338,13 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 			}
 			delete(channelsBeforeRestore, sc.Channel)
 		}
-		// Only set nextSequence if new value is greater than what
-		// is currently set.
-		if c.nextSequence <= sc.Last {
-			c.nextSequence = sc.Last + 1
-			if sc.Last > 0 {
-				// If store's seq is 0 but sc.Last is not, it likely means
-				// that all messages expired and our store is empty. We
-				// need to report to monitoring page the value of nextSequence
-				// instead of 0.
-				// We use a different field in the channel structure that
-				// uses atomic since it can be read concurrently in monitor's
-				// channelsz endpoint.
-				if seq, _ := c.store.Msgs.FirstSequence(); seq == 0 {
-					atomic.StoreUint64(&c.firstSeq, c.nextSequence)
-				}
-			}
-		}
+		// We keep track of the last sequence in the channel as indicated
+		// by sc.Last. It is possible that our message store has been emptied
+		// during restoreMsgsFromSnapshot() and that we did not store any
+		// messages because they have all expired in the leader.
+		// This is running under the FSM lock which protects this field.
+		c.snapLastSeq = sc.Last
+
 		for _, ss := range sc.Subscriptions {
 			s.recoverOneSub(c, ss.State, nil, ss.AcksPending)
 			c.ss.Lock()

@@ -423,11 +423,6 @@ func (cs *channelStore) turnOffPreventDelete(c *channel) {
 }
 
 type channel struct {
-	// This is used in clustering mode in a specific situation where
-	// all messages may have been expired so the store reports 0,0
-	// but we know that the firstSeq should be something else.
-	// Used with atomic operation.
-	firstSeq     uint64
 	nextSequence uint64
 	name         string
 	store        *stores.Channel
@@ -436,6 +431,11 @@ type channel struct {
 	stan         *StanServer
 	activity     *channelActivity
 	nextSubID    uint64
+
+	// Used in cluster mode to remember the last sequence that we got
+	// from a snapshot.
+	// This will be protected under the raft's FSM lock.
+	snapLastSeq uint64
 }
 
 type channelActivity struct {
@@ -2002,12 +2002,10 @@ func (s *StanServer) leadershipAcquired() error {
 	channels := s.channels.getAll()
 	for _, c := range channels {
 		// Update next sequence to assign.
-		lastSequence, err := c.store.Msgs.LastSequence()
+		_, lastSequence, err := s.getChannelFirstAndlLastSeq(c)
 		if err != nil {
 			return err
 		}
-		// It is possible that nextSequence be set when restoring
-		// from snapshots. Set it to the max value.
 		if c.nextSequence <= lastSequence {
 			c.nextSequence = lastSequence + 1
 		}

@@ -4713,14 +4713,15 @@ func TestClusteringSubDontStallDueToMsgExpiration(t *testing.T) {
 		}
 	}
 
-	checkReceived := func() {
+	checkReceived := func(t *testing.T) {
+		t.Helper()
 		select {
 		case <-ch:
 		case <-time.After(2 * time.Second):
 			t.Fatalf("Failed to receive messages")
 		}
 	}
-	checkReceived()
+	checkReceived(t)
 
 	// We aremove all state from node "b", but even if we didn't, on restart,
 	// since "b" store would be behind the rest, it would be emptied because
@@ -4733,7 +4734,7 @@ func TestClusteringSubDontStallDueToMsgExpiration(t *testing.T) {
 		}
 	}
 
-	checkReceived()
+	checkReceived(t)
 
 	// Wait for messages to expire
 	time.Sleep(100 * time.Millisecond)
@@ -4795,10 +4796,131 @@ func TestClusteringSubDontStallDueToMsgExpiration(t *testing.T) {
 	if err := sc.Publish("foo", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
-	checkReceived()
+	checkReceived(t)
 
 	sc.Close()
 	s3.Shutdown()
+}
+
+func TestClusteringStoreFirstLastDontFallToZero(t *testing.T) {
+	resetPreviousHTTPConnections()
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	ttl := 100 * time.Millisecond
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", false)
+	s1sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s1sOpts.MaxAge = ttl
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s2sOpts.MaxAge = ttl
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	sc.Close()
+
+	time.Sleep(200 * time.Millisecond)
+
+	if err := s1.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+	if err := s2.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s3sOpts.MaxAge = ttl
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	// Wait for "foo" to be re-created on node "c" and we get
+	// the proper first/last
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		s3.channels.RLock()
+		c, ok := s3.channels.channels["foo"]
+		s3.channels.RUnlock()
+		if !ok {
+			return fmt.Errorf("Channel foo still not created")
+		}
+		// We need to grab the FSM lock to safely access this field.
+		if _, lastSeq, _ := s3.getChannelFirstAndlLastSeq(c); lastSeq != 10 {
+			t.Fatalf("Expected lastSeq to be 10, got %v", lastSeq)
+		}
+		return nil
+	})
+
+	if err := s3.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+
+	shutdownAndCleanupState(t, s1, "a")
+	shutdownAndCleanupState(t, s2, "b")
+
+	// Restart s1
+	s1nOpts := defaultMonitorOptions
+	s1 = runServerWithOpts(t, s1sOpts, &s1nOpts)
+	defer s1.Shutdown()
+
+	leader := getLeader(t, 10*time.Second, s1, s3)
+	if leader != s3 {
+		t.Fatalf("s3 should have been leader")
+	}
+
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		s1.channels.RLock()
+		_, ok := s1.channels.channels["foo"]
+		s1.channels.RUnlock()
+		if !ok {
+			return fmt.Errorf("Channel foo still not created")
+		}
+		return nil
+	})
+
+	shutdownAndCleanupState(t, s3, "c")
+	s3 = runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	leader = getLeader(t, 10*time.Second, s1, s3)
+	if leader != s1 {
+		t.Fatalf("s1 should have been leader")
+	}
+
+	resp, body := getBody(t, ChannelsPath+"?channel=foo", expectedJSON)
+	defer resp.Body.Close()
+
+	cz := Channelz{}
+	if err := json.Unmarshal(body, &cz); err != nil {
+		t.Fatalf("Got an error unmarshalling the body: %v", err)
+	}
+	resp.Body.Close()
+	if cz.FirstSeq != 11 || cz.LastSeq != 10 {
+		t.Fatalf("Expected first/last seq to be 11, 10, got %v, %v",
+			cz.FirstSeq, cz.LastSeq)
+	}
+	leader.Shutdown()
 }
 
 func TestClusteringNoRaceOnChannelMonitor(t *testing.T) {

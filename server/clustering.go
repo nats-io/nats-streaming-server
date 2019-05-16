@@ -451,6 +451,46 @@ func (s *StanServer) getClusteringPeerAddr(raftName, nodeID string) string {
 	return fmt.Sprintf("%s.%s.%s", s.opts.ID, nodeID, raftName)
 }
 
+// Returns the message store first and last sequence.
+// When in clustered mode, if the first and last are 0, returns the value of
+// the last sequence that we possibly got from the last snapshot. If a node
+// restores a snapshot that let's say has first=1 and last=100, but when it
+// tries to get these messages from the leader, the leader does not send them
+// back because they have all expired, the node will not store anything.
+// If we just rely on store's first/last, this node would use and report 0
+// for channel's first and last while when all messages have expired, it should
+// be last+1/last.
+func (s *StanServer) getChannelFirstAndlLastSeqWithLock(c *channel, lock bool) (uint64, uint64, error) {
+	first, last, err := c.store.Msgs.FirstAndLastSequence()
+	if !s.isClustered {
+		return first, last, err
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	if first == 0 && last == 0 {
+		if lock {
+			s.raft.fsm.Lock()
+		}
+		if c.snapLastSeq != 0 {
+			last = c.snapLastSeq
+			first = last + 1
+		}
+		if lock {
+			s.raft.fsm.Unlock()
+		}
+	}
+	return first, last, nil
+}
+
+func (s *StanServer) getChannelFirstAndlLastSeq(c *channel) (uint64, uint64, error) {
+	return s.getChannelFirstAndlLastSeqWithLock(c, true)
+}
+
+func (s *StanServer) getChannelFirstAndlLastSeqLocked(c *channel) (uint64, uint64, error) {
+	return s.getChannelFirstAndlLastSeqWithLock(c, false)
+}
+
 // Apply log is invoked once a log entry is committed.
 // It returns a value which will be made available in the
 // ApplyFuture returned by Raft.Apply method if that
@@ -461,6 +501,10 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 	if err := op.Unmarshal(l.Data); err != nil {
 		panic(err)
 	}
+	// We don't want snapshot Persist() and Apply() to execute concurrently,
+	// so use common lock.
+	r.Lock()
+	defer r.Unlock()
 	switch op.OpType {
 	case spb.RaftOperation_Publish:
 		// Message replication.
