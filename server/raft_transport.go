@@ -330,6 +330,9 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 
 func (n *natsStreamLayer) Close() error {
 	n.mu.Lock()
+	nc := n.conn
+	// Do not set nc.conn to nil since it is accessed in some functions
+	// without the stream layer lock
 	conns := make(map[*natsConn]struct{}, len(n.conns))
 	for conn, s := range n.conns {
 		conns[conn] = s
@@ -338,7 +341,10 @@ func (n *natsStreamLayer) Close() error {
 	for c := range conns {
 		c.Close()
 	}
-	return n.sub.Unsubscribe()
+	if nc != nil {
+		nc.Close()
+	}
+	return nil
 }
 
 func (n *natsStreamLayer) Addr() net.Addr {
