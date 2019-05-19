@@ -26,6 +26,18 @@ import (
 	"github.com/nats-io/nats-streaming-server/util"
 )
 
+const (
+	defaultRestoreMsgsAttempts             = 10
+	defaultRestoreMsgsRcvTimeout           = 2 * time.Second
+	defaultRestoreMsgsSleepBetweenAttempts = time.Second
+)
+
+var (
+	restoreMsgsAttempts             = defaultRestoreMsgsAttempts
+	restoreMsgsRcvTimeout           = defaultRestoreMsgsRcvTimeout
+	restoreMsgsSleepBetweenAttempts = defaultRestoreMsgsSleepBetweenAttempts
+)
+
 // serverSnapshot implements the raft.FSMSnapshot interface by snapshotting
 // StanServer state.
 type serverSnapshot struct {
@@ -234,6 +246,27 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 	r.Lock()
 	defer r.Unlock()
 
+	shouldSnapshot := false
+	defer func() {
+		if retErr == nil && shouldSnapshot {
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				// s.raft.Snapshot() is actually s.raft.Raft.Snapshot()
+				// (our raft structure embeds Raft). But it is set after
+				// the call to NewRaft() - which invokes this function on
+				// startup. However, this runs under the server's lock, so
+				// simply grab the lock to ensure that Snapshot() will be
+				// able to execute.
+				// Also don't use startGoRoutine() here since it needs the
+				// server lock, which we already have.
+				s.mu.Lock()
+				s.raft.Snapshot().Error()
+				s.mu.Unlock()
+			}()
+		}
+	}()
+
 	// This function may be invoked directly from raft.NewRaft() when
 	// the node is initialized and if there were exisiting local snapshots,
 	// or later, when catching up with a leader. We behave differently
@@ -312,7 +345,9 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 	if err := r.restoreClientsFromSnapshot(serverSnap); err != nil {
 		return err
 	}
-	return r.restoreChannelsFromSnapshot(serverSnap, inNewRaftCall)
+	var err error
+	shouldSnapshot, err = r.restoreChannelsFromSnapshot(serverSnap, inNewRaftCall)
+	return err
 }
 
 func (r *raftFSM) restoreClientsFromSnapshot(serverSnap *spb.RaftSnapshot) error {
@@ -325,8 +360,10 @@ func (r *raftFSM) restoreClientsFromSnapshot(serverSnap *spb.RaftSnapshot) error
 	return nil
 }
 
-func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNewRaftCall bool) error {
+func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNewRaftCall bool) (bool, error) {
 	s := r.server
+
+	shouldSnapshot := false
 
 	var channelsBeforeRestore map[string]*channel
 	if !inNewRaftCall {
@@ -335,33 +372,48 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 	for _, sc := range serverSnap.Channels {
 		c, err := s.lookupOrCreateChannel(sc.Channel)
 		if err != nil {
-			return err
+			return false, err
 		}
 		// Keep track of first/last sequence in this channel's snapshot.
 		// It can help to detect that all messages in the leader have expired
 		// and this is what we should report/use as our store first/last.
-		// This is running under the FSM lock which protects this field.
 		atomic.StoreUint64(&c.firstSeq, sc.First)
 
 		// Even on startup (when inNewRaftCall==true), we need to call
 		// restoreMsgsFromSnapshot() to make sure our store is consistent.
-		// If we skip it (like we use to), then it is possible that this
+		// If we skip it (like we used to), then it is possible that this
 		// node misses some messages from the snapshot and will then start
 		// to apply remaining logs. It could even then become leader in
 		// the process with missing messages. So if we need to restore some
 		// messages and fail, keep trying until a leader is avail and
 		// able to serve this node.
-		for {
+		ok := false
+		for i := 0; i < restoreMsgsAttempts; i++ {
 			if err := r.restoreMsgsFromSnapshot(c, sc.First, sc.Last, false); err != nil {
-				s.log.Errorf("unable to restore messages, can't start until leader is available")
-				time.Sleep(time.Second)
+				s.log.Errorf("channel %q - unable to restore messages, can't start until leader is available",
+					sc.Channel)
+				time.Sleep(restoreMsgsSleepBetweenAttempts)
 			} else {
+				ok = true
 				break
 			}
+		}
+		if !ok {
+			err = fmt.Errorf("channel %q - unable to restore messages, aborting", sc.Channel)
+			s.log.Fatalf(err.Error())
+			// In tests, we use a "dummy" logger, so process will not exit
+			// (and we would not want that anyway), so make sure we return
+			// an error.
+			return false, err
 		}
 		if !inNewRaftCall {
 			delete(channelsBeforeRestore, sc.Channel)
 		}
+		// restoreMsgsFromSnapshot may have updated c.firstSeq. If that is the
+		// case it means that when restoring, we realized that some messages
+		// have expired/removed. If so, try to do a snapshot once we have
+		// finished with restoring.
+		shouldSnapshot = atomic.LoadUint64(&c.firstSeq) != sc.First
 
 		// Ensure we check store last sequence before storing msgs in Apply().
 		c.lSeqChecked = false
@@ -390,7 +442,7 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 			s.processDeleteChannel(name)
 		}
 	}
-	return nil
+	return shouldSnapshot, nil
 }
 
 func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64, fromApply bool) error {
@@ -484,7 +536,7 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64, fromAp
 				reqStart = reqEnd + 1
 			}
 		}
-		resp, err := sub.NextMsg(2 * time.Second)
+		resp, err := sub.NextMsg(restoreMsgsRcvTimeout)
 		if err != nil {
 			return err
 		}
