@@ -68,7 +68,7 @@ func shutdownAndCleanupState(t *testing.T, s *StanServer, nodeID string) {
 		os.RemoveAll(filepath.Join(defaultDataStore, nodeID))
 		os.RemoveAll(filepath.Join(defaultRaftLog, nodeID))
 	case stores.TypeSQL:
-		test.CleanupSQLDatastore(t, testSQLDriver, testSQLSource+nodeID)
+		test.CleanupSQLDatastore(t, testSQLDriver, testSQLSource+"_"+nodeID)
 	default:
 		t.Fatalf("This test needs to be updated for store type: %v", persistentStoreType)
 	}
@@ -4713,18 +4713,19 @@ func TestClusteringSubDontStallDueToMsgExpiration(t *testing.T) {
 		}
 	}
 
-	checkReceived := func() {
+	checkReceived := func(t *testing.T) {
+		t.Helper()
 		select {
 		case <-ch:
 		case <-time.After(2 * time.Second):
 			t.Fatalf("Failed to receive messages")
 		}
 	}
-	checkReceived()
+	checkReceived(t)
 
-	// We aremove all state from node "b", but even if we didn't, on restart,
+	// We remove all state from node "b", but even if we didn't, on restart,
 	// since "b" store would be behind the rest, it would be emptied because
-	// the current first message is move than the "b"'s last sequence.
+	// the current first message is more than the "b"'s last sequence.
 	shutdownAndCleanupState(t, s2, "b")
 
 	for i := 0; i < secondBatch; i++ {
@@ -4733,7 +4734,7 @@ func TestClusteringSubDontStallDueToMsgExpiration(t *testing.T) {
 		}
 	}
 
-	checkReceived()
+	checkReceived(t)
 
 	// Wait for messages to expire
 	time.Sleep(100 * time.Millisecond)
@@ -4795,10 +4796,131 @@ func TestClusteringSubDontStallDueToMsgExpiration(t *testing.T) {
 	if err := sc.Publish("foo", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
-	checkReceived()
+	checkReceived(t)
 
 	sc.Close()
 	s3.Shutdown()
+}
+
+func TestClusteringStoreFirstLastDontFallToZero(t *testing.T) {
+	resetPreviousHTTPConnections()
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	ttl := 100 * time.Millisecond
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", false)
+	s1sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s1sOpts.MaxAge = ttl
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s2sOpts.MaxAge = ttl
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	sc.Close()
+
+	time.Sleep(200 * time.Millisecond)
+
+	if err := s1.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+	if err := s2.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s3sOpts.MaxAge = ttl
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	// Wait for "foo" to be re-created on node "c" and we get
+	// the proper first/last
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		s3.channels.RLock()
+		c, ok := s3.channels.channels["foo"]
+		s3.channels.RUnlock()
+		if !ok {
+			return fmt.Errorf("Channel foo still not created")
+		}
+		// We need to grab the FSM lock to safely access this field.
+		if _, lastSeq, _ := s3.getChannelFirstAndlLastSeq(c); lastSeq != 10 {
+			t.Fatalf("Expected lastSeq to be 10, got %v", lastSeq)
+		}
+		return nil
+	})
+
+	if err := s3.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+
+	shutdownAndCleanupState(t, s1, "a")
+	shutdownAndCleanupState(t, s2, "b")
+
+	// Restart s1
+	s1nOpts := defaultMonitorOptions
+	s1 = runServerWithOpts(t, s1sOpts, &s1nOpts)
+	defer s1.Shutdown()
+
+	leader := getLeader(t, 10*time.Second, s1, s3)
+	if leader != s3 {
+		t.Fatalf("s3 should have been leader")
+	}
+
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		s1.channels.RLock()
+		_, ok := s1.channels.channels["foo"]
+		s1.channels.RUnlock()
+		if !ok {
+			return fmt.Errorf("Channel foo still not created")
+		}
+		return nil
+	})
+
+	shutdownAndCleanupState(t, s3, "c")
+	s3 = runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	leader = getLeader(t, 10*time.Second, s1, s3)
+	if leader != s1 {
+		t.Fatalf("s1 should have been leader")
+	}
+
+	resp, body := getBody(t, ChannelsPath+"?channel=foo", expectedJSON)
+	defer resp.Body.Close()
+
+	cz := Channelz{}
+	if err := json.Unmarshal(body, &cz); err != nil {
+		t.Fatalf("Got an error unmarshalling the body: %v", err)
+	}
+	resp.Body.Close()
+	if cz.FirstSeq != 11 || cz.LastSeq != 10 {
+		t.Fatalf("Expected first/last seq to be 11, 10, got %v, %v",
+			cz.FirstSeq, cz.LastSeq)
+	}
+	leader.Shutdown()
 }
 
 func TestClusteringNoRaceOnChannelMonitor(t *testing.T) {
@@ -5541,14 +5663,48 @@ func TestClusteringSubSentAckReplResumeOnClusterRestart(t *testing.T) {
 	sc.Close()
 }
 
-type msgStoreDoesntFlush struct {
+// This mocked MsgStore servers two purposes, to make sure
+// that Flush() is invoked when a Snapshot is done and will
+// simulate not recovering all messages (done by skipping
+// storing some).
+type msgStoreCaptureFlush struct {
+	sync.Mutex
 	stores.MsgStore
+	firstSeq uint64
+	lastSeq  uint64
+	ch       chan struct{}
 }
 
-func (s *msgStoreDoesntFlush) Store(m *pb.MsgProto) (uint64, error) {
+func (s *msgStoreCaptureFlush) Store(m *pb.MsgProto) (uint64, error) {
 	// To simulate a no flush, we are actually skipping storing
 	// the message.
+	if s.firstSeq == 0 || m.Sequence < s.firstSeq {
+		s.firstSeq = m.Sequence
+	}
+	if m.Sequence > s.lastSeq {
+		s.lastSeq = m.Sequence
+	}
 	return m.Sequence, nil
+}
+
+func (s *msgStoreCaptureFlush) FirstAndLastSequence() (uint64, uint64, error) {
+	return s.firstSeq, s.lastSeq, nil
+}
+
+func (s *msgStoreCaptureFlush) LastSequence() (uint64, error) {
+	return s.lastSeq, nil
+}
+
+func (s *msgStoreCaptureFlush) Flush() error {
+	s.Lock()
+	if s.ch != nil {
+		select {
+		case s.ch <- struct{}{}:
+		default:
+		}
+	}
+	s.Unlock()
+	return s.MsgStore.Flush()
 }
 
 func TestClusteringGapsAfterSnapshotAndNoFlush(t *testing.T) {
@@ -5592,7 +5748,10 @@ func TestClusteringGapsAfterSnapshotAndNoFlush(t *testing.T) {
 	c := s2.channels.get("foo")
 	c.store.Msgs.Flush()
 	// Replace with a store that does not write messages
-	c.store.Msgs = &msgStoreDoesntFlush{c.store.Msgs}
+	ms := &msgStoreCaptureFlush{MsgStore: c.store.Msgs, firstSeq: 1, lastSeq: 1}
+	s2.raft.fsm.Lock()
+	c.store.Msgs = ms
+	s2.raft.fsm.Unlock()
 
 	for i := 0; i < 100; i++ {
 		if err := sc.Publish("foo", []byte("hello")); err != nil {
@@ -5600,9 +5759,21 @@ func TestClusteringGapsAfterSnapshotAndNoFlush(t *testing.T) {
 		}
 	}
 
+	ms.Lock()
+	fch := make(chan struct{}, 1)
+	ms.ch = fch
+	ms.Unlock()
+
 	if err := s2.raft.Snapshot().Error(); err != nil {
 		t.Fatalf("Error on snapshot: %v", err)
 	}
+	// Make sure that store was flushed
+	select {
+	case <-fch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("MsgStore was not flushed during snapshot")
+	}
+
 	s2.Shutdown()
 
 	for i := 0; i < 10; i++ {
@@ -5627,6 +5798,8 @@ func TestClusteringGapsAfterSnapshotAndNoFlush(t *testing.T) {
 	s1.Shutdown()
 	s3.Shutdown()
 
+	// Restart in non cluster mode and consume all messages from S2.
+	// Make sure that there is not one with empty content.
 	s2.Shutdown()
 	s2sOpts.Clustering.Clustered = false
 	s2 = runServerWithOpts(t, s2sOpts, nil)
@@ -5744,13 +5917,7 @@ func TestClusteringRestoreSnapshotWithSomeMsgsNoLongerAvail(t *testing.T) {
 	s2 := runServerWithOpts(t, s2sOpts, nil)
 	defer s2.Shutdown()
 
-	// Configure third server.
-	s3sOpts := getTestDefaultOptsForClustering("c", false)
-	s3sOpts.MaxMsgs = 10
-	s3 := runServerWithOpts(t, s3sOpts, nil)
-	defer s3.Shutdown()
-
-	getLeader(t, 10*time.Second, s1, s2, s3)
+	getLeader(t, 10*time.Second, s1, s2)
 
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
@@ -5766,40 +5933,274 @@ func TestClusteringRestoreSnapshotWithSomeMsgsNoLongerAvail(t *testing.T) {
 		t.Fatalf("Error on snapshot: %v", err)
 	}
 
-	// Shutdown s3 and cleanup its state so it will have nothing in its stores
-	// and will restore from the snapshot.
-	shutdownAndCleanupState(t, s3, "c")
+	// We are going to check many different cases.
+	// 1- all messages in the snapshot are restored
+	// 2- some messages in the snapshot are restored
+	// 3- no message in the snapshot are restored
 
-	// Send 2 more messages that will make messages 1 and 2 disappear
+	check := func(t *testing.T, expectedFirst, expectedLast uint64) {
+		t.Helper()
+		s3sOpts := getTestDefaultOptsForClustering("c", false)
+		s3sOpts.MaxMsgs = 10
+		s3 := runServerWithOpts(t, s3sOpts, nil)
+		defer func() {
+			// Shutdown s3 and cleanup its state so it will have nothing in its stores
+			// and will restore from the snapshot.
+			shutdownAndCleanupState(t, s3, "c")
+		}()
+
+		waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+			c := s3.channels.get("foo")
+			if c == nil {
+				return fmt.Errorf("Channel foo not recreated yet")
+			}
+			first, last, err := s3.getChannelFirstAndlLastSeq(c)
+			if err != nil {
+				return fmt.Errorf("Error getting first/last seq: %v", err)
+			}
+			if first != expectedFirst {
+				return fmt.Errorf("Expected first to be %v, got %v", expectedFirst, first)
+			}
+			if last != expectedLast {
+				return fmt.Errorf("Expected last to be %v, got %v", expectedLast, last)
+			}
+			return nil
+		})
+	}
+
+	// 1- all messages in the snapshot are restored
+	check(t, 1, 10)
+
+	// 2- some messages in the snapshot are restored
+	// To do so, send 2 more messages what will make messages 1 and 2 disappear
 	for i := 0; i < 2; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	check(t, 3, 12)
+
+	// 3- no message in the snapshot are restored
+	// To do so, send enough messages so that the original 10 are gone.
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	check(t, 13, 22)
+
+	sc.Close()
+}
+
+func TestClusteringRestoreSnapshotCreateSnapshotAfterMsgsExpired(t *testing.T) {
+	// This test checks that when a node restores from a snapshot
+	// that channel has messages from 1 to 10, but when fetching them
+	// realize that they have expired, it will create its own snapshot
+	// to reflect the new state so that if it were to restart, it
+	// would not need to try to restore those known expired messages.
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.MaxAge = 100 * time.Millisecond
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.MaxAge = 100 * time.Millisecond
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.MaxAge = 100 * time.Millisecond
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2, s3)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	for i := 0; i < 10; i++ {
 		if err := sc.Publish("foo", []byte("hello")); err != nil {
 			t.Fatalf("Error on publish: %v", err)
 		}
 	}
 	sc.Close()
 
-	// Start s3. It will restore from the snapshot that says that
-	// channel has message 1 to 10, and then should receive 2 raft
-	// logs with messages 11 and 12.
-	// When s3 will ask the leader for messages 1 and 2, it should
-	// get empty responses indicating that these messages are gone,
-	// but should be able to request messages 3 to 10, then 11 and
-	// 12 will be replayed from raft logs.
+	// Create a snapshot that will indicate that there is messages from 1 to 10.
+	if err := s1.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+
+	// Wait for msgs to expire
+	waitFor(t, time.Second, 50*time.Millisecond, func() error {
+		c := s1.channels.get("foo")
+		n, _, _ := c.store.Msgs.State()
+		if n != 0 {
+			return fmt.Errorf("Not all messages expired, still %v", n)
+		}
+		return nil
+	})
+
+	// Restart s3 server, wait for it to report that there are no message (all expired)
+	s3.Shutdown()
 	s3 = runServerWithOpts(t, s3sOpts, nil)
 	defer s3.Shutdown()
 
 	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
 		c := s3.channels.get("foo")
 		if c == nil {
-			return fmt.Errorf("Channel foo not recreated yet")
+			return fmt.Errorf("channel still not created")
 		}
-		first, last, err := c.store.Msgs.FirstAndLastSequence()
-		if err != nil {
-			return fmt.Errorf("Error getting first/last seq: %v", err)
-		}
-		if first != 3 || last != 12 {
-			return fmt.Errorf("Expected first=3 last=12, got %v and %v", first, last)
+		first, last, _ := s3.getChannelFirstAndlLastSeq(c)
+		if first != 11 || last != 10 {
+			return fmt.Errorf("first and last should be 11 - 10, got %v - %v", first, last)
 		}
 		return nil
 	})
+
+	// Now stop all servers, and restart s3. If s3 has performed its own
+	// snapshot, it should be able to start on its own.
+	s1.Shutdown()
+	s2.Shutdown()
+	s3.Shutdown()
+
+	errCh := make(chan error, 1)
+	go func() {
+		s, err := RunServerWithOpts(s3sOpts, nil)
+		if s != nil {
+			s.Shutdown()
+		}
+		errCh <- err
+	}()
+
+	select {
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Server is stuck starting")
+	case e := <-errCh:
+		if e != nil {
+			t.Fatalf(e.Error())
+		}
+	}
+}
+
+func TestClusteringRestoreSnapshotMsgsBailIfNoLeader(t *testing.T) {
+	if persistentStoreType != stores.TypeFile {
+		t.Skip("test works only for file stores")
+	}
+	restoreMsgsAttempts = 5
+	restoreMsgsRcvTimeout = 50 * time.Millisecond
+	restoreMsgsSleepBetweenAttempts = 10 * time.Millisecond
+	defer func() {
+		restoreMsgsAttempts = defaultRestoreMsgsAttempts
+		restoreMsgsRcvTimeout = defaultRestoreMsgsRcvTimeout
+		restoreMsgsSleepBetweenAttempts = defaultRestoreMsgsSleepBetweenAttempts
+	}()
+
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", false)
+	s1sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	leader := getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	for i := 0; i < 10; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	sc.Close()
+
+	// Create a snapshot that will indicate that there is messages from 1 to 10.
+	if err := leader.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.Clustering.Peers = []string{"a", "b", "c"}
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	// Wait for this snapshot to be sent to s3
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		c := s3.channels.get("foo")
+		if c == nil {
+			return fmt.Errorf("channel still not created")
+		}
+		first, last, _ := s3.getChannelFirstAndlLastSeq(c)
+		if first != 1 || last != 10 {
+			return fmt.Errorf("first and last should be 1 - 10, got %v - %v", first, last)
+		}
+		return nil
+	})
+
+	snaps, err := ioutil.ReadDir(filepath.Join(defaultRaftLog, "c", clusterName, "snapshots"))
+	if err != nil {
+		t.Fatalf("Error reading snapshots directory: %v", err)
+	}
+	if len(snaps) == 0 {
+		t.Skip("Snapshot was not installed, skipping test")
+	}
+
+	// Shutdown all servers, then restart s3.
+	s1.Shutdown()
+	s2.Shutdown()
+	s3.Shutdown()
+
+	// Since s3 will have made a snapshot of its own, the only way it
+	// would get stuck waiting for a leader is if its store is not
+	// consistent with the snapshot info. So remove s3's message dat file.
+	if err := os.Remove(filepath.Join(defaultDataStore, "c", "foo", "msgs.1.dat")); err != nil {
+		t.Fatalf("error removing file: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		// We are expecting this to fail to start
+		s, err := RunServerWithOpts(s3sOpts, nil)
+		if err == nil {
+			s.Shutdown()
+			errCh <- fmt.Errorf("server did not fail to start")
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case <-time.After(time.Duration(restoreMsgsAttempts+2) * (restoreMsgsSleepBetweenAttempts + restoreMsgsRcvTimeout)):
+		t.Fatalf("Server should have exited after a certain number of failed attempts")
+	case e := <-errCh:
+		if e != nil {
+			t.Fatalf(e.Error())
+		}
+	}
 }

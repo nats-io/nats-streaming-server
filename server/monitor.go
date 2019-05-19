@@ -21,7 +21,6 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	gnatsd "github.com/nats-io/gnatsd/server"
@@ -501,18 +500,12 @@ func (s *StanServer) updateChannelz(cz *Channelz, c *channel, subsOption int) er
 	if err != nil {
 		return fmt.Errorf("unable to get message state: %v", err)
 	}
-	fseq, lseq, err := c.store.Msgs.FirstAndLastSequence()
+	fseq, lseq, err := s.getChannelFirstAndlLastSeq(c)
 	if err != nil {
 		return fmt.Errorf("unable to get first and last sequence: %v", err)
 	}
 	cz.Msgs = msgs
 	cz.Bytes = bytes
-	if fseq == 0 && lseq == 0 && s.isClustered {
-		fseq = atomic.LoadUint64(&c.firstSeq)
-		if fseq > 1 {
-			lseq = fseq - 1
-		}
-	}
 	cz.FirstSeq = fseq
 	cz.LastSeq = lseq
 	if subsOption == 1 {

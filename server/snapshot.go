@@ -26,6 +26,18 @@ import (
 	"github.com/nats-io/nats-streaming-server/util"
 )
 
+const (
+	defaultRestoreMsgsAttempts             = 10
+	defaultRestoreMsgsRcvTimeout           = 2 * time.Second
+	defaultRestoreMsgsSleepBetweenAttempts = time.Second
+)
+
+var (
+	restoreMsgsAttempts             = defaultRestoreMsgsAttempts
+	restoreMsgsRcvTimeout           = defaultRestoreMsgsRcvTimeout
+	restoreMsgsSleepBetweenAttempts = defaultRestoreMsgsSleepBetweenAttempts
+)
+
 // serverSnapshot implements the raft.FSMSnapshot interface by snapshotting
 // StanServer state.
 type serverSnapshot struct {
@@ -52,6 +64,11 @@ func (s *serverSnapshot) Persist(sink raft.SnapshotSink) (err error) {
 	}()
 
 	snap := &spb.RaftSnapshot{}
+
+	// We don't want Persit() and Apply() to be invoked concurrently,
+	// so use common lock.
+	s.raft.fsm.Lock()
+	defer s.raft.fsm.Unlock()
 
 	s.snapshotClients(snap, sink)
 
@@ -150,7 +167,7 @@ func (s *serverSnapshot) snapshotChannels(snap *spb.RaftSnapshot) error {
 		if err := c.store.Msgs.Flush(); err != nil {
 			return err
 		}
-		first, last, err := c.store.Msgs.FirstAndLastSequence()
+		first, last, err := s.getChannelFirstAndlLastSeq(c)
 		if err != nil {
 			return err
 		}
@@ -229,6 +246,27 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 	r.Lock()
 	defer r.Unlock()
 
+	shouldSnapshot := false
+	defer func() {
+		if retErr == nil && shouldSnapshot {
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				// s.raft.Snapshot() is actually s.raft.Raft.Snapshot()
+				// (our raft structure embeds Raft). But it is set after
+				// the call to NewRaft() - which invokes this function on
+				// startup. However, this runs under the server's lock, so
+				// simply grab the lock to ensure that Snapshot() will be
+				// able to execute.
+				// Also don't use startGoRoutine() here since it needs the
+				// server lock, which we already have.
+				s.mu.Lock()
+				s.raft.Snapshot().Error()
+				s.mu.Unlock()
+			}()
+		}
+	}()
+
 	// This function may be invoked directly from raft.NewRaft() when
 	// the node is initialized and if there were exisiting local snapshots,
 	// or later, when catching up with a leader. We behave differently
@@ -256,7 +294,13 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 		}()
 	} else {
 		s.log.Noticef("restoring from snapshot")
-		defer s.log.Noticef("done restoring from snapshot")
+		defer func() {
+			if retErr == nil {
+				s.log.Noticef("done restoring from snapshot")
+			} else {
+				s.log.Errorf("error restoring from snapshot: %v", retErr)
+			}
+		}()
 	}
 
 	// We need to drop current state. The server will recover from snapshot
@@ -301,7 +345,9 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 	if err := r.restoreClientsFromSnapshot(serverSnap); err != nil {
 		return err
 	}
-	return r.restoreChannelsFromSnapshot(serverSnap, inNewRaftCall)
+	var err error
+	shouldSnapshot, err = r.restoreChannelsFromSnapshot(serverSnap, inNewRaftCall)
+	return err
 }
 
 func (r *raftFSM) restoreClientsFromSnapshot(serverSnap *spb.RaftSnapshot) error {
@@ -314,8 +360,10 @@ func (r *raftFSM) restoreClientsFromSnapshot(serverSnap *spb.RaftSnapshot) error
 	return nil
 }
 
-func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNewRaftCall bool) error {
+func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNewRaftCall bool) (bool, error) {
 	s := r.server
+
+	shouldSnapshot := false
 
 	var channelsBeforeRestore map[string]*channel
 	if !inNewRaftCall {
@@ -324,33 +372,52 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 	for _, sc := range serverSnap.Channels {
 		c, err := s.lookupOrCreateChannel(sc.Channel)
 		if err != nil {
-			return err
+			return false, err
 		}
-		// Do not restore messages from snapshot if the server
-		// just started and is recovering from its own snapshot.
-		if !inNewRaftCall {
-			if err := r.restoreMsgsFromSnapshot(c, sc.First, sc.Last); err != nil {
-				return err
+		// Keep track of first/last sequence in this channel's snapshot.
+		// It can help to detect that all messages in the leader have expired
+		// and this is what we should report/use as our store first/last.
+		atomic.StoreUint64(&c.firstSeq, sc.First)
+
+		// Even on startup (when inNewRaftCall==true), we need to call
+		// restoreMsgsFromSnapshot() to make sure our store is consistent.
+		// If we skip it (like we used to), then it is possible that this
+		// node misses some messages from the snapshot and will then start
+		// to apply remaining logs. It could even then become leader in
+		// the process with missing messages. So if we need to restore some
+		// messages and fail, keep trying until a leader is avail and
+		// able to serve this node.
+		ok := false
+		for i := 0; i < restoreMsgsAttempts; i++ {
+			if err := r.restoreMsgsFromSnapshot(c, sc.First, sc.Last, false); err != nil {
+				s.log.Errorf("channel %q - unable to restore messages, can't start until leader is available",
+					sc.Channel)
+				time.Sleep(restoreMsgsSleepBetweenAttempts)
+			} else {
+				ok = true
+				break
 			}
+		}
+		if !ok {
+			err = fmt.Errorf("channel %q - unable to restore messages, aborting", sc.Channel)
+			s.log.Fatalf(err.Error())
+			// In tests, we use a "dummy" logger, so process will not exit
+			// (and we would not want that anyway), so make sure we return
+			// an error.
+			return false, err
+		}
+		if !inNewRaftCall {
 			delete(channelsBeforeRestore, sc.Channel)
 		}
-		// Only set nextSequence if new value is greater than what
-		// is currently set.
-		if c.nextSequence <= sc.Last {
-			c.nextSequence = sc.Last + 1
-			if sc.Last > 0 {
-				// If store's seq is 0 but sc.Last is not, it likely means
-				// that all messages expired and our store is empty. We
-				// need to report to monitoring page the value of nextSequence
-				// instead of 0.
-				// We use a different field in the channel structure that
-				// uses atomic since it can be read concurrently in monitor's
-				// channelsz endpoint.
-				if seq, _ := c.store.Msgs.FirstSequence(); seq == 0 {
-					atomic.StoreUint64(&c.firstSeq, c.nextSequence)
-				}
-			}
-		}
+		// restoreMsgsFromSnapshot may have updated c.firstSeq. If that is the
+		// case it means that when restoring, we realized that some messages
+		// have expired/removed. If so, try to do a snapshot once we have
+		// finished with restoring.
+		shouldSnapshot = atomic.LoadUint64(&c.firstSeq) != sc.First
+
+		// Ensure we check store last sequence before storing msgs in Apply().
+		c.lSeqChecked = false
+
 		for _, ss := range sc.Subscriptions {
 			s.recoverOneSub(c, ss.State, nil, ss.AcksPending)
 			c.ss.Lock()
@@ -375,33 +442,61 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 			s.processDeleteChannel(name)
 		}
 	}
-	return nil
+	return shouldSnapshot, nil
 }
 
-func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64) error {
-	storeFirst, storeLast, err := c.store.Msgs.FirstAndLastSequence()
+func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64, fromApply bool) error {
+	storeLast, err := c.store.Msgs.LastSequence()
 	if err != nil {
 		return err
 	}
-	// If the leader's first sequence is more than our lastSequence+1,
-	// then we need to empty the store. We don't want to have gaps.
-	// Same if our first is strictly greater than the leader, or our
-	// last sequence is more than the leader
-	if first > storeLast+1 || storeFirst > first || storeLast > last {
-		if err := c.store.Msgs.Empty(); err != nil {
-			return err
-		}
-	} else if storeLast == last {
-		// We may have a message with lower sequence than the leader,
-		// but our last sequence is the same, so nothing to do.
-		return nil
-	} else if storeLast > 0 {
-		// first is less than what we already have, just started
-		// at our next sequence.
+
+	// We are here in several situations:
+	// - on startup, we may have a snapshot with a channel first/last index.
+	//   It does not mean that there should not be more messages in the channel,
+	//   and there may be raft logs to apply following this snapshot. But
+	//   we still want to make sure that our store is consistent.
+	// - at runtime, we have fallen behind and the leader sent us a snapshot.
+	//   we care about restoring/fetching only messages past `storeLast`+1 up
+	//   to `last`
+	// - in Apply(), we are storing a message and this function is invoked with
+	//   `last` equal to that message sequence - 1. We need to possibly fetch
+	//   messages from `storeLast`+1 up to `last`.
+
+	// If we are invoked from Apply(), we are about to store a message
+	// at sequence `last`+1, so we want to ensure that we have all messages
+	// from `storeLast`+1 to `last` included. Set `first` to `storeLast`+1.
+	if fromApply {
 		first = storeLast + 1
 	}
-	// All messages were expired, we still need to save some information
-	// that will allow us to remember the last sequence.
+
+	// If the first sequence in the channel is past our store last sequence + 1,
+	// then we need to empty our store.
+	if first > storeLast+1 {
+		if storeLast != 0 {
+			if err := c.store.Msgs.Empty(); err != nil {
+				return err
+			}
+		}
+	} else if first <= storeLast {
+		// Start to store at storeLast+1
+		first = storeLast + 1
+	}
+
+	// With the above done, we now need to make sure that we don't try
+	// to restore from a too old position. If `first` is smaller than
+	// snapFSeq, then set the floor at that value.
+	// Note that c.firstSeq is only set from a thread invoking this
+	// function or within this function itself. However, it is read
+	// from other threads, so use atomic operation here for consistency,
+	// but not really required.
+	if fseq := atomic.LoadUint64(&c.firstSeq); fseq > first {
+		first = fseq
+	}
+
+	// Now check if we have anything to do. This condition will be true
+	// if we try to restore from a channel where all messages have expired
+	// or if we have all messages we need.
 	if first > last {
 		return nil
 	}
@@ -423,6 +518,7 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64) error 
 		reqEnd    uint64
 		batch     = uint64(100)
 		halfBatch = batch / 2
+		stored    = false
 	)
 	for seq := first; seq <= last; seq++ {
 		if seq == reqNext {
@@ -440,7 +536,7 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64) error 
 				reqStart = reqEnd + 1
 			}
 		}
-		resp, err := sub.NextMsg(2 * time.Second)
+		resp, err := sub.NextMsg(restoreMsgsRcvTimeout)
 		if err != nil {
 			return err
 		}
@@ -455,6 +551,19 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64) error 
 			if _, err := c.store.Msgs.Store(msg); err != nil {
 				return err
 			}
+			stored = true
+		} else {
+			// Since this message is not in the leader, it means that
+			// messages may have expired or be removed due to limit,
+			// so we need to empty our store before storing the next
+			// valid message.
+			if seq == first || stored {
+				if err := c.store.Msgs.Empty(); err != nil {
+					return err
+				}
+				stored = false
+			}
+			atomic.StoreUint64(&c.firstSeq, seq+1)
 		}
 		select {
 		case <-r.server.shutdownCh:
