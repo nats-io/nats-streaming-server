@@ -520,10 +520,32 @@ func (s *StanServer) subToSnapshotRestoreRequests() error {
 			s.log.Errorf("Invalid snapshot request, data len=%v", len(m.Data))
 			return
 		}
+
+		// Servers up to 0.14.1 (included) had a defect both on the leader and
+		// follower side. That is, they would both break out of their loop when
+		// getting the first "not found" message (expired or removed due to
+		// limits).
+		// Starting at 0.14.2, server needs to complete their loop to make sure
+		// they have restored all messages in the start/end range.
+		// The code below tries to handle pre and post 0.14.2 follower requests.
+
+		// A follower at version 0.14.2+ will include a known suffix to its
+		// reply subject. The leader here can then send the first available
+		// message when getting a request for a message of a given sequence
+		// that is not found.
+		sendFirstAvail := strings.HasSuffix(m.Reply, "."+restoreMsgsV2)
+
+		// For the newer servers, include a "reply" subject to the response
+		// to let the follower know that this is coming from a 0.14.2+ server.
+		var reply string
+		if sendFirstAvail {
+			reply = restoreMsgsV2
+		}
+
 		cname := m.Subject[prefixLen:]
 		c := s.channels.getIfNotAboutToBeDeleted(cname)
 		if c == nil {
-			s.ncsr.Publish(m.Reply, nil)
+			s.ncsr.PublishRequest(m.Reply, reply, nil)
 			return
 		}
 		start := util.ByteOrder.Uint64(m.Data[:8])
@@ -534,6 +556,15 @@ func (s *StanServer) subToSnapshotRestoreRequests() error {
 			if err != nil {
 				s.log.Errorf("Snapshot restore request error for channel %q, error looking up message %v: %v", c.name, seq, err)
 				return
+			}
+			// If the requestor is a server 0.14.2+, we will send the first
+			// available message.
+			if msg == nil && sendFirstAvail {
+				msg, err = c.store.Msgs.FirstMsg()
+				if err != nil {
+					s.log.Errorf("Snapshot restore request error for channel %q, error looking up first message: %v", c.name, err)
+					return
+				}
 			}
 			if msg == nil {
 				// We don't have this message because of channel limits.
@@ -547,8 +578,22 @@ func (s *StanServer) subToSnapshotRestoreRequests() error {
 				}
 				buf = msgBuf[:n]
 			}
-			if err := s.ncsr.Publish(m.Reply, buf); err != nil {
+			if err := s.ncsr.PublishRequest(m.Reply, reply, buf); err != nil {
 				s.log.Errorf("Snapshot restore request error for channel %q, unable to send response for seq %v: %v", c.name, seq, err)
+			}
+			// If we sent a message and seq was not the expected one,
+			// reset seq to proper value for the next iteration.
+			if msg != nil && msg.Sequence != seq {
+				seq = msg.Sequence
+			} else if buf == nil {
+				// Regardless of the version of the requestor, if we are
+				// here we can stop. If it is a pre 0.14.2, the follower
+				// would have break out of its for-loop when getting the
+				// nil message, so there is no point in continuing.
+				// And if it is a 0.14.2+, we have sent the first avail
+				// message and so if we are here it means that there
+				// is none, so we really have nothing else to do.
+				return
 			}
 			select {
 			case <-s.shutdownCh:

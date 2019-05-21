@@ -38,6 +38,7 @@ import (
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nats-streaming-server/test"
+	"github.com/nats-io/nats-streaming-server/util"
 )
 
 var defaultRaftLog string
@@ -5919,17 +5920,24 @@ func TestClusteringRestoreSnapshotWithSomeMsgsNoLongerAvail(t *testing.T) {
 
 	getLeader(t, 10*time.Second, s1, s2)
 
+	// Run the tests
+	testSnapshotRestorWithMissingMsgs(t, s1)
+}
+
+func testSnapshotRestorWithMissingMsgs(t *testing.T, leader *StanServer) {
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
 
-	for i := 0; i < 10; i++ {
+	maxMsgs := leader.opts.MaxMsgs
+
+	for i := 0; i < maxMsgs; i++ {
 		if err := sc.Publish("foo", []byte("hello")); err != nil {
 			t.Fatalf("Error on publish: %v", err)
 		}
 	}
 
-	// Create a snapshot that will indicate that there is messages from 1 to 10.
-	if err := s1.raft.Snapshot().Error(); err != nil {
+	// Create a snapshot that will indicate that there are maxMsgs.
+	if err := leader.raft.Snapshot().Error(); err != nil {
 		t.Fatalf("Error on snapshot: %v", err)
 	}
 
@@ -5938,10 +5946,12 @@ func TestClusteringRestoreSnapshotWithSomeMsgsNoLongerAvail(t *testing.T) {
 	// 2- some messages in the snapshot are restored
 	// 3- no message in the snapshot are restored
 
-	check := func(t *testing.T, expectedFirst, expectedLast uint64) {
+	check := func(t *testing.T, first, last int) {
 		t.Helper()
+		expectedFirst := uint64(first)
+		expectedLast := uint64(last)
 		s3sOpts := getTestDefaultOptsForClustering("c", false)
-		s3sOpts.MaxMsgs = 10
+		s3sOpts.MaxMsgs = maxMsgs
 		s3 := runServerWithOpts(t, s3sOpts, nil)
 		defer func() {
 			// Shutdown s3 and cleanup its state so it will have nothing in its stores
@@ -5969,27 +5979,26 @@ func TestClusteringRestoreSnapshotWithSomeMsgsNoLongerAvail(t *testing.T) {
 	}
 
 	// 1- all messages in the snapshot are restored
-	check(t, 1, 10)
+	check(t, 1, maxMsgs)
 
 	// 2- some messages in the snapshot are restored
-	// To do so, send 2 more messages what will make messages 1 and 2 disappear
-	for i := 0; i < 2; i++ {
+	// To do so, send 20% more messages what will make first `moreMsgs` disappear.
+	moreMsgs := (maxMsgs * 20) / 100
+	for i := 0; i < moreMsgs; i++ {
 		if err := sc.Publish("foo", []byte("hello")); err != nil {
 			t.Fatalf("Error on publish: %v", err)
 		}
 	}
-	check(t, 3, 12)
+	check(t, moreMsgs+1, maxMsgs+moreMsgs)
 
 	// 3- no message in the snapshot are restored
-	// To do so, send enough messages so that the original 10 are gone.
-	for i := 0; i < 10; i++ {
+	// To do so, send enough messages so that maxMsgs number of messages are gone.
+	for i := 0; i < maxMsgs; i++ {
 		if err := sc.Publish("foo", []byte("hello")); err != nil {
 			t.Fatalf("Error on publish: %v", err)
 		}
 	}
-	check(t, 13, 22)
-
-	sc.Close()
+	check(t, maxMsgs+moreMsgs+1, 2*maxMsgs+moreMsgs)
 }
 
 func TestClusteringRestoreSnapshotCreateSnapshotAfterMsgsExpired(t *testing.T) {
@@ -6091,6 +6100,176 @@ func TestClusteringRestoreSnapshotCreateSnapshotAfterMsgsExpired(t *testing.T) {
 		if e != nil {
 			t.Fatalf(e.Error())
 		}
+	}
+}
+
+func TestClusteringRestoreSnapshotWithSomeMsgsNoLongerAvailFromNewServer(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.MaxMsgs = 1000
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.MaxMsgs = 1000
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	// Create a subscription to monitor responses from the leader.
+	nc := newNatsConnection(t)
+	defer nc.Close()
+
+	msgsCount := int32(0)
+	notFound := int32(0)
+	if _, err := nc.Subscribe(nats.InboxPrefix+">", func(m *nats.Msg) {
+		if m.Reply != restoreMsgsV2 {
+			return
+		}
+		if len(m.Data) > 0 {
+			// Count the number of non empty responses.
+			atomic.AddInt32(&msgsCount, 1)
+		} else {
+			// The number of empty reponses.
+			atomic.AddInt32(&notFound, 1)
+		}
+	}); err != nil {
+		t.Fatalf("Error on subscribe")
+	}
+	nc.Flush()
+
+	// Run the tests
+	testSnapshotRestorWithMissingMsgs(t, s1)
+
+	// Check counts. For the 3 tests we should have restored
+	// 1..1000 (1000) + 201..1000 (800) + 1201 (1 to indicate that this
+	// is the first avail seq, but this one will not be stored, still,
+	// the restoreMsg routine received it, so we counted in msgsCount)
+	// So total is 1000+800+1=1801.
+	if n := atomic.LoadInt32(&msgsCount); n != 1801 {
+		t.Fatalf("Expected new server to have sent 1801 msgs, got %v", n)
+	}
+	if n := atomic.LoadInt32(&notFound); n != 0 {
+		t.Fatalf("Should not have sent a single empty response, got %v", n)
+	}
+}
+
+func TestClusteringRestoreSnapshotWithSomeMsgsNoLongerAvailFromOldServer(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.MaxMsgs = 1000
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.MaxMsgs = 1000
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	numRequests := int32(0)
+
+	// We are going to "plug" a fake handler for the snap restore requests
+	// to simulate the broken behavior of the older servers.
+	snapshotRestorePrefix := fmt.Sprintf("%s.%s.", defaultSnapshotPrefix, clusterName)
+	prefixLen := len(snapshotRestorePrefix)
+	s1.mu.Lock()
+	s1.snapReqSub.Unsubscribe()
+	_, err := s1.ncr.Subscribe(fmt.Sprintf("%s.%s.>", defaultSnapshotPrefix, clusterName),
+		func(m *nats.Msg) {
+			if len(m.Data) != 16 {
+				// older server bailed here if request is not 2 uint64
+				return
+			}
+			cname := m.Subject[prefixLen:]
+			c := s1.channels.getIfNotAboutToBeDeleted(cname)
+			if c == nil {
+				s1.ncsr.Publish(m.Reply, nil)
+				return
+			}
+			start := util.ByteOrder.Uint64(m.Data[:8])
+			end := util.ByteOrder.Uint64(m.Data[8:])
+
+			// Keep track of number of request
+			atomic.AddInt32(&numRequests, 1)
+
+			for seq := start; seq <= end; seq++ {
+				msg, err := c.store.Msgs.Lookup(seq)
+				if err != nil {
+					return
+				}
+				var buf []byte
+				if msg == nil {
+					buf = nil
+				} else {
+					buf, _ = msg.Marshal()
+				}
+				s1.ncsr.Publish(m.Reply, buf)
+				// Old servers would bail at the first not found message.
+				if buf == nil {
+					return
+				}
+			}
+		})
+	s1.mu.Unlock()
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	s1.ncsr.Flush()
+
+	// Run the tests
+	testSnapshotRestorWithMissingMsgs(t, s1)
+
+	// Check number of requests.
+	// For the first case (all msgs avail), there should have been
+	// 10 requests (from 1..100, 101..200, etc..).
+	//
+	// For the second case (msgs 1..200 are missing), there should
+	// have been 1 request for 1..100, but since old server returns
+	// not found and bails, we will send 2..101, 3..102, etc..
+	// but limit to 10 consecutive requests. So up to that point
+	// it will be 10 requests. Then we start a binary search but
+	// actually start with the last one to see if they did not all
+	// expire. So we will send request for 1000, which is found.
+	// Total requests: 10+1=11.
+	// Next we do proper binary between 11..999, and target is 201,
+	// which means 505, 257, 133, 195, 226, 210, 202, 198, 200, and 201.
+	// So that's 10 more requests, total: 11+10=21.
+	// Finally, we'll send requests for 201..300, 301..400, etc..
+	// so that's 8 more requests. Total: 21+8=29.
+	//
+	// For the third case, since messages 1..1000 are gone, we will start
+	// with 1..100, get a not found, and try 2..101, 3..102, so 10 requests.
+	// This time, the start of binary search will send a single request
+	// trying with the last (1000) and realize that it is gone, so we are
+	// done at this point. Total is 11 requests.
+	//
+	// So grand total would be: 10 + 29 + 11
+	expected := int32(50)
+	if n := atomic.LoadInt32(&numRequests); n != expected {
+		t.Fatalf("Expected old server to have received %v requests, got %v", expected, n)
 	}
 }
 

@@ -38,6 +38,12 @@ var (
 	restoreMsgsSleepBetweenAttempts = defaultRestoreMsgsSleepBetweenAttempts
 )
 
+const (
+	// Used as requests inbox's suffix and reply subject of response messages
+	// to indicate that this is from a 0.14.2+ server.
+	restoreMsgsV2 = "sfa"
+)
+
 // serverSnapshot implements the raft.FSMSnapshot interface by snapshotting
 // StanServer state.
 type serverSnapshot struct {
@@ -501,38 +507,47 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64, fromAp
 		return nil
 	}
 
-	inbox := nats.NewInbox()
-	sub, err := c.stan.ncsr.SubscribeSync(inbox)
+	s := r.server
+
+	// Servers up to 0.14.1 (included) had a defect both on the leader and
+	// follower side. That is, they would both break out of their loop when
+	// getting the first "not found" message (expired or removed due to
+	// limits).
+	// Starting at 0.14.2, server needs to complete their loop to make sure
+	// they have restored all messages in the start/end range.
+	// The code below tries to handle pre and post 0.14.2 servers.
+
+	// Add a specific suffix to our inbox (which will be the reply subject
+	// to the request) to indicate that this is a server 0.14.2+, which
+	// means that a leader 0.14.2+ will send the first avail message when
+	// not finding a specific message.
+	inbox := nats.NewInbox() + "." + restoreMsgsV2
+	sub, err := s.ncsr.SubscribeSync(inbox)
 	if err != nil {
 		return err
 	}
 	sub.SetPendingLimits(-1, -1)
 	defer sub.Unsubscribe()
 
-	subject := fmt.Sprintf("%s.%s.%s", defaultSnapshotPrefix, c.stan.info.ClusterID, c.name)
+	subject := fmt.Sprintf("%s.%s.%s", defaultSnapshotPrefix, s.info.ClusterID, c.name)
 
 	var (
-		reqBuf    [16]byte
-		reqNext   = first
-		reqStart  = first
-		reqEnd    uint64
-		batch     = uint64(100)
-		halfBatch = batch / 2
-		stored    = false
+		reqStart = first
+		reqEnd   uint64
+		batch    = uint64(100)
+		stored   = false
+		cnfcount = 0 // consecutive "messages not found" count
 	)
 	for seq := first; seq <= last; seq++ {
-		if seq == reqNext {
-			reqEnd = reqStart + batch
+		if seq == reqStart {
+			reqEnd = reqStart + batch - 1
 			if reqEnd > last {
 				reqEnd = last
 			}
-			util.ByteOrder.PutUint64(reqBuf[:8], reqStart)
-			util.ByteOrder.PutUint64(reqBuf[8:16], reqEnd)
-			if err := c.stan.ncsr.PublishRequest(subject, inbox, reqBuf[:16]); err != nil {
+			if err := s.sendRestoreMsgRequest(subject, inbox, reqStart, reqEnd); err != nil {
 				return err
 			}
 			if reqEnd != last {
-				reqNext = reqStart + halfBatch
 				reqStart = reqEnd + 1
 			}
 		}
@@ -540,13 +555,40 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64, fromAp
 		if err != nil {
 			return err
 		}
-		// It is possible that the leader does not have this message because of
-		// channel limits. If resp.Data is empty, we are in this situation.
-		// We need to continue to see if more recent messages are available though.
+		// If resp.Data is not empty, it is a valid message.
 		if len(resp.Data) != 0 {
+			cnfcount = 0
 			msg := &pb.MsgProto{}
 			if err := msg.Unmarshal(resp.Data); err != nil {
 				panic(err)
+			}
+			// Server 0.14.2+ may send us the first available message if
+			// the requested one is not available. So check the message
+			// sequence. (we could ensure that reply subject is
+			// restoreMsgsV2, but it is not required).
+			if msg.Sequence != seq {
+				// Any prior messages are now invalid, so empty our store.
+				if err := c.store.Msgs.Empty(); err != nil {
+					return err
+				}
+				stored = false
+				// Set the channel's first sequence, but not past the
+				// `last` that we use in our for-loop.
+				if msg.Sequence > last {
+					atomic.StoreUint64(&c.firstSeq, last+1)
+					// If the next sequence will be past our "last" target,
+					// simply break out of the for-loop without storing it here.
+					break
+				}
+				// Set channel's first sequence to this first avail message sequence.
+				atomic.StoreUint64(&c.firstSeq, msg.Sequence)
+				// Set seq to the new value to resume properly the loop.
+				seq = msg.Sequence
+				// If this is past our reqEnd, we need to initiate a new
+				// request at the next sequence in the for-loop.
+				if seq > reqEnd {
+					reqStart = seq + 1
+				}
 			}
 			if _, err := c.store.Msgs.Store(msg); err != nil {
 				return err
@@ -554,7 +596,7 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64, fromAp
 			stored = true
 		} else {
 			// Since this message is not in the leader, it means that
-			// messages may have expired or be removed due to limit,
+			// messages may have expired or been removed due to limit,
 			// so we need to empty our store before storing the next
 			// valid message.
 			if seq == first || stored {
@@ -564,12 +606,92 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64, fromAp
 				stored = false
 			}
 			atomic.StoreUint64(&c.firstSeq, seq+1)
+
+			// If this is coming from a leader 0.14.2+, the response message
+			// has a reply subject. In this situation, it means that there is
+			// not a single message available in this channel. We are done.
+			if resp.Reply == restoreMsgsV2 {
+				break
+			} else {
+				cnfcount++
+				if cnfcount >= 10 {
+					cnfcount = 0
+					fseq, err := s.restoreMsgsFindFirstAvailSeqFromOldLeader(subject, inbox, sub, seq+1, last)
+					if err != nil {
+						return err
+					}
+					if fseq > last {
+						// No message available, set channel firstSeq to
+						// message after our `last`, and we are done.
+						atomic.StoreUint64(&c.firstSeq, last+1)
+						break
+					}
+					// Since we do a seq++ in the for-loop, set this correctly.
+					seq = fseq - 1
+				}
+				// We are dealing with a leader pre 0.14.2 that has exited
+				// its for-loop by now. We need to re-issue a request.
+				// Do so by setting the reqStart to the next sequence
+				reqStart = seq + 1
+			}
 		}
 		select {
-		case <-r.server.shutdownCh:
+		case <-s.shutdownCh:
 			return fmt.Errorf("server shutting down")
 		default:
 		}
 	}
 	return c.store.Msgs.Flush()
+}
+
+// Sends individual requests to leader server (pre 0.14.1) in order to
+// find the sequence of the first available message in the range.
+func (s *StanServer) restoreMsgsFindFirstAvailSeqFromOldLeader(
+	subject, inbox string, sub *nats.Subscription, start, end uint64) (uint64, error) {
+
+	// Start with the last in case all messages in the desired range have expired.
+	resp, err := s.restoreMsgsFetchOne(subject, inbox, sub, end)
+	if err != nil {
+		return 0, err
+	}
+	// All have expired, we are done.
+	if len(resp.Data) == 0 {
+		return end + 1, nil
+	}
+	// Now use binary search...
+	l := start
+	r := end
+	for l <= r {
+		m := (l + r) / 2
+		resp, err := s.restoreMsgsFetchOne(subject, inbox, sub, m)
+		if err != nil {
+			return 0, err
+		}
+		// If no message, search right
+		if len(resp.Data) == 0 {
+			l = m + 1
+		} else {
+			// search left
+			r = m - 1
+		}
+	}
+	return l, nil
+}
+
+// Helper that sends a restoreMsg request with single sequence (range of seq..seq)
+// and waits for the reply. Returns the reply message or error.
+func (s *StanServer) restoreMsgsFetchOne(subject, inbox string, sub *nats.Subscription, seq uint64) (*nats.Msg, error) {
+	if err := s.sendRestoreMsgRequest(subject, inbox, seq, seq); err != nil {
+		return nil, err
+	}
+	return sub.NextMsg(restoreMsgsRcvTimeout)
+}
+
+// Helper that sends a restoreMsg request protocol to the given subject with specific inbox
+// as the reply subject. The request is for sequences [start..end].
+func (s *StanServer) sendRestoreMsgRequest(subject, inbox string, start, end uint64) error {
+	var reqBuf [16]byte
+	util.ByteOrder.PutUint64(reqBuf[:8], start)
+	util.ByteOrder.PutUint64(reqBuf[8:16], end)
+	return s.ncsr.PublishRequest(subject, inbox, reqBuf[:16])
 }
