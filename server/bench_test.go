@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nats-streaming-server/test"
+	"github.com/nats-io/stan.go"
 )
 
 func benchCleanupDatastore(b *testing.B, dir string) {

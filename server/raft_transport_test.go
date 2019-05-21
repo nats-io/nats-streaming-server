@@ -27,7 +27,7 @@ import (
 	"github.com/hashicorp/raft"
 	"github.com/nats-io/gnatsd/server"
 	natsdTest "github.com/nats-io/gnatsd/test"
-	"github.com/nats-io/go-nats"
+	"github.com/nats-io/nats.go"
 )
 
 type testAddrProvider struct {

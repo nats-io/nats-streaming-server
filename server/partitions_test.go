@@ -15,8 +15,8 @@ package server
 
 import (
 	"fmt"
-	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nuid"
+	"github.com/nats-io/stan.go/pb"
 	"strings"
 	"sync"
 	"testing"
@@ -24,11 +24,11 @@ import (
 
 	natsd "github.com/nats-io/gnatsd/server"
 	natsdTest "github.com/nats-io/gnatsd/test"
-	"github.com/nats-io/go-nats"
-	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nats-streaming-server/util"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/stan.go"
 )
 
 func setPartitionsVarsForTest() {

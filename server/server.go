@@ -32,9 +32,9 @@ import (
 	"github.com/hashicorp/raft"
 	natsdLogger "github.com/nats-io/gnatsd/logger"
 	"github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/go-nats"
-	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
+	"github.com/nats-io/stan.go/pb"
 
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"

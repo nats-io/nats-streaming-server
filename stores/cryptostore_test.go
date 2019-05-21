@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nats-io/go-nats-streaming/pb"
+	"github.com/nats-io/stan.go/pb"
 )
 
 func TestCryptoStoreKeyIsCleared(t *testing.T) {

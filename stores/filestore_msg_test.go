@@ -26,8 +26,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/util"
+	"github.com/nats-io/stan.go/pb"
 )
 
 const (

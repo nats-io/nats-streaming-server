@@ -26,8 +26,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/util"
+	"github.com/nats-io/stan.go/pb"
 	"golang.org/x/crypto/chacha20poly1305"
 )
 

@@ -2042,7 +2042,7 @@ if you want to ensure that each operation is immediately committed to the databa
 Here is the list of NATS Streaming clients, supported by Synadia. We may add additional supported streaming clients in the future, and encourage community-contributed clients.
 
 - [C#](https://github.com/nats-io/csharp-nats-streaming)
-- [Go](https://github.com/nats-io/go-nats-streaming)
+- [Go](https://github.com/nats-io/stan.go)
 - [Java](https://github.com/nats-io/java-nats-streaming)
 - [Node.js](https://github.com/nats-io/node-nats-streaming)
 
