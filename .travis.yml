@@ -3,6 +3,9 @@ sudo: false
 go:
 - 1.11.x
 - 1.12.x
+env:
+- GO111MODULE=off
+go_import_path: github.com/nats-io/nats-streaming-server
 install:
 - go get -t ./...
 - go get github.com/nats-io/gnatsd
@@ -26,4 +29,4 @@ script:
 - go test -i $EXCLUDE_VENDOR
 - if [[ "$TRAVIS_GO_VERSION" =~ 1.12 ]]; then ./scripts/cov.sh TRAVIS; else go test -failfast $EXCLUDE_VENDOR; fi
 after_success:
-- if [[ "$TRAVIS_GO_VERSION" =~ 1.12 ]] && [ "$TRAVIS_TAG" != "" ]; then ./scripts/cross_compile.sh $TRAVIS_TAG; ghr --owner nats-io --token $GITHUB_TOKEN --draft --replace $TRAVIS_TAG pkg/; fi
+- if [[ "$TRAVIS_GO_VERSION" =~ 1.11 ]] && [ "$TRAVIS_TAG" != "" ]; then ./scripts/cross_compile.sh $TRAVIS_TAG; ghr --owner nats-io --token $GITHUB_TOKEN --draft --replace $TRAVIS_TAG pkg/; fi
