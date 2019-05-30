@@ -15,6 +15,7 @@ package server
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -64,10 +65,10 @@ func cleanupRaftLog(t *testing.T) {
 func shutdownAndCleanupState(t *testing.T, s *StanServer, nodeID string) {
 	t.Helper()
 	s.Shutdown()
+	os.RemoveAll(filepath.Join(defaultRaftLog, nodeID))
 	switch persistentStoreType {
 	case stores.TypeFile:
 		os.RemoveAll(filepath.Join(defaultDataStore, nodeID))
-		os.RemoveAll(filepath.Join(defaultRaftLog, nodeID))
 	case stores.TypeSQL:
 		test.CleanupSQLDatastore(t, testSQLDriver, testSQLSource+"_"+nodeID)
 	default:
@@ -6381,5 +6382,71 @@ func TestClusteringRestoreSnapshotMsgsBailIfNoLeader(t *testing.T) {
 		if e != nil {
 			t.Fatalf(e.Error())
 		}
+	}
+}
+
+func TestClusteringSQLMsgStoreFlushed(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	ch := make(chan bool, 1)
+	count := 0
+	// Use less than SQLStore's sqlMsgCacheLimit
+	total := 500
+	ah := func(gui string, err error) {
+		count++
+		if count == total {
+			ch <- true
+		}
+	}
+	for i := 0; i < total; i++ {
+		if _, err := sc.PublishAsync("foo", []byte("hello"), ah); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("Did not get all our acks")
+	}
+
+	db, err := sql.Open(testSQLDriver, testSQLSource+"_b")
+	if err != nil {
+		t.Fatalf("Error opening db: %v", err)
+	}
+	defer db.Close()
+	r := db.QueryRow("SELECT COUNT(seq) FROM Messages")
+	count = 0
+	if err := r.Scan(&count); err != nil {
+		t.Fatalf("Error on scan: %v", err)
+	}
+	if count == 0 {
+		t.Fatalf("Expected some messages, got none")
 	}
 }

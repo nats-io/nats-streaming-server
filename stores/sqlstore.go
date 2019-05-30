@@ -181,6 +181,10 @@ const (
 	// Number of missed update interval after which the lock is assumed
 	// lost and another instance can update it.
 	sqlDefaultLockLostCount = 3
+
+	// Limit of number of messages in the cache before message store
+	// is automatically flushed on a Store() call.
+	sqlDefaultMsgCacheLimit = 1024
 )
 
 // These are initialized based on the constants that have reasonable values.
@@ -195,6 +199,7 @@ var (
 	sqlLockUpdateInterval        = sqlDefaultLockUpdateInterval
 	sqlLockLostCount             = sqlDefaultLockLostCount
 	sqlNoPanic                   = false // Used in tests to avoid go-routine to panic
+	sqlMsgCacheLimit             = sqlDefaultMsgCacheLimit
 )
 
 // SQLStoreOptions are used to configure the SQL Store.
@@ -337,10 +342,11 @@ type SQLMsgStore struct {
 }
 
 type sqlMsgsCache struct {
-	msgs map[uint64]*sqlCachedMsg
-	head *sqlCachedMsg
-	tail *sqlCachedMsg
-	free *sqlCachedMsg
+	msgs  map[uint64]*sqlCachedMsg
+	head  *sqlCachedMsg
+	tail  *sqlCachedMsg
+	free  *sqlCachedMsg
+	count int
 }
 
 type sqlCachedMsg struct {
@@ -1330,6 +1336,7 @@ func (mc *sqlMsgsCache) add(msg *pb.MsgProto, data []byte) {
 		mc.tail.next = cachedMsg
 	}
 	mc.tail = cachedMsg
+	mc.count++
 }
 
 func (mc *sqlMsgsCache) transferToFreeList() {
@@ -1339,6 +1346,7 @@ func (mc *sqlMsgsCache) transferToFreeList() {
 	}
 	mc.head = nil
 	mc.tail = nil
+	mc.count = 0
 }
 
 func (mc *sqlMsgsCache) pop() *sqlCachedMsg {
@@ -1349,6 +1357,7 @@ func (mc *sqlMsgsCache) pop() *sqlCachedMsg {
 		if mc.head == nil {
 			mc.tail = nil
 		}
+		mc.count--
 	}
 	return cm
 }
@@ -1370,6 +1379,11 @@ func (ms *SQLMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 
 	useCache := !ms.sqlStore.opts.NoCaching
 	if useCache {
+		if ms.writeCache.count >= sqlMsgCacheLimit {
+			if err := ms.flush(); err != nil {
+				return 0, err
+			}
+		}
 		ms.writeCache.add(m, msgBytes)
 	} else {
 		if _, err := ms.sqlStore.preparedStmts[sqlStoreMsg].Exec(ms.channelID, seq, m.Timestamp, dataLen, msgBytes); err != nil {

@@ -523,7 +523,7 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 					msg.Sequence, msg.Subject, err))
 			}
 		}
-		return nil
+		return c.store.Msgs.Flush()
 	case spb.RaftOperation_Connect:
 		// Client connection create replication.
 		return s.processConnect(op.ClientConnect.Request, op.ClientConnect.Refresh)
