@@ -1819,3 +1819,40 @@ func TestSQLRecoverLastSeqAfterMessagesExpired(t *testing.T) {
 	}
 	s.Close()
 }
+
+func TestSQLMsgCacheAutoFlush(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+
+	sqlMsgCacheLimit = 100
+	defer func() { sqlMsgCacheLimit = sqlDefaultMsgCacheLimit }()
+
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	// Create a store with caching enabled (which is default, but invoke option here)
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLNoCaching(false))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	cs := storeCreateChannel(t, s, "foo")
+	total := sqlMsgCacheLimit + 10
+	payload := make([]byte, 100)
+	for i := 0; i < total; i++ {
+		storeMsg(t, cs, "foo", uint64(i+1), payload)
+	}
+	// Check that we have started to write messages into the DB.
+	db := getDBConnection(t)
+	defer db.Close()
+	r := db.QueryRow("SELECT COUNT(seq) FROM Messages")
+	count := 0
+	if err := r.Scan(&count); err != nil {
+		t.Fatalf("Error on scan: %v", err)
+	}
+	if count == 0 {
+		t.Fatalf("Expected some messages, got none")
+	}
+}

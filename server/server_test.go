@@ -81,13 +81,13 @@ var (
 	testSQLSourceAdmin  = testDefaultMySQLSourceAdmin
 	testSQLDatabaseName = testDefaultDatabaseName
 	testDBSuffixes      = []string{"", "_a", "_b", "_c"}
+	doSQL               = false
 )
 
 func TestMain(m *testing.M) {
 	var (
 		bst         string
 		pst         string
-		doSQL       bool
 		sqlCreateDb bool
 		sqlDeleteDb bool
 	)

@@ -257,6 +257,9 @@ func TestDeliveryWithGapsInSequence(t *testing.T) {
 }
 
 func TestPersistentStoreSQLSubsPendingRows(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
 	source := testSQLSource
 	if persistentStoreType != stores.TypeSQL {
 		// If not running tests with `-persistent_store sql`,
