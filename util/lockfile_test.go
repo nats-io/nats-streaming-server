@@ -1,4 +1,4 @@
-// Copyright 2017-2018 The NATS Authors
+// Copyright 2017-2019 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,6 +15,7 @@ package util
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -99,12 +100,13 @@ func TestLockFile(t *testing.T) {
 		// Try again with different process, it should work now.
 		wg := sync.WaitGroup{}
 		wg.Add(1)
+		errCh := make(chan error, 1)
 		go func() {
 			defer wg.Done()
 			out, err := exec.Command(os.Args[0], "-lockFile", fname,
 				"-test.v", "-test.run=TestLockFile$").CombinedOutput()
 			if err != nil {
-				t.Fatalf("Other process should have been able to get the lock, got %v - %v",
+				errCh <- fmt.Errorf("Other process should have been able to get the lock, got %v - %v",
 					err, out)
 			}
 		}()
@@ -130,6 +132,11 @@ func TestLockFile(t *testing.T) {
 		wf.Close()
 		defer os.Remove(wf.Name())
 		wg.Wait()
+		select {
+		case e := <-errCh:
+			t.Fatal(e.Error())
+		default:
+		}
 	}
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2016-2018 The NATS Authors
+// Copyright 2016-2019 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -822,6 +822,7 @@ func TestNewOnHoldSetOnDurableRestart(t *testing.T) {
 	stop := make(chan struct{})
 	wg := sync.WaitGroup{}
 	wg.Add(1)
+	errCh := make(chan error, 1)
 	go func() {
 		defer wg.Done()
 		for {
@@ -830,7 +831,11 @@ func TestNewOnHoldSetOnDurableRestart(t *testing.T) {
 				return
 			default:
 				if err := sc.Publish("foo", []byte("hello")); err != nil {
-					t.Fatalf("Unexpected error on publish: %v", err)
+					select {
+					case errCh <- fmt.Errorf("Unexpected error on publish: %v", err):
+						return
+					default:
+					}
 				}
 			}
 		}
@@ -852,6 +857,11 @@ func TestNewOnHoldSetOnDurableRestart(t *testing.T) {
 	// Check our success
 	if failed {
 		t.Fatal("Did not receive the redelivered messages first")
+	}
+	select {
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	default:
 	}
 }
 

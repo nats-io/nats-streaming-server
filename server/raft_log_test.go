@@ -180,6 +180,7 @@ func TestRaftLogEncodeDecodeLogs(t *testing.T) {
 		}
 	}
 
+	errCh := make(chan error, 1)
 	// Perform concurrent encoding...
 	wg := sync.WaitGroup{}
 	encode := func(wg *sync.WaitGroup, min, max int) {
@@ -187,7 +188,11 @@ func TestRaftLogEncodeDecodeLogs(t *testing.T) {
 		for i := min; i < max; i++ {
 			l := logs[i]
 			if _, err := store.encodeRaftLog(l); err != nil {
-				t.Fatalf("Error during encoding")
+				select {
+				case errCh <- fmt.Errorf("Error during encoding: %v", err):
+					return
+				default:
+				}
 			}
 		}
 	}
@@ -205,7 +210,11 @@ func TestRaftLogEncodeDecodeLogs(t *testing.T) {
 			e := encoded[i]
 			var l raft.Log
 			if err := store.decodeRaftLog(e, &l); err != nil {
-				t.Fatalf("Error during encoding")
+				select {
+				case errCh <- fmt.Errorf("Error during decoding: %v", err):
+					return
+				default:
+				}
 			}
 		}
 	}
@@ -215,6 +224,12 @@ func TestRaftLogEncodeDecodeLogs(t *testing.T) {
 	go decode(&wg, 2*(total/4), 3*(total/4))
 	go decode(&wg, 3*(total/4), total)
 	wg.Wait()
+
+	select {
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	default:
+	}
 }
 
 func TestRaftLogWithEncryption(t *testing.T) {
