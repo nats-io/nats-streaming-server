@@ -1,4 +1,4 @@
-// Copyright 2016-2018 The NATS Authors
+// Copyright 2016-2019 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	natsdTest "github.com/nats-io/gnatsd/test"
 	"github.com/nats-io/go-nats-streaming"
 	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nats-streaming-server/stores"
@@ -531,7 +532,11 @@ func TestMaxInactivity(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
 	opts := getTestDefaultOptsForPersistentStore()
+	opts.NATSServerURL = "nats://127.0.0.1:4222"
 	opts.MaxInactivity = 100 * time.Millisecond
 	fooStarLimits := &stores.ChannelLimits{MaxInactivity: 500 * time.Millisecond}
 	opts.AddPerChannel("foo.*", fooStarLimits)
@@ -547,6 +552,7 @@ func TestMaxInactivity(t *testing.T) {
 	defer sc.Close()
 
 	wg := sync.WaitGroup{}
+	errCh := make(chan error, 1)
 	// If a subscription exists, channel should not be removed.
 	checkChannelNotDeletedDueToSub := func(channel, queue, dur string) {
 		defer wg.Done()
@@ -560,7 +566,11 @@ func TestMaxInactivity(t *testing.T) {
 			sub, err = sc.QueueSubscribe(channel, queue, func(_ *stan.Msg) {})
 		}
 		if err != nil {
-			t.Fatalf("Error on subscribe: %v", err)
+			select {
+			case errCh <- fmt.Errorf("Error on subscribe: %v", err):
+				return
+			default:
+			}
 		}
 		defer sub.Unsubscribe()
 		time.Sleep(opts.MaxInactivity + 50*time.Millisecond)
@@ -572,6 +582,11 @@ func TestMaxInactivity(t *testing.T) {
 	go checkChannelNotDeletedDueToSub("c3", "", "dur")
 	go checkChannelNotDeletedDueToSub("c4", "queue", "dur")
 	wg.Wait()
+	select {
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	default:
+	}
 	// Since last subscription is closed, wait more than
 	// MaxInactivity, all those channels should have been deleted
 	time.Sleep(opts.MaxInactivity + 50*time.Millisecond)
