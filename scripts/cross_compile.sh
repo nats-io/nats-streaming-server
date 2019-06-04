@@ -1,6 +1,11 @@
 #!/bin/bash -e
+
+# For now depend on vendor directory.
+# When we change to modules we need this to force pull in windows.
+# GOOS=windows GOARCH=amd64 go get -u
+export GO111MODULE="off"
+
 go get github.com/mitchellh/gox
-go get github.com/tcnksm/ghr
 
 export APPNAME="nats-streaming-server"
 export OSARCH="linux/386 linux/amd64 linux/arm64 darwin/amd64 windows/386 windows/amd64"

@@ -33,7 +33,7 @@ import proto "github.com/gogo/protobuf/proto"
 import fmt "fmt"
 import math "math"
 import _ "github.com/gogo/protobuf/gogoproto"
-import pb "github.com/nats-io/go-nats-streaming/pb"
+import pb "github.com/nats-io/stan.go/pb"
 
 import io "io"
 

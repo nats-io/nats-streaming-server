@@ -1,4 +1,4 @@
-// Copyright 2017-2018 The NATS Authors
+// Copyright 2017-2019 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	natsdLogger "github.com/nats-io/gnatsd/logger"
+	natsdLogger "github.com/nats-io/nats-server/v2/logger"
 )
 
 func TestMain(m *testing.M) {

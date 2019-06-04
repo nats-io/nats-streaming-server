@@ -1,4 +1,4 @@
-// Copyright 2017-2018 The NATS Authors
+// Copyright 2017-2019 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"time"
 
-	gnatsd "github.com/nats-io/gnatsd/server"
+	natsd "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/prometheus/procfs"
 )
@@ -128,12 +128,16 @@ type Subscriptionz struct {
 	IsStalled    bool   `json:"is_stalled"`
 }
 
-func (s *StanServer) startMonitoring(nOpts *gnatsd.Options) error {
+func (s *StanServer) startMonitoring(nOpts *natsd.Options) error {
 	var hh http.Handler
 	// If we are connecting to remote NATS Server, we start our own
 	// HTTP(s) server.
 	if s.opts.NATSServerURL != "" {
-		s.natsServer = gnatsd.New(nOpts)
+		ns, err := natsd.NewServer(nOpts)
+		if err != nil {
+			return err
+		}
+		s.natsServer = ns
 		if err := s.natsServer.StartMonitoring(); err != nil {
 			return err
 		}
@@ -203,7 +207,7 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Error getting file descriptors len: %v", err), http.StatusInternalServerError)
 			return
 		}
-		limits, err := p.NewLimits()
+		limits, err := p.Limits()
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error getting process limits: %v", err), http.StatusInternalServerError)
 			return
@@ -519,7 +523,7 @@ func (s *StanServer) sendResponse(w http.ResponseWriter, r *http.Request, conten
 	if err != nil {
 		s.log.Errorf("Error marshaling response to %q request: %v", r.URL, err)
 	}
-	gnatsd.ResponseHandler(w, r, b)
+	natsd.ResponseHandler(w, r, b)
 }
 
 func getOffsetAndLimit(r *http.Request) (int, int) {

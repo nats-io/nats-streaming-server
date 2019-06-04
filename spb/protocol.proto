@@ -18,7 +18,7 @@ syntax = "proto3";
 package spb;
 
 import "github.com/gogo/protobuf/gogoproto/gogo.proto";
-import "github.com/nats-io/go-nats-streaming/pb/protocol.proto";
+import "github.com/nats-io/stan.go/pb/protocol.proto";
 
 option (gogoproto.marshaler_all) = true;
 option (gogoproto.sizer_all) = true;

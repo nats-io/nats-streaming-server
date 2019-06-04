@@ -1,4 +1,4 @@
-// Copyright 2016-2018 The NATS Authors
+// Copyright 2016-2019 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	natsd "github.com/nats-io/gnatsd/server"
+	natsd "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
@@ -557,9 +557,9 @@ func TestParseConfigureOptions(t *testing.T) {
 	}
 
 	// Failures with bytes
-	expectToFail([]string{"-max_bytes", "12abc"}, "error")
+	expectToFail([]string{"-max_bytes", "12abc"}, "should be a size")
 	expectToFail([]string{"-max_bytes", "x1x"}, "size")
-	expectToFail([]string{"-max_bytes", "100a", "-mb", "100a", "-file_compact_min_size", "200a", "-file_buffer_size", "300a"}, "error")
+	expectToFail([]string{"-max_bytes", "100a", "-mb", "100a", "-file_compact_min_size", "200a", "-file_buffer_size", "300a"}, "should be a size")
 
 	sconf := "s.conf"
 	nconf := "n.conf"
