@@ -47,6 +47,55 @@ func IsStdDuration(field *google_protobuf.FieldDescriptorProto) bool {
 	return proto.GetBoolExtension(field.Options, E_Stdduration, false)
 }
 
+func IsStdDouble(field *google_protobuf.FieldDescriptorProto) bool {
+	return proto.GetBoolExtension(field.Options, E_Wktpointer, false) && *field.TypeName == ".google.protobuf.DoubleValue"
+}
+
+func IsStdFloat(field *google_protobuf.FieldDescriptorProto) bool {
+	return proto.GetBoolExtension(field.Options, E_Wktpointer, false) && *field.TypeName == ".google.protobuf.FloatValue"
+}
+
+func IsStdInt64(field *google_protobuf.FieldDescriptorProto) bool {
+	return proto.GetBoolExtension(field.Options, E_Wktpointer, false) && *field.TypeName == ".google.protobuf.Int64Value"
+}
+
+func IsStdUInt64(field *google_protobuf.FieldDescriptorProto) bool {
+	return proto.GetBoolExtension(field.Options, E_Wktpointer, false) && *field.TypeName == ".google.protobuf.UInt64Value"
+}
+
+func IsStdInt32(field *google_protobuf.FieldDescriptorProto) bool {
+	return proto.GetBoolExtension(field.Options, E_Wktpointer, false) && *field.TypeName == ".google.protobuf.Int32Value"
+}
+
+func IsStdUInt32(field *google_protobuf.FieldDescriptorProto) bool {
+	return proto.GetBoolExtension(field.Options, E_Wktpointer, false) && *field.TypeName == ".google.protobuf.UInt32Value"
+}
+
+func IsStdBool(field *google_protobuf.FieldDescriptorProto) bool {
+	return proto.GetBoolExtension(field.Options, E_Wktpointer, false) && *field.TypeName == ".google.protobuf.BoolValue"
+}
+
+func IsStdString(field *google_protobuf.FieldDescriptorProto) bool {
+	return proto.GetBoolExtension(field.Options, E_Wktpointer, false) && *field.TypeName == ".google.protobuf.StringValue"
+}
+
+func IsStdBytes(field *google_protobuf.FieldDescriptorProto) bool {
+	return proto.GetBoolExtension(field.Options, E_Wktpointer, false) && *field.TypeName == ".google.protobuf.BytesValue"
+}
+
+func IsStdType(field *google_protobuf.FieldDescriptorProto) bool {
+	return (IsStdTime(field) || IsStdDuration(field) ||
+		IsStdDouble(field) || IsStdFloat(field) ||
+		IsStdInt64(field) || IsStdUInt64(field) ||
+		IsStdInt32(field) || IsStdUInt32(field) ||
+		IsStdBool(field) ||
+		IsStdString(field) || IsStdBytes(field))
+}
+
+func IsWktPtr(field *google_protobuf.FieldDescriptorProto) bool {
+	return proto.GetBoolExtension(field.Options, E_Wktpointer, false)
+}
+
 func NeedsNilCheck(proto3 bool, field *google_protobuf.FieldDescriptorProto) bool {
 	nullable := IsNullable(field)
 	if field.IsMessage() || IsCustomType(field) {
@@ -88,6 +137,14 @@ func IsCastValue(field *google_protobuf.FieldDescriptorProto) bool {
 		return true
 	}
 	return false
+}
+
+func HasEnumDecl(file *google_protobuf.FileDescriptorProto, enum *google_protobuf.EnumDescriptorProto) bool {
+	return proto.GetBoolExtension(enum.Options, E_Enumdecl, proto.GetBoolExtension(file.Options, E_EnumdeclAll, true))
+}
+
+func HasTypeDecl(file *google_protobuf.FileDescriptorProto, message *google_protobuf.DescriptorProto) bool {
+	return proto.GetBoolExtension(message.Options, E_Typedecl, proto.GetBoolExtension(file.Options, E_TypedeclAll, true))
 }
 
 func GetCustomType(field *google_protobuf.FieldDescriptorProto) string {
@@ -326,9 +383,6 @@ func HasExtensionsMap(file *google_protobuf.FileDescriptorProto, message *google
 }
 
 func HasUnrecognized(file *google_protobuf.FileDescriptorProto, message *google_protobuf.DescriptorProto) bool {
-	if IsProto3(file) {
-		return false
-	}
 	return proto.GetBoolExtension(message.Options, E_GoprotoUnrecognized, proto.GetBoolExtension(file.Options, E_GoprotoUnrecognizedAll, true))
 }
 
@@ -342,4 +396,20 @@ func ImportsGoGoProto(file *google_protobuf.FileDescriptorProto) bool {
 
 func HasCompare(file *google_protobuf.FileDescriptorProto, message *google_protobuf.DescriptorProto) bool {
 	return proto.GetBoolExtension(message.Options, E_Compare, proto.GetBoolExtension(file.Options, E_CompareAll, false))
+}
+
+func RegistersGolangProto(file *google_protobuf.FileDescriptorProto) bool {
+	return proto.GetBoolExtension(file.Options, E_GoprotoRegistration, false)
+}
+
+func HasMessageName(file *google_protobuf.FileDescriptorProto, message *google_protobuf.DescriptorProto) bool {
+	return proto.GetBoolExtension(message.Options, E_Messagename, proto.GetBoolExtension(file.Options, E_MessagenameAll, false))
+}
+
+func HasSizecache(file *google_protobuf.FileDescriptorProto, message *google_protobuf.DescriptorProto) bool {
+	return proto.GetBoolExtension(message.Options, E_GoprotoSizecache, proto.GetBoolExtension(file.Options, E_GoprotoSizecacheAll, true))
+}
+
+func HasUnkeyed(file *google_protobuf.FileDescriptorProto, message *google_protobuf.DescriptorProto) bool {
+	return proto.GetBoolExtension(message.Options, E_GoprotoUnkeyed, proto.GetBoolExtension(file.Options, E_GoprotoUnkeyedAll, true))
 }

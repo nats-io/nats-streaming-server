@@ -1,4 +1,4 @@
-// Copyright 2017-2018 The NATS Authors
+// Copyright 2017-2019 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,20 +15,20 @@ package server
 
 import (
 	"fmt"
-	"github.com/nats-io/go-nats-streaming/pb"
 	"github.com/nats-io/nuid"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	natsd "github.com/nats-io/gnatsd/server"
-	natsdTest "github.com/nats-io/gnatsd/test"
-	"github.com/nats-io/go-nats"
-	"github.com/nats-io/go-nats-streaming"
+	natsd "github.com/nats-io/nats-server/v2/server"
+	natsdTest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nats-streaming-server/util"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/stan.go"
+	"github.com/nats-io/stan.go/pb"
 )
 
 func setPartitionsVarsForTest() {
@@ -706,9 +706,19 @@ func TestPartitionsRaceOnPub(t *testing.T) {
 	}
 	defer nc.Close()
 
+	s.mu.Lock()
 	pubSubj := fmt.Sprintf("%s.foo", s.info.Publish)
 	pubReq := &pb.PubMsg{ClientID: clientName, Subject: "foo", Data: []byte("hello")}
 	pubNuid := nuid.New()
+
+	connSubj := s.info.Discovery
+	connReq := &pb.ConnectRequest{ClientID: clientName, HeartbeatInbox: nats.NewInbox()}
+	connBytes, _ := connReq.Marshal()
+
+	closeSubj := s.info.Close
+	closeReq := &pb.CloseRequest{ClientID: clientName}
+	closeBytes, _ := closeReq.Marshal()
+	s.mu.Unlock()
 
 	// Repeat the test, because even with bug, it would be possible
 	// that the connection request is still processed first, which
@@ -752,12 +762,16 @@ func TestPartitionsRaceOnPub(t *testing.T) {
 			}
 			checkKnownInvalidMap(t, s, 1, clientName)
 
-			// Now connect
-			sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+			// Now connect (using bare connect so that we don't use connID)
+			resp, err = nc.Request(connSubj, connBytes, time.Second)
 			if err != nil {
 				t.Fatalf("Error on connect: %v", err)
 			}
-			defer sc.Close()
+			connResp := &pb.ConnectResponse{}
+			connResp.Unmarshal(resp.Data)
+			if connResp.Error != "" {
+				t.Fatalf("Connect error: %s", connResp.Error)
+			}
 			// This should clear the knownInvalid map
 			checkKnownInvalidMap(t, s, 0, "")
 
@@ -772,6 +786,16 @@ func TestPartitionsRaceOnPub(t *testing.T) {
 				t.Fatalf("Connection %d - Error on publish: %v", (i + 1), pubResp.Error)
 			}
 			checkWaitOnRegisterMap(t, s, 0)
+
+			resp, err = nc.Request(closeSubj, closeBytes, time.Second)
+			if err != nil {
+				t.Fatalf("Error on request: %v", err)
+			}
+			connCloseResp := &pb.ConnectResponse{}
+			connCloseResp.Unmarshal(resp.Data)
+			if connCloseResp.Error != "" {
+				t.Fatalf("Error on close: %s", connCloseResp.Error)
+			}
 		}()
 	}
 }
@@ -800,8 +824,18 @@ func TestPartitionsRaceOnSub(t *testing.T) {
 	}
 	defer nc.Close()
 
+	s.mu.Lock()
 	subSubj := s.info.Subscribe
 	subReq := &pb.SubscriptionRequest{ClientID: clientName, Subject: "foo", AckWaitInSecs: 30, MaxInFlight: 1}
+
+	connSubj := s.info.Discovery
+	connReq := &pb.ConnectRequest{ClientID: clientName, HeartbeatInbox: nats.NewInbox()}
+	connBytes, _ := connReq.Marshal()
+
+	closeSubj := s.info.Close
+	closeReq := &pb.CloseRequest{ClientID: clientName}
+	closeBytes, _ := closeReq.Marshal()
+	s.mu.Unlock()
 
 	// Repeat the test, because even with bug, it would be possible
 	// that the connection request is still processed first, which
@@ -845,12 +879,16 @@ func TestPartitionsRaceOnSub(t *testing.T) {
 			}
 			checkKnownInvalidMap(t, s, 1, clientName)
 
-			// Now connect
-			sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
+			// Now connect (using bare connect so that we don't use connID)
+			resp, err = nc.Request(connSubj, connBytes, time.Second)
 			if err != nil {
 				t.Fatalf("Error on connect: %v", err)
 			}
-			defer sc.Close()
+			connResp := &pb.ConnectResponse{}
+			connResp.Unmarshal(resp.Data)
+			if connResp.Error != "" {
+				t.Fatalf("Connect error: %s", connResp.Error)
+			}
 			// SHould be removed from map
 			checkKnownInvalidMap(t, s, 0, "")
 
@@ -865,6 +903,16 @@ func TestPartitionsRaceOnSub(t *testing.T) {
 				t.Fatalf("Connection %d - Error on subscribe: %v", (i + 1), subResp.Error)
 			}
 			checkWaitOnRegisterMap(t, s, 0)
+
+			resp, err = nc.Request(closeSubj, closeBytes, time.Second)
+			if err != nil {
+				t.Fatalf("Error on request: %v", err)
+			}
+			connCloseResp := &pb.ConnectResponse{}
+			connCloseResp.Unmarshal(resp.Data)
+			if connCloseResp.Error != "" {
+				t.Fatalf("Error on close: %s", connCloseResp.Error)
+			}
 		}()
 	}
 }

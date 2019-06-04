@@ -1,4 +1,4 @@
-// Copyright 2016-2018 The NATS Authors
+// Copyright 2016-2019 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -30,16 +30,15 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
-	natsdLogger "github.com/nats-io/gnatsd/logger"
-	"github.com/nats-io/gnatsd/server"
-	"github.com/nats-io/go-nats"
-	"github.com/nats-io/go-nats-streaming/pb"
-	"github.com/nats-io/nuid"
-
+	natsdLogger "github.com/nats-io/nats-server/v2/logger"
+	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nats-streaming-server/util"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nuid"
+	"github.com/nats-io/stan.go/pb"
 )
 
 // A single NATS Streaming Server
@@ -47,7 +46,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.14.3"
+	VERSION = "0.15.0-RC01"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"

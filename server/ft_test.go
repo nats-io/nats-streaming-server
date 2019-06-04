@@ -1,4 +1,4 @@
-// Copyright 2017-2018 The NATS Authors
+// Copyright 2017-2019 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -24,11 +24,11 @@ import (
 	"testing"
 	"time"
 
-	natsdTest "github.com/nats-io/gnatsd/test"
-	"github.com/nats-io/go-nats"
-	"github.com/nats-io/go-nats-streaming"
+	natsdTest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/stan.go"
 )
 
 // A mock store that we use to override GetExclusiveLock() behavior.
