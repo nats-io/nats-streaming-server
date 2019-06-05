@@ -825,13 +825,13 @@ various general statistics.
 ```
 {
   "cluster_id": "test-cluster",
-  "server_id": "xMp6S8ujCdq1f6K1zLQ7Jx",
-  "version": "0.14.3",
+  "server_id": "NSqMILe1E8aoN8H9N9EMlx",
+  "version": "0.15.1",
   "go": "go1.11.10",
   "state": "STANDALONE",
-  "now": "2019-05-31T10:40:20.103701-06:00",
-  "start_time": "2019-05-31T10:40:17.72128-06:00",
-  "uptime": "2s",
+  "now": "2019-06-05T12:42:03.125071-06:00",
+  "start_time": "2019-06-05T12:41:50.091142-06:00",
+  "uptime": "13s",
   "clients": 0,
   "subscriptions": 0,
   "channels": 0,
@@ -845,14 +845,14 @@ Here is an example:
 ```
 {
   "cluster_id": "test-cluster",
-  "server_id": "tD1uT9RDU117EnhbjfYiWy",
-  "version": "0.14.3",
+  "server_id": "4e0SiYIpAp2AfvnoVC9Muo",
+  "version": "0.15.1",
   "go": "go1.11.10",
   "state": "CLUSTERED",
   "role": "Follower",
-  "now": "2019-05-31T10:40:46.762166-06:00",
-  "start_time": "2019-05-31T10:40:43.690739-06:00",
-  "uptime": "3s",
+  "now": "2019-06-05T12:43:17.014304-06:00",
+  "start_time": "2019-06-05T12:43:14.710972-06:00",
+  "uptime": "2s",
   "clients": 0,
   "subscriptions": 0,
   "channels": 0,
@@ -1174,26 +1174,27 @@ The NATS Streaming Server embeds a NATS Server. Starting the server with no argu
 
 ```
 > ./nats-streaming-server
-[45214] 2019/05/31 10:58:21.697786 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.14.3
-[45214] 2019/05/31 10:58:21.697835 [INF] STREAM: ServerID: pshy3fbo9AuEtXcLvjwfQQ
-[45214] 2019/05/31 10:58:21.697837 [INF] STREAM: Go version: go1.11.10
-[45214] 2019/05/31 10:58:21.697839 [INF] STREAM: Git commit: [not set]
-[45214] 2019/05/31 10:58:21.698338 [INF] Starting nats-server version 1.4.1
-[45214] 2019/05/31 10:58:21.698345 [INF] Git commit [not set]
-[45214] 2019/05/31 10:58:21.698520 [INF] Listening for client connections on 0.0.0.0:4222
-[45214] 2019/05/31 10:58:21.698525 [INF] Server is ready
-[45214] 2019/05/31 10:58:21.726481 [INF] STREAM: Recovering the state...
-[45214] 2019/05/31 10:58:21.726495 [INF] STREAM: No recovered state
-[45214] 2019/05/31 10:58:21.982074 [INF] STREAM: Message store is MEMORY
-[45214] 2019/05/31 10:58:21.982110 [INF] STREAM: ---------- Store Limits ----------
-[45214] 2019/05/31 10:58:21.982113 [INF] STREAM: Channels:                  100 *
-[45214] 2019/05/31 10:58:21.982115 [INF] STREAM: --------- Channels Limits --------
-[45214] 2019/05/31 10:58:21.982117 [INF] STREAM:   Subscriptions:          1000 *
-[45214] 2019/05/31 10:58:21.982119 [INF] STREAM:   Messages     :       1000000 *
-[45214] 2019/05/31 10:58:21.982121 [INF] STREAM:   Bytes        :     976.56 MB *
-[45214] 2019/05/31 10:58:21.982123 [INF] STREAM:   Age          :     unlimited *
-[45214] 2019/05/31 10:58:21.982125 [INF] STREAM:   Inactivity   :     unlimited *
-[45214] 2019/05/31 10:58:21.982126 [INF] STREAM: ----------------------------------
+[93817] 2019/06/05 12:44:10.895877 [INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.15.1
+[93817] 2019/06/05 12:44:10.895928 [INF] STREAM: ServerID: TXER4DTyF8rzvL8vJdZhfp
+[93817] 2019/06/05 12:44:10.895930 [INF] STREAM: Go version: go1.11.10
+[93817] 2019/06/05 12:44:10.895933 [INF] STREAM: Git commit: [not set]
+[93817] 2019/06/05 12:44:10.896500 [INF] Starting nats-server version 2.0.0
+[93817] 2019/06/05 12:44:10.896508 [INF] Git commit [not set]
+[93817] 2019/06/05 12:44:10.896694 [INF] Listening for client connections on 0.0.0.0:4222
+[93817] 2019/06/05 12:44:10.896698 [INF] Server id is NC2GAQMFV5JQVZUZAHQ3VH3G6ZVHRF3XT7IRWI3KFBRWAL5XVUW6RMJ6
+[93817] 2019/06/05 12:44:10.896701 [INF] Server is ready
+[93817] 2019/06/05 12:44:10.928786 [INF] STREAM: Recovering the state...
+[93817] 2019/06/05 12:44:10.928805 [INF] STREAM: No recovered state
+[93817] 2019/06/05 12:44:11.179257 [INF] STREAM: Message store is MEMORY
+[93817] 2019/06/05 12:44:11.179319 [INF] STREAM: ---------- Store Limits ----------
+[93817] 2019/06/05 12:44:11.179325 [INF] STREAM: Channels:                  100 *
+[93817] 2019/06/05 12:44:11.179329 [INF] STREAM: --------- Channels Limits --------
+[93817] 2019/06/05 12:44:11.179333 [INF] STREAM:   Subscriptions:          1000 *
+[93817] 2019/06/05 12:44:11.179336 [INF] STREAM:   Messages     :       1000000 *
+[93817] 2019/06/05 12:44:11.179340 [INF] STREAM:   Bytes        :     976.56 MB *
+[93817] 2019/06/05 12:44:11.179344 [INF] STREAM:   Age          :     unlimited *
+[93817] 2019/06/05 12:44:11.179347 [INF] STREAM:   Inactivity   :     unlimited *
+[93817] 2019/06/05 12:44:11.179351 [INF] STREAM: ----------------------------------
 ```
 
 The server will be started and listening for client connections on port 4222 (the default) from all available interfaces. The logs will be displayed to stderr as shown above.
@@ -1770,13 +1771,14 @@ Below is what would be displayed with the above store limits configuration. Noti
 how `foo.bar.>` is indented compared to `foo.>` to show the inheritance.
 
 ```
-[INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.14.3
-[INF] STREAM: ServerID: GTYa5pcjZnQ6aSoO1PWMmT
+[INF] STREAM: Starting nats-streaming-server[test-cluster] version 0.15.1
+[INF] STREAM: ServerID: Y4y597WVLrWTxKykwx1L5g
 [INF] STREAM: Go version: go1.11.10
 [INF] STREAM: Git commit: [not set]
-[INF] Starting nats-server version 1.4.1
+[INF] Starting nats-server version 2.0.0
 [INF] Git commit [not set]
 [INF] Listening for client connections on 0.0.0.0:4222
+[INF] Server id is NATWWNPXILVPC7XI6SILWRP5GYIG2Q7PA5NDEKE5ZOBM5K5R5WMTKYH4
 [INF] Server is ready
 [INF] STREAM: Recovering the state...
 [INF] STREAM: No recovered state
