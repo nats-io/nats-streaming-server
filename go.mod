@@ -8,7 +8,7 @@ require (
 	github.com/hashicorp/go-msgpack v0.5.5
 	github.com/hashicorp/raft v1.1.0
 	github.com/lib/pq v1.1.1
-	github.com/nats-io/nats-server/v2 v2.0.0-RC19
+	github.com/nats-io/nats-server/v2 v2.0.0
 	github.com/nats-io/nats.go v1.8.1
 	github.com/nats-io/nuid v1.0.1
 	github.com/nats-io/stan.go v0.4.5
@@ -16,4 +16,5 @@ require (
 	go.etcd.io/bbolt v1.3.2
 	golang.org/x/crypto v0.0.0-20190530122614-20be4c3c3ed5
 	golang.org/x/sys v0.0.0-20190412213103-97732733099d
+	google.golang.org/appengine v1.6.0 // indirect
 )
