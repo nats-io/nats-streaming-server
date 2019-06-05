@@ -22,7 +22,7 @@ github.com/lib/pq/oid
 github.com/lib/pq/scram
 # github.com/nats-io/jwt v0.2.6
 github.com/nats-io/jwt
-# github.com/nats-io/nats-server/v2 v2.0.0-RC19
+# github.com/nats-io/nats-server/v2 v2.0.0
 github.com/nats-io/nats-server/v2/server
 github.com/nats-io/nats-server/v2/logger
 github.com/nats-io/nats-server/v2/conf
