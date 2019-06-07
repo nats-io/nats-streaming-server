@@ -573,7 +573,7 @@ that the RAFT state can be recovered along with the Streaming state.
 
 To minimize the single point of failure, NATS Streaming server can be run in Fault Tolerance mode. It works by having a group
 of servers with one acting as the active server (accessing the store) and handling all communication with clients, and all others
-acting as standby servers. 
+acting as standby servers.
 
 It is important to note that is not possible to run Nats Stream as Fault Tolerance mode and Clustering mode at the same time.
 
@@ -2023,6 +2023,31 @@ is provided in this repo:
 
 ```
 mysql -u nss -p -D nss_db -e "$(cat ./mysql.db.sql)"
+```
+
+#### SQL Store Example - Postgres
+Run a local dockerized instance of postgres if you do not already have one:
+
+```
+ID=$(docker run -d -e POSTGRES_PASSWORD=password -p 5432:5432 postgres)
+```
+
+[Optional] Drop any previous tables to clear data from previous sessions:
+
+```
+cat drop_postgres.db.sql | docker exec -i $ID psql -h 127.0.1.1 -U postgres
+```
+
+Run the database migrations Run the appropriate database migrations:
+
+```
+cat postgres.db.sql | docker exec -i $ID psql -h 127.0.1.1 -U postgres
+```
+
+Run the nats streaming server with postgres at the sql_source:
+
+```
+DOCKER_BRIDGE_IP=$(docker inspect --format '{{(index .IPAM.Config 0).Gateway}}' bridge) docker run -d --name nats-streaming -p 4222:4222 -p 8222:32768 nats-streaming-local -SDV --store sql --sql_driver postgres --sql_source="user=postgres password=postgres host=$DOCKER_BRIDGE_IP port=5432 sslmode=disable"
 ```
 
 #### SQL Store Options
