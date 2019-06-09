@@ -2038,7 +2038,7 @@ ID=$(docker run -d -e POSTGRES_PASSWORD=password -p 5432:5432 postgres)
 cat drop_postgres.db.sql | docker exec -i $ID psql -h 127.0.1.1 -U postgres
 ```
 
-Run the database migrations Run the appropriate database migrations:
+Run the appropriate database migrations for Postgres:
 
 ```
 cat postgres.db.sql | docker exec -i $ID psql -h 127.0.1.1 -U postgres
