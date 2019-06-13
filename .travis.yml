@@ -24,7 +24,7 @@ before_script:
 - $(exit $(go fmt $EXCLUDE_VENDOR | wc -l))
 - go vet $EXCLUDE_VENDOR
 - $(exit $(misspell -locale US . | grep -v "vendor/" | wc -l))
-- staticcheck -ignore "$(cat staticcheck.ignore)" $EXCLUDE_VENDOR_AND_PROTO_DIR
+- staticcheck $EXCLUDE_VENDOR_AND_PROTO_DIR
 script:
 - mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;"
 - go test -i $EXCLUDE_VENDOR
