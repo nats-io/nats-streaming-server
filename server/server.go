@@ -3238,14 +3238,14 @@ func findBestQueueSub(sl []*subState) *subState {
 
 // Send a message to the queue group
 // Assumes qs lock held for write
-func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force bool) (*subState, bool, bool) {
+func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force bool) (*subState, bool) {
 	sub := findBestQueueSub(qs.subs)
 	if sub == nil {
-		return nil, false, false
+		return nil, false
 	}
 	sub.Lock()
 	wasStalled := sub.stalled
-	didSend, sendMore := s.sendMsgToSub(sub, m, force)
+	didSend, _ := s.sendMsgToSub(sub, m, force)
 	// If this is not a redelivery and the sub was not stalled, but now is,
 	// bump the number of stalled members.
 	if !force && !wasStalled && sub.stalled {
@@ -3255,7 +3255,7 @@ func (s *StanServer) sendMsgToQueueGroup(qs *queueState, m *pb.MsgProto, force b
 		qs.lastSent = sub.LastSent
 	}
 	sub.Unlock()
-	return sub, didSend, sendMore
+	return sub, didSend
 }
 
 // processMsg will process a message, and possibly send to clients, etc.
@@ -3467,7 +3467,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 		// otherwise this could cause a message to be redelivered to multiple members.
 		if !isClustered && qs != nil && !isStartup {
 			qs.Lock()
-			pick, sent, _ = s.sendMsgToQueueGroup(qs, m, forceDelivery)
+			pick, sent = s.sendMsgToQueueGroup(qs, m, forceDelivery)
 			qs.Unlock()
 			if pick == nil {
 				s.log.Errorf("[Client:%s] Unable to find queue subscriber for subid=%d", clientID, subID)
@@ -5108,7 +5108,7 @@ func (s *StanServer) sendAvailableMessagesToQueue(c *channel, qs *queueState) {
 		if nextMsg == nil {
 			break
 		}
-		if _, sent, sendMore := s.sendMsgToQueueGroup(qs, nextMsg, honorMaxInFlight); !sent || !sendMore {
+		if _, sent := s.sendMsgToQueueGroup(qs, nextMsg, honorMaxInFlight); !sent {
 			break
 		}
 	}
