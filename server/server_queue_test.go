@@ -1030,3 +1030,53 @@ func TestPersistentStoreNewOnHoldClearedAfterRestart(t *testing.T) {
 		}
 	}
 }
+
+func TestQueueGroupNotStalledOnMemberLeaving(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc1 := NewDefaultConnection(t)
+	defer sc1.Close()
+
+	sc2, err := stan.Connect(clusterName, clientName+"2")
+	if err != nil {
+		t.Fatalf("Error connecting: %v", err)
+	}
+	defer sc2.Close()
+
+	total := 1000
+	for i := 0; i < total; i++ {
+		sc1.Publish("foo", []byte("hello"))
+	}
+
+	sub1GotIt := make(chan struct{}, 1)
+	if _, err := sc1.QueueSubscribe("foo", "bar", func(m *stan.Msg) {
+		select {
+		case sub1GotIt <- struct{}{}:
+		default:
+		}
+	}, stan.DeliverAllAvailable(), stan.MaxInflight(5)); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	ch := make(chan struct{}, 1)
+	waitForSub1 := true
+	if _, err := sc2.QueueSubscribe("foo", "bar", func(m *stan.Msg) {
+		if waitForSub1 {
+			waitForSub1 = false
+			<-sub1GotIt
+			sc1.Close()
+		}
+		if m.Sequence == uint64(total) {
+			ch <- struct{}{}
+		}
+	}, stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Did not receive all msgs")
+	}
+}
