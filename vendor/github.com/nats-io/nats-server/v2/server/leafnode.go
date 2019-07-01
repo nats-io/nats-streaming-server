@@ -166,7 +166,7 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 
 	var conn net.Conn
 
-	const connErrFmt = "Error trying to connect as leafnode to remote server (attempt %v): %v"
+	const connErrFmt = "Error trying to connect as leafnode to remote server %q (attempt %v): %v"
 
 	attempts := 0
 	for s.isRunning() && s.remoteLeafNodeStillValid(remote) {
@@ -177,15 +177,15 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 			if url != rURL.Host {
 				ipStr = fmt.Sprintf(" (%s)", url)
 			}
-			s.Debugf("Trying to connect as leafnode to remote server on %s%s", rURL.Host, ipStr)
+			s.Debugf("Trying to connect as leafnode to remote server on %q%s", rURL.Host, ipStr)
 			conn, err = net.DialTimeout("tcp", url, dialTimeout)
 		}
 		if err != nil {
 			attempts++
 			if s.shouldReportConnectErr(firstConnect, attempts) {
-				s.Errorf(connErrFmt, attempts, err)
+				s.Errorf(connErrFmt, rURL.Host, attempts, err)
 			} else {
-				s.Debugf(connErrFmt, attempts, err)
+				s.Debugf(connErrFmt, rURL.Host, attempts, err)
 			}
 			select {
 			case <-s.quitCh:
@@ -202,6 +202,12 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 		// We have a connection here to a remote server.
 		// Go ahead and create our leaf node and return.
 		s.createLeafNode(conn, remote)
+
+		// We will put this in the normal log if first connect, does not force -DV mode to know
+		// that the connect worked.
+		if firstConnect {
+			s.Noticef("Connected leafnode to %q", remote.RemoteLeafOpts.URL.Hostname())
+		}
 		return
 	}
 }
@@ -611,6 +617,8 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 
 	c.mu.Unlock()
 
+	c.Debugf("Leafnode connection created")
+
 	// Update server's accounting here if we solicited.
 	// Also send our local subs.
 	if solicited {
@@ -620,8 +628,6 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 		s.initLeafNodeSmap(c)
 		c.sendAllAccountSubs()
 	}
-
-	c.Noticef("Leafnode connection created")
 
 	return c
 }
@@ -1187,7 +1193,7 @@ func (c *client) processLeafMsgArgs(trace bool, arg []byte) error {
 		}
 	}
 	if c.pa.size < 0 {
-		return fmt.Errorf("processRoutedMsgArgs Bad or Missing Size: '%s'", args)
+		return fmt.Errorf("processLeafMsgArgs Bad or Missing Size: '%s'", args)
 	}
 
 	// Common ones processed after check for arg length
@@ -1221,6 +1227,11 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 		return
 	}
 
+	// Check to see if we need to map/route to another account.
+	if acc.imports.services != nil {
+		c.checkForImportServices(acc, msg)
+	}
+
 	// Match the subscriptions. We will use our own L1 map if
 	// it's still valid, avoiding contention on the shared sublist.
 	var r *SublistResult
@@ -1249,11 +1260,6 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 				}
 			}
 		}
-	}
-
-	// Check to see if we need to map/route to another account.
-	if acc.imports.services != nil {
-		c.checkForImportServices(acc, msg)
 	}
 
 	// Collect queue names if needed.

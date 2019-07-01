@@ -980,7 +980,7 @@ func (s *Server) HandleRoot(w http.ResponseWriter, r *http.Request) {
 	<a href=/routez>routez</a><br/>
 	<a href=/subsz>subsz</a><br/>
     <br/>
-    <a href=http://nats.io/documentation/server/monitoring/>help</a>
+    <a href=https://nats-io.github.io/docs/nats_server/monitoring.html>help</a>
   </body>
 </html>`)
 }

@@ -1,4 +1,4 @@
-// Copyright 2018 The NATS Authors
+// Copyright 2018-2019 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"regexp"
+	"strings"
 
 	"github.com/nats-io/jwt"
 	"github.com/nats-io/nkeys"
@@ -24,11 +25,19 @@ import (
 
 var nscDecoratedRe = regexp.MustCompile(`\s*(?:(?:[-]{3,}[^\n]*[-]{3,}\n)(.+)(?:\n\s*[-]{3,}[^\n]*[-]{3,}[\n]*))`)
 
-// readOperatorJWT
-func readOperatorJWT(jwtfile string) (*jwt.OperatorClaims, error) {
+// All JWTs once encoded start with this
+const jwtPrefix = "eyJ"
+
+// ReadOperatorJWT will read a jwt file for an operator claim. This can be a decorated file.
+func ReadOperatorJWT(jwtfile string) (*jwt.OperatorClaims, error) {
 	contents, err := ioutil.ReadFile(jwtfile)
 	if err != nil {
-		return nil, err
+		// Check to see if the JWT has been inlined.
+		if !strings.HasPrefix(jwtfile, jwtPrefix) {
+			return nil, err
+		}
+		// We may have an inline jwt here.
+		contents = []byte(jwtfile)
 	}
 	defer wipeSlice(contents)
 
