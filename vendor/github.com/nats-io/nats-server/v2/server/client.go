@@ -35,7 +35,7 @@ import (
 const (
 	// CLIENT is an end user.
 	CLIENT = iota
-	// ROUTER is another router in the cluster.
+	// ROUTER represents another server in the cluster.
 	ROUTER
 	// GATEWAY is a link between 2 clusters.
 	GATEWAY
@@ -202,8 +202,9 @@ type client struct {
 
 // Struct for PING initiation from the server.
 type pinfo struct {
-	tmr *time.Timer
-	out int
+	tmr  *time.Timer
+	last time.Time
+	out  int
 }
 
 // outbound holds pending data for a socket.
@@ -1461,6 +1462,10 @@ func (c *client) processPing() {
 	}
 	c.sendPong()
 
+	// Record this to suppress us sending one if this
+	// is within a given time interval for activity.
+	c.ping.last = time.Now()
+
 	// If not a CLIENT, we are done
 	if c.kind != CLIENT {
 		c.mu.Unlock()
@@ -1562,11 +1567,13 @@ func (c *client) processPub(trace bool, arg []byte) error {
 	default:
 		return fmt.Errorf("processPub Parse Error: '%s'", arg)
 	}
+	// If number overruns an int64, parseSize() will have returned a negative value
 	if c.pa.size < 0 {
 		return fmt.Errorf("processPub Bad or Missing Size: '%s'", arg)
 	}
 	maxPayload := atomic.LoadInt32(&c.mpay)
-	if maxPayload != jwt.NoLimit && int32(c.pa.size) > maxPayload {
+	// Use int64() to avoid int32 overrun...
+	if maxPayload != jwt.NoLimit && int64(c.pa.size) > int64(maxPayload) {
 		c.maxPayloadViolation(c.pa.size, maxPayload)
 		return ErrMaxPayload
 	}
@@ -2264,6 +2271,11 @@ func (c *client) processInboundClientMsg(msg []byte) {
 		return
 	}
 
+	// Check to see if we need to map/route to another account.
+	if c.acc.imports.services != nil {
+		c.checkForImportServices(c.acc, msg)
+	}
+
 	// Match the subscriptions. We will use our own L1 map if
 	// it's still valid, avoiding contention on the shared sublist.
 	var r *SublistResult
@@ -2292,11 +2304,6 @@ func (c *client) processInboundClientMsg(msg []byte) {
 				}
 			}
 		}
-	}
-
-	// Check to see if we need to map/route to another account.
-	if c.acc.imports.services != nil {
-		c.checkForImportServices(c.acc, msg)
 	}
 
 	var qnames [][]byte
@@ -2328,6 +2335,7 @@ func (c *client) checkForImportServices(acc *Account, msg []byte) {
 	if acc == nil || acc.imports.services == nil {
 		return
 	}
+
 	acc.mu.RLock()
 	rm := acc.imports.services[string(c.pa.subject)]
 	invalid := rm != nil && rm.invalid
@@ -2500,25 +2508,25 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 		}
 
 	selectQSub:
-
 		// We will hold onto remote or lead qsubs when we are coming from
 		// a route or a leaf node just in case we can no longer do local delivery.
 		var rsub *subscription
 
 		// Find a subscription that is able to deliver this message
 		// starting at a random index.
-		startIndex := c.in.prand.Intn(len(qsubs))
-		for i := 0; i < len(qsubs); i++ {
+		for startIndex, i := c.in.prand.Intn(len(qsubs)), 0; i < len(qsubs); i++ {
 			index := (startIndex + i) % len(qsubs)
 			sub := qsubs[index]
 			if sub == nil {
 				continue
 			}
-			kind := sub.client.kind
+
 			// Potentially sending to a remote sub across a route or leaf node.
-			if kind == ROUTER || kind == LEAF {
-				if c.kind == ROUTER || c.kind == LEAF || (c.kind == CLIENT && kind == LEAF) {
-					// We just came from a route/leaf, so skip and prefer local subs.
+			// We may want to skip this and prefer locals depending on where we
+			// were sourced from.
+			if src, dst := c.kind, sub.client.kind; dst == ROUTER || dst == LEAF {
+				if src == ROUTER || ((src == LEAF || src == CLIENT) && dst == LEAF) {
+					// We just came from a route, so skip and prefer local subs.
 					// Keep our first rsub in case all else fails.
 					if rsub == nil {
 						rsub = sub
@@ -2634,10 +2642,17 @@ func (c *client) processPingTimer() {
 
 	c.Debugf("%s Ping Timer", c.typeString())
 
-	// If we have had activity within the PingInterval no
-	// need to send a ping.
-	if delta := time.Since(c.last); delta < c.srv.getOpts().PingInterval {
-		c.Debugf("Delaying PING due to activity %v ago", delta.Round(time.Second))
+	// If we have had activity within the PingInterval then
+	// there is no need to send a ping. This can be client data
+	// or if we received a ping from the other side.
+	pingInterval := c.srv.getOpts().PingInterval
+	now := time.Now()
+	needRTT := c.rtt == 0 || now.Sub(c.rttStart) > DEFAULT_RTT_MEASUREMENT_INTERVAL
+
+	if delta := now.Sub(c.last); delta < pingInterval && !needRTT {
+		c.Debugf("Delaying PING due to client activity %v ago", delta.Round(time.Second))
+	} else if delta := now.Sub(c.ping.last); delta < pingInterval && !needRTT {
+		c.Debugf("Delaying PING due to remote ping %v ago", delta.Round(time.Second))
 	} else {
 		// Check for violation
 		if c.ping.out+1 > c.srv.getOpts().MaxPingsOut {
@@ -2652,6 +2667,20 @@ func (c *client) processPingTimer() {
 
 	// Reset to fire again.
 	c.setPingTimer()
+}
+
+// Lock should be held
+// We randomize the first one by an offset up to 20%, e.g. 2m ~= max 24s.
+// This is because the clients by default are usually setting same interval
+// and we have alot of cross ping/pongs between clients and servers.
+// We will now suppress the server ping/pong if we have received a client ping.
+func (c *client) setFirstPingTimer(pingInterval time.Duration) {
+	if c.srv == nil {
+		return
+	}
+	addDelay := rand.Int63n(int64(pingInterval / 5))
+	d := pingInterval + time.Duration(addDelay)
+	c.ping.tmr = time.AfterFunc(d, c.processPingTimer)
 }
 
 // Lock should be held
