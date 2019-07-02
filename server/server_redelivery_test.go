@@ -1455,14 +1455,9 @@ func TestQueueRedeliveryAfterMembersCrash(t *testing.T) {
 	defer sc1.Close()
 
 	total := 20
-	count := int32(0)
-	ch := make(chan bool, 1)
-	cb := func(_ *stan.Msg) {
-		if n := int(atomic.AddInt32(&count, 1)); n == total {
-			ch <- true
-		}
-	}
-	if _, err := sc1.QueueSubscribe("foo", "bar", cb,
+
+	if _, err := sc1.QueueSubscribe("foo", "bar", func(_ *stan.Msg) {},
+		stan.SetManualAckMode(),
 		stan.DeliverAllAvailable(),
 		stan.DurableName("dur"),
 		stan.MaxInflight(1),
@@ -1473,7 +1468,8 @@ func TestQueueRedeliveryAfterMembersCrash(t *testing.T) {
 	sc2, nc2 := createConnectionWithNatsOpts(t, "member2")
 	defer nc2.Close()
 	defer sc2.Close()
-	if _, err := sc2.QueueSubscribe("foo", "bar", cb,
+	if _, err := sc2.QueueSubscribe("foo", "bar", func(_ *stan.Msg) {},
+		stan.SetManualAckMode(),
 		stan.DeliverAllAvailable(),
 		stan.DurableName("dur"),
 		stan.MaxInflight(1),
@@ -1485,6 +1481,12 @@ func TestQueueRedeliveryAfterMembersCrash(t *testing.T) {
 	waitForNumSubs(t, s, "member1", 1)
 	waitForNumSubs(t, s, "member2", 1)
 
+	for i := 0; i < 2; i++ {
+		if err := sc1.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+
 	// Simulate crash by closing the NATS connections.
 	nc1.Close()
 	nc2.Close()
@@ -1492,7 +1494,7 @@ func TestQueueRedeliveryAfterMembersCrash(t *testing.T) {
 	// Produce messages
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
-	for i := 0; i < total; i++ {
+	for i := 0; i < total-2; i++ {
 		if err := sc.Publish("foo", []byte("hello")); err != nil {
 			t.Fatalf("Error on publish: %v", err)
 		}
@@ -1512,6 +1514,14 @@ func TestQueueRedeliveryAfterMembersCrash(t *testing.T) {
 	}
 	defer sc2.Close()
 
+	count := int32(0)
+	ch := make(chan bool, 1)
+	cb := func(m *stan.Msg) {
+		if n := int(atomic.AddInt32(&count, 1)); n == total {
+			ch <- true
+		}
+	}
+
 	if _, err := sc1.QueueSubscribe("foo", "bar", cb,
 		stan.DeliverAllAvailable(),
 		stan.DurableName("dur"),
@@ -1530,5 +1540,107 @@ func TestQueueRedeliveryAfterMembersCrash(t *testing.T) {
 	// Wait for messages. It should not take the 60 seconds of AckWait.
 	if err := Wait(ch); err != nil {
 		t.Fatal("Did not get redelivered messages on time")
+	}
+}
+
+func TestQueueRedeliveryWithMsgsReassignedToMemberWithAcksPending(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	// First check that the queue sub leaving is the one that
+	// had a msg with sequence smaller than the pending msg
+	// of the queue sub to which first message is reassigned.
+	for i := 0; i < 2; i++ {
+		sc.Publish("foo", []byte("msg"))
+	}
+
+	subCh := make(chan stan.Subscription, 1)
+	if _, err := sc.QueueSubscribe("foo", "bar",
+		func(m *stan.Msg) {
+			if m.Sequence == 1 && !m.Redelivered {
+				subCh <- m.Sub
+			}
+		},
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(),
+		stan.MaxInflight(1),
+	); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	// Wait for qsub1 to receive message
+	qsub1 := <-subCh
+
+	ch := make(chan bool, 1)
+	if _, err := sc.QueueSubscribe("foo", "bar",
+		func(m *stan.Msg) {
+			if m.Sequence == 2 && !m.Redelivered {
+				qsub1.Close()
+			} else if m.Sequence == 1 && m.Redelivered {
+				ch <- true
+			}
+		},
+		stan.DeliverAllAvailable(),
+		stan.MaxInflight(1),
+		stan.SetManualAckMode(),
+	); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Message 2 was not immediately redelivered")
+	}
+
+	// Now test with situation where the leaving queue sub
+	// has a message with seq higher than the pending msg
+	// of the queue sub the message is reassigned to.
+
+	for i := 0; i < 2; i++ {
+		sc.Publish("baz", []byte("msg"))
+	}
+
+	if _, err := sc.QueueSubscribe("baz", "bar",
+		func(m *stan.Msg) {
+			if m.Redelivered && m.Sequence == 2 {
+				ch <- true
+			} else if m.Sequence == 1 && !m.Redelivered {
+				subCh <- m.Sub
+			}
+		},
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(),
+		stan.MaxInflight(1),
+	); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	// Wait for first qsub to get message seq1
+	<-subCh
+
+	// Now that we got the first message to the first queue sub,
+	// start a new queue sub that will get message 2 and close.
+	// We want message 2 to be redelivered right away to qsub 1
+	if _, err := sc.QueueSubscribe("baz", "bar",
+		func(m *stan.Msg) {
+			if m.Sequence == 2 {
+				m.Sub.Close()
+			}
+		},
+		stan.DeliverAllAvailable(),
+		stan.MaxInflight(1),
+		stan.SetManualAckMode(),
+	); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Message 2 was not immediately redelivered")
 	}
 }
