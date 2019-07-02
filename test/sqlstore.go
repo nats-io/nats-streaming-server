@@ -72,7 +72,7 @@ func CreateSQLDatabase(driver, sourceAdmin, source, dbName string) error {
 }
 
 func loadCreateDatabaseStmts(driver string) ([]string, error) {
-	fileName := "../" + driver + ".db.sql"
+	fileName := "../scripts/" + driver + ".db.sql"
 	file, err := os.Open(fileName)
 	if err != nil {
 		return nil, fmt.Errorf("error opening file: %v", err)
