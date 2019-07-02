@@ -76,7 +76,7 @@ You can update the SQL table manually or run the provided scripts that create th
 and alter the `Clients` table adding the new column. For instance, with MySQL, you would run something similar to:
 
 ```
-mysql -u root nss_db < mysql.db.sql
+mysql -u root nss_db < scripts/mysql.db.sql
 ```
 The above assumes you are in the NATS Streaming Server directory, and the streaming database is called `nss_db`.
 
@@ -2007,7 +2007,7 @@ contains the information required to connect to a specific database on the given
 Note that the NATS Streaming Server does not need root privileges to connect to the database since it does not create
 the database, tables or indexes. This has to be done by the Database Administrator.
 
-We provide 2 files (`mysql.db.sql` and `postgres.db.sql`) that can be used to create the tables and indexes to the
+We provide 2 files (`scripts/mysql.db.sql` and `scripts/postgres.db.sql`) that can be used to create the tables and indexes to the
 database of your choice. However, administrators are free to configure and optimize the database as long as the name of tables
 and columns are preserved, since the NATS Streaming Server is going to issue SQL statements based on those.
 
@@ -2022,7 +2022,7 @@ and selecting the `nss_db` database. We then execute all the SQL statements crea
 is provided in this repo:
 
 ```
-mysql -u nss -p -D nss_db -e "$(cat ./mysql.db.sql)"
+mysql -u nss -p -D nss_db -e "$(cat ./scripts/mysql.db.sql)"
 ```
 
 #### SQL Store Example - Postgres
@@ -2035,13 +2035,13 @@ ID=$(docker run -d -e POSTGRES_PASSWORD=password -p 5432:5432 postgres)
 [Optional] Drop any previous tables to clear data from previous sessions:
 
 ```
-cat drop_postgres.db.sql | docker exec -i $ID psql -h 127.0.1.1 -U postgres
+cat scripts/drop_postgres.db.sql | docker exec -i $ID psql -h 127.0.1.1 -U postgres
 ```
 
 Run the appropriate database migrations for Postgres:
 
 ```
-cat postgres.db.sql | docker exec -i $ID psql -h 127.0.1.1 -U postgres
+cat scripts/postgres.db.sql | docker exec -i $ID psql -h 127.0.1.1 -U postgres
 ```
 
 Run the nats streaming server with postgres at the sql_source:
