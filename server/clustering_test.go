@@ -6450,3 +6450,73 @@ func TestClusteringSQLMsgStoreFlushed(t *testing.T) {
 		t.Fatalf("Expected some messages, got none")
 	}
 }
+
+func TestClusteringQueueMemberPendingCount(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	count := int32(0)
+	if _, err := sc.QueueSubscribe("foo", "bar",
+		func(m *stan.Msg) {
+			if atomic.AddInt32(&count, 1) == 5 {
+				m.Sub.Close()
+			}
+		},
+		stan.SetManualAckMode(),
+		stan.MaxInflight(5)); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	if _, err := sc.QueueSubscribe("foo", "bar",
+		func(m *stan.Msg) {
+			// Delay a bit to give a chance to server to send to qsub1.
+			// If not for this delay, it is likely that this qsub would
+			// receive all messages past message 1.
+			time.Sleep(10 * time.Millisecond)
+		},
+		stan.MaxInflight(5)); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	total := 50
+	for i := 0; i < total; i++ {
+		sc.Publish("foo", []byte("msg"))
+	}
+
+	// Make sure that acksPending on follower get down to 0.
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		subs := s2.clients.getSubs(clientName)
+		if len(subs) != 1 {
+			return fmt.Errorf("Should have only one sub")
+		}
+		sub := subs[0]
+		sub.RLock()
+		numPending := len(sub.acksPending)
+		sub.RUnlock()
+		if numPending != 0 {
+			return fmt.Errorf("Expected no pending, got %v", numPending)
+		}
+		return nil
+	})
+}

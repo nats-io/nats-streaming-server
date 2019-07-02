@@ -3299,11 +3299,14 @@ type byExpire []*pendingMsg
 func (a byExpire) Len() int      { return (len(a)) }
 func (a byExpire) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 func (a byExpire) Less(i, j int) bool {
-	// Always order by sequence since expire could be 0 (in
-	// case of a server restart) but even if it is not, if
-	// expire time happens to be the same, we still want
-	// messages to be ordered by sequence.
-	return a[i].seq < a[j].seq
+	// If expire is 0, it means the server was restarted
+	// and we don't have the expiration time, which will
+	// be set later, or if expiration is identical, then
+	// order by sequence instead.
+	if a[i].expire == 0 || a[j].expire == 0 || a[i].expire == a[j].expire {
+		return a[i].seq < a[j].seq
+	}
+	return a[i].expire < a[j].expire
 }
 
 // Returns an array of pendingMsg ordered by expiration date, unless
