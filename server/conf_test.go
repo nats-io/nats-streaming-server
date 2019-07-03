@@ -117,6 +117,9 @@ func TestParseConfig(t *testing.T) {
 	if opts.FileStoreOpts.ParallelRecovery != 9 {
 		t.Fatalf("Expected ParallelRecovery to be 9, got %v", opts.FileStoreOpts.ParallelRecovery)
 	}
+	if opts.FileStoreOpts.ReadBufferSize != 10 {
+		t.Fatalf("Expected ReadBufferSize to be 10, got %v", opts.FileStoreOpts.ReadBufferSize)
+	}
 	if opts.MaxChannels != 11 {
 		t.Fatalf("Expected MaxChannels to be 11, got %v", opts.MaxChannels)
 	}
@@ -434,6 +437,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "file:{compact_interval:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{compact_min_size:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{buffer_size:false}", wrongTypeErr)
+	expectFailureFor(t, "file:{read_buffer_size:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{crc:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{crc_poly:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{sync:123}", wrongTypeErr)
@@ -545,7 +549,7 @@ func TestParseConfigureOptions(t *testing.T) {
 	}
 
 	// Test bytes values
-	sopts, _ = mustNotFail([]string{"-max_bytes", "100KB", "-mb", "100KB", "-file_compact_min_size", "200KB", "-file_buffer_size", "300KB"})
+	sopts, _ = mustNotFail([]string{"-max_bytes", "100KB", "-mb", "100KB", "-file_compact_min_size", "200KB", "-file_buffer_size", "300KB", "-file_read_buffer_size", "1MB"})
 	if sopts.MaxBytes != 100*1024 {
 		t.Fatalf("Expected max_bytes to be 100KB, got %v", sopts.MaxBytes)
 	}
@@ -554,6 +558,9 @@ func TestParseConfigureOptions(t *testing.T) {
 	}
 	if sopts.FileStoreOpts.BufferSize != 300*1024 {
 		t.Fatalf("Expected file_buffer_size to be 300KB, got %v", sopts.FileStoreOpts.BufferSize)
+	}
+	if sopts.FileStoreOpts.ReadBufferSize != 1024*1024 {
+		t.Fatalf("Expected file_read_buffer_size to be 1MB, got %v", sopts.FileStoreOpts.ReadBufferSize)
 	}
 
 	// Failures with bytes

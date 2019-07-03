@@ -498,6 +498,11 @@ func parseFileOptions(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.FileStoreOpts.ParallelRecovery = int(v.(int64))
+		case "file_read_buffer_size", "read_buffer_size":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.FileStoreOpts.ReadBufferSize = int(v.(int64))
 		}
 	}
 	return nil
@@ -592,6 +597,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.IntVar(&sopts.FileStoreOpts.CompactInterval, "file_compact_interval", stores.DefaultFileStoreOptions.CompactInterval, "stan.FileStoreOpts.CompactInterval")
 	fs.String("file_compact_min_size", fmt.Sprintf("%v", stores.DefaultFileStoreOptions.CompactMinFileSize), "stan.FileStoreOpts.CompactMinFileSize")
 	fs.String("file_buffer_size", fmt.Sprintf("%v", stores.DefaultFileStoreOptions.BufferSize), "stan.FileStoreOpts.BufferSize")
+	fs.String("file_read_buffer_size", fmt.Sprintf("%v", stores.DefaultFileStoreOptions.ReadBufferSize), "")
 	fs.BoolVar(&sopts.FileStoreOpts.DoCRC, "file_crc", stores.DefaultFileStoreOptions.DoCRC, "stan.FileStoreOpts.DoCRC")
 	fs.Int64Var(&sopts.FileStoreOpts.CRCPolynomial, "file_crc_poly", stores.DefaultFileStoreOptions.CRCPolynomial, "stan.FileStoreOpts.CRCPolynomial")
 	fs.BoolVar(&sopts.FileStoreOpts.DoSync, "file_sync", stores.DefaultFileStoreOptions.DoSync, "stan.FileStoreOpts.DoSync")
@@ -690,10 +696,14 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 			sopts.MaxBytes, flagErr = getBytes(f)
 		case "file_compact_min_size":
 			sopts.FileStoreOpts.CompactMinFileSize, flagErr = getBytes(f)
-		case "file_buffer_size":
+		case "file_buffer_size", "file_read_buffer_size":
 			var i64 int64
 			i64, flagErr = getBytes(f)
-			sopts.FileStoreOpts.BufferSize = int(i64)
+			if f.Name == "file_buffer_size" {
+				sopts.FileStoreOpts.BufferSize = int(i64)
+			} else {
+				sopts.FileStoreOpts.ReadBufferSize = int(i64)
+			}
 		}
 	})
 	if flagErr != nil {
