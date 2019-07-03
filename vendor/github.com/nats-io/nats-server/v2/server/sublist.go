@@ -97,14 +97,27 @@ func newLevel() *level {
 	return &level{nodes: make(map[string]*node)}
 }
 
-// NewSublist will create a default sublist
-func NewSublist() *Sublist {
-	return &Sublist{root: newLevel(), cache: &sync.Map{}}
+// In general caching is recommended however in some extreme cases where
+// interest changes are high, suppressing the cache can help.
+// https://github.com/nats-io/nats-server/issues/941
+// FIXME(dlc) - should be more dynamic at some point based on cache thrashing.
+
+// NewSublist will create a default sublist with caching enabled per the flag.
+func NewSublist(enableCache bool) *Sublist {
+	if enableCache {
+		return &Sublist{root: newLevel(), cache: &sync.Map{}}
+	}
+	return &Sublist{root: newLevel(), cacheNum: slNoCache}
 }
 
-// NewSublistNoCache will create a default sublist without caching enabled.
+// NewSublistWithCache will create a default sublist with caching enabled.
+func NewSublistWithCache() *Sublist {
+	return NewSublist(true)
+}
+
+// NewSublistNoCache will create a default sublist with caching disabled.
 func NewSublistNoCache() *Sublist {
-	return &Sublist{root: newLevel(), cacheNum: slNoCache}
+	return NewSublist(false)
 }
 
 // CacheEnabled returns whether or not caching is enabled for this sublist.
@@ -691,35 +704,41 @@ type SublistStats struct {
 
 // Stats will return a stats structure for the current state.
 func (s *Sublist) Stats() *SublistStats {
-	s.Lock()
-	defer s.Unlock()
-
 	st := &SublistStats{}
+
+	s.RLock()
+	cache := s.cache
 	st.NumSubs = s.count
-	st.NumCache = uint32(atomic.LoadInt32(&s.cacheNum))
 	st.NumInserts = s.inserts
 	st.NumRemoves = s.removes
+	s.RUnlock()
+
+	if cn := atomic.LoadInt32(&s.cacheNum); cn > 0 {
+		st.NumCache = uint32(cn)
+	}
 	st.NumMatches = atomic.LoadUint64(&s.matches)
 	if st.NumMatches > 0 {
 		st.CacheHitRate = float64(atomic.LoadUint64(&s.cacheHits)) / float64(st.NumMatches)
 	}
 
 	// whip through cache for fanout stats, this can be off if cache is full and doing evictions.
-	tot, max := 0, 0
-	clen := 0
-	s.cache.Range(func(k, v interface{}) bool {
-		clen++
-		r := v.(*SublistResult)
-		l := len(r.psubs) + len(r.qsubs)
-		tot += l
-		if l > max {
-			max = l
+	// If this is called frequently, which it should not be, this could hurt performance.
+	if cache != nil {
+		tot, max, clen := 0, 0, 0
+		s.cache.Range(func(k, v interface{}) bool {
+			clen++
+			r := v.(*SublistResult)
+			l := len(r.psubs) + len(r.qsubs)
+			tot += l
+			if l > max {
+				max = l
+			}
+			return true
+		})
+		st.MaxFanout = uint32(max)
+		if tot > 0 {
+			st.AvgFanout = float64(tot) / float64(clen)
 		}
-		return true
-	})
-	st.MaxFanout = uint32(max)
-	if tot > 0 {
-		st.AvgFanout = float64(tot) / float64(clen)
 	}
 	return st
 }
