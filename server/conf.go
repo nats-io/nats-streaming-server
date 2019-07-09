@@ -696,14 +696,14 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 			sopts.MaxBytes, flagErr = getBytes(f)
 		case "file_compact_min_size":
 			sopts.FileStoreOpts.CompactMinFileSize, flagErr = getBytes(f)
-		case "file_buffer_size", "file_read_buffer_size":
+		case "file_buffer_size":
 			var i64 int64
 			i64, flagErr = getBytes(f)
-			if f.Name == "file_buffer_size" {
-				sopts.FileStoreOpts.BufferSize = int(i64)
-			} else {
-				sopts.FileStoreOpts.ReadBufferSize = int(i64)
-			}
+			sopts.FileStoreOpts.BufferSize = int(i64)
+		case "file_read_buffer_size":
+			var i64 int64
+			i64, flagErr = getBytes(f)
+			sopts.FileStoreOpts.ReadBufferSize = int(i64)
 		}
 	})
 	if flagErr != nil {

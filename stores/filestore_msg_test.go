@@ -1919,6 +1919,70 @@ func TestFSReadBuffer(t *testing.T) {
 			t.Fatalf("Expected content to be %q, got %q", i, m.Data)
 		}
 	}
+
+	// Empty cache
+	ms.Lock()
+	ms.cache.empty()
+	ms.Unlock()
+
+	// Lookup message 8, which should load 9 and 10 too
+	msgStoreLookup(t, c.Msgs, 8)
+	for i := uint64(8); i <= 10; i++ {
+		ms.Lock()
+		m := ms.cache.get(i)
+		ms.Unlock()
+		if m == nil {
+			t.Fatalf("Expected msg seq %v to be in cache, it was not", i)
+		}
+		if string(m.Data) != fmt.Sprintf("%v", i) {
+			t.Fatalf("Expected content to be %q, got %q", i, m.Data)
+		}
+	}
+
+	// Now lookup message 1, ensure that cache has only 10 elements...
+	msgStoreLookup(t, c.Msgs, 1)
+	ms.Lock()
+	sizeCache := 0
+	for cur := ms.cache.head; cur != nil; cur = cur.next {
+		sizeCache++
+	}
+	ms.Unlock()
+	if sizeCache != 10 {
+		t.Fatalf("Expected cache size to be 10, got %v", sizeCache)
+	}
+
+	s.Close()
+	cleanupFSDatastore(t)
+
+	// Restart test but now with a read buffer that is too small for a single message
+	s, err = NewFileStore(testLogger, testFSDefaultDatastore, &limits, BufferSize(0), ReadBufferSize(500))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	payload := make([]byte, 600)
+	c = storeCreateChannel(t, s, "foo")
+	for i := uint64(1); i <= 2; i++ {
+		storeMsg(t, c, "foo", i, payload)
+	}
+	c.Msgs.Flush()
+
+	// Force empty of cache
+	ms = c.Msgs.(*FileMsgStore)
+	ms.Lock()
+	ms.cache.empty()
+	ms.Unlock()
+
+	// Lookup first message
+	msgStoreLookup(t, c.Msgs, 1)
+	// Ensure that other message is not in the cache
+	ms.Lock()
+	m = ms.cache.get(2)
+	ms.Unlock()
+	if m != nil {
+		t.Fatalf("Expected msg seq 2 to not be in the cache, got %v", m)
+	}
 }
 
 func TestFSReadMsgRecord(t *testing.T) {
