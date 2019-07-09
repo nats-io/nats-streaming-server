@@ -1841,3 +1841,254 @@ func TestFSNoPanicOnRemoveMsg(t *testing.T) {
 		t.Fatal("Did not get error about removing message")
 	}
 }
+
+func TestFSReadBuffer(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	cacheTTL = int64(5 * time.Second)
+	defer func() { cacheTTL = testFSDefaultCacheTTL }()
+
+	limits := testDefaultStoreLimits
+	s, err := NewFileStore(testLogger, testFSDefaultDatastore, &limits, BufferSize(0), ReadBufferSize(0))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+	for i := uint64(1); i <= 10; i++ {
+		storeMsg(t, c, "foo", i, []byte(fmt.Sprintf("%v", i)))
+	}
+	c.Msgs.Flush()
+
+	// Force empty of cache
+	ms := c.Msgs.(*FileMsgStore)
+	ms.Lock()
+	ms.cache.empty()
+	ms.Unlock()
+
+	// Lookup first message and check that it is in the cache.
+	m := msgStoreLookup(t, c.Msgs, 1)
+	if string(m.Data) != "1" {
+		t.Fatalf("Expected message's data to be %q, got %q", "1", m.Data)
+	}
+	// Ensure that other messages are not in the cache
+	for i := uint64(2); i <= 10; i++ {
+		ms.Lock()
+		m := ms.cache.get(i)
+		ms.Unlock()
+		if m != nil {
+			t.Fatalf("Expected msg seq %v to not be in the cache, got %v", i, m)
+		}
+	}
+
+	s.Close()
+	cleanupFSDatastore(t)
+
+	// Restart test but now with a read buffer...
+	s, err = NewFileStore(testLogger, testFSDefaultDatastore, &limits, BufferSize(0), ReadBufferSize(1024*1024))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	c = storeCreateChannel(t, s, "foo")
+	for i := uint64(1); i <= 10; i++ {
+		storeMsg(t, c, "foo", i, []byte(fmt.Sprintf("%v", i)))
+	}
+	c.Msgs.Flush()
+
+	// Force empty of cache
+	ms = c.Msgs.(*FileMsgStore)
+	ms.Lock()
+	ms.cache.empty()
+	ms.Unlock()
+
+	// Lookup first message
+	msgStoreLookup(t, c.Msgs, 1)
+	// All others should have been added to the cache
+	for i := uint64(1); i <= 10; i++ {
+		ms.Lock()
+		m := ms.cache.get(i)
+		ms.Unlock()
+		if m == nil {
+			t.Fatalf("Expected msg seq %v to be in cache, it was not", i)
+		}
+		if string(m.Data) != fmt.Sprintf("%v", i) {
+			t.Fatalf("Expected content to be %q, got %q", i, m.Data)
+		}
+	}
+
+	// Empty cache
+	ms.Lock()
+	ms.cache.empty()
+	ms.Unlock()
+
+	// Lookup message 8, which should load 9 and 10 too
+	msgStoreLookup(t, c.Msgs, 8)
+	for i := uint64(8); i <= 10; i++ {
+		ms.Lock()
+		m := ms.cache.get(i)
+		ms.Unlock()
+		if m == nil {
+			t.Fatalf("Expected msg seq %v to be in cache, it was not", i)
+		}
+		if string(m.Data) != fmt.Sprintf("%v", i) {
+			t.Fatalf("Expected content to be %q, got %q", i, m.Data)
+		}
+	}
+
+	// Now lookup message 1, ensure that cache has only 10 elements...
+	msgStoreLookup(t, c.Msgs, 1)
+	ms.Lock()
+	sizeCache := 0
+	for cur := ms.cache.head; cur != nil; cur = cur.next {
+		sizeCache++
+	}
+	ms.Unlock()
+	if sizeCache != 10 {
+		t.Fatalf("Expected cache size to be 10, got %v", sizeCache)
+	}
+
+	s.Close()
+	cleanupFSDatastore(t)
+
+	// Restart test but now with a read buffer that is too small for a single message
+	s, err = NewFileStore(testLogger, testFSDefaultDatastore, &limits, BufferSize(0), ReadBufferSize(500))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	payload := make([]byte, 600)
+	c = storeCreateChannel(t, s, "foo")
+	for i := uint64(1); i <= 2; i++ {
+		storeMsg(t, c, "foo", i, payload)
+	}
+	c.Msgs.Flush()
+
+	// Force empty of cache
+	ms = c.Msgs.(*FileMsgStore)
+	ms.Lock()
+	ms.cache.empty()
+	ms.Unlock()
+
+	// Lookup first message
+	msgStoreLookup(t, c.Msgs, 1)
+	// Ensure that other message is not in the cache
+	ms.Lock()
+	m = ms.cache.get(2)
+	ms.Unlock()
+	if m != nil {
+		t.Fatalf("Expected msg seq 2 to not be in the cache, got %v", m)
+	}
+}
+
+func TestFSReadMsgRecord(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+	ms := c.Msgs.(*FileMsgStore)
+
+	r := &testReader{}
+
+	var err error
+
+	buf := make([]byte, recordHeaderSize+5)
+	var retBuf []byte
+
+	// Reader returns an error
+	errReturned := fmt.Errorf("Fake error")
+	r.setErrToReturn(errReturned)
+	retBuf, err = ms.readMsgRecord(r, buf, 1)
+	if !strings.Contains(err.Error(), errReturned.Error()) {
+		t.Fatalf("Expected error %v, got: %v", errReturned, err)
+	}
+	if !reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be same as the one provided")
+	}
+
+	// Record not containing CRC
+	_header := [4]byte{}
+	header := _header[:]
+	util.ByteOrder.PutUint32(header, 0)
+	r.setErrToReturn(nil)
+	r.setContent(header)
+	retBuf, err = ms.readMsgRecord(r, buf, 1)
+	if err == nil {
+		t.Fatal("Expected error got none")
+	}
+	if !reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be same as the one provided")
+	}
+
+	// Wrong CRC
+	b := make([]byte, recordHeaderSize+5)
+	util.ByteOrder.PutUint32(b, 5)
+	copy(b[recordHeaderSize:], []byte("hello"))
+	r.setErrToReturn(nil)
+	r.setContent(b)
+	retBuf, err = ms.readMsgRecord(r, buf, 5)
+	if err == nil {
+		t.Fatal("Expected error got none")
+	}
+	if !reflect.DeepEqual(retBuf, b) {
+		t.Fatal("Expected returned buffer to be same as the one provided")
+	}
+
+	// Not asking for CRC should return ok
+	r.setContent(b)
+	ms.fstore.opts.DoCRC = false
+	retBuf, err = ms.readMsgRecord(r, buf, 5)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be same as the one provided")
+	}
+	if string(retBuf[recordHeaderSize:recordHeaderSize+5]) != "hello" {
+		t.Fatalf("Expected body to be \"hello\", got %q", string(retBuf[recordHeaderSize:recordHeaderSize+5]))
+	}
+
+	// Check that returned buffer has expanded as required
+	ms.fstore.opts.DoCRC = true
+	b = make([]byte, recordHeaderSize+10)
+	payload := []byte("hellohello")
+	util.ByteOrder.PutUint32(b, uint32(len(payload)))
+	util.ByteOrder.PutUint32(b[4:recordHeaderSize], crc32.ChecksumIEEE(payload))
+	copy(b[recordHeaderSize:], payload)
+	r.setErrToReturn(nil)
+	r.setContent(b)
+	retBuf, err = ms.readMsgRecord(r, buf, 10)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if reflect.DeepEqual(retBuf, buf) {
+		t.Fatal("Expected returned buffer to be different than the one provided")
+	}
+	if string(retBuf[recordHeaderSize:recordHeaderSize+10]) != string(payload) {
+		t.Fatalf("Expected body to be %q got %v", string(payload), string(retBuf[recordHeaderSize:recordHeaderSize+10]))
+	}
+
+	// Append zeros to the end of buffer
+	for i := 0; i < recordHeaderSize+2; i++ {
+		b = append(b, 0)
+	}
+	// Don't call setContent since this would reset the read position
+	r.content = b
+	if _, err := ms.readMsgRecord(r, buf, 2); err != errNeedRewind {
+		t.Fatalf("Expected error %v, got %v", errNeedRewind, err)
+	}
+
+	// Check that error returned if size does not match
+	b = b[:len(b)-2]
+	r.setContent(b)
+	if _, err := ms.readMsgRecord(r, buf, 8); err == nil || !strings.Contains(err.Error(), "expected size") {
+		t.Fatalf("Expected error about wrong size, got %v", err)
+	}
+}

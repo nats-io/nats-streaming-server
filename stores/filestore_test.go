@@ -40,6 +40,7 @@ var (
 	testFSDefaultDatastore     string
 	testFSDisableBufferWriters bool
 	testFSSetFDsLimit          bool
+	testFSDisableReadBuffer    bool
 )
 
 var testFDsLimit = int64(5)
@@ -68,6 +69,9 @@ func newFileStore(t tLogger, dataStore string, limits *StoreLimits, options ...F
 	// Each test may override those.
 	if testFSDisableBufferWriters {
 		opts.BufferSize = 0
+	}
+	if testFSDisableReadBuffer {
+		opts.ReadBufferSize = 0
 	}
 	if testFSSetFDsLimit {
 		opts.FileDescriptorsLimit = testFDsLimit
@@ -572,6 +576,7 @@ func TestFSOptions(t *testing.T) {
 		SliceArchiveScript:   "myscript.sh",
 		FileDescriptorsLimit: 20,
 		ParallelRecovery:     5,
+		ReadBufferSize:       5 * 1024,
 	}
 	// Create the file with custom options
 	fs, err := NewFileStore(testLogger, testFSDefaultDatastore, &testDefaultStoreLimits,
@@ -585,7 +590,8 @@ func TestFSOptions(t *testing.T) {
 		DoSync(expected.DoSync),
 		SliceConfig(100, 1024*1024, time.Second, "myscript.sh"),
 		FileDescriptorsLimit(20),
-		ParallelRecovery(5))
+		ParallelRecovery(5),
+		ReadBufferSize(5*1024))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
@@ -687,6 +693,9 @@ func TestFSOptions(t *testing.T) {
 	badOpts = DefaultFileStoreOptions
 	badOpts.SliceMaxAge = -1
 	expectError(&badOpts, "slice max values")
+	badOpts = DefaultFileStoreOptions
+	badOpts.ReadBufferSize = -1
+	expectError(&badOpts, "read buffer size")
 }
 
 func TestFSLimitsOnRecovery(t *testing.T) {
