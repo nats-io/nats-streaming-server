@@ -102,8 +102,6 @@ type RemoteGatewayOpts struct {
 }
 
 // LeafNodeOpts are options for a given server to accept leaf node connections and/or connect to a remote cluster.
-// NOTE: This structure is no longer used for monitoring endpoints
-// and json tags are deprecated and may be removed in the future.
 type LeafNodeOpts struct {
 	Host              string            `json:"addr,omitempty"`
 	Port              int               `json:"port,omitempty"`
@@ -124,11 +122,9 @@ type LeafNodeOpts struct {
 }
 
 // RemoteLeafOpts are options for connecting to a remote server as a leaf node.
-// NOTE: This structure is no longer used for monitoring endpoints
-// and json tags are deprecated and may be removed in the future.
 type RemoteLeafOpts struct {
 	LocalAccount string      `json:"local_account,omitempty"`
-	URL          *url.URL    `json:"url,omitempty"`
+	URLs         []*url.URL  `json:"urls,omitempty"`
 	Credentials  string      `json:"-"`
 	TLS          bool        `json:"-"`
 	TLSConfig    *tls.Config `json:"-"`
@@ -190,6 +186,8 @@ type Options struct {
 	WriteDeadline    time.Duration `json:"-"`
 	MaxClosedClients int           `json:"-"`
 	LameDuckDuration time.Duration `json:"-"`
+	// MaxTracedMsgLen is the maximum printable length for traced messages.
+	MaxTracedMsgLen int `json:"-"`
 
 	// Operating a trusted NATS server
 	TrustedKeys      []string              `json:"-"`
@@ -539,6 +537,8 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			o.MaxPending = v.(int64)
 		case "max_connections", "max_conn":
 			o.MaxConn = int(v.(int64))
+		case "max_traced_msg_len":
+			o.MaxTracedMsgLen = int(v.(int64))
 		case "max_subscriptions", "max_subs":
 			o.MaxSubs = int(v.(int64))
 		case "ping_interval":
@@ -1027,6 +1027,8 @@ func parseLeafNodes(v interface{}, opts *Options, errors *[]error, warnings *[]e
 				continue
 			}
 			opts.LeafNode.Remotes = remotes
+		case "reconnect", "reconnect_delay", "reconnect_interval":
+			opts.LeafNode.ReconnectInterval = time.Duration(int(mv.(int64))) * time.Second
 		case "tls":
 			tc, err := parseTLS(tk)
 			if err != nil {
@@ -1079,13 +1081,23 @@ func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]
 		for k, v := range rm {
 			tk, v = unwrapValue(v)
 			switch strings.ToLower(k) {
-			case "url":
-				url, err := parseURL(v.(string), "leafnode")
-				if err != nil {
-					*errors = append(*errors, &configErr{tk, err.Error()})
-					continue
+			case "url", "urls":
+				switch v := v.(type) {
+				case []interface{}, []string:
+					urls, errs := parseURLs(v.([]interface{}), "leafnode")
+					if errs != nil {
+						*errors = append(*errors, errs...)
+						continue
+					}
+					remote.URLs = urls
+				case string:
+					url, err := parseURL(v, "leafnode")
+					if err != nil {
+						*errors = append(*errors, &configErr{tk, err.Error()})
+						continue
+					}
+					remote.URLs = append(remote.URLs, url)
 				}
-				remote.URL = url
 			case "account", "local":
 				remote.LocalAccount = v.(string)
 			case "creds", "credentials":
@@ -2437,8 +2449,12 @@ func setBaselineOptions(opts *Options) {
 	}
 	// Set baseline connect port for remotes.
 	for _, r := range opts.LeafNode.Remotes {
-		if r != nil && r.URL.Port() == "" {
-			r.URL.Host = net.JoinHostPort(r.URL.Host, strconv.Itoa(DEFAULT_LEAFNODE_PORT))
+		if r != nil {
+			for _, u := range r.URLs {
+				if u.Port() == "" {
+					u.Host = net.JoinHostPort(u.Host, strconv.Itoa(DEFAULT_LEAFNODE_PORT))
+				}
+			}
 		}
 	}
 
@@ -2551,6 +2567,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.StringVar(&opts.TLSCert, "tlscert", "", "Server certificate file.")
 	fs.StringVar(&opts.TLSKey, "tlskey", "", "Private key for server certificate.")
 	fs.StringVar(&opts.TLSCaCert, "tlscacert", "", "Client certificate CA for verification.")
+	fs.IntVar(&opts.MaxTracedMsgLen, "max_traced_msg_len", 0, "Maximum printable length for traced messages. 0 for unlimited")
 
 	// The flags definition above set "default" values to some of the options.
 	// Calling Parse() here will override the default options with any value
