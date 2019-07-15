@@ -24,6 +24,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/url"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -35,6 +36,9 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
+// Warning when user configures leafnode TLS insecure
+const leafnodeTLSInsecureWarning = "TLS certificate chain and hostname of solicited leafnodes will not be verified. DO NOT USE IN PRODUCTION!"
+
 type leaf struct {
 	// Used to suppress sub and unsub interest. Same as routes but our audience
 	// here is tied to this leaf node. This will hold all subscriptions except this
@@ -44,13 +48,16 @@ type leaf struct {
 	remote *leafNodeCfg
 }
 
+// Used for remote (solicited) leafnodes.
 type leafNodeCfg struct {
 	sync.RWMutex
 	*RemoteLeafOpts
-	urls   []*url.URL
-	curURL *url.URL
+	urls    []*url.URL
+	curURL  *url.URL
+	tlsName string
 }
 
+// Check to see if this is a solicited leafnode. We do special processing for solicited.
 func (c *client) isSolicitedLeafNode() bool {
 	return c.kind == LEAF && c.leaf.remote != nil
 }
@@ -66,7 +73,7 @@ func (s *Server) solicitLeafNodeRemotes(remotes []*RemoteLeafOpts) {
 func (s *Server) remoteLeafNodeStillValid(remote *leafNodeCfg) bool {
 	for _, ri := range s.getOpts().LeafNode.Remotes {
 		// FIXME(dlc) - What about auth changes?
-		if urlsAreEqual(ri.URL, remote.URL) {
+		if reflect.DeepEqual(ri.URLs, remote.URLs) {
 			return true
 		}
 	}
@@ -104,11 +111,15 @@ func (s *Server) reConnectToRemoteLeafNode(remote *leafNodeCfg) {
 func newLeafNodeCfg(remote *RemoteLeafOpts) *leafNodeCfg {
 	cfg := &leafNodeCfg{
 		RemoteLeafOpts: remote,
-		urls:           make([]*url.URL, 0, 4),
+		urls:           make([]*url.URL, 0, len(remote.URLs)),
 	}
 	// Start with the one that is configured. We will add to this
 	// array when receiving async leafnode INFOs.
-	cfg.urls = append(cfg.urls, cfg.URL)
+	cfg.urls = append(cfg.urls, cfg.URLs...)
+	// If we are TLS make sure we save off a proper servername if possible.
+	for _, u := range cfg.urls {
+		cfg.saveTLSHostname(u)
+	}
 	return cfg
 }
 
@@ -152,7 +163,7 @@ func (s *Server) setLeafNodeNonExportedOptions() {
 func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool) {
 	defer s.grWG.Done()
 
-	if remote == nil || remote.URL == nil {
+	if remote == nil || len(remote.URLs) == 0 {
 		s.Debugf("Empty remote leafnode definition, nothing to connect")
 		return
 	}
@@ -206,9 +217,18 @@ func (s *Server) connectToRemoteLeafNode(remote *leafNodeCfg, firstConnect bool)
 		// We will put this in the normal log if first connect, does not force -DV mode to know
 		// that the connect worked.
 		if firstConnect {
-			s.Noticef("Connected leafnode to %q", remote.RemoteLeafOpts.URL.Hostname())
+			s.Noticef("Connected leafnode to %q", rURL.Hostname())
 		}
 		return
+	}
+}
+
+// Save off the tlsName for when we use TLS and mix hostnames and IPs. IPs usually
+// come from the server we connect to.
+func (lcfg *leafNodeCfg) saveTLSHostname(u *url.URL) {
+	isTLS := lcfg.TLSConfig != nil || u.Scheme == "tls"
+	if isTLS && lcfg.tlsName == "" && net.ParseIP(u.Hostname()) == nil {
+		lcfg.tlsName = u.Hostname()
 	}
 }
 
@@ -243,15 +263,15 @@ func (s *Server) leafNodeAcceptLoop(ch chan struct{}) {
 		net.JoinHostPort(opts.LeafNode.Host, strconv.Itoa(l.Addr().(*net.TCPAddr).Port)))
 
 	s.mu.Lock()
-	tlsReq := opts.LeafNode.TLSConfig != nil
-	tlsVerify := tlsReq && opts.LeafNode.TLSConfig.ClientAuth == tls.RequireAndVerifyClientCert
+	tlsRequired := opts.LeafNode.TLSConfig != nil
+	tlsVerify := tlsRequired && opts.LeafNode.TLSConfig.ClientAuth == tls.RequireAndVerifyClientCert
 	info := Info{
 		ID:           s.info.ID,
 		Version:      s.info.Version,
 		GitCommit:    gitCommit,
 		GoVersion:    runtime.Version(),
 		AuthRequired: true,
-		TLSRequired:  tlsReq,
+		TLSRequired:  tlsRequired,
 		TLSVerify:    tlsVerify,
 		MaxPayload:   s.info.MaxPayload, // TODO(dlc) - Allow override?
 		Proto:        1,                 // Fixed for now.
@@ -276,6 +296,25 @@ func (s *Server) leafNodeAcceptLoop(ch chan struct{}) {
 
 	// Setup state that can enable shutdown
 	s.leafNodeListener = l
+
+	// As of now, a server that does not have remotes configured would
+	// never solicit a connection, so we should not have to warn if
+	// InsecureSkipVerify is set in main LeafNodes config (since
+	// this TLS setting matters only when soliciting a connection).
+	// Still, warn if insecure is set in any of LeafNode block.
+	// We need to check remotes, even if tls is not required on accept.
+	warn := tlsRequired && opts.LeafNode.TLSConfig.InsecureSkipVerify
+	if !warn {
+		for _, r := range opts.LeafNode.Remotes {
+			if r.TLSConfig != nil && r.TLSConfig.InsecureSkipVerify {
+				warn = true
+				break
+			}
+		}
+	}
+	if warn {
+		s.Warnf(leafnodeTLSInsecureWarning)
+	}
 	s.mu.Unlock()
 
 	// Let them know we are up
@@ -343,7 +382,7 @@ func (c *client) sendLeafConnect(tlsRequired bool) {
 		sig := base64.RawURLEncoding.EncodeToString(sigraw)
 		cinfo.JWT = string(tmp)
 		cinfo.Sig = sig
-	} else if userInfo := c.leaf.remote.URL.User; userInfo != nil {
+	} else if userInfo := c.leaf.remote.curURL.User; userInfo != nil {
 		cinfo.User = userInfo.Username()
 		pass, _ := userInfo.Password()
 		cinfo.Pass = pass
@@ -460,7 +499,7 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 		// FIXME(dlc) - Make this resolve at startup.
 		acc, err := s.LookupAccount(remote.LocalAccount)
 		if err != nil {
-			c.Debugf("Can not locate local account %q for leafnode", remote.LocalAccount)
+			c.Debugf("No local account %q for leafnode", remote.LocalAccount)
 			c.closeConnection(MissingAccount)
 			return nil
 		}
@@ -468,9 +507,14 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 		c.leaf.remote = remote
 	}
 
+	var nonce [nonceLen]byte
+
 	// Grab server variables
 	s.mu.Lock()
 	info := s.copyLeafNodeInfo()
+	if !solicited {
+		s.generateNonce(nonce[:])
+	}
 	s.mu.Unlock()
 
 	// Grab lock
@@ -524,7 +568,11 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 			// had this advertised to us an should use the configured host
 			// name for the TLS server name.
 			if net.ParseIP(host) != nil {
-				host, _, _ = net.SplitHostPort(c.leaf.remote.RemoteLeafOpts.URL.Host)
+				if c.leaf.remote.tlsName != "" {
+					host = c.leaf.remote.tlsName
+				} else {
+					host, _, _ = net.SplitHostPort(c.leaf.remote.curURL.Host)
+				}
 			}
 			tlsConfig.ServerName = host
 
@@ -563,7 +611,7 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 		// Send our info to the other side.
 		// Remember the nonce we sent here for signatures, etc.
 		c.nonce = make([]byte, nonceLen)
-		s.generateNonce(c.nonce)
+		copy(c.nonce, nonce[:])
 		info.Nonce = string(c.nonce)
 		info.CID = c.cid
 		b, _ := json.Marshal(info)
@@ -626,7 +674,7 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 		c.registerWithAccount(c.acc)
 		s.addLeafNodeConnection(c)
 		s.initLeafNodeSmap(c)
-		c.sendAllAccountSubs()
+		c.sendAllLeafSubs()
 	}
 
 	return c
@@ -674,15 +722,21 @@ func (c *client) updateLeafNodeURLs(info *Info) {
 			c.Errorf("Error parsing url %q: %v", surl, err)
 			continue
 		}
-		// Do not add if it's the same than the one that
-		// we have configured.
-		if urlsAreEqual(url, cfg.URL) {
-			continue
+		// Do not add if it's the same as what we already have configured.
+		var dup bool
+		for _, u := range cfg.URLs {
+			if urlsAreEqual(url, u) {
+				dup = true
+				break
+			}
 		}
-		cfg.urls = append(cfg.urls, url)
+		if !dup {
+			cfg.urls = append(cfg.urls, url)
+			cfg.saveTLSHostname(url)
+		}
 	}
 	// Add the configured one
-	cfg.urls = append(cfg.urls, cfg.URL)
+	cfg.urls = append(cfg.urls, cfg.URLs...)
 }
 
 // Similar to setInfoHostPortAndGenerateJSON, but for leafNodeInfo.
@@ -791,7 +845,7 @@ func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) erro
 
 	// We are good to go, send over all the bound account subscriptions.
 	s.startGoRoutine(func() {
-		c.sendAllAccountSubs()
+		c.sendAllLeafSubs()
 		s.grWG.Done()
 	})
 
@@ -819,7 +873,12 @@ func (s *Server) initLeafNodeSmap(c *client) {
 	ims := []string{}
 	acc.mu.RLock()
 	accName := acc.Name
-	acc.sl.All(&subs)
+	// If we are solicited we only send interest for local clients.
+	if c.isSolicitedLeafNode() {
+		acc.sl.localSubs(&subs)
+	} else {
+		acc.sl.All(&subs)
+	}
 	// Since leaf nodes only send on interest, if the bound
 	// account has import services we need to send those over.
 	for isubj := range acc.imports.services {
@@ -845,6 +904,8 @@ func (s *Server) initLeafNodeSmap(c *client) {
 		}
 	}
 
+	applyGlobalRouting := s.gateway.enabled
+
 	// Now walk the results and add them to our smap
 	c.mu.Lock()
 	for _, sub := range subs {
@@ -856,6 +917,12 @@ func (s *Server) initLeafNodeSmap(c *client) {
 	// FIXME(dlc) - We need to update appropriately on an account claims update.
 	for _, isubj := range ims {
 		c.leaf.smap[isubj]++
+	}
+	// If we have gateways enabled we need to make sure the other side sends us responses
+	// that have been augmented from the original subscription.
+	// TODO(dlc) - Should we lock this down more?
+	if applyGlobalRouting {
+		c.leaf.smap[gwReplyPrefix+"*.>"]++
 	}
 	c.mu.Unlock()
 }
@@ -880,7 +947,7 @@ func (s *Server) updateLeafNodes(acc *Account, sub *subscription, delta int32) {
 	_l := [32]*client{}
 	leafs := _l[:0]
 
-	// Grab all leaf nodes. Ignore leafnode if sub's client is a leafnode and matches.
+	// Grab all leaf nodes. Ignore a leafnode if sub's client is a leafnode and matches.
 	acc.mu.RLock()
 	for _, ln := range acc.lleafs {
 		if ln != sub.client {
@@ -895,11 +962,18 @@ func (s *Server) updateLeafNodes(acc *Account, sub *subscription, delta int32) {
 }
 
 // This will make an update to our internal smap and determine if we should send out
-// and interest update to the remote side.
+// an interest update to the remote side.
 func (c *client) updateSmap(sub *subscription, delta int32) {
 	key := keyFromSub(sub)
 
 	c.mu.Lock()
+
+	// If we are solicited make sure this is a local client.
+	if c.isSolicitedLeafNode() && sub.client.kind != CLIENT {
+		c.mu.Unlock()
+		return
+	}
+
 	n := c.leaf.smap[key]
 	// We will update if its a queue, if count is zero (or negative), or we were 0 and are N > 0.
 	update := sub.queue != nil || n == 0 || n+delta <= 0
@@ -942,8 +1016,8 @@ func keyFromSub(sub *subscription) string {
 }
 
 // Send all subscriptions for this account that include local
-// and all subscriptions besides our own.
-func (c *client) sendAllAccountSubs() {
+// and possibly all other remote subscriptions.
+func (c *client) sendAllLeafSubs() {
 	// Hold all at once for now.
 	var b bytes.Buffer
 
@@ -952,7 +1026,7 @@ func (c *client) sendAllAccountSubs() {
 		c.writeLeafSub(&b, key, n)
 	}
 
-	// We will make sure we don't overflow here due to an max_pending.
+	// We will make sure we don't overflow here due to a max_pending.
 	chunks := protoChunks(b.Bytes(), MAX_PAYLOAD_SIZE)
 	for _, chunk := range chunks {
 		c.queueOutbound(chunk)
@@ -1070,23 +1144,25 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 		atomic.StoreInt32(&osub.qw, sub.qw)
 		acc.sl.UpdateRemoteQSub(osub)
 	}
-
+	solicited := c.isSolicitedLeafNode()
 	c.mu.Unlock()
 
-	// Treat leaf node subscriptions similar to a client subscription, meaning we
-	// send them to both routes and gateways and other leaf nodes. We also do
-	// the shadow subscriptions.
 	if err := c.addShadowSubscriptions(acc, sub); err != nil {
 		c.Errorf(err.Error())
 	}
-	// If we are routing add to the route map for the associated account.
-	srv.updateRouteSubscriptionMap(acc, sub, 1)
-	if updateGWs {
-		srv.gatewayUpdateSubInterest(acc.Name, sub, 1)
-	}
-	// Now check on leafnode updates for other leaf nodes.
-	srv.updateLeafNodes(acc, sub, 1)
 
+	// If we are not solicited, treat leaf node subscriptions similar to a
+	// client subscription, meaning we forward them to routes, gateways and
+	// other leaf nodes as needed.
+	if !solicited {
+		// If we are routing add to the route map for the associated account.
+		srv.updateRouteSubscriptionMap(acc, sub, 1)
+		if updateGWs {
+			srv.gatewayUpdateSubInterest(acc.Name, sub, 1)
+		}
+		// Now check on leafnode updates for other leaf nodes.
+		srv.updateLeafNodes(acc, sub, 1)
+	}
 	return nil
 }
 

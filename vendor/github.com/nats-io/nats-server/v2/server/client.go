@@ -493,7 +493,8 @@ func (c *client) applyAccountLimits() {
 		c.mpay = c.acc.mpay
 	}
 
-	opts := c.srv.getOpts()
+	s := c.srv
+	opts := s.getOpts()
 
 	// We check here if the server has an option set that is lower than the account limit.
 	if c.mpay != jwt.NoLimit && opts.MaxPayload != 0 && int32(opts.MaxPayload) < c.acc.mpay {
@@ -529,16 +530,17 @@ func (c *client) RegisterUser(user *User) {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// Assign permissions.
 	if user.Permissions == nil {
 		// Reset perms to nil in case client previously had them.
 		c.perms = nil
 		c.mperms = nil
+		c.mu.Unlock()
 		return
 	}
 	c.setPermissions(user.Permissions)
+	c.mu.Unlock()
 }
 
 // RegisterNkey allows auth to call back into a new nkey
@@ -737,12 +739,9 @@ func (c *client) readLoop() {
 
 	for {
 		n, err := nc.Read(b)
-		if err != nil {
-			if err == io.EOF {
-				c.closeConnection(ClientClosed)
-			} else {
-				c.closeConnection(ReadError)
-			}
+		// If we have any data we will try to parse and exit at the end.
+		if n == 0 && err != nil {
+			c.closeConnection(closedStateForErr(err))
 			return
 		}
 		start := time.Now()
@@ -822,7 +821,22 @@ func (c *client) readLoop() {
 		if nc == nil {
 			return
 		}
+
+		// We could have had a read error from above but still read some data.
+		// If so do the close here unconditionally.
+		if err != nil {
+			c.closeConnection(closedStateForErr(err))
+			return
+		}
 	}
+}
+
+// Returns the appropriate closed state for a given read error.
+func closedStateForErr(err error) ClosedState {
+	if err == io.EOF {
+		return ClientClosed
+	}
+	return ReadError
 }
 
 // collapsePtoNB will place primary onto nb buffer as needed in prep for WriteTo.
@@ -1010,8 +1024,13 @@ func (c *client) traceMsg(msg []byte) {
 	if !c.trace {
 		return
 	}
-	// FIXME(dlc), allow limits to printable payload.
-	c.Tracef("<<- MSG_PAYLOAD: [%q]", msg[:len(msg)-LEN_CR_LF])
+
+	maxTrace := c.srv.getOpts().MaxTracedMsgLen
+	if maxTrace > 0 && (len(msg)-LEN_CR_LF) > maxTrace {
+		c.Tracef("<<- MSG_PAYLOAD: [\"%s...\"]", msg[:maxTrace])
+	} else {
+		c.Tracef("<<- MSG_PAYLOAD: [%q]", msg[:len(msg)-LEN_CR_LF])
+	}
 }
 
 func (c *client) traceInOp(op string, arg []byte) {
@@ -1062,6 +1081,8 @@ func (c *client) processErr(errStr string) {
 		c.Errorf("Route Error %s", errStr)
 	case GATEWAY:
 		c.Errorf("Gateway Error %s", errStr)
+	case LEAF:
+		c.Errorf("Leafnode Error %s", errStr)
 	}
 	c.closeConnection(ParseError)
 }
@@ -1264,6 +1285,8 @@ func (c *client) authViolation() {
 		hasNkeys = s.nkeys != nil
 		hasUsers = s.users != nil
 		s.mu.Unlock()
+		defer s.sendAuthErrorEvent(c)
+
 	}
 	if hasTrustedNkeys {
 		c.Errorf("%v", ErrAuthentication)
@@ -1280,9 +1303,6 @@ func (c *client) authViolation() {
 	}
 	c.sendErr("Authorization Violation")
 	c.closeConnection(AuthenticationViolation)
-	if s != nil {
-		s.sendAuthErrorEvent(c)
-	}
 }
 
 func (c *client) maxAccountConnExceeded() {
@@ -1425,6 +1445,7 @@ func (c *client) sendPing() {
 // Assume lock is held.
 func (c *client) generateClientInfoJSON(info Info) []byte {
 	info.CID = c.cid
+	info.MaxPayload = c.mpay
 	// Generate the info json
 	b, _ := json.Marshal(info)
 	pcs := [][]byte{[]byte("INFO"), b, []byte(CR_LF)}
@@ -1460,29 +1481,25 @@ func (c *client) processPing() {
 		c.mu.Unlock()
 		return
 	}
+
 	c.sendPong()
 
 	// Record this to suppress us sending one if this
 	// is within a given time interval for activity.
 	c.ping.last = time.Now()
 
-	// If not a CLIENT, we are done
-	if c.kind != CLIENT {
+	// If not a CLIENT, we are done. Also the CONNECT should
+	// have been received, but make sure it is so before proceeding
+	if c.kind != CLIENT || !c.flags.isSet(connectReceived) {
 		c.mu.Unlock()
 		return
 	}
 
-	// The CONNECT should have been received, but make sure it
-	// is so before proceeding
-	if !c.flags.isSet(connectReceived) {
-		c.mu.Unlock()
-		return
-	}
 	// If we are here, the CONNECT has been received so we know
 	// if this client supports async INFO or not.
 	var (
-		checkClusterChange bool
-		srv                = c.srv
+		checkInfoChange bool
+		srv             = c.srv
 	)
 	// For older clients, just flip the firstPongSent flag if not already
 	// set and we are done.
@@ -1491,21 +1508,24 @@ func (c *client) processPing() {
 	} else {
 		// This is a client that supports async INFO protocols.
 		// If this is the first PING (so firstPongSent is not set yet),
-		// we will need to check if there was a change in cluster topology.
-		checkClusterChange = !c.flags.isSet(firstPongSent)
+		// we will need to check if there was a change in cluster topology
+		// or we have a different max payload. We will send this first before
+		// pong since most clients do flush after connect call.
+		checkInfoChange = !c.flags.isSet(firstPongSent)
 	}
 	c.mu.Unlock()
 
-	if checkClusterChange {
+	if checkInfoChange {
+		opts := srv.getOpts()
 		srv.mu.Lock()
 		c.mu.Lock()
 		// Now that we are under both locks, we can flip the flag.
-		// This prevents sendAsyncInfoToClients() and and code here
-		// to send a double INFO protocol.
+		// This prevents sendAsyncInfoToClients() and code here to
+		// send a double INFO protocol.
 		c.flags.set(firstPongSent)
 		// If there was a cluster update since this client was created,
 		// send an updated INFO protocol now.
-		if srv.lastCURLsUpdate >= c.start.UnixNano() {
+		if srv.lastCURLsUpdate >= c.start.UnixNano() || c.mpay != int32(opts.MaxPayload) {
 			c.sendInfo(c.generateClientInfoJSON(srv.copyInfo()))
 		}
 		c.mu.Unlock()
@@ -2424,8 +2444,8 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 	msgh = append(msgh, ' ')
 	si := len(msgh)
 
-	// For sending messages across routes. Reset it if we have one.
-	// We reuse this data structure.
+	// For sending messages across routes and leafnodes.
+	// Reset if we have one since we reuse this data structure.
 	if c.in.rts != nil {
 		c.in.rts = c.in.rts[:0]
 	}
@@ -2436,10 +2456,9 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 		// these after everything else.
 		switch sub.client.kind {
 		case ROUTER:
-			if c.kind == ROUTER {
-				continue
+			if c.kind != ROUTER && !c.isSolicitedLeafNode() {
+				c.addSubToRouteTargets(sub)
 			}
-			c.addSubToRouteTargets(sub)
 			continue
 		case GATEWAY:
 			// Never send to gateway from here.
@@ -2449,7 +2468,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 			// Leaf node delivery audience is different however.
 			// Also leaf nodes are always no echo, so we make sure we are not
 			// going to send back to ourselves here.
-			if c != sub.client {
+			if c != sub.client && (c.kind != ROUTER || !c.isSolicitedLeafNode()) {
 				c.addSubToRouteTargets(sub)
 			}
 			continue
@@ -2574,7 +2593,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 
 sendToRoutesOrLeafs:
 
-	// If no messages for routes return here.
+	// If no messages for routes or leafnodes return here.
 	if len(c.in.rts) == 0 {
 		return queues
 	}

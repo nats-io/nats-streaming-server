@@ -97,7 +97,7 @@ const (
 const sendRouteSubsInGoRoutineThreshold = 1024 * 1024 // 1MB
 
 // Warning when user configures cluster TLS insecure
-const clusterTLSInsecureWarning = "TLS Hostname verification disabled, system will not verify identity of the solicited route"
+const clusterTLSInsecureWarning = "TLS certificate chain and hostname of solicited routes will not be verified. DO NOT USE IN PRODUCTION!"
 
 // Can be changed for tests
 var routeConnectDelay = DEFAULT_ROUTE_CONNECT
@@ -1280,6 +1280,11 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 			rs := *c.route
 			r = &rs
 		}
+		// Since this duplicate route is going to be removed, make sure we clear
+		// c.route.leafnodeURL, otherwise, when processing the disconnect, this
+		// would cause the leafnode URL for that remote server to be removed
+		// from our list.
+		c.route.leafnodeURL = _EMPTY_
 		c.mu.Unlock()
 
 		remote.mu.Lock()
