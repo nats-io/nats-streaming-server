@@ -189,6 +189,13 @@ type FileStoreOptions struct {
 	// client will be asking for the following sequential messages, so this
 	// is a read ahead optimization.
 	ReadBufferSize int
+
+	// AutoSync defines how often the store will flush and sync the files in
+	// the background. The default is set to 60 seconds.
+	// This is useful when a file sync is not desired for each Flush() call
+	// by setting DoSync to false.
+	// Setting AutoSync to any value <= 0 will disable auto sync.
+	AutoSync time.Duration
 }
 
 // This is an internal error to detect situations where we do
@@ -210,6 +217,7 @@ var DefaultFileStoreOptions = FileStoreOptions{
 	SliceMaxBytes:        64 * 1024 * 1024, // 64MB
 	ParallelRecovery:     1,
 	ReadBufferSize:       2 * 1024 * 1024, // 2MB
+	AutoSync:             time.Minute,
 }
 
 // BufferSize is a FileStore option that sets the size of the buffer used
@@ -315,6 +323,15 @@ func DoSync(enableFileSync bool) FileStoreOption {
 	}
 }
 
+// AutoSync is a FileStore option that defines how often each store is sync'ed on disk.
+// Any value <= 0 will disable this feature.
+func AutoSync(dur time.Duration) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.AutoSync = dur
+		return nil
+	}
+}
+
 // SliceConfig is a FileStore option that allows the configuration of
 // file slice limits and optional archive script file name.
 func SliceConfig(maxMsgs int, maxBytes int64, maxAge time.Duration, script string) FileStoreOption {
@@ -397,6 +414,9 @@ func AllOptions(opts *FileStoreOptions) FileStoreOption {
 			return err
 		}
 		if err := ReadBufferSize(opts.ReadBufferSize)(o); err != nil {
+			return err
+		}
+		if err := AutoSync(opts.AutoSync)(o); err != nil {
 			return err
 		}
 		o.CompactEnabled = opts.CompactEnabled
@@ -490,6 +510,7 @@ type FileStore struct {
 	cliCompactTS  time.Time
 	crcTable      *crc32.Table
 	lockFile      util.LockFile
+	autoSyncTimer *time.Timer
 }
 
 type subscription struct {
@@ -648,6 +669,7 @@ var (
 	bkgTasksSleepDuration = defaultBkgTasksSleepDuration
 	cacheTTL              = int64(defaultCacheTTL)
 	sliceCloseInterval    = defaultSliceCloseInterval
+	testAutoSync          = int64(0)
 )
 
 // FileStoreTestSetBackgroundTaskInterval is used by tests to reduce the interval
@@ -1277,7 +1299,45 @@ func NewFileStore(log logger.Logger, rootDir string, limits *StoreLimits, option
 		os.Remove(truncateFName)
 	}
 
+	if fs.opts.AutoSync > 0 {
+		fs.autoSyncTimer = time.AfterFunc(fs.opts.AutoSync, fs.autoSync)
+	}
+
 	return fs, nil
+}
+
+// autoSync will periodically flush and sync msgs and sub stores on disk.
+func (fs *FileStore) autoSync() {
+	fs.Lock()
+	if fs.closed {
+		fs.Unlock()
+		return
+	}
+
+	if len(fs.channels) > 0 {
+		channels := make([]*Channel, 0, len(fs.channels))
+		for _, c := range fs.channels {
+			channels = append(channels, c)
+		}
+		fs.Unlock()
+
+		for _, c := range channels {
+			if n := atomic.LoadInt64(&testAutoSync); n > 0 {
+				time.Sleep(time.Duration(n))
+			}
+			c.Msgs.(*FileMsgStore).autoSync()
+			c.Subs.(*FileSubStore).autoSync()
+		}
+
+		fs.Lock()
+		if fs.closed {
+			fs.Unlock()
+			return
+		}
+	}
+
+	fs.autoSyncTimer.Reset(fs.opts.AutoSync)
+	fs.Unlock()
 }
 
 type channelRecoveryCtx struct {
@@ -1842,6 +1902,9 @@ func (fs *FileStore) Close() error {
 
 	fm := fs.fm
 	lockFile := fs.lockFile
+	if fs.autoSyncTimer != nil {
+		fs.autoSyncTimer.Stop()
+	}
 	fs.Unlock()
 
 	if fm != nil {
@@ -2775,7 +2838,7 @@ processErr:
 
 func (ms *FileMsgStore) fillGaps(fslice *fileSlice, upToMsg *pb.MsgProto) error {
 	// flush possible buffered messages.
-	if err := ms.flush(fslice); err != nil {
+	if err := ms.flush(fslice, false); err != nil {
 		return err
 	}
 
@@ -3657,7 +3720,7 @@ func (ms *FileMsgStore) Close() error {
 	if ms.writeSlice != nil {
 		// Flush current file slice where writes happen
 		ms.lockFiles(ms.writeSlice)
-		err = ms.flush(ms.writeSlice)
+		err = ms.flush(ms.writeSlice, true)
 		ms.unlockFiles(ms.writeSlice)
 	}
 	// Remove/close all file slices
@@ -3676,7 +3739,7 @@ func (ms *FileMsgStore) Close() error {
 	return err
 }
 
-func (ms *FileMsgStore) flush(fslice *fileSlice) error {
+func (ms *FileMsgStore) flush(fslice *fileSlice, forceSync bool) error {
 	if ms.bw != nil && ms.bw.buf != nil && ms.bw.buf.Buffered() > 0 {
 		if err := ms.bw.buf.Flush(); err != nil {
 			return err
@@ -3691,7 +3754,7 @@ func (ms *FileMsgStore) flush(fslice *fileSlice) error {
 			return err
 		}
 	}
-	if ms.fstore.opts.DoSync {
+	if ms.fstore.opts.DoSync || forceSync {
 		if err := fslice.file.handle.Sync(); err != nil {
 			return err
 		}
@@ -3709,12 +3772,24 @@ func (ms *FileMsgStore) Flush() error {
 	if ms.writeSlice != nil {
 		err = ms.lockFiles(ms.writeSlice)
 		if err == nil {
-			err = ms.flush(ms.writeSlice)
+			err = ms.flush(ms.writeSlice, false)
 			ms.unlockFiles(ms.writeSlice)
 		}
 	}
 	ms.Unlock()
 	return err
+}
+
+// Flushes and sync the message store on disk.
+func (ms *FileMsgStore) autoSync() {
+	ms.Lock()
+	if !ms.closed && ms.writeSlice != nil {
+		if err := ms.lockFiles(ms.writeSlice); err == nil {
+			ms.flush(ms.writeSlice, true)
+			ms.unlockFiles(ms.writeSlice)
+		}
+	}
+	ms.Unlock()
 }
 
 // Empty implements the MsgStore interface
@@ -3781,7 +3856,7 @@ func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doR
 	fileName := filepath.Join(channel, subsFileName)
 	ss.file, err = fs.fm.createFile(fileName, defaultFileFlags, func() error {
 		ss.writer = nil
-		return ss.flush()
+		return ss.flush(false)
 	})
 	if err != nil {
 		return nil, err
@@ -4270,9 +4345,9 @@ func (ss *FileSubStore) writeRecord(w io.Writer, recType recordType, rec record)
 	return nil
 }
 
-func (ss *FileSubStore) flush() error {
+func (ss *FileSubStore) flush(forceSync bool) error {
 	// Skip this if nothing was written since the last flush
-	if !ss.activity {
+	if !ss.activity && !forceSync {
 		return nil
 	}
 	// Reset this now
@@ -4282,7 +4357,7 @@ func (ss *FileSubStore) flush() error {
 			return err
 		}
 	}
-	if ss.opts.DoSync {
+	if ss.opts.DoSync || forceSync {
 		return ss.file.handle.Sync()
 	}
 	return nil
@@ -4293,11 +4368,23 @@ func (ss *FileSubStore) Flush() error {
 	ss.Lock()
 	err := ss.lockFile()
 	if err == nil {
-		err = ss.flush()
+		err = ss.flush(false)
 		ss.fm.unlockFile(ss.file)
 	}
 	ss.Unlock()
 	return err
+}
+
+// Flush and sync the subscription store on disk.
+func (ss *FileSubStore) autoSync() {
+	ss.Lock()
+	if !ss.closed {
+		if err := ss.lockFile(); err == nil {
+			ss.flush(true)
+			ss.fm.unlockFile(ss.file)
+		}
+	}
+	ss.Unlock()
 }
 
 // Close closes this store
@@ -4326,7 +4413,7 @@ func (ss *FileSubStore) Close() error {
 	var err error
 	if ss.fm.remove(ss.file) {
 		if ss.file.handle != nil {
-			err = ss.flush()
+			err = ss.flush(true)
 			err = util.CloseFile(err, ss.file.handle)
 		}
 	}
