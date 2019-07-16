@@ -120,6 +120,9 @@ func TestParseConfig(t *testing.T) {
 	if opts.FileStoreOpts.ReadBufferSize != 10 {
 		t.Fatalf("Expected ReadBufferSize to be 10, got %v", opts.FileStoreOpts.ReadBufferSize)
 	}
+	if opts.FileStoreOpts.AutoSync != 2*time.Minute {
+		t.Fatalf("Expected AutoSync to be 2minutes, got %v", opts.FileStoreOpts.AutoSync)
+	}
 	if opts.MaxChannels != 11 {
 		t.Fatalf("Expected MaxChannels to be 11, got %v", opts.MaxChannels)
 	}
@@ -448,6 +451,8 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "file:{slice_archive_script:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{fds_limit:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{parallel_recovery:false}", wrongTypeErr)
+	expectFailureFor(t, "file:{auto_sync:123}", wrongTypeErr)
+	expectFailureFor(t, "file:{auto_sync:\"1h:0m\"}", wrongTimeErr)
 	expectFailureFor(t, "cluster:{node_id:false}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{bootstrap:1}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{peers:1}", wrongTypeErr)

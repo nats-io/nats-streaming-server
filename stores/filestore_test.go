@@ -577,6 +577,7 @@ func TestFSOptions(t *testing.T) {
 		FileDescriptorsLimit: 20,
 		ParallelRecovery:     5,
 		ReadBufferSize:       5 * 1024,
+		AutoSync:             2 * time.Minute,
 	}
 	// Create the file with custom options
 	fs, err := NewFileStore(testLogger, testFSDefaultDatastore, &testDefaultStoreLimits,
@@ -591,7 +592,8 @@ func TestFSOptions(t *testing.T) {
 		SliceConfig(100, 1024*1024, time.Second, "myscript.sh"),
 		FileDescriptorsLimit(20),
 		ParallelRecovery(5),
-		ReadBufferSize(5*1024))
+		ReadBufferSize(5*1024),
+		AutoSync(2*time.Minute))
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
@@ -1953,4 +1955,96 @@ func TestFSTruncateOnUnexpectedEOFLock(t *testing.T) {
 	// Now one can use the option again
 	s, _ = openDefaultFileStore(t, TruncateUnexpectedEOF(true))
 	s.Close()
+}
+
+func TestFSAutoSync(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	// Verify that auto sync can be disabled
+	s := createDefaultFileStore(t, BufferSize(1024), AutoSync(-100*time.Millisecond))
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+	ms := c.Msgs.(*FileMsgStore)
+	ss := c.Subs.(*FileSubStore)
+
+	storeMsg(t, c, "foo", 1, []byte("hello"))
+	storeSub(t, c, "foo")
+
+	time.Sleep(150 * time.Millisecond)
+
+	ms.Lock()
+	notFlushed := ms.bw != nil && ms.bw.buf != nil && ms.bw.buf.Buffered() > 0
+	ms.Unlock()
+	if !notFlushed {
+		t.Fatalf("Message store should not have been flushed")
+	}
+
+	ss.Lock()
+	notFlushed = ss.bw != nil && ss.bw.buf != nil && ss.bw.buf.Buffered() > 0
+	ss.Unlock()
+	if !notFlushed {
+		t.Fatalf("Message store should not have been flushed")
+	}
+
+	s.Close()
+	cleanupFSDatastore(t)
+	// Verify that auto sync works
+	s = createDefaultFileStore(t, BufferSize(1024), AutoSync(100*time.Millisecond))
+	defer s.Close()
+
+	c = storeCreateChannel(t, s, "foo")
+	ms = c.Msgs.(*FileMsgStore)
+	ss = c.Subs.(*FileSubStore)
+
+	storeMsg(t, c, "foo", 1, []byte("hello"))
+	storeSub(t, c, "foo")
+
+	time.Sleep(150 * time.Millisecond)
+
+	ms.Lock()
+	notFlushed = ms.bw != nil && ms.bw.buf != nil && ms.bw.buf.Buffered() > 0
+	ms.Unlock()
+	if notFlushed {
+		t.Fatalf("Message store should have been flushed")
+	}
+
+	ss.Lock()
+	notFlushed = ss.bw != nil && ss.bw.buf != nil && ss.bw.buf.Buffered() > 0
+	ss.Unlock()
+	if notFlushed {
+		t.Fatalf("Message store should have been flushed")
+	}
+
+	s.Close()
+
+	cleanupFSDatastore(t)
+	// Verify that auto sync works if a channel is removed
+	// Make the auto sync code wait for 300ms when getting ready to sync a msg/sub store.
+	atomic.StoreInt64(&testAutoSync, int64(300*time.Millisecond))
+	defer atomic.StoreInt64(&testAutoSync, 0)
+
+	s = createDefaultFileStore(t, BufferSize(1024), AutoSync(150*time.Millisecond))
+	defer s.Close()
+
+	c = storeCreateChannel(t, s, "foo")
+
+	storeMsg(t, c, "foo", 1, []byte("hello"))
+	subID := storeSub(t, c, "foo")
+	storeSubDelete(t, c, "foo", subID)
+
+	// Wait for the autosync callback to pick up the channel's stores to
+	// perform an autosync. We have made the code wait 300ms before
+	// issuing the autoSync() call...
+	time.Sleep(200 * time.Millisecond)
+
+	// Now delete channel
+	if err := s.DeleteChannel("foo"); err != nil {
+		t.Fatalf("Error deleting channel: %v", err)
+	}
+
+	// Now wait for the autoSync callback to resume and make sure
+	// that we don't get a crash.
+	time.Sleep(300 * time.Millisecond)
 }

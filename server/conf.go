@@ -503,6 +503,15 @@ func parseFileOptions(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.FileStoreOpts.ReadBufferSize = int(v.(int64))
+		case "file_auto_sync", "auto_sync":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			dur, err := time.ParseDuration(v.(string))
+			if err != nil {
+				return err
+			}
+			opts.FileStoreOpts.AutoSync = dur
 		}
 	}
 	return nil
@@ -608,6 +617,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.Int64Var(&sopts.FileStoreOpts.FileDescriptorsLimit, "file_fds_limit", stores.DefaultFileStoreOptions.FileDescriptorsLimit, "stan.FileStoreOpts.FileDescriptorsLimit")
 	fs.IntVar(&sopts.FileStoreOpts.ParallelRecovery, "file_parallel_recovery", stores.DefaultFileStoreOptions.ParallelRecovery, "stan.FileStoreOpts.ParallelRecovery")
 	fs.BoolVar(&sopts.FileStoreOpts.TruncateUnexpectedEOF, "file_truncate_bad_eof", stores.DefaultFileStoreOptions.TruncateUnexpectedEOF, "Truncate files for which there is an unexpected EOF on recovery, dataloss may occur")
+	fs.DurationVar(&sopts.FileStoreOpts.AutoSync, "file_auto_sync", stores.DefaultFileStoreOptions.AutoSync, "Interval at which the store should be automatically flushed and sync'ed on disk (<= 0 to disable)")
 	fs.IntVar(&sopts.IOBatchSize, "io_batch_size", DefaultIOBatchSize, "stan.IOBatchSize")
 	fs.Int64Var(&sopts.IOSleepTime, "io_sleep_time", DefaultIOSleepTime, "stan.IOSleepTime")
 	fs.StringVar(&sopts.FTGroupName, "ft_group", "", "stan.FTGroupName")

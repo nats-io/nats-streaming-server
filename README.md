@@ -1440,6 +1440,7 @@ Streaming Server File Store Options:
     --file_parallel_recovery <int>       On startup, number of channels that can be recovered in parallel
     --file_truncate_bad_eof <bool>       Truncate files for which there is an unexpected EOF on recovery, dataloss may occur
     --file_read_buffer_size <size>       Size of messages read ahead buffer (0 to disable)
+    --file_auto_sync <duration>          Interval at which the store should be automatically flushed and sync'ed on disk (<= 0 to disable)
 
 Streaming Server SQL Store Options:
     --sql_driver <string>            Name of the SQL Driver ("mysql" or "postgres")
@@ -1633,6 +1634,7 @@ File Options Configuration:
 | file_descriptors_limit | Channels translate to sub-directories under the file store's root directory. Each channel needs several files to maintain the state so the need for file descriptors increase with the number of channels. This option instructs the store to limit the concurrent use of file descriptors. Note that this is a soft limit and there may be cases when the store will use more than this number. A value of 0 means no limit. Setting a limit will probably have a performance impact | Number >= 0 | `file_descriptors_limit: 100` |
 | parallel_recovery | When the server starts, the recovery of channels (directories) is done sequentially. However, when using SSDs, it may be worth setting this value to something higher than 1 to perform channels recovery in parallel | Number >= 1 | `parallel_recovery: 4` |
 | read_buffer_size | Size of buffers used to read ahead from message stores. This can significantly speed up sending messages to consumers after messages have been published. Default is 2MB. Set to 0 to disable | Bytes | `read_buffer_size: 2MB` |
+| auto_sync | Interval at which the store should be automatically flushed and sync'ed on disk. Default is every minute. Set to <=0 to disable | Duration | `auto_sync: "2m"` |
 
 Cluster Configuration:
 

@@ -81,6 +81,7 @@ Streaming Server File Store Options:
     --file_parallel_recovery <int>       On startup, number of channels that can be recovered in parallel
     --file_truncate_bad_eof <bool>       Truncate files for which there is an unexpected EOF on recovery, dataloss may occur
     --file_read_buffer_size <size>       Size of messages read ahead buffer (0 to disable)
+    --file_auto_sync <duration>          Interval at which the store should be automatically flushed and sync'ed on disk (<= 0 to disable)
 
 Streaming Server SQL Store Options:
     --sql_driver <string>            Name of the SQL Driver ("mysql" or "postgres")
