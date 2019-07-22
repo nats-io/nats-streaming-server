@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nats-io/stan.go/pb"
 )
@@ -492,4 +493,26 @@ func TestCryptoStoreMultipleCiphers(t *testing.T) {
 			t.Fatalf("Expected message %q, got %q", payloads[i], rm.Data)
 		}
 	}
+}
+
+func TestCryptoFileAutoSync(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	fs, _ := newFileStore(t, testFSDefaultDatastore, nil, AutoSync(15*time.Millisecond))
+	s, err := NewCryptoStore(fs, CryptoCipherAES, []byte("testkey"))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	// Add some state
+	cs := storeCreateChannel(t, s, "foo")
+	storeMsg(t, cs, "foo", 1, []byte("msg"))
+	storeSub(t, cs, "foo")
+
+	// Wait for auto sync to kick in
+	time.Sleep(50 * time.Millisecond)
+
+	// Server should not have panic'ed.
 }

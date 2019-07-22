@@ -2021,30 +2021,28 @@ func TestFSAutoSync(t *testing.T) {
 
 	cleanupFSDatastore(t)
 	// Verify that auto sync works if a channel is removed
-	// Make the auto sync code wait for 300ms when getting ready to sync a msg/sub store.
-	atomic.StoreInt64(&testAutoSync, int64(300*time.Millisecond))
-	defer atomic.StoreInt64(&testAutoSync, 0)
-
 	s = createDefaultFileStore(t, BufferSize(1024), AutoSync(150*time.Millisecond))
 	defer s.Close()
 
-	c = storeCreateChannel(t, s, "foo")
+	channels := map[string]struct{}{}
+	for i := 0; i < 100; i++ {
+		cn := fmt.Sprintf("foo_%d", i)
+		c = storeCreateChannel(t, s, cn)
+		channels[cn] = struct{}{}
 
-	storeMsg(t, c, "foo", 1, []byte("hello"))
-	subID := storeSub(t, c, "foo")
-	storeSubDelete(t, c, "foo", subID)
-
-	// Wait for the autosync callback to pick up the channel's stores to
-	// perform an autosync. We have made the code wait 300ms before
-	// issuing the autoSync() call...
-	time.Sleep(200 * time.Millisecond)
-
-	// Now delete channel
-	if err := s.DeleteChannel("foo"); err != nil {
-		t.Fatalf("Error deleting channel: %v", err)
+		storeMsg(t, c, cn, 1, []byte("hello"))
+		subID := storeSub(t, c, cn)
+		storeSubDelete(t, c, cn, subID)
 	}
 
-	// Now wait for the autoSync callback to resume and make sure
-	// that we don't get a crash.
+	// Delete channels around the time the auto-sync would hit.
+	time.Sleep(140 * time.Millisecond)
+	for cn := range channels {
+		if err := s.DeleteChannel(cn); err != nil {
+			t.Fatalf("Error deleting channel: %v", err)
+		}
+	}
+
+	// Make sure we don't get a panic
 	time.Sleep(300 * time.Millisecond)
 }
