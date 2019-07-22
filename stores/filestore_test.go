@@ -1974,24 +1974,40 @@ func TestFSAutoSync(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond)
 
-	ms.Lock()
-	notFlushed := ms.bw != nil && ms.bw.buf != nil && ms.bw.buf.Buffered() > 0
-	ms.Unlock()
-	if !notFlushed {
-		t.Fatalf("Message store should not have been flushed")
+	checkMsgStoreFlushed := func(t *testing.T, ms *FileMsgStore, shouldBeFlushed bool) int64 {
+		t.Helper()
+		ms.Lock()
+		flushed := ms.bw != nil && ms.bw.buf != nil && ms.bw.buf.Buffered() == 0
+		synced := ms.synced
+		ms.Unlock()
+		if shouldBeFlushed && !flushed {
+			t.Fatalf("Message store should have been flushed")
+		} else if !shouldBeFlushed && flushed {
+			t.Fatalf("Message store should not have been flushed")
+		}
+		return synced
 	}
+	checkMsgStoreFlushed(t, ms, false)
 
-	ss.Lock()
-	notFlushed = ss.bw != nil && ss.bw.buf != nil && ss.bw.buf.Buffered() > 0
-	ss.Unlock()
-	if !notFlushed {
-		t.Fatalf("Message store should not have been flushed")
+	checkSubStoreFlushed := func(t *testing.T, ss *FileSubStore, shouldBeFlushed bool) int64 {
+		t.Helper()
+		ss.Lock()
+		flushed := ss.bw != nil && ss.bw.buf != nil && ss.bw.buf.Buffered() == 0
+		synced := ss.synced
+		ss.Unlock()
+		if shouldBeFlushed && !flushed {
+			t.Fatalf("Subscription store should have been flushed")
+		} else if !shouldBeFlushed && flushed {
+			t.Fatalf("Subscription store should not have been flushed")
+		}
+		return synced
 	}
+	checkSubStoreFlushed(t, ss, false)
 
 	s.Close()
 	cleanupFSDatastore(t)
 	// Verify that auto sync works
-	s = createDefaultFileStore(t, BufferSize(1024), AutoSync(100*time.Millisecond))
+	s = createDefaultFileStore(t, BufferSize(1024), AutoSync(15*time.Millisecond))
 	defer s.Close()
 
 	c = storeCreateChannel(t, s, "foo")
@@ -2001,50 +2017,31 @@ func TestFSAutoSync(t *testing.T) {
 	storeMsg(t, c, "foo", 1, []byte("hello"))
 	storeSub(t, c, "foo")
 
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
-	ms.Lock()
-	notFlushed = ms.bw != nil && ms.bw.buf != nil && ms.bw.buf.Buffered() > 0
-	ms.Unlock()
-	if notFlushed {
-		t.Fatalf("Message store should have been flushed")
+	msSynced := checkMsgStoreFlushed(t, ms, true)
+	ssSynced := checkSubStoreFlushed(t, ss, true)
+
+	// Check that without new activity, there is no unnecessary sync'ing.
+	time.Sleep(100 * time.Millisecond)
+
+	if n := checkMsgStoreFlushed(t, ms, true); n != msSynced {
+		t.Fatalf("Message store is unnecessarily sync'ed (sync count was %v, now %v)", msSynced, n)
+	}
+	if n := checkSubStoreFlushed(t, ss, true); n != ssSynced {
+		t.Fatalf("Subscription store is unnecessarily sync'ed (sync count was %v, now %v)", ssSynced, n)
 	}
 
-	ss.Lock()
-	notFlushed = ss.bw != nil && ss.bw.buf != nil && ss.bw.buf.Buffered() > 0
-	ss.Unlock()
-	if notFlushed {
-		t.Fatalf("Message store should have been flushed")
+	// Add new activity and check things are now updated.
+	storeMsg(t, c, "foo", 2, []byte("hello"))
+	storeSub(t, c, "foo")
+
+	time.Sleep(50 * time.Millisecond)
+
+	if n := checkMsgStoreFlushed(t, ms, true); n == msSynced {
+		t.Fatalf("Message store was not sync'ed after new activity (sync count was %v, now %v)", msSynced, n)
 	}
-
-	s.Close()
-
-	cleanupFSDatastore(t)
-	// Verify that auto sync works if a channel is removed
-	// Make the auto sync code wait for 300ms when getting ready to sync a msg/sub store.
-	atomic.StoreInt64(&testAutoSync, int64(300*time.Millisecond))
-	defer atomic.StoreInt64(&testAutoSync, 0)
-
-	s = createDefaultFileStore(t, BufferSize(1024), AutoSync(150*time.Millisecond))
-	defer s.Close()
-
-	c = storeCreateChannel(t, s, "foo")
-
-	storeMsg(t, c, "foo", 1, []byte("hello"))
-	subID := storeSub(t, c, "foo")
-	storeSubDelete(t, c, "foo", subID)
-
-	// Wait for the autosync callback to pick up the channel's stores to
-	// perform an autosync. We have made the code wait 300ms before
-	// issuing the autoSync() call...
-	time.Sleep(200 * time.Millisecond)
-
-	// Now delete channel
-	if err := s.DeleteChannel("foo"); err != nil {
-		t.Fatalf("Error deleting channel: %v", err)
+	if n := checkSubStoreFlushed(t, ss, true); n == ssSynced {
+		t.Fatalf("Subscription store was not sync'ed after new activity (sync count was %v, now %v)", ssSynced, n)
 	}
-
-	// Now wait for the autoSync callback to resume and make sure
-	// that we don't get a crash.
-	time.Sleep(300 * time.Millisecond)
 }

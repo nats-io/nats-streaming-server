@@ -510,7 +510,6 @@ type FileStore struct {
 	cliCompactTS  time.Time
 	crcTable      *crc32.Table
 	lockFile      util.LockFile
-	autoSyncTimer *time.Timer
 }
 
 type subscription struct {
@@ -546,6 +545,9 @@ type FileSubStore struct {
 	activity    bool         // was there any write between two flush calls
 	writer      io.Writer    // this is either `bw` or `file` depending if buffer writer is used or not
 	shrinkTimer *time.Timer  // timer associated with callback shrinking buffer when possible
+	syncTimer   *time.Timer  // timer associated with performing auto flush and disk sync
+	needSync    bool         // this is required to reduce sync'ing in case DoSync==false, but AutoSync>0
+	synced      int64        // number of times the file is actually sync'ed
 	allDone     sync.WaitGroup
 }
 
@@ -636,6 +638,8 @@ type FileMsgStore struct {
 	bkgTasksWake chan bool // signal the background tasks go routine to get out of a sleep
 	allDone      sync.WaitGroup
 	readBufSize  int
+	needSync     bool  // this required to reduce sync'ing when DoSync==false, but AutoSync>0
+	synced       int64 // number of times the file is actually sync'ed
 }
 
 type bufferPool struct {
@@ -669,7 +673,6 @@ var (
 	bkgTasksSleepDuration = defaultBkgTasksSleepDuration
 	cacheTTL              = int64(defaultCacheTTL)
 	sliceCloseInterval    = defaultSliceCloseInterval
-	testAutoSync          = int64(0)
 )
 
 // FileStoreTestSetBackgroundTaskInterval is used by tests to reduce the interval
@@ -1299,45 +1302,7 @@ func NewFileStore(log logger.Logger, rootDir string, limits *StoreLimits, option
 		os.Remove(truncateFName)
 	}
 
-	if fs.opts.AutoSync > 0 {
-		fs.autoSyncTimer = time.AfterFunc(fs.opts.AutoSync, fs.autoSync)
-	}
-
 	return fs, nil
-}
-
-// autoSync will periodically flush and sync msgs and sub stores on disk.
-func (fs *FileStore) autoSync() {
-	fs.Lock()
-	if fs.closed {
-		fs.Unlock()
-		return
-	}
-
-	if len(fs.channels) > 0 {
-		channels := make([]*Channel, 0, len(fs.channels))
-		for _, c := range fs.channels {
-			channels = append(channels, c)
-		}
-		fs.Unlock()
-
-		for _, c := range channels {
-			if n := atomic.LoadInt64(&testAutoSync); n > 0 {
-				time.Sleep(time.Duration(n))
-			}
-			c.Msgs.(*FileMsgStore).autoSync()
-			c.Subs.(*FileSubStore).autoSync()
-		}
-
-		fs.Lock()
-		if fs.closed {
-			fs.Unlock()
-			return
-		}
-	}
-
-	fs.autoSyncTimer.Reset(fs.opts.AutoSync)
-	fs.Unlock()
 }
 
 type channelRecoveryCtx struct {
@@ -1902,9 +1867,6 @@ func (fs *FileStore) Close() error {
 
 	fm := fs.fm
 	lockFile := fs.lockFile
-	if fs.autoSyncTimer != nil {
-		fs.autoSyncTimer.Stop()
-	}
 	fs.Unlock()
 
 	if fm != nil {
@@ -2655,6 +2617,11 @@ func (ms *FileMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 		}
 	}
 
+	// In case DoSync is false, but we have auto-sync.
+	// This allow the background task to auto-sync only when there
+	// has been new activity since last sync.
+	ms.needSync = true
+
 	// Is there a gap in message sequence?
 	if ms.last > 0 && m.Sequence > ms.last+1 {
 		if err := ms.fillGaps(fslice, m); err != nil {
@@ -3189,6 +3156,9 @@ func (ms *FileMsgStore) backgroundTasks() {
 	nextExpiration := ms.expiration
 	lastCacheCheck := ms.timeTick
 	lastBufShrink := ms.timeTick
+	autoSyncInterval := int64(ms.fstore.opts.AutoSync)
+	doAutoSync := autoSyncInterval > 0
+	lastAutoSync := ms.timeTick
 	ms.RUnlock()
 
 	for {
@@ -3253,6 +3223,12 @@ func (ms *FileMsgStore) backgroundTasks() {
 				ms.Unlock()
 			}
 			lastCacheCheck = timeTick
+		}
+
+		// Check for auto-sync
+		if doAutoSync && timeTick >= lastAutoSync+autoSyncInterval {
+			ms.autoSync()
+			lastAutoSync = timeTick
 		}
 
 		select {
@@ -3761,6 +3737,8 @@ func (ms *FileMsgStore) flush(fslice *fileSlice, forceSync bool) error {
 		if err := fslice.idxFile.handle.Sync(); err != nil {
 			return err
 		}
+		ms.needSync = false
+		ms.synced++
 	}
 	return nil
 }
@@ -3783,7 +3761,7 @@ func (ms *FileMsgStore) Flush() error {
 // Flushes and sync the message store on disk.
 func (ms *FileMsgStore) autoSync() {
 	ms.Lock()
-	if !ms.closed && ms.writeSlice != nil {
+	if ms.needSync && !ms.closed && ms.writeSlice != nil {
 		if err := ms.lockFiles(ms.writeSlice); err == nil {
 			ms.flush(ms.writeSlice, true)
 			ms.unlockFiles(ms.writeSlice)
@@ -3892,6 +3870,12 @@ func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doR
 		fs.fm.closeLockedFile(ss.file)
 	} else {
 		fs.fm.unlockFile(ss.file)
+	}
+	if fs.opts.AutoSync > 0 {
+		ss.Lock()
+		ss.allDone.Add(1)
+		ss.syncTimer = time.AfterFunc(fs.opts.AutoSync, ss.autoSync)
+		ss.Unlock()
 	}
 	return ss, nil
 }
@@ -4321,6 +4305,7 @@ func (ss *FileSubStore) writeRecord(w io.Writer, recType recordType, rec record)
 	}
 	// Indicate that we wrote something to the buffer/file
 	ss.activity = true
+	ss.needSync = true
 	switch recType {
 	case subRecNew:
 		ss.numRecs++
@@ -4358,7 +4343,11 @@ func (ss *FileSubStore) flush(forceSync bool) error {
 		}
 	}
 	if ss.opts.DoSync || forceSync {
-		return ss.file.handle.Sync()
+		if err := ss.file.handle.Sync(); err != nil {
+			return err
+		}
+		ss.needSync = false
+		ss.synced++
 	}
 	return nil
 }
@@ -4379,10 +4368,13 @@ func (ss *FileSubStore) Flush() error {
 func (ss *FileSubStore) autoSync() {
 	ss.Lock()
 	if !ss.closed {
-		if err := ss.lockFile(); err == nil {
+		if ss.needSync && ss.lockFile() == nil {
 			ss.flush(true)
 			ss.fm.unlockFile(ss.file)
 		}
+		ss.syncTimer.Reset(ss.fstore.opts.AutoSync)
+	} else {
+		ss.allDone.Done()
 	}
 	ss.Unlock()
 }
@@ -4401,6 +4393,11 @@ func (ss *FileSubStore) Close() error {
 		if ss.shrinkTimer.Stop() {
 			// If we can stop, timer callback won't fire,
 			// so we need to decrement the wait group.
+			ss.allDone.Done()
+		}
+	}
+	if ss.syncTimer != nil {
+		if ss.syncTimer.Stop() {
 			ss.allDone.Done()
 		}
 	}

@@ -19,6 +19,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats-streaming-server/spb"
 )
@@ -288,4 +289,34 @@ func TestRSUseSubID(t *testing.T) {
 	if newSub3.ID != 12 {
 		t.Fatalf("Expected newSub3.ID to be 12, got %v", newSub3.ID)
 	}
+}
+
+func TestRSFileAutoSync(t *testing.T) {
+	cleanupRaftDatastore(t)
+	defer cleanupRaftDatastore(t)
+
+	limits := testDefaultStoreLimits
+	fs, err := NewFileStore(testLogger, testRSDefaultDatastore, &limits, AutoSync(15*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+
+	s := NewRaftStore(testLogger, fs, &limits)
+	defer s.Close()
+
+	info := testDefaultServerInfo
+	info.ClusterID = "testRaftStore"
+	if err := s.Init(&info); err != nil {
+		t.Fatalf("Error on init: %v", err)
+	}
+
+	// Add some state
+	cs := storeCreateChannel(t, s, "foo")
+	storeMsg(t, cs, "foo", 1, []byte("msg"))
+	storeSub(t, cs, "foo")
+
+	// Wait for auto sync to kick in
+	time.Sleep(50 * time.Millisecond)
+
+	// Server should not have panic'ed.
 }
