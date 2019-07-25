@@ -6,7 +6,7 @@ require (
 	github.com/go-sql-driver/mysql v1.4.1
 	github.com/gogo/protobuf v1.2.1
 	github.com/hashicorp/go-msgpack v0.5.5
-	github.com/hashicorp/raft v1.1.0
+	github.com/hashicorp/raft v1.1.1
 	github.com/lib/pq v1.1.1
 	github.com/nats-io/nats-server/v2 v2.0.2
 	github.com/nats-io/nats.go v1.8.1
