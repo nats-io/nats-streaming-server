@@ -6520,3 +6520,84 @@ func TestClusteringQueueMemberPendingCount(t *testing.T) {
 		return nil
 	})
 }
+
+type captureRaftLogger struct {
+	dummyLogger
+	good map[string]struct{}
+	bad  map[string]struct{}
+}
+
+func (rl *captureRaftLogger) log(logLevel, format string, args ...interface{}) {
+	rl.Lock()
+	msg := fmt.Sprintf(format, args...)
+	if strings.Contains(msg, "raft:") {
+		if strings.Contains(msg, "STREAM: raft:") {
+			rl.good[logLevel] = struct{}{}
+		} else {
+			rl.bad[logLevel] = struct{}{}
+		}
+	}
+	rl.Unlock()
+}
+
+func (rl *captureRaftLogger) Noticef(format string, args ...interface{}) {
+	rl.log("info", format, args...)
+}
+func (rl *captureRaftLogger) Debugf(format string, args ...interface{}) {
+	rl.log("debug", format, args...)
+}
+func (rl *captureRaftLogger) Tracef(format string, args ...interface{}) {
+	rl.log("trace", format, args...)
+}
+func (rl *captureRaftLogger) Errorf(format string, args ...interface{}) {
+	rl.log("error", format, args...)
+}
+func (rl *captureRaftLogger) Fatalf(format string, args ...interface{}) {
+	rl.log("fatal", format, args...)
+}
+func (rl *captureRaftLogger) Warnf(format string, args ...interface{}) {
+	rl.log("warning", format, args...)
+}
+
+func TestClusteringRaftLogging(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	l := &captureRaftLogger{
+		good: make(map[string]struct{}),
+		bad:  make(map[string]struct{}),
+	}
+
+	opts := getTestDefaultOptsForClustering("a", false)
+	opts.NATSServerURL = ""
+	opts.Clustering.Peers = []string{"b"}
+	opts.CustomLogger = l
+	opts.Debug, opts.Trace = true, true
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	// With the above setup, we should have RAFT logging
+	// DEBUG, INFO, WARN and ERROR traces.
+	waitFor(t, 2*time.Second, 15*time.Millisecond, func() error {
+		l.Lock()
+		gotAll := len(l.good)+len(l.bad) >= 4
+		l.Unlock()
+		if !gotAll {
+			return fmt.Errorf("Did not get all expected RAFT log levels")
+		}
+		return nil
+	})
+
+	var wrongLevels []string
+	l.Lock()
+	for level := range l.bad {
+		wrongLevels = append(wrongLevels, level)
+	}
+	l.Unlock()
+
+	if len(wrongLevels) > 0 {
+		t.Fatalf("Wrong tracing for raft log levels: %v", wrongLevels)
+	}
+}
