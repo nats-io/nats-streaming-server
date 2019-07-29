@@ -13,8 +13,8 @@ require (
 	github.com/nats-io/nuid v1.0.1
 	github.com/nats-io/stan.go v0.4.5
 	github.com/prometheus/procfs v0.0.2
-	go.etcd.io/bbolt v1.3.2
+	go.etcd.io/bbolt v1.3.3
 	golang.org/x/crypto v0.0.0-20190701094942-4def268fd1a4
-	golang.org/x/sys v0.0.0-20190710143415-6ec70d6a5542
+	golang.org/x/sys v0.0.0-20190726091711-fc99dfbffb4e
 	google.golang.org/appengine v1.6.0 // indirect
 )
