@@ -1856,3 +1856,68 @@ func TestSQLMsgCacheAutoFlush(t *testing.T) {
 		t.Fatalf("Expected some messages, got none")
 	}
 }
+
+func TestSQLGetExclusiveLockRace(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	sqlLockUpdateInterval = 250 * time.Millisecond
+	sqlLockLostCount = 100
+	sqlNoPanic = true
+	defer func() {
+		sqlLockUpdateInterval = sqlDefaultLockUpdateInterval
+		sqlLockLostCount = sqlDefaultLockLostCount
+		sqlNoPanic = false
+	}()
+
+	s1 := createDefaultSQLStore(t)
+	defer s1.Close()
+
+	hasLock, err := s1.GetExclusiveLock()
+	if !hasLock || err != nil {
+		t.Fatalf("Expected lock to be acquired, got %v, %v", hasLock, err)
+	}
+
+	dl := &captureErrAndFatalLogger{}
+	s2, err := NewSQLStore(dl, testSQLDriver, testSQLSource, nil, SQLNoCaching(true))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s2.Close()
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		s2.GetExclusiveLock()
+		wg.Done()
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	s1.Close()
+
+	wg.Wait()
+
+	db := getDBConnection(t)
+	defer db.Close()
+
+	// Now check that s2's is updating the lock table
+	prevTick := uint64(0)
+	for i := 0; i < 2; i++ {
+		r := db.QueryRow("SELECT tick FROM StoreLock")
+		tick := uint64(0)
+		if err := r.Scan(&tick); err != nil {
+			t.Fatalf("Error on Scan: %v", err)
+		}
+		if prevTick > 0 && tick == prevTick {
+			t.Fatalf("Tick was not updated (%v)", prevTick)
+		}
+		prevTick = tick
+		if i == 0 {
+			time.Sleep(3 * sqlLockUpdateInterval)
+		}
+	}
+}
