@@ -367,6 +367,7 @@ func TestCSMaxAge(t *testing.T) {
 			// Wait a bit
 			time.Sleep(300 * time.Millisecond)
 			// Send more
+			start := time.Now()
 			for i := 0; i < 5; i++ {
 				storeMsg(t, cs, "foo", seq, msg)
 				seq++
@@ -377,7 +378,11 @@ func TestCSMaxAge(t *testing.T) {
 			expectedFirst := uint64(11)
 			expectedLast := uint64(15)
 			first, last := msgStoreFirstAndLastSequence(t, cs.Msgs)
-			if first != expectedFirst || last != expectedLast {
+			// On travis, sometimes it gets delayed so much that
+			// by the time we check, all have expired.
+			if dur := time.Since(start); dur >= 350*time.Millisecond {
+				t.Logf("Skipping first/last check since %v passed since sending the 5 msgs", dur)
+			} else if first != expectedFirst || last != expectedLast {
 				t.Fatalf("Expected first/last to be %v/%v, got %v/%v",
 					expectedFirst, expectedLast, first, last)
 			}
