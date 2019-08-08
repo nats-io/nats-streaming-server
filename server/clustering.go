@@ -34,18 +34,21 @@ const (
 	defaultRaftElectionTimeout  = 2 * time.Second
 	defaultRaftLeaseTimeout     = time.Second
 	defaultRaftCommitTimeout    = 100 * time.Millisecond
+	defaultTPortTimeout         = 2 * time.Second
 )
 
 var (
 	runningInTests              bool
 	joinRaftGroupTimeout        = defaultJoinRaftGroupTimeout
 	testPauseAfterNewRaftCalled bool
+	tportTimeout                = defaultTPortTimeout
 )
 
 func clusterSetupForTest() {
 	runningInTests = true
 	lazyReplicationInterval = 250 * time.Millisecond
 	joinRaftGroupTimeout = 250 * time.Millisecond
+	tportTimeout = 250 * time.Millisecond
 }
 
 // ClusteringOptions contains STAN Server options related to clustering.
@@ -236,15 +239,28 @@ func (rl *raftLogger) Write(b []byte) (int, error) {
 	}
 	levelStart := bytes.IndexByte(b, '[')
 	if levelStart != -1 {
+		// After raft v1.0.0, they changed the way they log.
+		// Used to be:
+		// "[DEBUG] raft:
+		// "[INFO] raft:
+		// "[WARN] raft:
+		// "[ERR] raft:
+		// But now have aligned and changed ERR to ERROR:
+		// "[DEBUG] raft:
+		// "[INFO]  raft:
+		// "[WARN]  raft:
+		// "[ERROR] raft:
+		// So our offset will always be levelStart+8
+		offset := levelStart + 8
 		switch b[levelStart+1] {
 		case 'D': // [DEBUG]
-			rl.log.Tracef("%s", b[levelStart+8:])
+			rl.log.Tracef("%s", b[offset:])
 		case 'I': // [INFO]
-			rl.log.Noticef("%s", b[levelStart+7:])
+			rl.log.Noticef("%s", b[offset:])
 		case 'W': // [WARN]
-			rl.log.Warnf("%s", b[levelStart+7:])
-		case 'E': // [ERR]
-			rl.log.Errorf("%s", b[levelStart+6:])
+			rl.log.Warnf("%s", b[offset:])
+		case 'E': // [ERROR]
+			rl.log.Errorf("%s", b[offset:])
 		default:
 			rl.log.Noticef("%s", b)
 		}
@@ -323,7 +339,7 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 	}
 
 	// TODO: using a single NATS conn for every channel might be a bottleneck. Maybe pool conns?
-	transport, err := newNATSTransport(addr, s.ncr, 2*time.Second, logWriter)
+	transport, err := newNATSTransport(addr, s.ncr, tportTimeout, logWriter)
 	if err != nil {
 		store.Close()
 		return false, err
