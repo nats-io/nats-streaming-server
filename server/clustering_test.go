@@ -4218,14 +4218,16 @@ func TestClusteringDeadlockOnChannelDelete(t *testing.T) {
 
 	leader.mu.RLock()
 	newSubSubject := leader.info.Subscribe
+	unsubSubject := leader.info.SubClose
 	leader.mu.RUnlock()
 
 	req := pb.SubscriptionRequest{
 		ClientID:      "me",
 		AckWaitInSecs: 30,
-		Inbox:         nats.NewInbox(),
 		MaxInFlight:   1,
 	}
+
+	inboxes := make([]string, 0, 1000)
 
 	for i := 0; i < 1000; i++ {
 		leader.lookupOrCreateChannel(fmt.Sprintf("foo.%d", i))
@@ -4234,9 +4236,24 @@ func TestClusteringDeadlockOnChannelDelete(t *testing.T) {
 	time.Sleep(990 * time.Millisecond)
 
 	for i := 0; i < 1000; i++ {
+		req.Inbox = nats.NewInbox()
+		inboxes = append(inboxes, req.Inbox)
 		req.Subject = fmt.Sprintf("foo.%d", i)
 		b, _ := req.Marshal()
 		nc.Publish(newSubSubject, b)
+	}
+
+	// Technically, it is possible that some subscriptions have prevented
+	// the channel from being deleted (if they made it before the channel
+	// was deleted). So send close requests.
+	for i := 0; i < 1000; i++ {
+		req := pb.UnsubscribeRequest{
+			ClientID: "me",
+			Inbox:    inboxes[i],
+			Subject:  fmt.Sprintf("foo.%d", i),
+		}
+		b, _ := req.Marshal()
+		nc.Publish(unsubSubject, b)
 	}
 
 	ch := make(chan struct{}, 1)
