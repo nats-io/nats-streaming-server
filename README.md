@@ -59,6 +59,7 @@ NATS Streaming provides the following high-level feature set.
             * [File Store Options](#file-store-options)
             * [File Store Recovery Errors](#file-store-recovery-errors)
         * [SQL Store](#sql-store)
+            * [SQL Read and Write Timeouts](#sql-read-and-write-timeouts)
             * [SQL Store Options](#sql-store-options)
 - [Clients](#clients)
 - [License](#license)
@@ -2053,6 +2054,25 @@ Run the nats streaming server with postgres at the sql_source:
 ```
 DOCKER_BRIDGE_IP=$(docker inspect --format '{{(index .IPAM.Config 0).Gateway}}' bridge) docker run -d --name nats-streaming -p 4222:4222 -p 8222:32768 nats-streaming-local -SDV --store sql --sql_driver postgres --sql_source="user=postgres password=postgres host=$DOCKER_BRIDGE_IP port=5432 sslmode=disable"
 ```
+
+#### SQL Read and Write Timeouts
+
+Sometimes, it is possible that a DB connection between the streaming server and the DB server is stale but the connection is not dropped.
+This would cause the server to block while trying to store or lookup a message, or any other operation involving the database.
+Because of internal locking in the store implementation, this could cause the server to seemingly be unresponsive.
+
+To mitigate that, you can pass `readTimeout` and `writeTimeout` options to the `sql_source` when starting the server. The MySQL driver had always had those options, but we have extended the Postgres driver that we use to provide those options in NATS Streaming `v0.16.0`.
+You pass the values as a duration, for instance `5s` for 5 seconds.
+
+Here is what a `sql_source` would look like for `MySQL` driver:
+```
+nats-streaming-server -store sql -sql_driver mysql -sql_source "nss:password@/nss_db?readTimeout=5s&writeTimeout=5s" ..
+```
+Or, for `Postgres` driver:
+```
+nats-streaming-server -store sql -sql_driver postgres -sql_source "dbname=nss_db readTimeout=5s writeTimeout=5s sslmode=disable" ..
+```
+Be careful to not make those values too small otherwise you could cause unwanted failures.
 
 #### SQL Store Options
 
