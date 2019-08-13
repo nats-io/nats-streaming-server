@@ -383,7 +383,11 @@ var sqlSeqArrayPool = &sync.Pool{
 // DefaultStoreLimits.
 func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits, options ...SQLStoreOption) (*SQLStore, error) {
 	initSQLStmts.Do(func() { initSQLStmtsTable(driver) })
-	db, err := sql.Open(driver, source)
+	realDriver := driver
+	if driver == driverPostgres {
+		realDriver = "pq-deadlines"
+	}
+	db, err := sql.Open(realDriver, source)
 	if err != nil {
 		return nil, err
 	}

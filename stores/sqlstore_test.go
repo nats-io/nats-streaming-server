@@ -17,6 +17,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"net"
 	"reflect"
 	"strings"
 	"sync"
@@ -28,8 +29,9 @@ import (
 	"github.com/nats-io/nats-streaming-server/test"
 	"github.com/nats-io/stan.go/pb"
 
-	_ "github.com/go-sql-driver/mysql" // mysql driver
-	_ "github.com/lib/pq"              // postgres driver
+	_ "github.com/go-sql-driver/mysql"                              // mysql driver
+	_ "github.com/lib/pq"                                           // postgres driver
+	_ "github.com/nats-io/nats-streaming-server/stores/pqdeadlines" // wrapper for postgres that gives read/write deadlines
 )
 
 // The SourceAdmin is used by the test setup to have access
@@ -1920,4 +1922,171 @@ func TestSQLGetExclusiveLockRace(t *testing.T) {
 			time.Sleep(3 * sqlLockUpdateInterval)
 		}
 	}
+}
+
+type myProxy struct {
+	sync.Mutex
+	connectTo string
+	port      int
+	l         net.Listener
+	pauseCh   chan struct{}
+	wg        sync.WaitGroup
+}
+
+func newProxy(connectTo string) (*myProxy, error) {
+	p := &myProxy{connectTo: connectTo, pauseCh: make(chan struct{}, 1)}
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	p.l = l
+	p.port = l.Addr().(*net.TCPAddr).Port
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			p.wg.Add(1)
+			go p.proxy(c)
+		}
+	}()
+	return p, nil
+}
+
+func (p *myProxy) proxy(c net.Conn) {
+	defer p.wg.Done()
+
+	dest, err := net.Dial("tcp", p.connectTo)
+	if err != nil {
+		p.l.Close()
+		return
+	}
+
+	pauseIfAsked := func() {
+		select {
+		case <-p.pauseCh:
+			// We were paused.. wait for other notification to unpause
+			<-p.pauseCh
+		default:
+		}
+	}
+
+	go func() {
+		defer dest.Close()
+		var destBuf [1024]byte
+		for {
+			n, err := dest.Read(destBuf[:])
+			if err != nil {
+				return
+			}
+			pauseIfAsked()
+			if _, err := c.Write(destBuf[:n]); err != nil {
+				return
+			}
+		}
+	}()
+
+	defer dest.Close()
+	defer c.Close()
+	var buf [1024]byte
+	for {
+		n, err := c.Read(buf[:])
+		if err != nil {
+			return
+		}
+		pauseIfAsked()
+		if _, err := dest.Write(buf[:n]); err != nil {
+			return
+		}
+	}
+}
+
+func (p *myProxy) getPort() int {
+	return p.port
+}
+
+func (p *myProxy) pause() {
+	p.pauseCh <- struct{}{}
+}
+
+func (p *myProxy) resume() {
+	p.pauseCh <- struct{}{}
+}
+
+func (p *myProxy) close() {
+	p.l.Close()
+	p.wg.Wait()
+}
+
+func TestSQLDeadlines(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	var port int
+	var source string
+
+	if testSQLDriver == driverMySQL {
+		port = 3306
+	} else {
+		port = 5432
+	}
+	proxy, err := newProxy(fmt.Sprintf("localhost:%d", port))
+	if err != nil {
+		t.Fatalf("Error creating proxy: %v", err)
+	}
+	defer proxy.close()
+
+	pport := proxy.getPort()
+	if testSQLDriver == driverMySQL {
+		source = fmt.Sprintf("nss:password@tcp(localhost:%d)/%s?readTimeout=500ms&writeTimeout=500ms", pport, testDefaultDatabaseName)
+	} else {
+		source = fmt.Sprintf("port=%d dbname=%s readTimeout=500ms writeTimeout=500ms sslmode=disable", pport, testDefaultDatabaseName)
+	}
+	s, err := NewSQLStore(testLogger, testSQLDriver, source, nil, SQLNoCaching(true), SQLMaxOpenConns(1))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+	storeMsg(t, c, "foo", 1, []byte("msg1"))
+
+	checkTimeout := func(t *testing.T, f func() error) {
+		proxy.pause()
+		defer proxy.resume()
+
+		start := time.Now()
+		if err := f(); err == nil {
+			t.Fatal("Expected error, did not get one")
+		}
+		dur := time.Since(start)
+		if dur > time.Second {
+			t.Fatalf("Expected to take less than 1sec, took: %v", dur)
+		}
+	}
+
+	checkTimeout(t, func() error {
+		_, err := c.Msgs.Store(&pb.MsgProto{
+			Sequence:  2,
+			Data:      []byte("msg2"),
+			Subject:   "foo",
+			Timestamp: time.Now().UnixNano(),
+		})
+		return err
+	})
+
+	msgStoreLookup(t, c.Msgs, 1)
+
+	checkTimeout(t, func() error {
+		_, err := c.Msgs.Lookup(1)
+		return err
+	})
 }
