@@ -546,7 +546,6 @@ type FileSubStore struct {
 	writer      io.Writer    // this is either `bw` or `file` depending if buffer writer is used or not
 	shrinkTimer *time.Timer  // timer associated with callback shrinking buffer when possible
 	syncTimer   *time.Timer  // timer associated with performing auto flush and disk sync
-	needSync    bool         // this is required to reduce sync'ing in case DoSync==false, but AutoSync>0
 	synced      int64        // number of times the file is actually sync'ed
 	allDone     sync.WaitGroup
 }
@@ -3730,7 +3729,7 @@ func (ms *FileMsgStore) flush(fslice *fileSlice, forceSync bool) error {
 			return err
 		}
 	}
-	if ms.fstore.opts.DoSync || forceSync {
+	if ms.needSync && (ms.fstore.opts.DoSync || forceSync) {
 		if err := fslice.file.handle.Sync(); err != nil {
 			return err
 		}
@@ -4305,7 +4304,6 @@ func (ss *FileSubStore) writeRecord(w io.Writer, recType recordType, rec record)
 	}
 	// Indicate that we wrote something to the buffer/file
 	ss.activity = true
-	ss.needSync = true
 	switch recType {
 	case subRecNew:
 		ss.numRecs++
@@ -4332,7 +4330,7 @@ func (ss *FileSubStore) writeRecord(w io.Writer, recType recordType, rec record)
 
 func (ss *FileSubStore) flush(forceSync bool) error {
 	// Skip this if nothing was written since the last flush
-	if !ss.activity && !forceSync {
+	if !ss.activity {
 		return nil
 	}
 	// Reset this now
@@ -4346,7 +4344,6 @@ func (ss *FileSubStore) flush(forceSync bool) error {
 		if err := ss.file.handle.Sync(); err != nil {
 			return err
 		}
-		ss.needSync = false
 		ss.synced++
 	}
 	return nil
@@ -4368,7 +4365,7 @@ func (ss *FileSubStore) Flush() error {
 func (ss *FileSubStore) autoSync() {
 	ss.Lock()
 	if !ss.closed {
-		if ss.needSync && ss.lockFile() == nil {
+		if ss.activity && ss.lockFile() == nil {
 			ss.flush(true)
 			ss.fm.unlockFile(ss.file)
 		}

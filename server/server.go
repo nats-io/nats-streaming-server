@@ -4244,7 +4244,7 @@ func (s *StanServer) processUnsubscribeRequest(m *nats.Msg) {
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidUnsubReq)
 		return
 	}
-	s.performmUnsubOrCloseSubscription(m, req, false)
+	s.performUnsubOrCloseSubscription(m, req, false)
 }
 
 // processSubCloseRequest will process a subscription close request.
@@ -4256,7 +4256,7 @@ func (s *StanServer) processSubCloseRequest(m *nats.Msg) {
 		s.sendSubscriptionResponseErr(m.Reply, ErrInvalidUnsubReq)
 		return
 	}
-	s.performmUnsubOrCloseSubscription(m, req, true)
+	s.performUnsubOrCloseSubscription(m, req, true)
 }
 
 // Used when processing protocol messages to guarantee ordering.
@@ -4278,9 +4278,9 @@ func (s *StanServer) barrier(f func()) {
 	})
 }
 
-// performmUnsubOrCloseSubscription processes the unsub or close subscription
+// performUnsubOrCloseSubscription processes the unsub or close subscription
 // request.
-func (s *StanServer) performmUnsubOrCloseSubscription(m *nats.Msg, req *pb.UnsubscribeRequest, isSubClose bool) {
+func (s *StanServer) performUnsubOrCloseSubscription(m *nats.Msg, req *pb.UnsubscribeRequest, isSubClose bool) {
 	// With partitioning, first verify that this server is handling this
 	// channel. If not, do not return an error, since another server will
 	// handle it. If no other server is, the client will get a timeout.
@@ -4388,6 +4388,9 @@ func (s *StanServer) replicateUnsubscribe(req *pb.UnsubscribeRequest, opType spb
 }
 
 func (s *StanServer) sendSubscriptionResponseErr(reply string, err error) {
+	if reply == "" {
+		return
+	}
 	resp := &pb.SubscriptionResponse{}
 	if err != nil {
 		resp.Error = err.Error()
