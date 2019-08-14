@@ -15,6 +15,9 @@ package server
 
 import (
 	"fmt"
+	"runtime"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -93,7 +96,7 @@ func TestQueueSubsWithDifferentAckWait(t *testing.T) {
 	select {
 	case <-rch2:
 	// ok
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		t.Fatal("Message should have been redelivered")
 	}
 	// Create 3rd member with higher AckWait than the 2nd
@@ -113,7 +116,7 @@ func TestQueueSubsWithDifferentAckWait(t *testing.T) {
 	select {
 	case <-rch3:
 	// ok
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		t.Fatal("Message should have been redelivered")
 	}
 }
@@ -1078,5 +1081,83 @@ func TestQueueGroupNotStalledOnMemberLeaving(t *testing.T) {
 	case <-ch:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("Did not receive all msgs")
+	}
+}
+
+type checkStoreLookup struct {
+	stores.MsgStore
+	errCh chan error
+}
+
+func (s *checkStoreLookup) Lookup(seq uint64) (*pb.MsgProto, error) {
+	buf := make([]byte, 10000)
+	n := runtime.Stack(buf, false)
+	if strings.Contains(string(buf[:n]), "Remove") {
+		select {
+		case s.errCh <- fmt.Errorf("Lookup invoked from Remove"):
+		default:
+		}
+	}
+	return s.MsgStore.Lookup(seq)
+}
+
+func TestQueueNoRedeliveryDuringSubClose(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	errCh := make(chan error, 1)
+
+	c, err := s.lookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Error creating channel: %v", err)
+	}
+	c.store.Msgs = &checkStoreLookup{MsgStore: c.store.Msgs, errCh: errCh}
+
+	sc1 := NewDefaultConnection(t)
+	defer sc1.Close()
+
+	ch := make(chan struct{})
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	if _, err := sc1.QueueSubscribe("foo", "bar", func(m *stan.Msg) {
+		<-ch
+		if m.Sequence == 10 {
+			wg.Done()
+		}
+	}); err != nil {
+		t.Fatalf("Error on queue subscribe: %v", err)
+	}
+
+	sc2, err := stan.Connect(clusterName, clientName+"2")
+	if err != nil {
+		t.Fatalf("Error on connect")
+	}
+	defer sc2.Close()
+
+	if _, err := sc2.QueueSubscribe("foo", "bar", func(_ *stan.Msg) {},
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Error on queue subscribe: %v", err)
+	}
+
+	// Send some messages, since sub1 does not ack due to channel
+	// being blocked and sub2 does not ack due to manual ack mode,
+	// messages should be distributed.
+	for i := 0; i < 10; i++ {
+		if err := sc2.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish")
+		}
+	}
+
+	if err := sc2.Close(); err != nil {
+		t.Fatalf("Error on publish")
+	}
+
+	close(ch)
+	wg.Wait()
+
+	select {
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	default:
 	}
 }

@@ -1195,11 +1195,20 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	ss.Unlock()
 
 	if !ss.stan.isClustered || ss.stan.isLeader() {
-		// Calling this will sort current pending messages and ensure
-		// that the ackTimer is properly set. It does not necessarily
-		// mean that messages are going to be redelivered on the spot.
+		// Go over the list of queue subs to which we have transferred
+		// messages from the leaving member. We want to have those
+		// messages redelivered quickly.
 		for _, qsub := range qsubs {
-			ss.stan.performAckExpirationRedelivery(qsub, false)
+			qsub.Lock()
+			// Make the timer fire soon. performAckExpirationRedelivery
+			// will then re-order messages, etc..
+			fireIn := 100 * time.Millisecond
+			if qsub.ackTimer == nil {
+				ss.stan.setupAckTimer(qsub, fireIn)
+			} else {
+				qsub.ackTimer.Reset(fireIn)
+			}
+			qsub.Unlock()
 		}
 	}
 
