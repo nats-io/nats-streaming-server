@@ -26,7 +26,7 @@ import (
 )
 
 // Version is the NATS Streaming Go Client version
-const Version = "0.4.5"
+const Version = "0.5.0"
 
 const (
 	// DefaultNatsURL is the default URL the client connects to
@@ -156,9 +156,12 @@ type Options struct {
 	// calls block.
 	MaxPubAcksInflight int
 
+	// DEPRECATED: Please use PingInterval instead
+	PingIterval int
+
 	// PingInterval is the interval at which client sends PINGs to the server
 	// to detect the loss of a connection.
-	PingIterval int
+	PingInterval int
 
 	// PingMaxOut specifies the maximum number of PINGs without a corresponding
 	// PONG before declaring the connection permanently lost.
@@ -169,16 +172,24 @@ type Options struct {
 	ConnectionLostCB ConnectionLostHandler
 }
 
-// DefaultOptions are the NATS Streaming client's default options
-var DefaultOptions = Options{
-	NatsURL:            DefaultNatsURL,
-	ConnectTimeout:     DefaultConnectWait,
-	AckTimeout:         DefaultAckWait,
-	DiscoverPrefix:     DefaultDiscoverPrefix,
-	MaxPubAcksInflight: DefaultMaxPubAcksInflight,
-	PingIterval:        DefaultPingInterval,
-	PingMaxOut:         DefaultPingMaxOut,
+// GetDefaultOptions returns default configuration options for the client.
+func GetDefaultOptions() Options {
+	return Options{
+		NatsURL:            DefaultNatsURL,
+		ConnectTimeout:     DefaultConnectWait,
+		AckTimeout:         DefaultAckWait,
+		DiscoverPrefix:     DefaultDiscoverPrefix,
+		MaxPubAcksInflight: DefaultMaxPubAcksInflight,
+		PingInterval:       DefaultPingInterval,
+		PingMaxOut:         DefaultPingMaxOut,
+	}
 }
+
+// DEPRECATED: Use GetDefaultOptions() instead.
+// DefaultOptions is not safe for use by multiple clients.
+// For details see https://github.com/nats-io/nats.go/issues/308.
+// DefaultOptions are the NATS Streaming client's default options
+var DefaultOptions = GetDefaultOptions()
 
 // Option is a function on the options for a connection.
 type Option func(*Options) error
@@ -246,7 +257,7 @@ func Pings(interval, maxOut int) Option {
 				return fmt.Errorf("invalid ping values: interval=%v (min>0) maxOut=%v (min=2)", interval, maxOut)
 			}
 		}
-		o.PingIterval = interval
+		o.PingInterval = interval
 		o.PingMaxOut = maxOut
 		return nil
 	}
@@ -359,7 +370,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 		HeartbeatInbox: hbInbox,
 		ConnID:         c.connID,
 		Protocol:       protocolOne,
-		PingInterval:   int32(c.opts.PingIterval),
+		PingInterval:   int32(c.opts.PingInterval),
 		PingMaxOut:     int32(c.opts.PingMaxOut),
 	}
 	b, _ := req.Marshal()

@@ -1,4 +1,4 @@
-// Copyright 2012-2018 The NATS Authors
+// Copyright 2012-2019 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -18,6 +18,7 @@ import (
 	"encoding/base64"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/nats-io/jwt"
 	"github.com/nats-io/nkeys"
@@ -89,11 +90,19 @@ type SubjectPermission struct {
 	Deny  []string `json:"deny,omitempty"`
 }
 
+// ResponsePermission can be used to allow responses to any reply subject
+// that is received on a valid subscription.
+type ResponsePermission struct {
+	MaxMsgs int           `json:"max"`
+	Expires time.Duration `json:"ttl"`
+}
+
 // Permissions are the allowed subjects on a per
 // publish or subscribe basis.
 type Permissions struct {
-	Publish   *SubjectPermission `json:"publish"`
-	Subscribe *SubjectPermission `json:"subscribe"`
+	Publish   *SubjectPermission  `json:"publish"`
+	Subscribe *SubjectPermission  `json:"subscribe"`
+	Response  *ResponsePermission `json:"responses,omitempty"`
 }
 
 // RoutePermissions are similar to user permissions
@@ -133,6 +142,12 @@ func (p *Permissions) clone() *Permissions {
 	}
 	if p.Subscribe != nil {
 		clone.Subscribe = p.Subscribe.clone()
+	}
+	if p.Response != nil {
+		clone.Response = &ResponsePermission{
+			MaxMsgs: p.Response.MaxMsgs,
+			Expires: p.Response.Expires,
+		}
 	}
 	return clone
 }
@@ -396,6 +411,11 @@ func (s *Server) isClientAuthorized(c *client) bool {
 			c.Debugf("Signature not verified")
 			return false
 		}
+		if acc.checkUserRevoked(juc.Subject) {
+			c.Debugf("User authentication revoked")
+			return false
+		}
+
 		nkey = buildInternalNkeyUser(juc, acc)
 		c.RegisterNkeyUser(nkey)
 
@@ -595,12 +615,20 @@ func (s *Server) isLeafNodeAuthorized(c *client) bool {
 	// If we have a jwt and a userClaim, make sure we have the Account, etc associated.
 	// We need to look up the account. This will use an account resolver if one is present.
 	if juc != nil {
-		if acc, _ = s.LookupAccount(juc.Issuer); acc == nil {
-			c.Debugf("Account JWT can not be found")
+		issuer := juc.Issuer
+		if juc.IssuerAccount != "" {
+			issuer = juc.IssuerAccount
+		}
+		if acc, err = s.LookupAccount(issuer); acc == nil {
+			c.Debugf("Account JWT lookup error: %v", err)
 			return false
 		}
 		if !s.isTrustedIssuer(acc.Issuer) {
 			c.Debugf("Account JWT not signed by trusted operator")
+			return false
+		}
+		if juc.IssuerAccount != "" && !acc.hasIssuer(juc.Issuer) {
+			c.Debugf("User JWT issuer is not known")
 			return false
 		}
 		if acc.IsExpired() {

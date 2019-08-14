@@ -34,28 +34,33 @@ const globalAccountName = "$G"
 // Account are subject namespace definitions. By default no messages are shared between accounts.
 // You can share via Exports and Imports of Streams and Services.
 type Account struct {
-	Name       string
-	Nkey       string
-	Issuer     string
-	claimJWT   string
-	updated    time.Time
-	mu         sync.RWMutex
-	sl         *Sublist
-	etmr       *time.Timer
-	ctmr       *time.Timer
-	strack     map[string]sconns
-	nrclients  int32
-	sysclients int32
-	nleafs     int32
-	nrleafs    int32
-	clients    map[*client]*client
-	rm         map[string]int32
-	lleafs     []*client
-	imports    importMap
-	exports    exportMap
+	Name         string
+	Nkey         string
+	Issuer       string
+	claimJWT     string
+	updated      time.Time
+	mu           sync.RWMutex
+	sl           *Sublist
+	etmr         *time.Timer
+	ctmr         *time.Timer
+	strack       map[string]sconns
+	nrclients    int32
+	sysclients   int32
+	nleafs       int32
+	nrleafs      int32
+	clients      map[*client]*client
+	rm           map[string]int32
+	lqws         map[string]int32
+	usersRevoked map[string]int64
+	actsRevoked  map[string]int64
+	respMap      map[string][]*serviceRespEntry
+	lleafs       []*client
+	imports      importMap
+	exports      exportMap
 	limits
 	nae         int32
 	pruning     bool
+	rmPruning   bool
 	expired     bool
 	signingKeys []string
 	srv         *Server // server this account is registered with (possibly nil)
@@ -68,6 +73,7 @@ type limits struct {
 	mconns   int32
 	mleafs   int32
 	maxnae   int32
+	maxnrm   int32
 	maxaettl time.Duration
 }
 
@@ -88,13 +94,47 @@ type streamImport struct {
 
 // Import service mapping struct
 type serviceImport struct {
-	acc     *Account
-	from    string
-	to      string
-	ae      bool
-	ts      int64
-	claim   *jwt.Import
-	invalid bool
+	acc      *Account
+	claim    *jwt.Import
+	from     string
+	to       string
+	rt       ServiceRespType
+	ts       int64
+	ae       bool
+	internal bool
+	invalid  bool
+}
+
+// This is used to record when we create a mapping for implicit service
+// imports. We use this to clean up entries that are not singletons when
+// we detect that interest is no longer present. The key to the map will
+// be the actual interest. We record the mapped subject and the serviceImport
+type serviceRespEntry struct {
+	acc  *Account
+	msub string
+}
+
+// ServiceRespType represents the types of service request response types.
+type ServiceRespType uint8
+
+// Service response types. Defaults to a singleton.
+const (
+	Singleton ServiceRespType = iota
+	Stream
+	Chunked
+)
+
+// String helper.
+func (rt ServiceRespType) String() string {
+	switch rt {
+	case Singleton:
+		return "Singleton"
+	case Stream:
+		return "Stream"
+	case Chunked:
+		return "Chunked"
+	}
+	return "Unknown ServiceResType"
 }
 
 // exportAuth holds configured approvals or boolean indicating an
@@ -102,6 +142,7 @@ type serviceImport struct {
 type exportAuth struct {
 	tokenReq bool
 	approved map[string]*Account
+	respType ServiceRespType
 }
 
 // importMap tracks the imported streams and services.
@@ -120,7 +161,7 @@ type exportMap struct {
 func NewAccount(name string) *Account {
 	a := &Account{
 		Name:   name,
-		limits: limits{-1, -1, -1, -1, 0, 0},
+		limits: limits{-1, -1, -1, -1, 0, 0, 0},
 	}
 	return a
 }
@@ -319,6 +360,11 @@ func (a *Account) randomClient() *client {
 
 // AddServiceExport will configure the account with the defined export.
 func (a *Account) AddServiceExport(subject string, accounts []*Account) error {
+	return a.AddServiceExportWithResponse(subject, Singleton, accounts)
+}
+
+// AddServiceExportWithresponse will configure the account with the defined export and response type.
+func (a *Account) AddServiceExportWithResponse(subject string, respType ServiceRespType, accounts []*Account) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a == nil {
@@ -327,7 +373,16 @@ func (a *Account) AddServiceExport(subject string, accounts []*Account) error {
 	if a.exports.services == nil {
 		a.exports.services = make(map[string]*exportAuth)
 	}
+
 	ea := a.exports.services[subject]
+
+	if respType != Singleton {
+		if ea == nil {
+			ea = &exportAuth{}
+		}
+		ea.respType = respType
+	}
+
 	if accounts != nil {
 		if ea == nil {
 			ea = &exportAuth{}
@@ -372,7 +427,8 @@ func (a *Account) AddServiceImportWithClaim(destination *Account, from, to strin
 		return ErrServiceImportAuthorization
 	}
 
-	return a.addImplicitServiceImport(destination, from, to, false, imClaim)
+	a.addServiceImport(destination, from, to, imClaim)
+	return nil
 }
 
 // AddServiceImport will add a route to an account to send published messages / requests
@@ -394,6 +450,57 @@ func (a *Account) removeServiceImport(subject string) {
 	a.mu.Unlock()
 	if a.srv != nil && a.srv.gateway.enabled {
 		a.srv.gatewayHandleServiceImport(a, []byte(subject), nil, -1)
+	}
+}
+
+// This tracks responses to service requests mappings. This is used for cleanup.
+func (a *Account) addRespMapEntry(acc *Account, reply, from string) {
+	a.mu.Lock()
+	if a.respMap == nil {
+		a.respMap = make(map[string][]*serviceRespEntry)
+	}
+	sre := &serviceRespEntry{acc, from}
+	sra := a.respMap[reply]
+	a.respMap[reply] = append(sra, sre)
+	if len(a.respMap) > int(a.maxnrm) && !a.rmPruning {
+		a.rmPruning = true
+		go a.pruneNonAutoExpireResponseMaps()
+	}
+	a.mu.Unlock()
+}
+
+// This checks for any response map entries.
+func (a *Account) checkForRespEntry(reply string) {
+	a.mu.RLock()
+	if len(a.imports.services) == 0 || len(a.respMap) == 0 {
+		a.mu.RUnlock()
+		return
+	}
+	sra := a.respMap[reply]
+	if sra == nil {
+		a.mu.RUnlock()
+		return
+	}
+	// If we are here we have an entry we should check. We will first check
+	// if there is any interest for this subject for the entire account. If
+	// there is we can not delete any entries yet.
+	rr := a.sl.Match(reply)
+	a.mu.RUnlock()
+
+	// No interest.
+	if len(rr.psubs)+len(rr.qsubs) > 0 {
+		return
+	}
+
+	// Delete all the entries here.
+	a.mu.Lock()
+	delete(a.respMap, reply)
+	a.mu.Unlock()
+
+	// If we are here we no longer have interest and we have a respMap entry
+	// that we should clean up.
+	for _, sre := range sra {
+		sre.acc.removeServiceImport(sre.msub)
 	}
 }
 
@@ -437,8 +544,8 @@ func (a *Account) SetAutoExpireTTL(ttl time.Duration) {
 // Return a list of the current autoExpireResponseMaps.
 func (a *Account) autoExpireResponseMaps() []*serviceImport {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
 	if len(a.imports.services) == 0 {
+		a.mu.RUnlock()
 		return nil
 	}
 	aesis := make([]*serviceImport, 0, len(a.imports.services))
@@ -450,20 +557,58 @@ func (a *Account) autoExpireResponseMaps() []*serviceImport {
 	sort.Slice(aesis, func(i, j int) bool {
 		return aesis[i].ts < aesis[j].ts
 	})
+
+	a.mu.RUnlock()
 	return aesis
+}
+
+// MaxResponseMaps return the maximum number of
+// non auto-expire response maps we will allow.
+func (a *Account) MaxResponseMaps() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return int(a.maxnrm)
+}
+
+// SetMaxResponseMaps sets the max outstanding non auto-expire response maps.
+func (a *Account) SetMaxResponseMaps(max int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.maxnrm = int32(max)
 }
 
 // Add a route to connect from an implicit route created for a response to a request.
 // This does no checks and should be only called by the msg processing code. Use
-// addServiceImport from above if responding to user input or config changes, etc.
-func (a *Account) addImplicitServiceImport(destination *Account, from, to string, autoexpire bool, claim *jwt.Import) error {
+// AddServiceImport from above if responding to user input or config changes, etc.
+func (a *Account) addServiceImport(dest *Account, from, to string, claim *jwt.Import) *serviceImport {
+	rt := Singleton
+	dest.mu.Lock()
+	if ae := dest.exports.services[to]; ae != nil {
+		rt = ae.respType
+	}
+	dest.mu.Unlock()
+
 	a.mu.Lock()
 	if a.imports.services == nil {
 		a.imports.services = make(map[string]*serviceImport)
 	}
-	si := &serviceImport{destination, from, to, autoexpire, 0, claim, false}
+	si := &serviceImport{dest, claim, from, to, rt, 0, false, false, false}
 	a.imports.services[from] = si
-	if autoexpire {
+	a.mu.Unlock()
+
+	return si
+}
+
+// This is for internal responses.
+func (a *Account) addResponseServiceImport(dest *Account, from, to string, rt ServiceRespType) *serviceImport {
+	a.mu.Lock()
+	if a.imports.services == nil {
+		a.imports.services = make(map[string]*serviceImport)
+	}
+	ae := rt == Singleton
+	si := &serviceImport{dest, nil, from, to, rt, 0, ae, true, false}
+	a.imports.services[from] = si
+	if ae {
 		a.nae++
 		si.ts = time.Now().Unix()
 		if a.nae > a.maxnae && !a.pruning {
@@ -472,7 +617,26 @@ func (a *Account) addImplicitServiceImport(destination *Account, from, to string
 		}
 	}
 	a.mu.Unlock()
-	return nil
+	return si
+}
+
+// This will prune off the non auto-expire (non singleton) response maps.
+func (a *Account) pruneNonAutoExpireResponseMaps() {
+	var sres []*serviceRespEntry
+	a.mu.Lock()
+	for subj, sra := range a.respMap {
+		rr := a.sl.Match(subj)
+		if len(rr.psubs)+len(rr.qsubs) == 0 {
+			delete(a.respMap, subj)
+			sres = append(sres, sra...)
+		}
+	}
+	a.rmPruning = false
+	a.mu.Unlock()
+
+	for _, sre := range sres {
+		sre.acc.removeServiceImport(sre.msub)
+	}
 }
 
 // This will prune the list to below the threshold and remove all ttl'd maps.
@@ -585,8 +749,9 @@ func (a *Account) AddStreamExport(subject string, accounts []*Account) error {
 func (a *Account) checkStreamImportAuthorized(account *Account, subject string, imClaim *jwt.Import) bool {
 	// Find the subject in the exports list.
 	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.checkStreamImportAuthorizedNoLock(account, subject, imClaim)
+	auth := a.checkStreamImportAuthorizedNoLock(account, subject, imClaim)
+	a.mu.RUnlock()
+	return auth
 }
 
 func (a *Account) checkStreamImportAuthorizedNoLock(account *Account, subject string, imClaim *jwt.Import) bool {
@@ -600,8 +765,8 @@ func (a *Account) checkExportApproved(account *Account, subject string, imClaim 
 	// Check direct match of subject first
 	ea, ok := m[subject]
 	if ok {
-		// if ea is nil that denotes a public export
-		if ea == nil {
+		// if ea is nil or eq.approved is nil, that denotes a public export
+		if ea == nil || (ea.approved == nil && !ea.tokenReq) {
 			return true
 		}
 		// Check if token required
@@ -757,6 +922,12 @@ func (a *Account) checkActivation(acc *Account, claim *jwt.Import, expTimer bool
 			})
 		}
 	}
+	// Check for token revocation..
+	if a.actsRevoked != nil {
+		if t, ok := a.actsRevoked[act.Subject]; ok && t <= time.Now().Unix() {
+			return false
+		}
+	}
 
 	return true
 }
@@ -892,6 +1063,19 @@ func (a *Account) clearExpirationTimer() bool {
 	return stopped
 }
 
+// checkUserRevoked will check if a user has been revoked.
+func (a *Account) checkUserRevoked(nkey string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.usersRevoked == nil {
+		return false
+	}
+	if t, ok := a.usersRevoked[nkey]; !ok || t > time.Now().Unix() {
+		return false
+	}
+	return true
+}
+
 // Check expiration and set the proper state as needed.
 func (a *Account) checkExpiration(claims *jwt.ClaimsData) {
 	a.mu.Lock()
@@ -974,6 +1158,8 @@ func (s *Server) updateAccountClaims(a *Account, ac *jwt.AccountClaims) {
 	// Reset exports and imports here.
 	a.exports = exportMap{}
 	a.imports = importMap{}
+	// Reset any notion of export revocations.
+	a.actsRevoked = nil
 
 	// update account signing keys
 	a.signingKeys = nil
@@ -1014,9 +1200,27 @@ func (s *Server) updateAccountClaims(a *Account, ac *jwt.AccountClaims) {
 			}
 		case jwt.Service:
 			s.Debugf("Adding service export %q for %s", e.Subject, a.Name)
-			if err := a.AddServiceExport(string(e.Subject), authAccounts(e.TokenReq)); err != nil {
+			rt := Singleton
+			switch e.ResponseType {
+			case jwt.ResponseTypeStream:
+				rt = Stream
+			case jwt.ResponseTypeChunked:
+				rt = Chunked
+			}
+			if err := a.AddServiceExportWithResponse(string(e.Subject), rt, authAccounts(e.TokenReq)); err != nil {
 				s.Debugf("Error adding service export to account [%s]: %v", a.Name, err.Error())
 			}
+		}
+		// We will track these at the account level. Should not have any collisions.
+		if e.Revocations != nil {
+			a.mu.Lock()
+			if a.actsRevoked == nil {
+				a.actsRevoked = make(map[string]int64)
+			}
+			for k, t := range e.Revocations {
+				a.actsRevoked[k] = t
+			}
+			a.mu.Unlock()
 		}
 	}
 	for _, i := range ac.Imports {
@@ -1098,6 +1302,15 @@ func (s *Server) updateAccountClaims(a *Account, ac *jwt.AccountClaims) {
 	a.mpay = int32(ac.Limits.Payload)
 	a.mconns = int32(ac.Limits.Conn)
 	a.mleafs = int32(ac.Limits.LeafNodeConn)
+	// Check for any revocations
+	if len(ac.Revocations) > 0 {
+		// We will always replace whatever we had with most current, so no
+		// need to look at what we have.
+		a.usersRevoked = make(map[string]int64, len(ac.Revocations))
+		for pk, t := range ac.Revocations {
+			a.usersRevoked[pk] = t
+		}
+	}
 	a.mu.Unlock()
 
 	clients := gatherClients()
@@ -1107,6 +1320,7 @@ func (s *Server) updateAccountClaims(a *Account, ac *jwt.AccountClaims) {
 			return clients[i].start.After(clients[j].start)
 		})
 	}
+	now := time.Now().Unix()
 	for i, c := range clients {
 		if a.mconns != jwt.NoLimit && i >= int(a.mconns) {
 			c.maxAccountConnExceeded()
@@ -1114,7 +1328,22 @@ func (s *Server) updateAccountClaims(a *Account, ac *jwt.AccountClaims) {
 		}
 		c.mu.Lock()
 		c.applyAccountLimits()
+		// Check for being revoked here. We use ac one to avoid
+		// the account lock.
+		var nkey string
+		if c.user != nil {
+			nkey = c.user.Nkey
+		}
 		c.mu.Unlock()
+
+		// Check if we have been revoked.
+		if ac.Revocations != nil {
+			if t, ok := ac.Revocations[nkey]; ok && now >= t {
+				c.sendErrAndDebug("User Authentication Revoked")
+				c.closeConnection(Revocation)
+				continue
+			}
+		}
 	}
 
 	// Check if the signing keys changed, might have to evict
@@ -1163,6 +1392,19 @@ func buildInternalNkeyUser(uc *jwt.UserClaims, acc *Account) *NkeyUser {
 		p.Subscribe = &SubjectPermission{}
 		p.Subscribe.Allow = uc.Sub.Allow
 		p.Subscribe.Deny = uc.Sub.Deny
+	}
+	if uc.Resp != nil {
+		if p == nil {
+			p = &Permissions{Publish: &SubjectPermission{}}
+		}
+		if p.Publish.Allow == nil {
+			// We turn off the blanket allow statement.
+			p.Publish.Allow = []string{}
+		}
+		p.Response = &ResponsePermission{
+			MaxMsgs: uc.Resp.MaxMsgs,
+			Expires: uc.Resp.Expires,
+		}
 	}
 	nu.Permissions = p
 	return nu

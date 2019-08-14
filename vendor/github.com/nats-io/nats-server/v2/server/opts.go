@@ -103,18 +103,20 @@ type RemoteGatewayOpts struct {
 
 // LeafNodeOpts are options for a given server to accept leaf node connections and/or connect to a remote cluster.
 type LeafNodeOpts struct {
-	Host              string            `json:"addr,omitempty"`
-	Port              int               `json:"port,omitempty"`
-	Username          string            `json:"-"`
-	Password          string            `json:"-"`
-	AuthTimeout       float64           `json:"auth_timeout,omitempty"`
-	TLSConfig         *tls.Config       `json:"-"`
-	TLSTimeout        float64           `json:"tls_timeout,omitempty"`
-	TLSMap            bool              `json:"-"`
-	Remotes           []*RemoteLeafOpts `json:"remotes,omitempty"`
-	Advertise         string            `json:"-"`
-	NoAdvertise       bool              `json:"-"`
-	ReconnectInterval time.Duration     `json:"-"`
+	Host              string        `json:"addr,omitempty"`
+	Port              int           `json:"port,omitempty"`
+	Username          string        `json:"-"`
+	Password          string        `json:"-"`
+	AuthTimeout       float64       `json:"auth_timeout,omitempty"`
+	TLSConfig         *tls.Config   `json:"-"`
+	TLSTimeout        float64       `json:"tls_timeout,omitempty"`
+	TLSMap            bool          `json:"-"`
+	Advertise         string        `json:"-"`
+	NoAdvertise       bool          `json:"-"`
+	ReconnectInterval time.Duration `json:"-"`
+
+	// For solicited connections to other clusters/superclusters.
+	Remotes []*RemoteLeafOpts `json:"remotes,omitempty"`
 
 	// Not exported, for tests.
 	resolver    netResolver
@@ -859,6 +861,12 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 				*errors = append(*errors, err)
 				continue
 			}
+			// Dynamic response permissions do not make sense here.
+			if perms.Response != nil {
+				err := &configErr{tk, fmt.Sprintf("Cluster permissions do not support dynamic responses")}
+				*errors = append(*errors, err)
+				continue
+			}
 			// This will possibly override permissions that were define in auth block
 			setClusterPermissions(&opts.Cluster, perms)
 		default:
@@ -1241,6 +1249,7 @@ type export struct {
 	acc  *Account
 	sub  string
 	accs []string
+	rt   ServiceRespType
 }
 
 type importStream struct {
@@ -1433,7 +1442,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 			}
 			accounts = append(accounts, ta)
 		}
-		if err := service.acc.AddServiceExport(service.sub, accounts); err != nil {
+		if err := service.acc.AddServiceExportWithResponse(service.sub, service.rt, accounts); err != nil {
 			msg := fmt.Sprintf("Error adding service export %q: %v", service.sub, err)
 			*errors = append(*errors, &configErr{tk, msg})
 			continue
@@ -1570,6 +1579,8 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 		curStream  *export
 		curService *export
 		accounts   []string
+		rt         ServiceRespType
+		rtSeen     bool
 	)
 	tk, v := unwrapValue(v)
 	vv, ok := v.(map[string]interface{})
@@ -1585,7 +1596,11 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 				*errors = append(*errors, err)
 				continue
 			}
-
+			if rtSeen {
+				err := &configErr{tk, "Detected response directive on non-service"}
+				*errors = append(*errors, err)
+				continue
+			}
 			mvs, ok := mv.(string)
 			if !ok {
 				err := &configErr{tk, fmt.Sprintf("Expected stream name to be string, got %T", mv)}
@@ -1595,6 +1610,33 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 			curStream = &export{sub: mvs}
 			if accounts != nil {
 				curStream.accs = accounts
+			}
+		case "response", "response_type":
+			rtSeen = true
+			mvs, ok := mv.(string)
+			if !ok {
+				err := &configErr{tk, fmt.Sprintf("Expected response type to be string, got %T", mv)}
+				*errors = append(*errors, err)
+				continue
+			}
+			switch strings.ToLower(mvs) {
+			case "single", "singleton":
+				rt = Singleton
+			case "stream":
+				rt = Stream
+			case "chunk", "chunked":
+				rt = Chunked
+			default:
+				err := &configErr{tk, fmt.Sprintf("Unknown response type: %q", mvs)}
+				*errors = append(*errors, err)
+				continue
+			}
+			if curService != nil {
+				curService.rt = rt
+			}
+			if curStream != nil {
+				err := &configErr{tk, "Detected response directive on non-service"}
+				*errors = append(*errors, err)
 			}
 		case "service":
 			if curStream != nil {
@@ -1611,6 +1653,9 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 			curService = &export{sub: mvs}
 			if accounts != nil {
 				curService.accs = accounts
+			}
+			if rtSeen {
+				curService.rt = rt
 			}
 		case "accounts":
 			for _, iv := range mv.([]interface{}) {
@@ -1909,26 +1954,49 @@ func parseUserPermissions(mv interface{}, errors, warnings *[]error) (*Permissio
 		return nil, &configErr{tk, fmt.Sprintf("Expected permissions to be a map/struct, got %+v", mv)}
 	}
 	for k, v := range pm {
-		tk, v = unwrapValue(v)
+		tk, mv = unwrapValue(v)
 
 		switch strings.ToLower(k) {
 		// For routes:
 		// Import is Publish
 		// Export is Subscribe
 		case "pub", "publish", "import":
-			perms, err := parseVariablePermissions(v, errors, warnings)
+			perms, err := parseVariablePermissions(mv, errors, warnings)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
 			}
 			p.Publish = perms
 		case "sub", "subscribe", "export":
-			perms, err := parseVariablePermissions(v, errors, warnings)
+			perms, err := parseVariablePermissions(mv, errors, warnings)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
 			}
 			p.Subscribe = perms
+		case "publish_allow_responses", "allow_responses":
+			rp := &ResponsePermission{
+				MaxMsgs: DEFAULT_ALLOW_RESPONSE_MAX_MSGS,
+				Expires: DEFAULT_ALLOW_RESPONSE_EXPIRATION,
+			}
+			// Try boolean first
+			responses, ok := mv.(bool)
+			if ok {
+				if responses {
+					p.Response = rp
+				}
+			} else {
+				p.Response = parseAllowResponses(v, errors, warnings)
+			}
+			if p.Response != nil {
+				if p.Publish == nil {
+					p.Publish = &SubjectPermission{}
+				}
+				if p.Publish.Allow == nil {
+					// We turn off the blanket allow statement.
+					p.Publish.Allow = []string{}
+				}
+			}
 		default:
 			if !tk.IsUsedVariable() {
 				err := &configErr{tk, fmt.Sprintf("Unknown field %q parsing permissions", k)}
@@ -1951,7 +2019,7 @@ func parseVariablePermissions(v interface{}, errors, warnings *[]error) (*Subjec
 	}
 }
 
-// Helper function to parse subject singeltons and/or arrays
+// Helper function to parse subject singletons and/or arrays
 func parseSubjects(v interface{}, errors, warnings *[]error) ([]string, error) {
 	tk, v := unwrapValue(v)
 
@@ -1978,6 +2046,52 @@ func parseSubjects(v interface{}, errors, warnings *[]error) ([]string, error) {
 		return nil, &configErr{tk, err.Error()}
 	}
 	return subjects, nil
+}
+
+// Helper function to parse a ResponsePermission.
+func parseAllowResponses(v interface{}, errors, warnings *[]error) *ResponsePermission {
+	tk, v := unwrapValue(v)
+	// Check if this is a map.
+	pm, ok := v.(map[string]interface{})
+	if !ok {
+		err := &configErr{tk, "error parsing response permissions, expected a boolean or a map"}
+		*errors = append(*errors, err)
+		return nil
+	}
+
+	rp := &ResponsePermission{
+		MaxMsgs: DEFAULT_ALLOW_RESPONSE_MAX_MSGS,
+		Expires: DEFAULT_ALLOW_RESPONSE_EXPIRATION,
+	}
+
+	for k, v := range pm {
+		tk, v = unwrapValue(v)
+		switch strings.ToLower(k) {
+		case "max", "max_msgs", "max_messages", "max_responses":
+			rp.MaxMsgs = int(v.(int64))
+		case "expires", "expiration", "ttl":
+			wd, ok := v.(string)
+			if ok {
+				ttl, err := time.ParseDuration(wd)
+				if err != nil {
+					err := &configErr{tk, fmt.Sprintf("error parsing expires: %v", err)}
+					*errors = append(*errors, err)
+					return nil
+				}
+				rp.Expires = ttl
+			} else {
+				err := &configErr{tk, "error parsing expires, not a duration string"}
+				*errors = append(*errors, err)
+				return nil
+			}
+		default:
+			if !tk.IsUsedVariable() {
+				err := &configErr{tk, fmt.Sprintf("Unknown field %q parsing permissions", k)}
+				*errors = append(*errors, err)
+			}
+		}
+	}
+	return rp
 }
 
 // Helper function to parse old style authorization configs.

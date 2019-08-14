@@ -29,7 +29,7 @@ import (
 	"github.com/nats-io/nats-streaming-server/test"
 	"github.com/nats-io/stan.go/pb"
 
-	_ "github.com/go-sql-driver/mysql"                              // mysql driver
+	mysql "github.com/go-sql-driver/mysql"                          // mysql driver
 	_ "github.com/lib/pq"                                           // postgres driver
 	_ "github.com/nats-io/nats-streaming-server/stores/pqdeadlines" // wrapper for postgres that gives read/write deadlines
 )
@@ -2022,6 +2022,10 @@ func (p *myProxy) close() {
 	p.wg.Wait()
 }
 
+type silenceMySQLLogger struct{}
+
+func (l *silenceMySQLLogger) Print(v ...interface{}) {}
+
 func TestSQLDeadlines(t *testing.T) {
 	if !doSQL {
 		t.SkipNow()
@@ -2047,6 +2051,7 @@ func TestSQLDeadlines(t *testing.T) {
 	pport := proxy.getPort()
 	if testSQLDriver == driverMySQL {
 		source = fmt.Sprintf("nss:password@tcp(localhost:%d)/%s?readTimeout=500ms&writeTimeout=500ms", pport, testDefaultDatabaseName)
+		mysql.SetLogger(&silenceMySQLLogger{})
 	} else {
 		source = fmt.Sprintf("port=%d dbname=%s readTimeout=500ms writeTimeout=500ms sslmode=disable", pport, testDefaultDatabaseName)
 	}
