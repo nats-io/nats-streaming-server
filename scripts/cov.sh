@@ -1,6 +1,11 @@
 #!/bin/bash -e
 # Run from directory above via ./scripts/cov.sh
 
+export GO111MODULE="off"
+
+go get github.com/mattn/goveralls
+go get github.com/wadey/gocovmerge
+
 rm -rf ./cov
 mkdir cov
 go test -v -failfast -covermode=atomic -coverprofile=./cov/server.out -coverpkg=./server,./stores,./util ./server

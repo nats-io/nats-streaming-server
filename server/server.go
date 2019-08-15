@@ -46,7 +46,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.15.1"
+	VERSION = "0.16.0"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -2975,7 +2975,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 		client.fhb++
 		// If we have reached the max number of failures
 		if client.fhb > s.opts.ClientHBFailCount {
-			s.log.Debugf("[Client:%s] Timed out on heartbeats", clientID)
+			s.log.Errorf("[Client:%s] Timed out on heartbeats", clientID)
 			// close the client (connection). This locks the
 			// client object internally so unlock here.
 			client.Unlock()

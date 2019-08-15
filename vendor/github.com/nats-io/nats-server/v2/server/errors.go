@@ -40,14 +40,14 @@ var (
 	// ErrReservedPublishSubject represents an error condition when sending to a reserved subject, e.g. _SYS.>
 	ErrReservedPublishSubject = errors.New("reserved internal subject")
 
-	// ErrBadClientProtocol signals a client requested an invalud client protocol.
+	// ErrBadClientProtocol signals a client requested an invalid client protocol.
 	ErrBadClientProtocol = errors.New("invalid client protocol")
 
 	// ErrTooManyConnections signals a client that the maximum number of connections supported by the
 	// server has been reached.
 	ErrTooManyConnections = errors.New("maximum connections exceeded")
 
-	// ErrTooManyAccountConnections signals that an acount has reached its maximum number of active
+	// ErrTooManyAccountConnections signals that an account has reached its maximum number of active
 	// connections.
 	ErrTooManyAccountConnections = errors.New("maximum account active connections exceeded")
 
@@ -109,6 +109,9 @@ var (
 	// ErrNoSysAccount is returned when an attempt to publish or subscribe is made
 	// when there is no internal system account defined.
 	ErrNoSysAccount = errors.New("system account not setup")
+
+	// ErrRevocation is returned when a credential has been revoked.
+	ErrRevocation = errors.New("credentials have been revoked")
 )
 
 // configErr is a configuration error.
