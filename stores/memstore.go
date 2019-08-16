@@ -107,7 +107,7 @@ func (ms *MemoryMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 	// If there is an age limit and no timer yet created, do so now
 	if ms.limits.MaxAge > time.Duration(0) && ms.ageTimer == nil {
 		ms.wg.Add(1)
-		ms.ageTimer = time.AfterFunc(ms.limits.MaxAge, ms.expireMsgs)
+		ms.ageTimer = time.AfterFunc(ms.msgExpireIn(m.Timestamp), ms.expireMsgs)
 	}
 
 	// Check if we need to remove any (but leave at least the last added)

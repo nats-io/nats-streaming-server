@@ -15,6 +15,7 @@ package stores
 
 import (
 	"sync"
+	"time"
 
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/spb"
@@ -335,6 +336,17 @@ func (gms *genericMsgStore) empty() {
 // Close closes this store.
 func (gms *genericMsgStore) Close() error {
 	return nil
+}
+
+// With the given timestamp, returns in how long the message
+// should expire. If in the past, returns 0
+func (gms *genericMsgStore) msgExpireIn(timestamp int64) time.Duration {
+	now := time.Now().UnixNano()
+	fireIn := time.Duration(timestamp + int64(gms.limits.MaxAge) - now)
+	if fireIn < 0 {
+		fireIn = 0
+	}
+	return fireIn
 }
 
 ////////////////////////////////////////////////////////////////////////////

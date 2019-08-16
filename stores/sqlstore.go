@@ -331,6 +331,7 @@ type SQLMsgStore struct {
 	channelID   int64
 	sqlStore    *SQLStore // Reference to "parent" store
 	expireTimer *time.Timer
+	fTimestamp  int64
 	wg          sync.WaitGroup
 
 	// If option NoBuffering is false, uses this cache for storing Store()
@@ -1407,8 +1408,9 @@ func (ms *SQLMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 			return 0, sqlStmtError(sqlStoreMsg, err)
 		}
 	}
-	if ms.first == 0 {
+	if ms.first == 0 || ms.first == seq {
 		ms.first = seq
+		ms.fTimestamp = m.Timestamp
 	}
 	ms.last = seq
 	ms.totalCount++
@@ -1461,7 +1463,7 @@ func (ms *SQLMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 
 func (ms *SQLMsgStore) createExpireTimer() {
 	ms.wg.Add(1)
-	ms.expireTimer = time.AfterFunc(ms.limits.MaxAge, ms.expireMsgs)
+	ms.expireTimer = time.AfterFunc(ms.msgExpireIn(ms.fTimestamp), ms.expireMsgs)
 }
 
 // Lookup implements the MsgStore interface
@@ -1563,7 +1565,6 @@ func (ms *SQLMsgStore) expireMsgs() {
 		count     int
 		maxSeq    uint64
 		totalSize uint64
-		timestamp int64
 	)
 	processErr := func(errCode int, err error) {
 		ms.log.Errorf("Unable to perform expiration for channel %q: %v", ms.subject, sqlStmtError(errCode, err))
@@ -1595,24 +1596,24 @@ func (ms *SQLMsgStore) expireMsgs() {
 			ms.totalBytes -= totalSize
 		}
 		// Reset since we are in a loop
-		timestamp = 0
+		ms.fTimestamp = 0
 		// If there is any message left in the channel, find out what the expiration
 		// timer needs to be set to.
 		if ms.totalCount > 0 {
 			r = ms.sqlStore.preparedStmts[sqlGetFirstMsgTimestamp].QueryRow(ms.channelID, ms.first)
-			if err := r.Scan(&timestamp); err != nil {
+			if err := r.Scan(&ms.fTimestamp); err != nil {
 				processErr(sqlGetFirstMsgTimestamp, err)
 				return
 			}
 		}
 		// No message left or no message to expire. The timer will be recreated when
 		// a new message is added to the channel.
-		if timestamp == 0 {
-			ms.wg.Done()
+		if ms.fTimestamp == 0 {
 			ms.expireTimer = nil
+			ms.wg.Done()
 			return
 		}
-		elapsed := time.Duration(time.Now().UnixNano() - timestamp)
+		elapsed := time.Duration(time.Now().UnixNano() - ms.fTimestamp)
 		if elapsed < ms.limits.MaxAge {
 			ms.expireTimer.Reset(ms.limits.MaxAge - elapsed)
 			// Done with the for loop

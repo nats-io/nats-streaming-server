@@ -495,6 +495,42 @@ func TestCSMaxAgeWithGapInSeq(t *testing.T) {
 	}
 }
 
+func TestCSMaxAgeForMsgsWithTimestampInPast(t *testing.T) {
+	for _, st := range testStores {
+		st := st
+		t.Run(st.name, func(t *testing.T) {
+			t.Parallel()
+			defer endTest(t, st)
+			s := startTest(t, st)
+			defer s.Close()
+
+			sl := testDefaultStoreLimits
+			sl.MaxAge = time.Minute
+			s.SetLimits(&sl)
+
+			cs := storeCreateChannel(t, s, "foo")
+			for seq := uint64(1); seq < 3; seq++ {
+				// Create a message with a timestamp in the past.
+				msg := &pb.MsgProto{
+					Sequence:  seq,
+					Subject:   "foo",
+					Data:      []byte("hello"),
+					Timestamp: time.Now().Add(-time.Hour).UnixNano(),
+				}
+				if _, err := cs.Msgs.Store(msg); err != nil {
+					t.Fatalf("Error storing message: %v", err)
+				}
+				// Wait a bit
+				time.Sleep(300 * time.Millisecond)
+				// Check that message has expired.
+				if first, err := cs.Msgs.FirstSequence(); err != nil || first != seq+1 {
+					t.Fatal("Message should have expired")
+				}
+			}
+		})
+	}
+}
+
 func TestCSGetSeqFromStartTime(t *testing.T) {
 	for _, st := range testStores {
 		st := st
