@@ -122,6 +122,9 @@ const (
 	// Interval at which server goes through list of subscriptions with
 	// pending sent/ack operations that needs to be replicated.
 	defaultLazyReplicationInterval = time.Second
+
+	// Log statement printed when server is considered ready
+	streamingReadyLog = "Streaming Server is ready"
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -1943,6 +1946,9 @@ func (s *StanServer) start(runningState State) error {
 	for _, l := range storeLimitsLines {
 		s.log.Noticef(l)
 	}
+	if !s.isClustered {
+		s.log.Noticef(streamingReadyLog)
+	}
 
 	// Execute (in a go routine) redelivery of unacknowledged messages,
 	// and release newOnHold. We only do this if not clustered. If
@@ -2028,7 +2034,10 @@ func (s *StanServer) sendSynchronziationRequest() (chan struct{}, chan struct{})
 // This should only be called when the server is running in clustered mode.
 func (s *StanServer) leadershipAcquired() error {
 	s.log.Noticef("server became leader, performing leader promotion actions")
-	defer s.log.Noticef("finished leader promotion actions")
+	defer func() {
+		s.log.Noticef("finished leader promotion actions")
+		s.log.Noticef(streamingReadyLog)
+	}()
 
 	// If we were not the leader, there should be nothing in the ioChannel
 	// (processing of client publishes). However, since a node could go

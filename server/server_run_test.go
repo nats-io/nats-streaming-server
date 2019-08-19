@@ -1062,3 +1062,96 @@ func TestDontExposeUserPassword(t *testing.T) {
 		t.Fatalf("Password exposed in url: %v", msg)
 	}
 }
+
+func TestStreamingServerReadyLog(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	checkLog := func(t *testing.T, l *captureNoticesLogger, expected bool) {
+		t.Helper()
+		check := func() error {
+			present := false
+			l.Lock()
+			for _, n := range l.notices {
+				if strings.Contains(n, streamingReadyLog) {
+					present = true
+					break
+				}
+			}
+			l.Unlock()
+			if !expected && present {
+				return fmt.Errorf("Did not expect the log statement at this time")
+			} else if expected && !present {
+				return fmt.Errorf("Log statement still not present")
+			}
+			return nil
+		}
+		// When not expected, wait a bit to make sure that the
+		// statement does not show up.
+		if !expected {
+			time.Sleep(500 * time.Millisecond)
+			if err := check(); err != nil {
+				t.Fatal(err.Error())
+			}
+		} else {
+			waitFor(t, time.Second, 15*time.Millisecond, func() error {
+				return check()
+			})
+		}
+	}
+
+	// Standalone case
+	sOpts := GetDefaultOptions()
+	l := &captureNoticesLogger{}
+	sOpts.CustomLogger = l
+	sOpts.NATSServerURL = "nats://localhost:4222"
+	s := runServerWithOpts(t, sOpts, nil)
+	defer s.Shutdown()
+	checkLog(t, l, true)
+	s.Shutdown()
+
+	// FT case..
+	sOpts = getTestFTDefaultOptions()
+	l = &captureNoticesLogger{}
+	sOpts.CustomLogger = l
+	sOpts.NATSServerURL = "nats://localhost:4222"
+	s = runServerWithOpts(t, sOpts, nil)
+	defer s.Shutdown()
+	checkLog(t, l, true)
+
+	sOpts = getTestFTDefaultOptions()
+	l2 := &captureNoticesLogger{}
+	sOpts.CustomLogger = l2
+	sOpts.NATSServerURL = "nats://localhost:4222"
+	s2 := runServerWithOpts(t, sOpts, nil)
+	defer s2.Shutdown()
+	// At first, we should not get the lock since server
+	// is standby...
+	checkLog(t, l2, false)
+	// Now shutdown s and s2 shoudl report it is ready
+	s.Shutdown()
+	checkLog(t, l2, true)
+	s2.Shutdown()
+
+	// Clustering case..
+	sOpts = getTestDefaultOptsForClustering("a", false)
+	sOpts.Clustering.Peers = []string{"b"}
+	l = &captureNoticesLogger{}
+	sOpts.CustomLogger = l
+	s = runServerWithOpts(t, sOpts, nil)
+	defer s.Shutdown()
+	checkLog(t, l, false)
+
+	sOpts = getTestDefaultOptsForClustering("b", false)
+	sOpts.Clustering.Peers = []string{"a"}
+	s2 = runServerWithOpts(t, sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 5*time.Second, s, s2)
+	checkLog(t, l, true)
+}
