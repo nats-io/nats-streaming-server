@@ -46,7 +46,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.16.0"
+	VERSION = "0.16.1"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -535,13 +535,15 @@ func (s *StanServer) subToSnapshotRestoreRequests() error {
 		// reply subject. The leader here can then send the first available
 		// message when getting a request for a message of a given sequence
 		// that is not found.
-		sendFirstAvail := strings.HasSuffix(m.Reply, "."+restoreMsgsV2)
+		v2 := strings.HasSuffix(m.Reply, "."+restoreMsgsV2)
 
 		// For the newer servers, include a "reply" subject to the response
 		// to let the follower know that this is coming from a 0.14.2+ server.
 		var reply string
-		if sendFirstAvail {
+		var replyFirstAvail string
+		if v2 {
 			reply = restoreMsgsV2
+			replyFirstAvail = restoreMsgsV2 + restoreMsgsFirstAvailSuffix
 		}
 
 		cname := m.Subject[prefixLen:]
@@ -554,6 +556,7 @@ func (s *StanServer) subToSnapshotRestoreRequests() error {
 		end := util.ByteOrder.Uint64(m.Data[8:])
 
 		for seq := start; seq <= end; seq++ {
+			sendingTheFirstAvail := false
 			msg, err := c.store.Msgs.Lookup(seq)
 			if err != nil {
 				s.log.Errorf("Snapshot restore request error for channel %q, error looking up message %v: %v", c.name, seq, err)
@@ -561,12 +564,13 @@ func (s *StanServer) subToSnapshotRestoreRequests() error {
 			}
 			// If the requestor is a server 0.14.2+, we will send the first
 			// available message.
-			if msg == nil && sendFirstAvail {
+			if msg == nil && v2 {
 				msg, err = c.store.Msgs.FirstMsg()
 				if err != nil {
 					s.log.Errorf("Snapshot restore request error for channel %q, error looking up first message: %v", c.name, err)
 					return
 				}
+				sendingTheFirstAvail = msg != nil
 			}
 			if msg == nil {
 				// We don't have this message because of channel limits.
@@ -580,8 +584,18 @@ func (s *StanServer) subToSnapshotRestoreRequests() error {
 				}
 				buf = msgBuf[:n]
 			}
-			if err := s.ncsr.PublishRequest(m.Reply, reply, buf); err != nil {
+			// This will be empty string for old requestors, or restoreMsgsV2
+			// for servers 0.14.2+
+			respReply := reply
+			if sendingTheFirstAvail {
+				// Use the reply subject that contains information that this
+				// is the first available message. Requestors 0.16.1+ will
+				// make use of that.
+				respReply = replyFirstAvail
+			}
+			if err := s.ncsr.PublishRequest(m.Reply, respReply, buf); err != nil {
 				s.log.Errorf("Snapshot restore request error for channel %q, unable to send response for seq %v: %v", c.name, seq, err)
+				return
 			}
 			// If we sent a message and seq was not the expected one,
 			// reset seq to proper value for the next iteration.

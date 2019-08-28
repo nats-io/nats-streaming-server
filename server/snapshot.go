@@ -16,6 +16,7 @@ package server
 import (
 	"fmt"
 	"io"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -42,6 +43,9 @@ const (
 	// Used as requests inbox's suffix and reply subject of response messages
 	// to indicate that this is from a 0.14.2+ server.
 	restoreMsgsV2 = "sfa"
+	// Suffix added to reply subject when leader is sending the first available
+	// message
+	restoreMsgsFirstAvailSuffix = ".first"
 )
 
 // serverSnapshot implements the raft.FSMSnapshot interface by snapshotting
@@ -346,7 +350,7 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 
 	serverSnap := &spb.RaftSnapshot{}
 	if err := serverSnap.Unmarshal(buf); err != nil {
-		panic(err)
+		return fmt.Errorf("error decoding snapshot record: %v", err)
 	}
 	if err := r.restoreClientsFromSnapshot(serverSnap); err != nil {
 		return err
@@ -560,13 +564,26 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64, fromAp
 			cnfcount = 0
 			msg := &pb.MsgProto{}
 			if err := msg.Unmarshal(resp.Data); err != nil {
-				panic(err)
+				return fmt.Errorf("error decoding message: %v", err)
 			}
 			// Server 0.14.2+ may send us the first available message if
 			// the requested one is not available. So check the message
-			// sequence. (we could ensure that reply subject is
-			// restoreMsgsV2, but it is not required).
+			// sequence.
 			if msg.Sequence != seq {
+				// Servers 0.16.1+ send the response with a Reply that
+				// indicates if this is the first available message.
+				// Because unless the msg.Sequence is > reqEnd, which
+				// is the only case where the leader could send a message
+				// (and only one) outside of our request range, there
+				// is no way to know if this is really the first available
+				// message or some messages were lost in transit.
+				if !strings.HasSuffix(resp.Reply, restoreMsgsFirstAvailSuffix) && seq <= reqEnd {
+					// Ensure this is really the first available, otherwise
+					// return an error, the restore will be retried.
+					if first, err := s.hasLeaderSentFirstAvail(subject, seq, msg.Sequence); !first || err != nil {
+						return fmt.Errorf("expected to restore message %v, got %v (err=%v)", seq, msg.Sequence, err)
+					}
+				}
 				// Any prior messages are now invalid, so empty our store.
 				if err := c.store.Msgs.Empty(); err != nil {
 					return err
@@ -642,6 +659,33 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64, fromAp
 		}
 	}
 	return c.store.Msgs.Flush()
+}
+
+// This function will create a new ephemeral subscription and ask for a
+// single message sequence `reqSeq` and expect to get a response with
+// a message sequence `gotSeq`. If that is the case, this functions
+// returns true, and returns false otherwise.
+func (s *StanServer) hasLeaderSentFirstAvail(subject string, reqSeq, gotSeq uint64) (bool, error) {
+	inbox := nats.NewInbox() + "." + restoreMsgsV2
+	sub, err := s.ncsr.SubscribeSync(inbox)
+	if err != nil {
+		return false, err
+	}
+	defer sub.Unsubscribe()
+	rawMsg, err := s.restoreMsgsFetchOne(subject, inbox, sub, reqSeq)
+	if err != nil {
+		return false, err
+	}
+	if len(rawMsg.Data) > 0 {
+		msg := &pb.MsgProto{}
+		if err := msg.Unmarshal(rawMsg.Data); err != nil {
+			return false, err
+		}
+		if msg.Sequence == gotSeq {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Sends individual requests to leader server (pre 0.14.1) in order to

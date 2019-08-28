@@ -6152,7 +6152,7 @@ func TestClusteringRestoreSnapshotWithSomeMsgsNoLongerAvailFromNewServer(t *test
 	msgsCount := int32(0)
 	notFound := int32(0)
 	if _, err := nc.Subscribe(nats.InboxPrefix+">", func(m *nats.Msg) {
-		if m.Reply != restoreMsgsV2 {
+		if !strings.HasPrefix(m.Reply, restoreMsgsV2) {
 			return
 		}
 		if len(m.Data) > 0 {
@@ -6617,4 +6617,224 @@ func TestClusteringRaftLogging(t *testing.T) {
 	if len(wrongLevels) > 0 {
 		t.Fatalf("Wrong tracing for raft log levels: %v", wrongLevels)
 	}
+}
+
+type blockingLookupStore struct {
+	stores.MsgStore
+	inLookupCh chan struct{}
+	releaseCh  chan bool
+	skip       bool
+}
+
+func (b *blockingLookupStore) Lookup(seq uint64) (*pb.MsgProto, error) {
+	if !b.skip {
+		b.inLookupCh <- struct{}{}
+		b.skip = <-b.releaseCh
+	}
+	return b.MsgStore.Lookup(seq)
+}
+
+func TestClusteringRestoreSnapshotErrorDontSkipSeq(t *testing.T) {
+	restoreMsgsRcvTimeout = 500 * time.Millisecond
+	defer func() { restoreMsgsRcvTimeout = defaultRestoreMsgsRcvTimeout }()
+
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// Use 2 routed servers
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	total := 10
+	for i := 0; i < total; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	sc.Close()
+
+	// Create a snapshot that will indicate that there is messages from 1 to 10.
+	if err := s1.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+
+	c := s1.channels.get("foo")
+	ch1 := make(chan struct{})
+	ch2 := make(chan bool)
+	c.store.Msgs = &blockingLookupStore{MsgStore: c.store.Msgs, inLookupCh: ch1, releaseCh: ch2}
+
+	// Configure second server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	// Let the server send 3 messages, then make the connection fail.
+	for i := 0; i < 3; i++ {
+		<-ch1
+		ch2 <- false
+	}
+
+	// Now at sequence 4, cause a failure..
+	<-ch1
+
+	// Replace the connection used to replicate with a closed connection
+	// so that we get an error on publish.
+	closedConn, err := nats.Connect("nats://127.0.0.1:4222")
+	if err != nil {
+		t.Fatalf("Error creating conn: %v", err)
+	}
+	closedConn.Close()
+	s1.mu.Lock()
+	savedConn := s1.ncsr
+	s1.ncsr = closedConn
+	s1.mu.Unlock()
+
+	// Release the lookup so that s1 nows tries to send the message(s)
+	ch2 <- false
+
+	// Restoring the connection now
+	<-ch1
+	s1.mu.Lock()
+	s1.ncsr = savedConn
+	s1.mu.Unlock()
+	// From now on, the store will not block on lookups
+	ch2 <- true
+
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		c := s3.channels.get("foo")
+		if c != nil {
+			first, last, err := c.store.Msgs.FirstAndLastSequence()
+			if err != nil {
+				return fmt.Errorf("Error getting first/last seq: %v", err)
+			}
+			if first == 1 && last == uint64(total) {
+				return nil
+			}
+			return fmt.Errorf("Channel foo is not right: first=%v last=%v", first, last)
+		}
+		return fmt.Errorf("Channel foo still not restored")
+	})
+}
+
+func TestClusteringRestoreSnapshotGapInSeq(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	n1Opts := natsdTest.DefaultTestOptions
+	n1Opts.Host = "127.0.0.1"
+	n1Opts.Port = 4222
+	n1Opts.Cluster.Host = "127.0.0.1"
+	n1Opts.Cluster.Port = 6222
+	ns1 := natsdTest.RunServer(&n1Opts)
+	defer ns1.Shutdown()
+
+	n2Opts := natsdTest.DefaultTestOptions
+	n2Opts.Host = "127.0.0.1"
+	n2Opts.Port = 4223
+	n2Opts.Cluster.Host = "127.0.0.1"
+	n2Opts.Cluster.Port = 6223
+	n2Opts.Routes = natsd.RoutesFromStr("nats://127.0.0.1:6222")
+	ns2 := natsdTest.RunServer(&n2Opts)
+	defer ns2.Shutdown()
+
+	n3Opts := natsdTest.DefaultTestOptions
+	n3Opts.Host = "127.0.0.1"
+	n3Opts.Port = 4224
+	n3Opts.Cluster.Host = "127.0.0.1"
+	n3Opts.Cluster.Port = 6224
+	n3Opts.Routes = natsd.RoutesFromStr("nats://127.0.0.1:6222, nats://127.0.0.1:6223")
+	ns3 := natsdTest.RunServer(&n3Opts)
+	defer ns3.Shutdown()
+
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.NATSServerURL = "nats://127.0.0.1:4222"
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.NATSServerURL = "nats://127.0.0.1:4223"
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	total := 10
+	for i := 0; i < total; i++ {
+		if err := sc.Publish("foo", []byte("hello")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	sc.Close()
+
+	// Create a snapshot that will indicate that there is messages from 1 to 10.
+	if err := s1.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot: %v", err)
+	}
+
+	c := s1.channels.get("foo")
+	ch1 := make(chan struct{})
+	ch2 := make(chan bool)
+	c.store.Msgs = &blockingLookupStore{MsgStore: c.store.Msgs, inLookupCh: ch1, releaseCh: ch2}
+
+	// Configure second server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.NATSServerURL = "nats://127.0.0.1:4224"
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	for i := 0; i < 2; i++ {
+		<-ch1
+		ch2 <- false
+	}
+
+	ns3.Shutdown()
+
+	for i := 0; i < 2; i++ {
+		<-ch1
+		ch2 <- false
+	}
+
+	ns3 = natsdTest.RunServer(&n3Opts)
+	defer ns3.Shutdown()
+
+	<-ch1
+	// Make the store stop blocking on Lookup
+	ch2 <- true
+
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		c := s3.channels.get("foo")
+		if c != nil {
+			first, last, err := c.store.Msgs.FirstAndLastSequence()
+			if err != nil {
+				return fmt.Errorf("Error getting first/last seq: %v", err)
+			}
+			if first == 1 && last == uint64(total) {
+				return nil
+			}
+			return fmt.Errorf("Channel foo is not right: first=%v last=%v", first, last)
+		}
+		return fmt.Errorf("Channel foo still not restored")
+	})
 }
