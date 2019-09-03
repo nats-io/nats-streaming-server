@@ -5169,7 +5169,7 @@ func (s *StanServer) sendAvailableMessages(c *channel, sub *subState) {
 }
 
 func (s *StanServer) getNextMsg(c *channel, nextSeq, lastSent *uint64) *pb.MsgProto {
-	for {
+	for i := 0; ; i++ {
 		nextMsg, err := c.store.Msgs.Lookup(*nextSeq)
 		if err != nil {
 			s.log.Errorf("Error looking up message %v:%v (%v)", c.name, *nextSeq, err)
@@ -5180,13 +5180,33 @@ func (s *StanServer) getNextMsg(c *channel, nextSeq, lastSent *uint64) *pb.MsgPr
 		if nextMsg != nil {
 			return nextMsg
 		}
+		// Message was not found, check the store first/last sequences.
 		first, last, _ := c.store.Msgs.FirstAndLastSequence()
-		if *nextSeq < first {
+		if *nextSeq >= last {
+			// This means that we are looking for a message that has not
+			// been stored. This is perfectly normal when delivering messages
+			// and reach the end of the channel.
+			return nil
+		} else if *nextSeq < first {
+			// We were trying to lookup a message that has likely now
+			// been removed (expired, or due to max msgs/bytes etc) since
+			// the first available is greater than the message we were
+			// looking for. Try to lookup the first available.
 			*nextSeq = first
 			*lastSent = first - 1
-		} else if *nextSeq >= last {
-			return nil
-		} else {
+		} else if i > 0 {
+			// The last condition is when `nextSeq` is between `first` and
+			// `last`, which could mean 2 things:
+			// - New messages have been stored between the lookup at the top
+			//   of the loop and calling FirstAndLastSequence(), so we should
+			//   try again.
+			// - There is a gap - which should not happen but we have decided
+			//   to support this situation - so we move by one at a time until
+			//   we find a valid message.
+
+			// So if i==0 (first iteration) we don't come here and simply try
+			// again. Otherwise, move the requested sequence in search of the
+			// first valid message.
 			*nextSeq++
 			*lastSent++
 		}

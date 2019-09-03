@@ -6627,11 +6627,12 @@ type blockingLookupStore struct {
 }
 
 func (b *blockingLookupStore) Lookup(seq uint64) (*pb.MsgProto, error) {
+	msg, err := b.MsgStore.Lookup(seq)
 	if !b.skip {
 		b.inLookupCh <- struct{}{}
 		b.skip = <-b.releaseCh
 	}
-	return b.MsgStore.Lookup(seq)
+	return msg, err
 }
 
 func TestClusteringRestoreSnapshotErrorDontSkipSeq(t *testing.T) {
