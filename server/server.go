@@ -4584,18 +4584,16 @@ func (s *StanServer) addSubscription(ss *subStore, sub *subState) error {
 }
 
 // updateDurable adds back `sub` to the client and updates the store.
-// No lock is needed for `sub` since it has just been created.
-func (s *StanServer) updateDurable(ss *subStore, sub *subState) error {
-	// Reset the hasFailedHB boolean since it may have been set
-	// if the client previously crashed and server set this
-	// flag to its subs.
-	sub.hasFailedHB = false
+func (s *StanServer) updateDurable(ss *subStore, sub *subState, clientID string) error {
 	// Store in the client
-	if !s.clients.addSub(sub.ClientID, sub) {
-		return fmt.Errorf("can't find clientID: %v", sub.ClientID)
+	if !s.clients.addSub(clientID, sub) {
+		return fmt.Errorf("can't find clientID: %v", clientID)
 	}
 	// Update this subscription in the store
-	if err := sub.store.UpdateSub(&sub.SubState); err != nil {
+	sub.Lock()
+	err := sub.store.UpdateSub(&sub.SubState)
+	sub.Unlock()
+	if err != nil {
 		return err
 	}
 	ss.Lock()
@@ -4708,11 +4706,20 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 		if s.isClustered {
 			sub.norepl = false
 		}
+		// Reset the hasFailedHB boolean since it may have been set
+		// if the client previously crashed and server set this
+		// flag to its subs.
+		sub.hasFailedHB = false
+		// Reset initialized for restarting durable subscription.
+		// Without this (and if there is no message to be redelivered,
+		// which would set newOnHold), we could be sending avail
+		// messages before the response has been sent to client library.
+		sub.initialized = false
 		sub.Unlock()
 
 		// Case of restarted durable subscriber, or first durable queue
 		// subscriber re-joining a group that was left with pending messages.
-		err = s.updateDurable(ss, sub)
+		err = s.updateDurable(ss, sub, sr.ClientID)
 	} else {
 		subIsNew = true
 		// Create sub here (can be plain, durable or queue subscriber)
