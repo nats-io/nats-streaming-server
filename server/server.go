@@ -1026,8 +1026,10 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	)
 
 	ss.Lock()
-	if ss.stan.debug {
-		log = ss.stan.log
+	s := ss.stan
+	standaloneOrLeader := !s.isClustered || s.isLeader()
+	if s.debug {
+		log = s.log
 	}
 
 	sub.Lock()
@@ -1051,7 +1053,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	sub.Unlock()
 
 	reportError := func(err error) {
-		ss.stan.log.Errorf("Error deleting subscription subid=%d, subject=%s, err=%v", subid, subject, err)
+		s.log.Errorf("Error deleting subscription subid=%d, subject=%s, err=%v", subid, subject, err)
 	}
 
 	// Delete from storage non durable subscribers on either connection
@@ -1114,54 +1116,59 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 			if sub.stalled && qs.stalledSubCount > 0 {
 				qs.stalledSubCount--
 			}
-			// Set expiration in the past to force redelivery
-			expirationTime := time.Now().UnixNano() - int64(time.Second)
-			// If there are pending messages in this sub, they need to be
-			// transferred to remaining queue subscribers.
-			numQSubs := len(qs.subs)
-			idx := 0
-			sub.RLock()
-			// Need to update if this member was the one with the last
-			// message of the group.
-			storageUpdate = sub.LastSent == qs.lastSent
-			sortedPendingMsgs := makeSortedPendingMsgs(sub.acksPending)
-			for _, pm := range sortedPendingMsgs {
-				// Get one of the remaning queue subscribers.
-				qsub := qs.subs[idx]
-				qsub.Lock()
-				// Store in storage
-				if err := qsub.store.AddSeqPending(qsub.ID, pm.seq); err != nil {
-					ss.stan.log.Errorf("[Client:%s] Unable to transfer message to subid=%d, subject=%s, seq=%d, err=%v",
-						clientID, subid, subject, pm.seq, err)
+			if standaloneOrLeader {
+				// Set expiration in the past to force redelivery
+				expirationTime := time.Now().UnixNano() - int64(time.Second)
+				// If there are pending messages in this sub, they need to be
+				// transferred to remaining queue subscribers.
+				numQSubs := len(qs.subs)
+				idx := 0
+				sub.RLock()
+				// Need to update if this member was the one with the last
+				// message of the group.
+				storageUpdate = sub.LastSent == qs.lastSent
+				sortedPendingMsgs := makeSortedPendingMsgs(sub.acksPending)
+				for _, pm := range sortedPendingMsgs {
+					// Get one of the remaning queue subscribers.
+					qsub := qs.subs[idx]
+					qsub.Lock()
+					// Store in storage
+					if err := qsub.store.AddSeqPending(qsub.ID, pm.seq); err != nil {
+						s.log.Errorf("[Client:%s] Unable to transfer message to subid=%d, subject=%s, seq=%d, err=%v",
+							clientID, subid, subject, pm.seq, err)
+						qsub.Unlock()
+						continue
+					}
+					// We don't need to update if the sub's lastSent is transferred
+					// to another queue subscriber.
+					if storageUpdate && pm.seq == qs.lastSent {
+						storageUpdate = false
+					}
+					// Update LastSent if applicable
+					if pm.seq > qsub.LastSent {
+						qsub.LastSent = pm.seq
+					}
+					// Store in ackPending.
+					qsub.acksPending[pm.seq] = expirationTime
+					// Keep track of this qsub
+					if qsubs == nil {
+						qsubs = make(map[uint64]*subState)
+					}
+					if _, tracked := qsubs[qsub.ID]; !tracked {
+						qsubs[qsub.ID] = qsub
+					}
+					if s.isClustered {
+						s.collectSentOrAck(qsub, true, pm.seq)
+					}
 					qsub.Unlock()
-					continue
+					// Move to the next queue subscriber, going back to first if needed.
+					idx++
+					if idx == numQSubs {
+						idx = 0
+					}
 				}
-				// We don't need to update if the sub's lastSent is transferred
-				// to another queue subscriber.
-				if storageUpdate && pm.seq == qs.lastSent {
-					storageUpdate = false
-				}
-				// Update LastSent if applicable
-				if pm.seq > qsub.LastSent {
-					qsub.LastSent = pm.seq
-				}
-				// Store in ackPending.
-				qsub.acksPending[pm.seq] = expirationTime
-				// Keep track of this qsub
-				if qsubs == nil {
-					qsubs = make(map[uint64]*subState)
-				}
-				if _, tracked := qsubs[qsub.ID]; !tracked {
-					qsubs[qsub.ID] = qsub
-				}
-				qsub.Unlock()
-				// Move to the next queue subscriber, going back to first if needed.
-				idx++
-				if idx == numQSubs {
-					idx = 0
-				}
+				sub.RUnlock()
 			}
-			sub.RUnlock()
 			// Even for durable queue subscribers, if this is not the last
 			// member, we need to delete from storage (we did that higher in
 			// that function for non durable case). Issue #215.
@@ -1211,7 +1218,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	}
 	ss.Unlock()
 
-	if !ss.stan.isClustered || ss.stan.isLeader() {
+	if standaloneOrLeader {
 		// Go over the list of queue subs to which we have transferred
 		// messages from the leaving member. We want to have those
 		// messages redelivered quickly.
@@ -1221,7 +1228,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 			// will then re-order messages, etc..
 			fireIn := 100 * time.Millisecond
 			if qsub.ackTimer == nil {
-				ss.stan.setupAckTimer(qsub, fireIn)
+				s.setupAckTimer(qsub, fireIn)
 			} else {
 				qsub.ackTimer.Reset(fireIn)
 			}

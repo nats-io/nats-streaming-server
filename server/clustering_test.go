@@ -6839,3 +6839,157 @@ func TestClusteringRestoreSnapshotGapInSeq(t *testing.T) {
 		return fmt.Errorf("Channel foo still not restored")
 	})
 }
+
+func TestClusteringPendingCountOnFollowers(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	leader := getLeader(t, 10*time.Second, s1, s2, s3)
+
+	leader.mu.Lock()
+	leader.dupCIDTimeout = 50 * time.Millisecond
+	leader.mu.Unlock()
+
+	// Create STAN connections with passing NATS connections
+	// so that we can simulate crash of apps.
+	ncs := make([]*nats.Conn, 0, 3)
+	for i := 0; i < 3; i++ {
+		nc, err := nats.Connect(nats.DefaultURL)
+		if err != nil {
+			t.Fatalf("Error on connect: %v", err)
+		}
+		defer nc.Close()
+		ncs = append(ncs, nc)
+	}
+
+	count := int32(0)
+	ch := make(chan bool, 1)
+	killSubs := make(chan bool, 1)
+	rch := make(chan uint64, 1)
+	rtrack := int32(0)
+	cb := func(m *stan.Msg) {
+		if atomic.LoadInt32(&rtrack) > 0 {
+			if m.Redelivered {
+				select {
+				case rch <- m.Sequence:
+				default:
+				}
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		n := int(atomic.AddInt32(&count, 1))
+		if n == 10 {
+			killSubs <- true
+		} else if n == 20 {
+			ch <- true
+		}
+	}
+
+	for i := 0; i < 3; i++ {
+		sc, err := stan.Connect(clusterName, fmt.Sprintf("sub%d", i+1),
+			stan.NatsConn(ncs[i]), stan.ConnectWait(time.Second))
+		if err != nil {
+			t.Fatalf("Error on connect: %v", err)
+		}
+		defer sc.Close()
+
+		if _, err := sc.QueueSubscribe("foo", "queue", cb,
+			stan.DurableName("durable"),
+			stan.MaxInflight(2),
+			stan.DeliverAllAvailable()); err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+	}
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	// Send 10 messages
+	for i := 0; i < 10; i++ {
+		sc.PublishAsync("foo", []byte("msg"), nil)
+	}
+
+	select {
+	case <-killSubs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Did not receive all msgs")
+	}
+
+	// Start to "kill" subs.
+	for _, nc := range ncs {
+		nc.Close()
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Send 10 more messages...
+	for i := 0; i < 10; i++ {
+		sc.PublishAsync("foo", []byte("msg"), nil)
+	}
+
+	// Recreate 3 stan connections with "same" queue subs.
+	for i := 0; i < 3; i++ {
+		sc, err := stan.Connect(clusterName, fmt.Sprintf("sub%d", i+1))
+		if err != nil {
+			t.Fatalf("Error on connect: %v", err)
+		}
+		defer sc.Close()
+
+		if _, err := sc.QueueSubscribe("foo", "queue", cb,
+			stan.DurableName("durable"),
+			stan.MaxInflight(2),
+			stan.DeliverAllAvailable()); err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Wait for all messages to be received
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Did not receive all msgs")
+	}
+
+	// Now check the pending counts on all servers.
+	srvs := []*StanServer{s1, s2, s3}
+	for _, s := range srvs {
+		waitForAcks(t, s, "sub1", 4, 0)
+		waitForAcks(t, s, "sub2", 5, 0)
+		waitForAcks(t, s, "sub3", 6, 0)
+	}
+
+	atomic.StoreInt32(&rtrack, 1)
+	// Now kill leader, wait for new one
+	leader.Shutdown()
+	srvs = removeServer(srvs, leader)
+	getLeader(t, 10*time.Second, srvs...)
+
+	// Make sure that there is no redeliveries
+	select {
+	case seq := <-rch:
+		t.Fatalf("Message %v was redelivered", seq)
+	case <-time.After(500 * time.Millisecond):
+		// ok
+	}
+}
