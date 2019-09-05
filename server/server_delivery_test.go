@@ -15,6 +15,7 @@ package server
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -323,4 +324,61 @@ func TestPersistentStoreSQLSubsPendingRows(t *testing.T) {
 		sc.PublishAsync("foo", []byte("hello"), nil)
 	}
 	waitForAcks(t, s, clientName, 1, 3002)
+}
+
+func TestDeliveryRaceBetweenNextMsgAndStoring(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	prev := uint64(0)
+	errCh := make(chan error, 1)
+	doneCh := make(chan bool)
+	cb := func(m *stan.Msg) {
+		if m.Sequence != prev+1 {
+			errCh <- fmt.Errorf("Previous was %v, now got %v", prev, m.Sequence)
+			m.Sub.Close()
+			return
+		}
+		prev = m.Sequence
+		if m.Sequence == 4 {
+			doneCh <- true
+		}
+	}
+	if _, err := sc.Subscribe("foo", cb, stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Erro on subscribe: %v", err)
+	}
+
+	sc.Publish("foo", []byte("msg1"))
+
+	c := s.channels.get("foo")
+	ch1 := make(chan struct{})
+	ch2 := make(chan bool)
+	c.store.Msgs = &blockingLookupStore{MsgStore: c.store.Msgs, inLookupCh: ch1, releaseCh: ch2}
+
+	sub := s.clients.getSubs(clientName)[0]
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		s.sendAvailableMessages(c, sub)
+		wg.Done()
+	}()
+	<-ch1
+	sc.PublishAsync("foo", []byte("msg2"), nil)
+	sc.PublishAsync("foo", []byte("msg3"), nil)
+	time.Sleep(50 * time.Millisecond)
+	ch2 <- true
+	wg.Wait()
+
+	sc.Publish("foo", []byte("msg4"))
+
+	select {
+	case <-doneCh:
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	case <-time.After(time.Second):
+		t.Fatal("Timeout!")
+	}
 }
