@@ -1281,3 +1281,116 @@ func TestNumSubsOnSubFailure(t *testing.T) {
 	sc.Close()
 	checkNumSubs(t, s, 2)
 }
+
+func TestSubStartPacing(t *testing.T) {
+	paceLimit = 10
+	defer func() { paceLimit = defaultPaceLimit }()
+
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	total := 10000
+	count := 0
+	ch := make(chan bool, 1)
+	for i := 0; i < total; i++ {
+		if _, err := sc.PublishAsync("foo", []byte("hello"), func(string, error) {
+			if count++; count == total {
+				ch <- true
+			}
+		}); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Not all messages were published")
+	}
+
+	// Start a subscription and make sure all messages are received.
+	count = 0
+	if _, err := sc.Subscribe("foo",
+		func(_ *stan.Msg) {
+			if count++; count == total {
+				ch <- true
+			}
+		},
+		stan.DeliverAllAvailable(),
+		stan.MaxInflight(total)); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Did not get all messages")
+	}
+}
+
+func TestQueueSubsStartPacing(t *testing.T) {
+	paceLimit = 10
+	defer func() { paceLimit = defaultPaceLimit }()
+
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	total := 10000
+	count := int32(0)
+	ch := make(chan bool, 1)
+	for i := 0; i < total; i++ {
+		if _, err := sc.PublishAsync("foo", []byte("hello"), func(string, error) {
+			if count++; count == int32(total) {
+				ch <- true
+			}
+		}); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Not all messages were published")
+	}
+
+	// Start 2 queue subs at the same time. With pacing, there
+	// should be a bit of distribution between the 2 queue subs.
+	// Without, and since MaxInflight is equal to `total`, only
+	// the first queue sub would receive all messages.
+	atomic.StoreInt32(&count, 0)
+	count1 := int32(0)
+	count2 := int32(0)
+	startSub := func(c *int32) {
+		sc.QueueSubscribe("foo", "bar",
+			func(_ *stan.Msg) {
+				atomic.AddInt32(c, 1)
+				if n := atomic.AddInt32(&count, 1); n == int32(total) {
+					ch <- true
+				}
+			},
+			stan.DeliverAllAvailable(),
+			stan.MaxInflight(total))
+	}
+	go startSub(&count1)
+	go startSub(&count2)
+
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Did not get all messages")
+	}
+
+	n := int(atomic.LoadInt32(&count1))
+	if n == total {
+		t.Fatalf("Queue sub 1 got all %v messages", total)
+	} else if n == 0 {
+		t.Fatal("Queue sub 1 did not get any message")
+	}
+}

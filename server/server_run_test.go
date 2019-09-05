@@ -1133,7 +1133,7 @@ func TestStreamingServerReadyLog(t *testing.T) {
 	// At first, we should not get the lock since server
 	// is standby...
 	checkLog(t, l2, false)
-	// Now shutdown s and s2 shoudl report it is ready
+	// Now shutdown s and s2 should report it is ready
 	s.Shutdown()
 	checkLog(t, l2, true)
 	s2.Shutdown()

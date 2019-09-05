@@ -125,6 +125,12 @@ const (
 
 	// Log statement printed when server is considered ready
 	streamingReadyLog = "Streaming Server is ready"
+
+	// Number of messages to send to a sub/queue on start of the subscription.
+	// This is to avoid having the server load a large amount of messages
+	// when the subscription start. It also allows queue subs starting
+	// at the same time to better distribute load.
+	defaultPaceLimit = 100
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -181,6 +187,7 @@ var (
 	lazyReplicationInterval    = defaultLazyReplicationInterval
 	testDeleteChannel          bool
 	testSubSentAndAckSlowApply bool
+	paceLimit                  = defaultPaceLimit
 )
 
 var (
@@ -5002,11 +5009,17 @@ func (s *StanServer) processSubscriptionsStart() {
 				s.performDurableRedelivery(c, sub)
 			}
 			// publish messages to this subscriber
-			if qs != nil {
-				s.sendAvailableMessagesToQueue(c, qs)
-			} else {
-				s.sendAvailableMessages(c, sub)
-			}
+			s.wg.Add(1)
+			go func() {
+				if qs != nil {
+					for s.sendAvailableMessagesToQueueEx(c, qs, true) {
+					}
+				} else {
+					for s.sendAvailableMessagesEx(c, sub, true) {
+					}
+				}
+				s.wg.Done()
+			}()
 		case <-s.subStartQuit:
 			return
 		}
@@ -5133,22 +5146,34 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64, from
 
 // Send any messages that are ready to be sent that have been queued to the group.
 func (s *StanServer) sendAvailableMessagesToQueue(c *channel, qs *queueState) {
+	s.sendAvailableMessagesToQueueEx(c, qs, false)
+}
+
+// Send any messages that are ready to be sent that have been queued to the group.
+// If `pace` is true, this call will possibly return before the group is stalled
+// and return `true` if function should be called again.
+func (s *StanServer) sendAvailableMessagesToQueueEx(c *channel, qs *queueState, pace bool) bool {
 	if c == nil || qs == nil {
-		return
+		return false
 	}
 
 	qs.Lock()
 	// Short circuit if no active members
 	if len(qs.subs) == 0 {
 		qs.Unlock()
-		return
+		return false
 	}
 	// If redelivery at startup in progress, don't attempt to deliver new messages
 	if qs.newOnHold {
 		qs.Unlock()
-		return
+		return false
 	}
-	for nextSeq := qs.lastSent + 1; qs.stalledSubCount < len(qs.subs); nextSeq++ {
+	limit := 0xFFFFFFFF
+	if pace {
+		limit = paceLimit
+	}
+	i := 0
+	for nextSeq := qs.lastSent + 1; qs.stalledSubCount < len(qs.subs) && i < limit; nextSeq++ {
 		nextMsg := s.getNextMsg(c, &nextSeq, &qs.lastSent)
 		if nextMsg == nil {
 			break
@@ -5156,14 +5181,31 @@ func (s *StanServer) sendAvailableMessagesToQueue(c *channel, qs *queueState) {
 		if _, sent := s.sendMsgToQueueGroup(qs, nextMsg, honorMaxInFlight); !sent {
 			break
 		}
+		i++
 	}
 	qs.Unlock()
+	// Did we stop because of the limit? If so, caller should call again.
+	return pace && i == limit
 }
 
 // Send any messages that are ready to be sent that have been queued.
 func (s *StanServer) sendAvailableMessages(c *channel, sub *subState) {
+	s.sendAvailableMessagesEx(c, sub, false)
+}
+
+// Send any messages that are ready to be sent that have been queued.
+// If `pace` is true, this call will possibly return before the sub is stalled
+// and return `true` if function should be called again.
+func (s *StanServer) sendAvailableMessagesEx(c *channel, sub *subState, pace bool) bool {
+	limit := 0xFFFFFFFF
+	if pace {
+		// We don't have to check that limit is <= MaxInflight since
+		// sendMsgToSub() will ensure that we don't send more than that.
+		limit = paceLimit
+	}
 	sub.Lock()
-	for nextSeq := sub.LastSent + 1; !sub.stalled; nextSeq++ {
+	i := 0
+	for nextSeq := sub.LastSent + 1; !sub.stalled && i < limit; nextSeq++ {
 		nextMsg := s.getNextMsg(c, &nextSeq, &sub.LastSent)
 		if nextMsg == nil {
 			break
@@ -5171,8 +5213,11 @@ func (s *StanServer) sendAvailableMessages(c *channel, sub *subState) {
 		if sent, sendMore := s.sendMsgToSub(sub, nextMsg, honorMaxInFlight); !sent || !sendMore {
 			break
 		}
+		i++
 	}
 	sub.Unlock()
+	// Did we stop because of the limit? If so, caller should call again.
+	return pace && i == limit
 }
 
 func (s *StanServer) getNextMsg(c *channel, nextSeq, lastSent *uint64) *pb.MsgProto {
