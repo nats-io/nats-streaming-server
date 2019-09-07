@@ -486,20 +486,33 @@ func TestPersistentStoreNoPanicOnShutdown(t *testing.T) {
 	defer s.Shutdown()
 
 	// Start a go routine that keeps sending messages
-	sendQuit := make(chan bool)
+	sendQuit := make(chan bool, 1)
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
+	nc, err := nats.Connect(nats.DefaultURL, nats.NoReconnect())
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+	sc, err := stan.Connect(clusterName, clientName,
+		stan.NatsConn(nc),
+		stan.PubAckWait(250*time.Millisecond))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc.Close()
 	go func() {
 		defer wg.Done()
-
-		sc, nc := createConnectionWithNatsOpts(t, clientName, nats.NoReconnect())
-		defer sc.Close()
-		defer nc.Close()
-
 		payload := []byte("hello")
 		for {
 			select {
 			case <-sendQuit:
+				// We know that the server is shutdown, so close
+				// the NATS connection first so that STAN does not
+				// try to send the close protocol (which will timeout
+				// with a 2sec by default).
+				nc.Close()
+				sc.Close()
 				return
 			default:
 				sc.PublishAsync("foo", payload, nil)

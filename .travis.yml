@@ -28,9 +28,11 @@ before_script:
 - $(exit $(misspell -locale US README.md | wc -l))
 - staticcheck $EXCLUDE_VENDOR_AND_PROTO_DIR
 script:
+- set -e
 - mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;"
 - go test -i $EXCLUDE_VENDOR
 - if [[ "$TRAVIS_GO_VERSION" =~ 1.12 ]]; then ./scripts/cov.sh TRAVIS; else go test -failfast $EXCLUDE_VENDOR; fi
+- set +e
 
 deploy:
   provider: script

@@ -432,6 +432,10 @@ func getTestDefaultOptsForPersistentStore() *Options {
 	case stores.TypeFile:
 		opts.FilestoreDir = defaultDataStore
 		opts.FileStoreOpts.BufferSize = 1024
+		// Go 1.12 on macOS is very slow at doing sync writes...
+		if runtime.GOOS == "darwin" && strings.HasPrefix(runtime.Version(), "go1.12") {
+			opts.FileStoreOpts.DoSync = false
+		}
 	case stores.TypeSQL:
 		opts.SQLStoreOpts.Driver = testSQLDriver
 		opts.SQLStoreOpts.Source = testSQLSource
