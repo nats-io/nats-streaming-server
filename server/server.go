@@ -1260,36 +1260,37 @@ func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 
 // Options for NATS Streaming Server
 type Options struct {
-	ID                 string
-	DiscoverPrefix     string
-	StoreType          string
-	FilestoreDir       string
-	FileStoreOpts      stores.FileStoreOptions
-	SQLStoreOpts       stores.SQLStoreOptions
+	ID                    string
+	DiscoverPrefix        string
+	StoreType             string
+	FilestoreDir          string
+	FileStoreOpts         stores.FileStoreOptions
+	SQLStoreOpts          stores.SQLStoreOptions
 	stores.StoreLimits               // Store limits (MaxChannels, etc..)
-	EnableLogging      bool          // Enables logging
-	CustomLogger       logger.Logger // Server will start with the provided logger
-	Trace              bool          // Verbose trace
-	Debug              bool          // Debug trace
-	HandleSignals      bool          // Should the server setup a signal handler (for Ctrl+C, etc...)
-	Secure             bool          // Create a TLS enabled connection w/o server verification
-	ClientCert         string        // Client Certificate for TLS
-	ClientKey          string        // Client Key for TLS
-	ClientCA           string        // Client CAs for TLS
-	IOBatchSize        int           // Maximum number of messages collected from clients before starting their processing.
-	IOSleepTime        int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
-	NATSServerURL      string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
-	ClientHBInterval   time.Duration // Interval at which server sends heartbeat to a client.
-	ClientHBTimeout    time.Duration // How long server waits for a heartbeat response.
-	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
-	FTGroupName        string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
-	Partitioning       bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
-	SyslogName         string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
-	Encrypt            bool          // Specify if server should encrypt messages payload when storing them
-	EncryptionCipher   string        // Cipher used for encryption. Supported are "AES" and "CHACHA". If none is specified, defaults to AES on platforms with Intel processors, CHACHA otherwise.
-	EncryptionKey      []byte        // Encryption key. The environment NATS_STREAMING_ENCRYPTION_KEY takes precedence and is the preferred way to provide the key.
-	Clustering         ClusteringOptions
-	NATSClientOpts     []nats.Option
+	EnableLogging         bool          // Enables logging
+	CustomLogger          logger.Logger // Server will start with the provided logger
+	Trace                 bool          // Verbose trace
+	Debug                 bool          // Debug trace
+	HandleSignals         bool          // Should the server setup a signal handler (for Ctrl+C, etc...)
+	Secure                bool          // Create a TLS enabled connection w/o server verification
+	ClientCert            string        // Client Certificate for TLS
+	ClientKey             string        // Client Key for TLS
+	ClientCA              string        // Client CAs for TLS
+	IOBatchSize           int           // Maximum number of messages collected from clients before starting their processing.
+	IOSleepTime           int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
+	NATSServerURL         string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
+	NATSServerCredentials string     // Credentials file for connecting to external NATS Server.
+	ClientHBInterval      time.Duration // Interval at which server sends heartbeat to a client.
+	ClientHBTimeout       time.Duration // How long server waits for a heartbeat response.
+	ClientHBFailCount     int           // Number of failed heartbeats before server closes client connection.
+	FTGroupName           string        // Name of the FT Group. A group can be 2 or more servers with a single active server and all sharing the same datastore.
+	Partitioning          bool          // Specify if server only accepts messages/subscriptions on channels defined in StoreLimits.
+	SyslogName            string        // Optional name for the syslog (usueful on Windows when running several servers as a service)
+	Encrypt               bool          // Specify if server should encrypt messages payload when storing them
+	EncryptionCipher      string        // Cipher used for encryption. Supported are "AES" and "CHACHA". If none is specified, defaults to AES on platforms with Intel processors, CHACHA otherwise.
+	EncryptionKey         []byte        // Encryption key. The environment NATS_STREAMING_ENCRYPTION_KEY takes precedence and is the preferred way to provide the key.
+	Clustering            ClusteringOptions
+	NATSClientOpts        []nats.Option
 }
 
 // Clone returns a deep copy of the Options object.
@@ -1309,16 +1310,17 @@ func (o *Options) Clone() *Options {
 
 // DefaultOptions are default options for the NATS Streaming Server
 var defaultOptions = Options{
-	ID:                DefaultClusterID,
-	DiscoverPrefix:    DefaultDiscoverPrefix,
-	StoreType:         DefaultStoreType,
-	FileStoreOpts:     stores.DefaultFileStoreOptions,
-	IOBatchSize:       DefaultIOBatchSize,
-	IOSleepTime:       DefaultIOSleepTime,
-	NATSServerURL:     "",
-	ClientHBInterval:  DefaultHeartBeatInterval,
-	ClientHBTimeout:   DefaultClientHBTimeout,
-	ClientHBFailCount: DefaultMaxFailedHeartBeats,
+	ID:                    DefaultClusterID,
+	DiscoverPrefix:        DefaultDiscoverPrefix,
+	StoreType:             DefaultStoreType,
+	FileStoreOpts:         stores.DefaultFileStoreOptions,
+	IOBatchSize:           DefaultIOBatchSize,
+	IOSleepTime:           DefaultIOSleepTime,
+	NATSServerURL:         "",
+	NATSServerCredentials: "",
+	ClientHBInterval:      DefaultHeartBeatInterval,
+	ClientHBTimeout:       DefaultClientHBTimeout,
+	ClientHBFailCount:     DefaultMaxFailedHeartBeats,
 }
 
 // GetDefaultOptions returns default options for the NATS Streaming Server
@@ -1439,6 +1441,10 @@ func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 	ncOpts.User = s.natsOpts.Username
 	ncOpts.Password = s.natsOpts.Password
 	ncOpts.Token = s.natsOpts.Authorization
+
+	if s.opts.NATSServerCredentials != "" {
+	  nats.UserCredentials(s.opts.NATSServerCredentials)(&ncOpts)
+	}
 
 	ncOpts.Name = fmt.Sprintf("_NSS-%s-%s", s.opts.ID, name)
 
