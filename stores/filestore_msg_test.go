@@ -1799,7 +1799,7 @@ func TestFSNoPanicOnRemoveMsg(t *testing.T) {
 
 	limits := testDefaultStoreLimits
 	limits.MaxMsgs = 5
-	s, err := NewFileStore(l, testFSDefaultDatastore, &limits, BufferSize(0), DoCRC(false))
+	s, err := NewFileStore(l, testFSDefaultDatastore, &limits, BufferSize(0))
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -1820,7 +1820,7 @@ func TestFSNoPanicOnRemoveMsg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error reading file: %v", err)
 	}
-	util.ByteOrder.PutUint64(content[4:], 2)
+	copy(content[4:], []byte("xxx"))
 	if err := ioutil.WriteFile(idxFile.name, content, 0600); err != nil {
 		t.Fatalf("Error writing file: %v", err)
 	}
@@ -2090,5 +2090,150 @@ func TestFSReadMsgRecord(t *testing.T) {
 	r.setContent(b)
 	if _, err := ms.readMsgRecord(r, buf, 8); err == nil || !strings.Contains(err.Error(), "expected size") {
 		t.Fatalf("Expected error about wrong size, got %v", err)
+	}
+}
+
+func TestFSGapsInSequenceWithoutFillAndExpiration(t *testing.T) {
+	opts := testFSGetOptionsForGapsTests()
+	// Add case with smaller slice
+	opts = append(opts, testFSGapsOption{
+		name: "SmallFileSlice",
+		opt:  SliceConfig(3, 0, 0, ""),
+	})
+	for _, o := range opts {
+		t.Run(o.name, func(t *testing.T) {
+			fillGaps = false
+			defer func() { fillGaps = true }()
+
+			cleanupFSDatastore(t)
+			defer cleanupFSDatastore(t)
+
+			s := createDefaultFileStore(t, o.opt)
+			defer s.Close()
+
+			limits := testDefaultStoreLimits
+			limits.MaxMsgs = 6
+			s.SetLimits(&limits)
+
+			c := storeCreateChannel(t, s, "foo")
+			ms := c.Msgs.(*FileMsgStore)
+
+			seqs := []uint64{1, 2, 5, 8, 9, 10}
+			for _, seq := range seqs {
+				storeMsg(t, c, "foo", seq, []byte(fmt.Sprintf("msg%d", seq)))
+			}
+			ms.Flush()
+			ms.Lock()
+			ms.cache.empty()
+			ms.Unlock()
+
+			for _, seq := range seqs {
+				msg, err := ms.Lookup(seq)
+				if err != nil {
+					t.Fatalf("Error on lookup: %v", err)
+				}
+				if msg.Sequence != seq || string(msg.Data) != fmt.Sprintf("msg%d", seq) {
+					t.Fatalf("Unexpected message for seq %v: %v", seq, msg)
+				}
+			}
+
+			notfound := []uint64{3, 6, 7}
+			for _, seq := range notfound {
+				msg, err := ms.Lookup(seq)
+				if err != nil || msg != nil {
+					t.Fatalf("Unexpected result err=%v msg=%v", err, msg)
+				}
+			}
+
+			// Add more messages to force 3 first to be removed,
+			// and in the case of the small slice option, should
+			// cause first slice to be removed.
+			// Add some more gaps..
+			storeMsg(t, c, "foo", 12, []byte("msg12"))
+			storeMsg(t, c, "foo", 14, []byte("msg14"))
+			storeMsg(t, c, "foo", 16, []byte("msg16"))
+
+			first, last := msgStoreFirstAndLastSequence(t, ms)
+			if first != 8 && last != 16 {
+				t.Fatalf("Expected first to be 8 and last to be 16, got %v and %v", first, last)
+			}
+
+			expectFirsSliceToBe := func(t *testing.T, expected int) {
+				ms.Lock()
+				ffseq := ms.firstFSlSeq
+				ms.Unlock()
+				if ffseq != expected {
+					t.Fatalf("First slice expected to be %v, got %v", expected, ffseq)
+				}
+			}
+			if o.name == "SmallFileSlice" {
+				expectFirsSliceToBe(t, 2)
+			} else {
+				expectFirsSliceToBe(t, 1)
+			}
+
+			storeMsg(t, c, "foo", 18, []byte("msg18"))
+			storeMsg(t, c, "foo", 19, []byte("msg19"))
+			storeMsg(t, c, "foo", 20, []byte("msg20"))
+
+			// Force expiration..
+			time.Sleep(50 * time.Millisecond)
+			ms.Lock()
+			ms.expireMsgs(time.Now().UnixNano(), int64(time.Millisecond))
+			ms.Unlock()
+
+			n, b, err := ms.State()
+			if err != nil {
+				t.Fatalf("Error getting state: %v", err)
+			}
+			if n != 0 || b != 0 {
+				t.Fatalf("Unexpected number of msgs: %v bytes: %v", n, b)
+			}
+
+			if o.name == "SmallFileSlice" {
+				expectFirsSliceToBe(t, 4)
+			} else {
+				expectFirsSliceToBe(t, 1)
+			}
+		})
+	}
+}
+
+func TestFSExpirationError(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+	ms := c.Msgs.(*FileMsgStore)
+
+	storeMsg(t, c, "foo", 1, []byte("msg"))
+	ms.Flush()
+	ms.Lock()
+	ms.cache.empty()
+	ms.Unlock()
+
+	ms.Lock()
+	idxFile := ms.files[1].idxFile
+	ms.fm.closeLockedOrOpenedFile(idxFile)
+	content, err := ioutil.ReadFile(idxFile.name)
+	if err != nil {
+		t.Fatalf("Error reading file: %v", err)
+	}
+	copy(content[4:], []byte("xxx"))
+	if err := ioutil.WriteFile(idxFile.name, content, 0600); err != nil {
+		t.Fatalf("Error writing file: %v", err)
+	}
+	ms.Unlock()
+
+	time.Sleep(50 * time.Millisecond)
+	ms.Lock()
+	now := time.Now().UnixNano()
+	nextExpiration := ms.expireMsgs(time.Now().UnixNano(), int64(time.Millisecond))
+	ms.Unlock()
+	if nextExpiration < now+int64(4500*time.Millisecond) {
+		t.Fatalf("Expected next expiration to be set to 5secs from now, got %v", time.Duration(nextExpiration))
 	}
 }

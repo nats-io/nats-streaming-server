@@ -672,6 +672,7 @@ var (
 	bkgTasksSleepDuration = defaultBkgTasksSleepDuration
 	cacheTTL              = int64(defaultCacheTTL)
 	sliceCloseInterval    = defaultSliceCloseInterval
+	fillGaps              = true
 )
 
 // FileStoreTestSetBackgroundTaskInterval is used by tests to reduce the interval
@@ -2622,7 +2623,7 @@ func (ms *FileMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 	ms.needSync = true
 
 	// Is there a gap in message sequence?
-	if ms.last > 0 && m.Sequence > ms.last+1 {
+	if fillGaps && ms.last > 0 && m.Sequence > ms.last+1 {
 		if err := ms.fillGaps(fslice, m); err != nil {
 			ms.unlockFiles(fslice)
 			return 0, err
@@ -2915,6 +2916,11 @@ func (ms *FileMsgStore) expireMsgs(now, maxAge int64) int64 {
 					// Try again in 5 secs.
 					ms.expiration = now + int64(5*time.Second)
 					return ms.expiration
+				} else if m == nil {
+					ms.log.Warnf("Skip expiration of missing sequence %v for channel %q",
+						ms.first, ms.channelName)
+					ms.skipMissingMsg(slice)
+					continue
 				}
 			}
 		}
@@ -2998,12 +3004,51 @@ func (ms *FileMsgStore) readMsgIndex(slice *fileSlice, seq uint64) (*msgIndex, e
 	// Read the index record and ensure we have what we expect
 	seqInIndexFile, msgIndex, err := ms.readIndex(slice.idxFile.handle)
 	if err != nil {
+		if err == io.EOF {
+			return ms.backtrackIndex(slice, seq, seqInIndexFile, idxFileOffset)
+		}
 		return nil, err
 	}
 	if seqInIndexFile != seq {
-		return nil, fmt.Errorf("wrong sequence, wanted %v got %v", seq, seqInIndexFile)
+		return ms.backtrackIndex(slice, seq, seqInIndexFile, idxFileOffset)
 	}
 	return msgIndex, nil
+}
+
+// Looks for the index record for the given `seq` going backward
+// from the give `offset`. This is invoked when the recovered index
+// at the given offset does not the requested sequence, as the result
+// of gaps in the index file.
+func (ms *FileMsgStore) backtrackIndex(slice *fileSlice, seq, wrongSeq uint64, offset int64) (*msgIndex, error) {
+	for offset -= msgIndexRecSize; offset >= 4; offset -= msgIndexRecSize {
+		if _, err := slice.idxFile.handle.Seek(offset, io.SeekStart); err != nil {
+			break
+		}
+		seqInIndexFile, msgIndex, err := ms.readIndex(slice.idxFile.handle)
+		if err == io.EOF {
+			continue
+		}
+		if err == nil && seqInIndexFile == seq {
+			return msgIndex, nil
+		}
+		if err != nil || seqInIndexFile < seq {
+			break
+		}
+	}
+	// Not found...
+	return nil, nil
+}
+
+// When a message is not found due to unexpected gap (from older
+// store since now we ensure there is no gap), bump the first
+// message sequence and update slice.
+func (ms *FileMsgStore) skipMissingMsg(slice *fileSlice) {
+	ms.first++
+	ms.firstMsg = nil
+	if ms.first > ms.last {
+		ms.lastMsg = nil
+	}
+	slice.firstSeq = ms.first
 }
 
 // removeFirstMsg "removes" the first message of the first slice.
@@ -3024,6 +3069,15 @@ func (ms *FileMsgStore) removeFirstMsg(mindex *msgIndex, lockFile bool) error {
 		if err != nil {
 			return err
 		}
+		// Here we are getting the first sequence from the first
+		// available slice, so ms.first and slice.firstSeq should
+		// be the same, but due to possible gaps, they may not.
+		// Adjust in case.
+		ms.first = slice.firstSeq
+	}
+	if mindex == nil {
+		ms.skipMissingMsg(slice)
+		return nil
 	}
 	// Size of the first message in this slice
 	firstMsgSize := mindex.msgSize
@@ -3274,8 +3328,10 @@ func (ms *FileMsgStore) lookup(seq uint64) (*pb.MsgProto, error) {
 		}
 		if ms.readBufSize > 0 && seq != fslice.lastSeq {
 			msg, err = ms.readAheadMsgs(fslice, seq)
-			ms.unlockFiles(fslice)
-			return msg, err
+			if err == nil {
+				ms.unlockFiles(fslice)
+				return msg, err
+			}
 		}
 		msgIndex, err := ms.readMsgIndex(fslice, seq)
 		if msgIndex != nil {
