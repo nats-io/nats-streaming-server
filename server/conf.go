@@ -95,6 +95,11 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.NATSServerURL = v.(string)
+		case "credentials":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.NATSCredentials = v.(string)
 		case "secure":
 			if err := checkType(k, reflect.Bool, v); err != nil {
 				return err

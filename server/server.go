@@ -1279,6 +1279,7 @@ type Options struct {
 	IOBatchSize        int           // Maximum number of messages collected from clients before starting their processing.
 	IOSleepTime        int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
 	NATSServerURL      string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
+	NATSCredentials    string        // Credentials file for connecting to external NATS Server.
 	ClientHBInterval   time.Duration // Interval at which server sends heartbeat to a client.
 	ClientHBTimeout    time.Duration // How long server waits for a heartbeat response.
 	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
@@ -1315,7 +1316,6 @@ var defaultOptions = Options{
 	FileStoreOpts:     stores.DefaultFileStoreOptions,
 	IOBatchSize:       DefaultIOBatchSize,
 	IOSleepTime:       DefaultIOSleepTime,
-	NATSServerURL:     "",
 	ClientHBInterval:  DefaultHeartBeatInterval,
 	ClientHBTimeout:   DefaultClientHBTimeout,
 	ClientHBFailCount: DefaultMaxFailedHeartBeats,
@@ -1427,6 +1427,10 @@ func (s *StanServer) buildServerURLs() ([]string, error) {
 func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 	var err error
 	ncOpts := nats.DefaultOptions
+
+	if s.opts.NATSCredentials != "" {
+		nats.UserCredentials(s.opts.NATSCredentials)(&ncOpts)
+	}
 
 	for _, o := range s.opts.NATSClientOpts {
 		o(&ncOpts)
