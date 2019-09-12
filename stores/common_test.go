@@ -63,10 +63,10 @@ type testStore struct {
 var (
 	testLogger logger.Logger
 	testStores = []*testStore{
-		&testStore{TypeMemory, false},
-		&testStore{TypeFile, true},
-		&testStore{TypeSQL, true},
-		&testStore{TypeRaft, false},
+		{TypeMemory, false},
+		{TypeFile, true},
+		{TypeSQL, true},
+		{TypeRaft, false},
 	}
 	testTimestampMu   sync.Mutex
 	testLastTimestamp int64

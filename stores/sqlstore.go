@@ -504,7 +504,7 @@ func (s *SQLStore) updateDBLock() {
 
 	var (
 		ticker  = time.NewTicker(sqlLockUpdateInterval)
-		hasLock = true
+		hasLock bool
 		err     error
 		failed  int
 	)

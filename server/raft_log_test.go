@@ -285,19 +285,19 @@ func TestRaftLogWithEncryption(t *testing.T) {
 	}
 
 	expected := []*raft.Log{
-		&raft.Log{
+		{
 			Type:  raft.LogCommand,
 			Index: 1,
 			Term:  1,
 			Data:  []byte("msg1"),
 		},
-		&raft.Log{
+		{
 			Type:  raft.LogCommand,
 			Index: 2,
 			Term:  1,
 			Data:  []byte("msg2"),
 		},
-		&raft.Log{
+		{
 			Type:  raft.LogCommand,
 			Index: 3,
 			Term:  1,

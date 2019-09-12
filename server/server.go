@@ -46,7 +46,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.16.1"
+	VERSION = "0.16.2"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -3468,7 +3468,6 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 	var (
 		pick               *subState
 		sent               bool
-		tracePrinted       bool
 		foundWithZero      bool
 		nextExpirationTime int64
 	)
@@ -3497,8 +3496,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 		// If this message has not yet expired, reset timer for next callback
 		if pm.expire > limit {
 			nextExpirationTime = pm.expire
-			if !tracePrinted && s.trace {
-				tracePrinted = true
+			if s.trace {
 				s.log.Tracef("[Client:%s] Redelivery for subid=%d, skipping seq=%d", clientID, subID, m.Sequence)
 			}
 			break

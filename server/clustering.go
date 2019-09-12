@@ -433,7 +433,7 @@ func (s *StanServer) bootstrapCluster(name string, node *raft.Raft) error {
 	var (
 		addr = s.getClusteringAddr(name)
 		// Include ourself in the cluster.
-		servers = []raft.Server{raft.Server{
+		servers = []raft.Server{{
 			ID:      raft.ServerID(s.opts.Clustering.NodeID),
 			Address: raft.ServerAddress(addr),
 		}}

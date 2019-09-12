@@ -169,7 +169,7 @@ func TestRAFTTransportAppendEntries(t *testing.T) {
 		PrevLogEntry: 100,
 		PrevLogTerm:  4,
 		Entries: []*raft.Log{
-			&raft.Log{
+			{
 				Index: 101,
 				Term:  4,
 				Type:  raft.LogNoop,
@@ -251,7 +251,7 @@ func TestRAFTTransportAppendEntriesPipeline(t *testing.T) {
 		PrevLogEntry: 100,
 		PrevLogTerm:  4,
 		Entries: []*raft.Log{
-			&raft.Log{
+			{
 				Index: 101,
 				Term:  4,
 				Type:  raft.LogNoop,
@@ -556,7 +556,7 @@ func TestRAFTTransportPooledConn(t *testing.T) {
 		PrevLogEntry: 100,
 		PrevLogTerm:  4,
 		Entries: []*raft.Log{
-			&raft.Log{
+			{
 				Index: 101,
 				Term:  4,
 				Type:  raft.LogNoop,
