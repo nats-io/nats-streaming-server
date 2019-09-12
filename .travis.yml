@@ -19,19 +19,18 @@ install:
 services:
 - mysql
 before_script:
-- EXCLUDE_VENDOR=$(go list ./... | grep -v "/vendor/")
-- EXCLUDE_VENDOR_AND_PROTO_DIR=$(go list ./... | grep -v "/vendor/" | grep -v "/spb")
+# Remove the "spb" directory that contains protobuf
+- GO_LIST=$(go list ./... | grep -v "/spb")
 - go install
-- $(exit $(go fmt $EXCLUDE_VENDOR | wc -l))
-- go vet $EXCLUDE_VENDOR
-- $(exit $(misspell -locale US $EXCLUDE_VENDOR_AND_PROTO_DIR | wc -l))
-- $(exit $(misspell -locale US README.md | wc -l))
-- staticcheck $EXCLUDE_VENDOR_AND_PROTO_DIR
+- $(exit $(go fmt $GO_LIST | wc -l))
+- go vet $GO_LIST
+- find . -type f -name "*.go" | grep -v "/vendor/" | grep -v "/spb/" | xargs misspell -error -locale US
+- staticcheck $GO_LIST
 script:
 - set -e
 - mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;"
-- go test -i $EXCLUDE_VENDOR
-- if [[ "$TRAVIS_GO_VERSION" =~ 1.12 ]]; then ./scripts/cov.sh TRAVIS; else go test -failfast $EXCLUDE_VENDOR; fi
+- go test -i ./...
+- if [[ "$TRAVIS_GO_VERSION" =~ 1.12 ]]; then ./scripts/cov.sh TRAVIS; else go test -failfast ./...; fi
 - set +e
 
 deploy:

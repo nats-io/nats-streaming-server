@@ -448,7 +448,6 @@ func TestCSMaxAge(t *testing.T) {
 				}
 				// Store a message
 				storeMsg(t, cs, "bar", seq, []byte("msg"))
-				seq++
 				// Now timer should have been set again
 				if !isSet() {
 					t.Fatal("Timer should have been set")

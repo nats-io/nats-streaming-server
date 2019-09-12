@@ -1442,8 +1442,8 @@ type testFSGapsOption struct {
 func testFSGetOptionsForGapsTests() []testFSGapsOption {
 	defaultOptions := DefaultFileStoreOptions
 	opts := []testFSGapsOption{
-		testFSGapsOption{"Default", AllOptions(&defaultOptions)},
-		testFSGapsOption{"NoBuffer", BufferSize(0)},
+		{"Default", AllOptions(&defaultOptions)},
+		{"NoBuffer", BufferSize(0)},
 	}
 	return opts
 }

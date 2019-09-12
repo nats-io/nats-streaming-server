@@ -1391,7 +1391,7 @@ func TestFSReadRecord(t *testing.T) {
 
 	buf := make([]byte, 5)
 	var retBuf []byte
-	recType := recNoType
+	var recType recordType
 	recSize := 0
 
 	// Reader returns an error

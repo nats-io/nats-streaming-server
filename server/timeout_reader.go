@@ -23,6 +23,7 @@ import (
 
 const bufferSize = 4096
 
+// ErrTimeout reports a read timeout error
 var ErrTimeout = errors.New("natslog: read timeout")
 
 type timeoutReader struct {

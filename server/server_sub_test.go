@@ -843,11 +843,11 @@ func TestTraceSubCreateCloseUnsubscribeRequests(t *testing.T) {
 		suffix bool
 	}
 	subOpts := []optAndText{
-		optAndText{stan.StartAt(pb.StartPosition_NewOnly), "new-only, seq=1", true},
-		optAndText{stan.StartWithLastReceived(), "last message, seq=1", true},
-		optAndText{stan.StartAtSequence(10), "from sequence, asked_seq=10 actual_seq=1", true},
-		optAndText{stan.StartAt(pb.StartPosition_First), "from beginning, seq=1", true},
-		optAndText{stan.StartAtTimeDelta(time.Hour), "from time time=", false},
+		{stan.StartAt(pb.StartPosition_NewOnly), "new-only, seq=1", true},
+		{stan.StartWithLastReceived(), "last message, seq=1", true},
+		{stan.StartAtSequence(10), "from sequence, asked_seq=10 actual_seq=1", true},
+		{stan.StartAt(pb.StartPosition_First), "from beginning, seq=1", true},
+		{stan.StartAtTimeDelta(time.Hour), "from time time=", false},
 	}
 	for _, o := range subOpts {
 		sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {}, o.opt)
@@ -891,21 +891,21 @@ func TestTraceSubCreateCloseUnsubscribeRequests(t *testing.T) {
 	}
 	ssubs := []startSub{
 		// New plain subscription followed by Unsubscribe should remove the subscription
-		startSub{
+		{
 			start:      func() (stan.Subscription, error) { return sc.Subscribe("foo", func(_ *stan.Msg) {}) },
 			startTrace: "Started new subscription",
 			end:        func(sub stan.Subscription) error { return sub.Unsubscribe() },
 			endTrace:   "Removed subscription",
 		},
 		// New plain subscription followed by Close should remove the subscription
-		startSub{
+		{
 			start:      func() (stan.Subscription, error) { return sc.Subscribe("foo", func(_ *stan.Msg) {}) },
 			startTrace: "Started new subscription",
 			end:        func(sub stan.Subscription) error { return sub.Close() },
 			endTrace:   "Removed subscription",
 		},
 		// New durable subscription followed by Close should suspend the subscription
-		startSub{
+		{
 			start: func() (stan.Subscription, error) {
 				return sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
 			},
@@ -914,7 +914,7 @@ func TestTraceSubCreateCloseUnsubscribeRequests(t *testing.T) {
 			endTrace:   "Suspended durable subscription",
 		},
 		// Resuming the durable subscription, followed by Unsubscribe should removed the subscription
-		startSub{
+		{
 			start: func() (stan.Subscription, error) {
 				return sc.Subscribe("foo", func(_ *stan.Msg) {}, stan.DurableName("dur"))
 			},
@@ -923,41 +923,41 @@ func TestTraceSubCreateCloseUnsubscribeRequests(t *testing.T) {
 			endTrace:   "Removed durable subscription",
 		},
 		// Non durable queue subscribption
-		startSub{
+		{
 			start:      func() (stan.Subscription, error) { return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}) },
 			startTrace: "Started new queue subscription",
 			end:        func(sub stan.Subscription) error { return nil }, endTrace: "",
 		},
 		// Adding a member followed by Unsubscribe should simply remove this member.
-		startSub{
+		{
 			start:      func() (stan.Subscription, error) { return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}) },
 			startTrace: "Added member to queue subscription",
 			end:        func(sub stan.Subscription) error { return sub.Unsubscribe() },
 			endTrace:   "Removed member from queue subscription",
 		},
 		// Adding a member followed by Close should simply remove this member.
-		startSub{
+		{
 			start:      func() (stan.Subscription, error) { return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}) },
 			startTrace: "Added member to queue subscription",
 			end:        func(sub stan.Subscription) error { return sub.Close() },
 			endTrace:   "Removed member from queue subscription",
 		},
 		// New queue subscription followed by Unsubscribe should remove the queue subscription
-		startSub{
+		{
 			start:      func() (stan.Subscription, error) { return sc.QueueSubscribe("foo", "queue2", func(_ *stan.Msg) {}) },
 			startTrace: "Started new queue subscription",
 			end:        func(sub stan.Subscription) error { return sub.Unsubscribe() },
 			endTrace:   "Removed queue subscription",
 		},
 		// New queue subscription followed by Close should remove the queue subscription
-		startSub{
+		{
 			start:      func() (stan.Subscription, error) { return sc.QueueSubscribe("foo", "queue2", func(_ *stan.Msg) {}) },
 			startTrace: "Started new queue subscription",
 			end:        func(sub stan.Subscription) error { return sub.Close() },
 			endTrace:   "Removed queue subscription",
 		},
 		// New durable queue subscription followed by Close should suspend the subscription
-		startSub{
+		{
 			start: func() (stan.Subscription, error) {
 				return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}, stan.DurableName("dur"))
 			},
@@ -966,7 +966,7 @@ func TestTraceSubCreateCloseUnsubscribeRequests(t *testing.T) {
 			endTrace:   "Suspended durable queue subscription",
 		},
 		// Resuming durable queue subscription
-		startSub{
+		{
 			start: func() (stan.Subscription, error) {
 				return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}, stan.DurableName("dur"))
 			},
@@ -974,7 +974,7 @@ func TestTraceSubCreateCloseUnsubscribeRequests(t *testing.T) {
 			end:        func(sub stan.Subscription) error { return nil }, endTrace: "",
 		},
 		// Adding a member followed by Close should remove this member only
-		startSub{
+		{
 			start: func() (stan.Subscription, error) {
 				return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}, stan.DurableName("dur"))
 			},
@@ -983,7 +983,7 @@ func TestTraceSubCreateCloseUnsubscribeRequests(t *testing.T) {
 			endTrace:   "Removed member from durable queue subscription",
 		},
 		// Adding a member followed by Unsubscribe should remove this member only
-		startSub{
+		{
 			start: func() (stan.Subscription, error) {
 				return sc.QueueSubscribe("foo", "queue", func(_ *stan.Msg) {}, stan.DurableName("dur"))
 			},
@@ -992,7 +992,7 @@ func TestTraceSubCreateCloseUnsubscribeRequests(t *testing.T) {
 			endTrace:   "Removed member from durable queue subscription",
 		},
 		// New durable subscription followed by Unsubscribe should remove the subscription
-		startSub{
+		{
 			start: func() (stan.Subscription, error) {
 				return sc.QueueSubscribe("foo", "queue2", func(_ *stan.Msg) {}, stan.DurableName("dur"))
 			},

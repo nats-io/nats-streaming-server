@@ -588,7 +588,6 @@ func (r *raftFSM) restoreMsgsFromSnapshot(c *channel, first, last uint64, fromAp
 				if err := c.store.Msgs.Empty(); err != nil {
 					return err
 				}
-				stored = false
 				// Set the channel's first sequence, but not past the
 				// `last` that we use in our for-loop.
 				if msg.Sequence > last {

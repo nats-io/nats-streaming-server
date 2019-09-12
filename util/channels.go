@@ -24,7 +24,7 @@ import (
 // Number of bytes used to encode a channel name
 const encodedChannelLen = 2
 
-// SendsChannelsList sends the list of channels to the given subject, possibly
+// SendChannelsList sends the list of channels to the given subject, possibly
 // splitting the list in several requests if it cannot fit in a single message.
 func SendChannelsList(channels []string, sendInbox, replyInbox string, nc *nats.Conn, serverID string) error {
 	// Since the NATS message payload is limited, we need to repeat
