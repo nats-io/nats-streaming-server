@@ -2969,6 +2969,9 @@ func (ms *FileMsgStore) enforceLimits(reportHitLimit, lockFile bool) error {
 			return nil
 		}
 		if reportHitLimit && !ms.hitLimit {
+			defer func() {
+				ms.hitLimit = false
+			}()
 			ms.hitLimit = true
 			ms.log.Warnf(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs,
 				util.FriendlyBytes(int64(ms.totalBytes)), util.FriendlyBytes(ms.limits.MaxBytes))

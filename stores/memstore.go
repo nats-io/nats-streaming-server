@@ -119,6 +119,9 @@ func (ms *MemoryMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 				(maxBytes > 0 && (ms.totalBytes > uint64(maxBytes)))) {
 			ms.removeFirstMsg()
 			if !ms.hitLimit {
+				defer func() {
+					ms.hitLimit = false
+				}()
 				ms.hitLimit = true
 				ms.log.Warnf(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs,
 					util.FriendlyBytes(int64(ms.totalBytes)), util.FriendlyBytes(ms.limits.MaxBytes))

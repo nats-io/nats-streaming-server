@@ -1448,6 +1448,9 @@ func (ms *SQLMsgStore) Store(m *pb.MsgProto) (uint64, error) {
 				ms.first++
 			}
 			if !ms.hitLimit {
+				defer func() {
+					ms.hitLimit = false
+				}()
 				ms.hitLimit = true
 				ms.log.Warnf(droppingMsgsFmt, ms.subject, ms.totalCount, ms.limits.MaxMsgs,
 					util.FriendlyBytes(int64(ms.totalBytes)), util.FriendlyBytes(ms.limits.MaxBytes))
