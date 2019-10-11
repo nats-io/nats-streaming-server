@@ -429,8 +429,8 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 		c.lSeqChecked = false
 
 		for _, ss := range sc.Subscriptions {
-			s.recoverOneSub(c, ss.State, nil, ss.AcksPending)
 			c.ss.Lock()
+			s.recoverOneSub(c, ss.State, nil, ss.AcksPending)
 			if ss.State.ID >= c.nextSubID {
 				c.nextSubID = ss.State.ID + 1
 			}
