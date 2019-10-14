@@ -907,9 +907,7 @@ func (ss *subStore) Store(sub *subState) error {
 		return err
 	}
 
-	ss.Lock()
 	ss.updateState(sub)
-	ss.Unlock()
 
 	return nil
 }
@@ -938,6 +936,9 @@ func (ss *subStore) updateState(sub *subState) {
 			// maybe due to upgrades from much older releases that had bugs?).
 			// So don't panic and use as the shadow the one with the highest LastSent
 			// value.
+			if qs.shadow != nil {
+				ss.stan.log.Warnf("Duplicate shadow durable queue consumer (subid=%v) for group %q", sub.ID, sub.QGroup)
+			}
 			if qs.shadow == nil || sub.LastSent > qs.lastSent {
 				qs.shadow = sub
 			}
@@ -2361,17 +2362,21 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 			return nil, err
 		}
 		if !s.isClustered {
+			ss := channel.ss
+			ss.Lock()
 			// Get the recovered subscriptions for this channel.
 			for _, recSub := range recoveredChannel.Subscriptions {
 				sub := s.recoverOneSub(channel, recSub.Sub, recSub.Pending, nil)
 				if sub != nil {
 					// Subscribe to subscription ACKs
 					if err := sub.startAckSub(s.nca, s.processAckMsg); err != nil {
+						ss.Unlock()
 						return nil, err
 					}
 					allSubs = append(allSubs, sub)
 				}
 			}
+			ss.Unlock()
 			// Now that we have recovered possible subscriptions for this channel,
 			// check if we should start the delete timer.
 			if channel.activity != nil {
@@ -3013,17 +3018,17 @@ func (s *StanServer) checkClientHealth(clientID string) {
 			// close the client (connection). This locks the
 			// client object internally so unlock here.
 			client.Unlock()
-			// If clustered, thread operations through Raft.
-			if s.isClustered {
-				s.barrier(func() {
+			s.barrier(func() {
+				// If clustered, thread operations through Raft.
+				if s.isClustered {
 					if err := s.replicateConnClose(&pb.CloseRequest{ClientID: clientID}); err != nil {
 						s.log.Errorf("[Client:%s] Failed to replicate disconnect on heartbeat expiration: %v",
 							clientID, err)
 					}
-				})
-			} else {
-				s.closeClient(clientID)
-			}
+				} else {
+					s.closeClient(clientID)
+				}
+			})
 			return
 		}
 	} else {
@@ -4605,7 +4610,6 @@ func (s *StanServer) updateDurable(ss *subStore, sub *subState, clientID string)
 	if err != nil {
 		return err
 	}
-	ss.Lock()
 	// Do this only for durable subscribers (not durable queue subscribers).
 	if sub.isDurableSubscriber() {
 		// Add back into plain subscribers
@@ -4613,7 +4617,6 @@ func (s *StanServer) updateDurable(ss *subStore, sub *subState, clientID string)
 	}
 	// And in ackInbox lookup map.
 	ss.acks[sub.AckInbox] = sub
-	ss.Unlock()
 
 	return nil
 }
@@ -4633,6 +4636,9 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 		sub *subState
 		ss  = c.ss
 	)
+
+	ss.Lock()
+
 	// Will be true for durable queue subscribers and durable subscribers alike.
 	isDurable := false
 	// Will be set to false for en existing durable subscriber or existing
@@ -4646,6 +4652,7 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 			if strings.Contains(sr.DurableName, ":") {
 				s.log.Errorf("[Client:%s] Invalid DurableName (%q) for queue subscriber from %s",
 					sr.ClientID, sr.DurableName, sr.Subject)
+				ss.Unlock()
 				return nil, ErrInvalidDurName
 			}
 			isDurable = true
@@ -4656,7 +4663,6 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 		}
 		// Lookup for an existing group. Only interested in situation where
 		// the group exist, but is empty and had a shadow subscriber.
-		ss.RLock()
 		qs := ss.qsubs[sr.QGroup]
 		if qs != nil {
 			qs.Lock()
@@ -4668,15 +4674,15 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 			qs.Unlock()
 			setStartPos = false
 		}
-		ss.RUnlock()
 	} else if sr.DurableName != "" {
 		// Check for DurableSubscriber status
-		if sub = ss.LookupByDurable(durableKey(sr)); sub != nil {
+		if sub = ss.durables[durableKey(sr)]; sub != nil {
 			sub.RLock()
 			clientID := sub.ClientID
 			sub.RUnlock()
 			if clientID != "" {
 				s.log.Errorf("[Client:%s] Duplicate durable subscription registration", sr.ClientID)
+				ss.Unlock()
 				return nil, ErrDupDurable
 			}
 			setStartPos = false
@@ -4766,14 +4772,13 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 			sub.ID = subID
 			err = s.addSubscription(ss, sub)
 			if err == nil && subID > 0 {
-				ss.Lock()
 				if subID >= c.nextSubID {
 					c.nextSubID = subID + 1
 				}
-				ss.Unlock()
 			}
 		}
 	}
+	ss.Unlock()
 	if err == nil && (!s.isClustered || s.isLeader()) {
 		err = sub.startAckSub(s.nca, s.processAckMsg)
 		if err == nil {

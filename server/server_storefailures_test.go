@@ -41,6 +41,7 @@ type mockedSubStore struct {
 	sync.RWMutex
 	fail          bool
 	failFlushOnce bool
+	ch            chan bool
 }
 
 func (ms *mockedStore) CreateChannel(name string) (*stores.Channel, error) {
@@ -253,7 +254,12 @@ func TestMsgLookupFailures(t *testing.T) {
 func (ss *mockedSubStore) CreateSub(sub *spb.SubState) error {
 	ss.RLock()
 	fail := ss.fail
+	ch := ss.ch
 	ss.RUnlock()
+	if ch != nil {
+		// Wait for notification that we can continue
+		<-ch
+	}
 	if fail {
 		return fmt.Errorf("On purpose")
 	}
