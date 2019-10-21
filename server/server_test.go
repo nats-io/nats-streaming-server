@@ -186,6 +186,8 @@ func init() {
 func stackFatalf(t tLogger, f string, args ...interface{}) {
 	msg := fmt.Sprintf(f, args...) + "\n" + stack()
 	t.Fatalf(msg)
+	// For staticcheck SA0511...
+	panic("unreachable code")
 }
 
 func stack() string {
