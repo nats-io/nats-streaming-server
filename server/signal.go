@@ -39,9 +39,12 @@ func (s *StanServer) handleSignals() {
 			// registered, so we don't need a "default" in the
 			// switch statement.
 			switch sig {
-			case syscall.SIGINT, syscall.SIGTERM:
+			case syscall.SIGINT:
 				s.Shutdown()
 				os.Exit(0)
+			case syscall.SIGTERM:
+				s.Shutdown()
+				os.Exit(2)
 			case syscall.SIGUSR1:
 				// File log re-open for rotating file logs.
 				s.log.ReopenLogFile()
