@@ -86,7 +86,7 @@ func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
 		// IDs, make sure that if someone adds a test with a new ID
 		// he/she adds it to the list of database names to create on
 		// test startup.
-		ok := false
+		var ok bool
 		suffix := "_" + id
 		for _, n := range testDBSuffixes {
 			if suffix == n {
@@ -152,6 +152,7 @@ func verifyNoLeader(t *testing.T, timeout time.Duration, servers ...*StanServer)
 	deadline := time.Now().Add(timeout)
 	var leader *StanServer
 	for time.Now().Before(deadline) {
+		leader = nil
 		for _, server := range servers {
 			if server.raft == nil {
 				continue
@@ -162,7 +163,9 @@ func verifyNoLeader(t *testing.T, timeout time.Duration, servers ...*StanServer)
 				break
 			}
 		}
-		return
+		if leader == nil {
+			return
+		}
 	}
 	stackFatalf(t, "Found unexpected leader %q", leader.info.NodeID)
 }

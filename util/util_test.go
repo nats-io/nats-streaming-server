@@ -46,6 +46,8 @@ func stackFatalf(t *testing.T, f string, args ...interface{}) {
 	}
 
 	t.Fatalf("%s", strings.Join(lines, "\n"))
+	// For staticcheck SA0511...
+	panic("unreachable code")
 }
 
 func TestEnsureBufBigEnough(t *testing.T) {
