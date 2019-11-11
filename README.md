@@ -6,7 +6,7 @@ NATS Streaming is an extremely performant, lightweight reliable streaming platfo
 
 ## Documentation
 
-* [Official documentation](https://nats-io.github.io/docs)
+* [Official documentation](https://docs.nats.io/nats-streaming-concepts)
 
 ## Clients
 
