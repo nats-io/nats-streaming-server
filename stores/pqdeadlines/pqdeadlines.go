@@ -79,23 +79,26 @@ func (t deadlineDriver) Open(connection string) (driver.Conn, error) {
 			return nil, err
 		}
 	}
+
 	for _, keyVal := range strings.Fields(connection) {
 		s := strings.Split(keyVal, "=")
 		key := strings.ToLower(s[0])
-		if key == "readtimeout" {
+		switch key {
+		case "readtimeout":
 			readTimeout, err = time.ParseDuration(s[1])
 			if err != nil {
 				return nil, fmt.Errorf("unable to parse readTimeout: %v", err)
 			}
-		} else if key == "writetimeout" {
+		case "writetimeout":
 			writeTimeout, err = time.ParseDuration(s[1])
 			if err != nil {
 				return nil, fmt.Errorf("unable to parse writeTimeout: %v", err)
 			}
-		} else {
+		default:
 			connKeyVals = append(connKeyVals, keyVal)
 		}
 	}
+
 	connStr := strings.Join(connKeyVals, " ")
 	td := deadlineDialer{
 		readTimeout:  readTimeout,
