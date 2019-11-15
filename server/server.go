@@ -1416,6 +1416,8 @@ func (s *StanServer) buildServerURLs() ([]string, error) {
 			hostport = net.JoinHostPort("127.0.0.1", sport)
 		case "::":
 			hostport = net.JoinHostPort("::1", sport)
+    case "[::]":
+      hostport = net.JoinHostPort("::1", sport)
 		default:
 			hostport = net.JoinHostPort(opts.Host, sport)
 		}
