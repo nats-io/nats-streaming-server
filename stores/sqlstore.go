@@ -704,8 +704,7 @@ func (s *SQLStore) createPreparedStmts() error {
 func initSQLStmtsTable(driver string) {
 	// The sqlStmts table is initialized with MySQL statements.
 	// Update the statements for the selected driver.
-	switch driver {
-	case driverPostgres:
+	if driver == driverPostgres {
 		// Replace ? with $1, $2, etc...
 		for i, stmt := range sqlStmts {
 			n := 0

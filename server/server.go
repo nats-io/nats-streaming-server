@@ -1411,11 +1411,12 @@ func (s *StanServer) buildServerURLs() ([]string, error) {
 		// use 127.0.0.1 or ::1 for host address (important for
 		// Windows since connect with 0.0.0.0 or :: fails).
 		sport := strconv.Itoa(opts.Port)
-		if opts.Host == "0.0.0.0" {
+		switch opts.Host {
+		case "0.0.0.0":
 			hostport = net.JoinHostPort("127.0.0.1", sport)
-		} else if opts.Host == "::" || opts.Host == "[::]" {
+		case "::", "[::]":
 			hostport = net.JoinHostPort("::1", sport)
-		} else {
+		default:
 			hostport = net.JoinHostPort(opts.Host, sport)
 		}
 	}
