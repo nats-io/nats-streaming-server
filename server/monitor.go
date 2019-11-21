@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	natsd "github.com/nats-io/nats-server/v2/server"
@@ -55,6 +56,10 @@ type Serverz struct {
 	Channels      int       `json:"channels"`
 	TotalMsgs     int       `json:"total_msgs"`
 	TotalBytes    uint64    `json:"total_bytes"`
+	InMsgs        int64     `json:"in_msgs"`
+	InBytes       int64     `json:"in_bytes"`
+	OutMsgs       int64     `json:"out_msgs"`
+	OutBytes      int64     `json:"out_bytes"`
 	OpenFDs       int       `json:"open_fds,omitempty"`
 	MaxFDs        int       `json:"max_fds,omitempty"`
 }
@@ -230,6 +235,10 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 		Subscriptions: numSubs,
 		TotalMsgs:     count,
 		TotalBytes:    bytes,
+		InMsgs:        atomic.LoadInt64(&s.stats.inMsgs),
+		InBytes:       atomic.LoadInt64(&s.stats.inBytes),
+		OutMsgs:       atomic.LoadInt64(&s.stats.outMsgs),
+		OutBytes:      atomic.LoadInt64(&s.stats.outBytes),
 		OpenFDs:       fds,
 		MaxFDs:        maxFDs,
 	}
