@@ -633,6 +633,12 @@ type StanServer struct {
 	// atomic.* functions crash on 32bit machines if operand is not aligned
 	// at 64bit. See https://github.com/golang/go/issues/599
 	ioChannelStatsMaxBatchSize int64 // stats of the max number of messages than went into a single batch
+	stats                      struct {
+		inMsgs   int64
+		inBytes  int64
+		outMsgs  int64
+		outBytes int64
+	}
 
 	mu         sync.RWMutex
 	shutdown   bool
@@ -3152,6 +3158,8 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 		}
 		// else we will report an error below...
 	}
+	atomic.AddInt64(&s.stats.inMsgs, 1)
+	atomic.AddInt64(&s.stats.inBytes, int64(len(m.Data)))
 
 	// Make sure we have a guid and valid channel name.
 	if pm.Guid == "" || !util.IsChannelNameValid(pm.Subject, false) {
@@ -3866,6 +3874,8 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 			sub.ClientID, sub.ID, m.Subject, m.Sequence, err)
 		return false, false
 	}
+	atomic.AddInt64(&s.stats.outMsgs, 1)
+	atomic.AddInt64(&s.stats.outBytes, int64(len(b)))
 
 	// Setup the ackTimer as needed now. I don't want to use defer in this
 	// function, and want to make sure that if we exit before the end, the

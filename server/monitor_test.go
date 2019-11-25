@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1325,4 +1326,67 @@ func TestMonitorNumSubs(t *testing.T) {
 	qsub1.Unsubscribe()
 	dur.Unsubscribe()
 	checkNumSubs(t, 0)
+}
+
+func TestMonitorInOutMsgs(t *testing.T) {
+	resetPreviousHTTPConnections()
+	s := runMonitorServer(t, GetDefaultOptions())
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	mch := make(chan *stan.Msg, 5)
+	count := int32(0)
+	if _, err := sc.Subscribe("foo", func(m *stan.Msg) {
+		atomic.AddInt32(&count, 1)
+		if !m.Redelivered {
+			select {
+			case mch <- m:
+			default:
+			}
+		}
+	},
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(500))); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {
+		atomic.AddInt32(&count, 1)
+	}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		sc.Publish("foo", []byte("msg"))
+	}
+
+	resp, body := getBody(t, ServerPath, expectedJSON)
+	resp.Body.Close()
+	sz := Serverz{}
+	if err := json.Unmarshal(body, &sz); err != nil {
+		t.Fatalf("Got an error unmarshalling the body: %v", err)
+	}
+	if sz.InMsgs != 5 || sz.InBytes == 0 {
+		t.Fatalf("Expected 5 inbound messages, got %v - %v", sz.InMsgs, sz.InBytes)
+	}
+	if sz.OutMsgs != 10 || sz.OutBytes == 0 {
+		t.Fatalf("Expected 10 outbound messages, got %v - %v", sz.InMsgs, sz.InBytes)
+	}
+
+	time.Sleep(700 * time.Millisecond)
+
+	resp, body = getBody(t, ServerPath, expectedJSON)
+	resp.Body.Close()
+	sz = Serverz{}
+	if err := json.Unmarshal(body, &sz); err != nil {
+		t.Fatalf("Got an error unmarshalling the body: %v", err)
+	}
+	if sz.InMsgs != 5 || sz.InBytes == 0 {
+		t.Fatalf("Expected 5 inbound messages, got %v - %v", sz.InMsgs, sz.InBytes)
+	}
+	if sz.OutMsgs != 15 || sz.OutBytes == 0 {
+		t.Fatalf("Expected 15 outbound messages, got %v - %v", sz.InMsgs, sz.InBytes)
+	}
 }
