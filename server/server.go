@@ -14,6 +14,7 @@
 package server
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -1273,10 +1274,12 @@ type Options struct {
 	Trace              bool          // Verbose trace
 	Debug              bool          // Debug trace
 	HandleSignals      bool          // Should the server setup a signal handler (for Ctrl+C, etc...)
-	Secure             bool          // Create a TLS enabled connection w/o server verification
+	Secure             bool          // Create a TLS enabled connection
 	ClientCert         string        // Client Certificate for TLS
 	ClientKey          string        // Client Key for TLS
 	ClientCA           string        // Client CAs for TLS
+	TLSSkipVerify      bool          // Skips the server's certificate chain and host name verification (Insecure!)
+	TLSServerName      string        // Used to verify the hostname returned in the server certificate
 	IOBatchSize        int           // Maximum number of messages collected from clients before starting their processing.
 	IOSleepTime        int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
 	NATSServerURL      string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
@@ -1437,6 +1440,15 @@ func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 	for _, o := range s.opts.NATSClientOpts {
 		o(&ncOpts)
 	}
+	// If a TLSConfig is passed as an option, reject if streaming TLSServerName
+	// is set, but is different from the existing TLSConfig.ServerName.
+	if ncOpts.TLSConfig != nil &&
+		ncOpts.TLSConfig.ServerName != "" &&
+		s.opts.TLSServerName != "" &&
+		ncOpts.TLSConfig.ServerName != s.opts.TLSServerName {
+		return nil, fmt.Errorf("conflict between TLS configuration's ServerName %q and Streaming's TLSServerName %q",
+			ncOpts.TLSConfig.ServerName, s.opts.TLSServerName)
+	}
 
 	ncOpts.Servers, err = s.buildServerURLs()
 	if err != nil {
@@ -1473,6 +1485,23 @@ func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 	if s.opts.ClientCert != "" {
 		if err = nats.ClientCert(s.opts.ClientCert, s.opts.ClientKey)(&ncOpts); err != nil {
 			return nil, err
+		}
+	}
+	// Check for TLSSkipVerify and TLSServerName
+	if s.opts.TLSServerName != "" || s.opts.TLSSkipVerify {
+		// Create TLSConfig if needed
+		if ncOpts.TLSConfig == nil {
+			if err = nats.Secure(&tls.Config{})(&ncOpts); err != nil {
+				return nil, err
+			}
+		}
+		// Do not override if false or empty (since TLSConfig may have been
+		// passed as an option).
+		if s.opts.TLSSkipVerify {
+			ncOpts.TLSConfig.InsecureSkipVerify = s.opts.TLSSkipVerify
+		}
+		if s.opts.TLSServerName != "" {
+			ncOpts.TLSConfig.ServerName = s.opts.TLSServerName
 		}
 	}
 	// Shorten the time we wait to try to reconnect.
@@ -1711,6 +1740,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	// Create our connections
 	if err := s.createNatsConnections(); err != nil {
 		return nil, err
+	}
+	if sOpts.TLSSkipVerify {
+		s.log.Warnf("TLS certificate chain and hostname will not be verified. DO NOT USE IN PRODUCTION!")
 	}
 
 	// In FT mode, server cannot recover the store until it is elected leader.
