@@ -1337,7 +1337,7 @@ func GetDefaultOptions() (o *Options) {
 
 // DefaultNatsServerOptions are default options for the NATS server
 var DefaultNatsServerOptions = server.Options{
-	Host:   "localhost",
+	Host:   "127.0.0.1",
 	Port:   4222,
 	NoLog:  true,
 	NoSigs: true,

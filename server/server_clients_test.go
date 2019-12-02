@@ -345,7 +345,7 @@ func TestClientsWithDupCID(t *testing.T) {
 
 	connect := func(cid string, shouldFail bool) (stan.Conn, time.Duration, error) {
 		start := time.Now()
-		c, err := stan.Connect(clusterName, cid, stan.ConnectWait(3*s.dupCIDTimeout))
+		c, err := stan.Connect(clusterName, cid, stan.NatsURL(nats.DefaultURL), stan.ConnectWait(3*s.dupCIDTimeout))
 		duration := time.Since(start)
 		if shouldFail {
 			if c != nil {
@@ -401,7 +401,7 @@ func TestClientsWithDupCID(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 	defer newConn.Close()
-	if duration >= dupTimeoutMin {
+	if duration >= dupTimeoutMax {
 		t.Fatalf("Connect expected to be fast, took %v", duration)
 	}
 

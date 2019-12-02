@@ -59,7 +59,7 @@ func TestSignalToReOpenLogFile(t *testing.T) {
 		sopts := GetDefaultOptions()
 		sopts.HandleSignals = true
 		nopts := &natsd.Options{
-			Host:    "localhost",
+			Host:    "127.0.0.1",
 			Port:    -1,
 			NoSigs:  true,
 			LogFile: logFile,
