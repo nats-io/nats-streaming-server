@@ -218,6 +218,16 @@ func parseTLS(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.ClientCA = v.(string)
+		case "server_name", "server_hostname":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.TLSServerName = v.(string)
+		case "skip_verify", "insecure":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.TLSSkipVerify = v.(bool)
 		}
 	}
 	return nil

@@ -75,6 +75,12 @@ func TestParseConfig(t *testing.T) {
 	if opts.ClientCA != "/path/to/client/ca_file" {
 		t.Fatalf("Expected ClientCA to be %q, got %q", "/path/to/client/ca_file", opts.ClientCA)
 	}
+	if opts.TLSServerName != "localhost" {
+		t.Fatalf("Expected TLSServerName to be %q, got %q", "localhost", opts.TLSServerName)
+	}
+	if !opts.TLSSkipVerify {
+		t.Fatalf("Expected TLSSkipVerify to be true, got %v", opts.TLSSkipVerify)
+	}
 	if opts.NATSCredentials != "credentials.creds" {
 		t.Fatalf("Expected Credentials to be %q, got %q", "credentials.creds", opts.NATSCredentials)
 	}
@@ -438,6 +444,8 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "tls:{client_cert:123}", wrongTypeErr)
 	expectFailureFor(t, "tls:{client_key:123}", wrongTypeErr)
 	expectFailureFor(t, "tls:{client_ca:123}", wrongTypeErr)
+	expectFailureFor(t, "tls:{server_name:123}", wrongTypeErr)
+	expectFailureFor(t, "tls:{insecure:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{compact:123}", wrongTypeErr)
 	expectFailureFor(t, "file:{compact_frag:false}", wrongTypeErr)
 	expectFailureFor(t, "file:{compact_interval:false}", wrongTypeErr)
