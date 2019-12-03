@@ -106,7 +106,7 @@ func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
 	opts.Clustering.LogCacheSize = DefaultLogCacheSize
 	opts.Clustering.LogSnapshots = 1
 	opts.Clustering.RaftLogging = true
-	opts.NATSServerURL = "nats://localhost:4222"
+	opts.NATSServerURL = "nats://127.0.0.1:4222"
 	return opts
 }
 
@@ -557,7 +557,7 @@ func TestClusteringBootstrapMisconfiguration(t *testing.T) {
 	n2Opts := natsdTest.DefaultTestOptions
 	n2Opts.Host = "127.0.0.1"
 	n2Opts.Port = 4223
-	n2Opts.Cluster.Host = "localhost"
+	n2Opts.Cluster.Host = "127.0.0.1"
 	n2Opts.Cluster.Port = 6223
 	s2sOpts := getTestDefaultOptsForClustering("b", true)
 	s2sOpts.NATSServerURL = ""

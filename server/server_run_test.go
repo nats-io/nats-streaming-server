@@ -526,7 +526,7 @@ func TestDontEmbedNATSRunning(t *testing.T) {
 	sOpts.NATSServerURL = "nats://localhost:5223"
 
 	nOpts := DefaultNatsServerOptions
-	nOpts.Host = "localhost"
+	nOpts.Host = "127.0.0.1"
 	nOpts.Port = 5223
 	natsd := natsdTest.RunServer(&nOpts)
 	defer natsd.Shutdown()

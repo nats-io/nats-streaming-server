@@ -46,12 +46,12 @@ const (
 )
 
 var defaultMonitorOptions = natsd.Options{
-	Host:     "localhost",
+	Host:     "127.0.0.1",
 	Port:     4222,
 	HTTPHost: monitorHost,
 	HTTPPort: monitorPort,
 	Cluster: natsd.ClusterOpts{
-		Host: "localhost",
+		Host: "127.0.0.1",
 		Port: 6222,
 	},
 	NoLog:  true,
