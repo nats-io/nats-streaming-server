@@ -239,22 +239,21 @@ func (rl *raftLogger) Write(b []byte) (int, error) {
 	}
 	levelStart := bytes.IndexByte(b, '[')
 	if levelStart != -1 {
-		// After raft v1.0.0, they changed the way they log.
-		// Used to be:
-		// "[DEBUG] raft:
-		// "[INFO] raft:
-		// "[WARN] raft:
-		// "[ERR] raft:
-		// But now have aligned and changed ERR to ERROR:
-		// "[DEBUG] raft:
-		// "[INFO]  raft:
-		// "[WARN]  raft:
-		// "[ERROR] raft:
-		// So our offset will always be levelStart+8
-		offset := levelStart + 8
+		// RAFT has various "headers", sometimes it is "[xxxx] raft:",
+		// sometimes "[xxx]  raft:" or "[xxx]  raft-net:", etc..
+		// So look for the closing ']' and skip spaces to determine the offset.
+		offset := levelStart + 1 + bytes.IndexByte(b[levelStart+1:], ']')
+		for offset = offset + 1; offset < len(b); offset++ {
+			if b[offset] != ' ' {
+				break
+			}
+		}
+		if offset == len(b) {
+			return len(b), nil
+		}
 		switch b[levelStart+1] {
 		case 'D': // [DEBUG]
-			rl.log.Tracef("%s", b[offset:])
+			rl.log.Debugf("%s", b[offset:])
 		case 'I': // [INFO]
 			rl.log.Noticef("%s", b[offset:])
 		case 'W': // [WARN]
