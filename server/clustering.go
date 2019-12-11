@@ -34,7 +34,7 @@ const (
 	defaultRaftElectionTimeout  = 2 * time.Second
 	defaultRaftLeaseTimeout     = time.Second
 	defaultRaftCommitTimeout    = 100 * time.Millisecond
-	defaultTPortTimeout         = 2 * time.Second
+	defaultTPortTimeout         = 10 * time.Second
 )
 
 var (
