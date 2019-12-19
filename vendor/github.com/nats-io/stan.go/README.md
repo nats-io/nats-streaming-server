@@ -25,6 +25,14 @@ NATS Streaming provides the following high-level feature set:
 go get github.com/nats-io/stan.go/
 ```
 
+When using or transitioning to Go modules support:
+
+```bash
+# Go client latest or explicit version
+go get github.com/nats-io/stan.go/@latest
+go get github.com/nats-io/stan.go/@v0.5.2
+```
+
 ## Basic Usage
 
 ```go

@@ -26,11 +26,11 @@ import (
 )
 
 // Version is the NATS Streaming Go Client version
-const Version = "0.5.0"
+const Version = "0.5.2"
 
 const (
 	// DefaultNatsURL is the default URL the client connects to
-	DefaultNatsURL = "nats://localhost:4222"
+	DefaultNatsURL = "nats://127.0.0.1:4222"
 	// DefaultConnectWait is the default timeout used for the connect operation
 	DefaultConnectWait = 2 * time.Second
 	// DefaultDiscoverPrefix is the prefix subject used to connect to the NATS Streaming server
@@ -48,6 +48,7 @@ const (
 
 // Conn represents a connection to the NATS Streaming subsystem. It can Publish and
 // Subscribe to messages within the NATS Streaming cluster.
+// The connection is safe to use in multiple Go routines concurrently.
 type Conn interface {
 	// Publish will publish to the cluster and wait for an ACK.
 	Publish(subject string, data []byte) error
@@ -99,7 +100,7 @@ const (
 
 // Errors
 var (
-	ErrConnectReqTimeout = errors.New("stan: connect request timeout")
+	ErrConnectReqTimeout = errors.New("stan: connect request timeout (possibly wrong cluster ID?)")
 	ErrCloseReqTimeout   = errors.New("stan: close request timeout")
 	ErrSubReqTimeout     = errors.New("stan: subscribe request timeout")
 	ErrUnsubReqTimeout   = errors.New("stan: unsubscribe request timeout")
@@ -253,7 +254,7 @@ func Pings(interval, maxOut int) Option {
 		// by the library as milliseconds. If this test boolean is set,
 		// do not check values.
 		if !testAllowMillisecInPings {
-			if interval < 1 || maxOut <= 2 {
+			if interval < 1 || maxOut < 2 {
 				return fmt.Errorf("invalid ping values: interval=%v (min>0) maxOut=%v (min=2)", interval, maxOut)
 			}
 		}
@@ -410,7 +411,7 @@ func Connect(stanClusterID, clientID string, options ...Option) (Conn, error) {
 		c.Close()
 		return nil, err
 	}
-	c.ackSubscription.SetPendingLimits(1024*1024, 32*1024*1024)
+	c.ackSubscription.SetPendingLimits(-1, -1)
 	c.pubAckMap = make(map[string]*ack)
 
 	// Create Subscription map

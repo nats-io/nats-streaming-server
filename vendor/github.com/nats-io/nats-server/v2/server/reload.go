@@ -785,6 +785,9 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			// Ignore NoLog and NoSigs options since they are not parsed and only used in
 			// testing.
 			continue
+		case "disableshortfirstping":
+			newOpts.DisableShortFirstPing = oldValue.(bool)
+			continue
 		case "maxtracedmsglen":
 			diffOpts = append(diffOpts, &maxTracedMsgLenOption{newValue: newValue.(int)})
 		case "port":
@@ -912,6 +915,8 @@ func (s *Server) reloadAuthorization() {
 				acc.mu.RLock()
 				accName := acc.Name
 				acc.mu.RUnlock()
+				// Release server lock for following actions
+				s.mu.Unlock()
 				accClaims, claimJWT, _ := s.fetchAccountClaims(accName)
 				if accClaims != nil {
 					err := s.updateAccountWithClaimJWT(acc, claimJWT)
@@ -923,9 +928,10 @@ func (s *Server) reloadAuthorization() {
 					s.Noticef("Reloaded: deleting account [removed]: %q", accName)
 					s.accounts.Delete(k)
 				}
+				// Regrab server lock.
+				s.mu.Lock()
 				return true
 			})
-
 		}
 	}
 

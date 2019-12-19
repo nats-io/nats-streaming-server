@@ -40,6 +40,9 @@ var (
 	// ErrReservedPublishSubject represents an error condition when sending to a reserved subject, e.g. _SYS.>
 	ErrReservedPublishSubject = errors.New("reserved internal subject")
 
+	// ErrBadPublishSubject represents an error condition for an invalid publish subject.
+	ErrBadPublishSubject = errors.New("invalid publish subject")
+
 	// ErrBadClientProtocol signals a client requested an invalid client protocol.
 	ErrBadClientProtocol = errors.New("invalid client protocol")
 
@@ -76,6 +79,15 @@ var (
 	// ErrMissingAccount is returned when an account does not exist.
 	ErrMissingAccount = errors.New("account missing")
 
+	// ErrMissingService is returned when an account does not have an exported service.
+	ErrMissingService = errors.New("service missing")
+
+	// ErrBadServiceType is returned when latency tracking is being applied to non-singleton response types.
+	ErrBadServiceType = errors.New("bad service response type")
+
+	// ErrBadSampling is returned when the sampling for latency tracking is not 1 >= sample <= 100.
+	ErrBadSampling = errors.New("bad sampling percentage, should be 1-100")
+
 	// ErrAccountValidation is returned when an account has failed validation.
 	ErrAccountValidation = errors.New("account validation failed")
 
@@ -93,6 +105,9 @@ var (
 
 	// ErrStreamImportAuthorization is returned when a stream import is not authorized.
 	ErrStreamImportAuthorization = errors.New("stream import not authorized")
+
+	// ErrStreamImportBadPrefix is returned when a stream import prefix contains wildcards.
+	ErrStreamImportBadPrefix = errors.New("stream import prefix can not contain wildcard tokens")
 
 	// ErrServiceImportAuthorization is returned when a service import is not authorized.
 	ErrServiceImportAuthorization = errors.New("service import not authorized")
@@ -112,6 +127,9 @@ var (
 
 	// ErrRevocation is returned when a credential has been revoked.
 	ErrRevocation = errors.New("credentials have been revoked")
+
+	// Used to signal an error that a server is not running.
+	ErrServerNotRunning = errors.New("server is not running")
 )
 
 // configErr is a configuration error.

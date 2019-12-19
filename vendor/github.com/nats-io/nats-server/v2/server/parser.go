@@ -282,7 +282,7 @@ func (c *client) parse(buf []byte) error {
 			c.drop, c.as, c.state = 0, i+1, OP_START
 			// Drop all pub args
 			c.pa.arg, c.pa.pacache, c.pa.account, c.pa.subject = nil, nil, nil, nil
-			c.pa.reply, c.pa.szb, c.pa.queues = nil, nil, nil
+			c.pa.reply, c.pa.size, c.pa.szb, c.pa.queues = nil, 0, nil, nil
 		case OP_A:
 			switch b {
 			case '+':
@@ -407,7 +407,7 @@ func (c *client) parse(buf []byte) error {
 
 				switch c.kind {
 				case CLIENT:
-					err = c.processSub(arg)
+					_, err = c.processSub(arg, false)
 				case ROUTER:
 					err = c.processRemoteSub(arg)
 				case GATEWAY:
@@ -867,7 +867,9 @@ func (c *client) parse(buf []byte) error {
 		// read buffer and we are not able to process the msg.
 		if c.argBuf == nil {
 			// Works also for MSG_ARG, when message comes from ROUTE.
-			c.clonePubArg()
+			if err := c.clonePubArg(); err != nil {
+				goto parseErr
+			}
 		}
 
 		// If we will overflow the scratch buffer, just create a
@@ -917,15 +919,17 @@ func protoSnippet(start int, buf []byte) string {
 
 // clonePubArg is used when the split buffer scenario has the pubArg in the existing read buffer, but
 // we need to hold onto it into the next read.
-func (c *client) clonePubArg() {
+func (c *client) clonePubArg() error {
 	// Just copy and re-process original arg buffer.
 	c.argBuf = c.scratch[:0]
 	c.argBuf = append(c.argBuf, c.pa.arg...)
 
-	// This is a routed msg
-	if c.pa.account != nil {
-		c.processRoutedMsgArgs(false, c.argBuf)
-	} else {
-		c.processPub(false, c.argBuf)
+	switch c.kind {
+	case ROUTER, GATEWAY:
+		return c.processRoutedMsgArgs(false, c.argBuf)
+	case LEAF:
+		return c.processLeafMsgArgs(false, c.argBuf)
+	default:
+		return c.processPub(false, c.argBuf)
 	}
 }

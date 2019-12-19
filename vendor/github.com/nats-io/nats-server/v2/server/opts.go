@@ -24,7 +24,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -107,6 +109,8 @@ type LeafNodeOpts struct {
 	Port              int           `json:"port,omitempty"`
 	Username          string        `json:"-"`
 	Password          string        `json:"-"`
+	Account           string        `json:"-"`
+	Users             []*User       `json:"-"`
 	AuthTimeout       float64       `json:"auth_timeout,omitempty"`
 	TLSConfig         *tls.Config   `json:"-"`
 	TLSTimeout        float64       `json:"tls_timeout,omitempty"`
@@ -121,6 +125,7 @@ type LeafNodeOpts struct {
 	// Not exported, for tests.
 	resolver    netResolver
 	dialTimeout time.Duration
+	loopDelay   time.Duration
 }
 
 // RemoteLeafOpts are options for connecting to a remote server as a leaf node.
@@ -137,57 +142,59 @@ type RemoteLeafOpts struct {
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
 type Options struct {
-	ConfigFile       string        `json:"-"`
-	Host             string        `json:"addr"`
-	Port             int           `json:"port"`
-	ClientAdvertise  string        `json:"-"`
-	Trace            bool          `json:"-"`
-	Debug            bool          `json:"-"`
-	NoLog            bool          `json:"-"`
-	NoSigs           bool          `json:"-"`
-	NoSublistCache   bool          `json:"-"`
-	Logtime          bool          `json:"-"`
-	MaxConn          int           `json:"max_connections"`
-	MaxSubs          int           `json:"max_subscriptions,omitempty"`
-	Nkeys            []*NkeyUser   `json:"-"`
-	Users            []*User       `json:"-"`
-	Accounts         []*Account    `json:"-"`
-	SystemAccount    string        `json:"-"`
-	AllowNewAccounts bool          `json:"-"`
-	Username         string        `json:"-"`
-	Password         string        `json:"-"`
-	Authorization    string        `json:"-"`
-	PingInterval     time.Duration `json:"ping_interval"`
-	MaxPingsOut      int           `json:"ping_max"`
-	HTTPHost         string        `json:"http_host"`
-	HTTPPort         int           `json:"http_port"`
-	HTTPSPort        int           `json:"https_port"`
-	AuthTimeout      float64       `json:"auth_timeout"`
-	MaxControlLine   int32         `json:"max_control_line"`
-	MaxPayload       int32         `json:"max_payload"`
-	MaxPending       int64         `json:"max_pending"`
-	Cluster          ClusterOpts   `json:"cluster,omitempty"`
-	Gateway          GatewayOpts   `json:"gateway,omitempty"`
-	LeafNode         LeafNodeOpts  `json:"leaf,omitempty"`
-	ProfPort         int           `json:"-"`
-	PidFile          string        `json:"-"`
-	PortsFileDir     string        `json:"-"`
-	LogFile          string        `json:"-"`
-	Syslog           bool          `json:"-"`
-	RemoteSyslog     string        `json:"-"`
-	Routes           []*url.URL    `json:"-"`
-	RoutesStr        string        `json:"-"`
-	TLSTimeout       float64       `json:"tls_timeout"`
-	TLS              bool          `json:"-"`
-	TLSVerify        bool          `json:"-"`
-	TLSMap           bool          `json:"-"`
-	TLSCert          string        `json:"-"`
-	TLSKey           string        `json:"-"`
-	TLSCaCert        string        `json:"-"`
-	TLSConfig        *tls.Config   `json:"-"`
-	WriteDeadline    time.Duration `json:"-"`
-	MaxClosedClients int           `json:"-"`
-	LameDuckDuration time.Duration `json:"-"`
+	ConfigFile            string        `json:"-"`
+	ServerName            string        `json:"server_name"`
+	Host                  string        `json:"addr"`
+	Port                  int           `json:"port"`
+	ClientAdvertise       string        `json:"-"`
+	Trace                 bool          `json:"-"`
+	Debug                 bool          `json:"-"`
+	NoLog                 bool          `json:"-"`
+	NoSigs                bool          `json:"-"`
+	NoSublistCache        bool          `json:"-"`
+	DisableShortFirstPing bool          `json:"-"`
+	Logtime               bool          `json:"-"`
+	MaxConn               int           `json:"max_connections"`
+	MaxSubs               int           `json:"max_subscriptions,omitempty"`
+	Nkeys                 []*NkeyUser   `json:"-"`
+	Users                 []*User       `json:"-"`
+	Accounts              []*Account    `json:"-"`
+	SystemAccount         string        `json:"-"`
+	AllowNewAccounts      bool          `json:"-"`
+	Username              string        `json:"-"`
+	Password              string        `json:"-"`
+	Authorization         string        `json:"-"`
+	PingInterval          time.Duration `json:"ping_interval"`
+	MaxPingsOut           int           `json:"ping_max"`
+	HTTPHost              string        `json:"http_host"`
+	HTTPPort              int           `json:"http_port"`
+	HTTPSPort             int           `json:"https_port"`
+	AuthTimeout           float64       `json:"auth_timeout"`
+	MaxControlLine        int32         `json:"max_control_line"`
+	MaxPayload            int32         `json:"max_payload"`
+	MaxPending            int64         `json:"max_pending"`
+	Cluster               ClusterOpts   `json:"cluster,omitempty"`
+	Gateway               GatewayOpts   `json:"gateway,omitempty"`
+	LeafNode              LeafNodeOpts  `json:"leaf,omitempty"`
+	ProfPort              int           `json:"-"`
+	PidFile               string        `json:"-"`
+	PortsFileDir          string        `json:"-"`
+	LogFile               string        `json:"-"`
+	Syslog                bool          `json:"-"`
+	RemoteSyslog          string        `json:"-"`
+	Routes                []*url.URL    `json:"-"`
+	RoutesStr             string        `json:"-"`
+	TLSTimeout            float64       `json:"tls_timeout"`
+	TLS                   bool          `json:"-"`
+	TLSVerify             bool          `json:"-"`
+	TLSMap                bool          `json:"-"`
+	TLSCert               string        `json:"-"`
+	TLSKey                string        `json:"-"`
+	TLSCaCert             string        `json:"-"`
+	TLSConfig             *tls.Config   `json:"-"`
+	WriteDeadline         time.Duration `json:"-"`
+	MaxClosedClients      int           `json:"-"`
+	LameDuckDuration      time.Duration `json:"-"`
 	// MaxTracedMsgLen is the maximum printable length for traced messages.
 	MaxTracedMsgLen int `json:"-"`
 
@@ -220,6 +227,7 @@ type Options struct {
 
 	// private fields, used for testing
 	gatewaysSolicitDelay time.Duration
+	routeProto           int
 }
 
 type netResolver interface {
@@ -288,6 +296,7 @@ type authorization struct {
 	user  string
 	pass  string
 	token string
+	acc   string
 	// Multiple Nkeys/Users
 	nkeys              []*NkeyUser
 	users              []*User
@@ -371,6 +380,28 @@ func unwrapValue(v interface{}) (token, interface{}) {
 	}
 }
 
+// configureSystemAccount configures a system account
+// if present in the configuration.
+func configureSystemAccount(o *Options, m map[string]interface{}) error {
+	configure := func(v interface{}) error {
+		tk, v := unwrapValue(v)
+		sa, ok := v.(string)
+		if !ok {
+			return &configErr{tk, fmt.Sprintf("system account name must be a string")}
+		}
+		o.SystemAccount = sa
+		return nil
+	}
+
+	if v, ok := m["system_account"]; ok {
+		return configure(v)
+	} else if v, ok := m["system"]; ok {
+		return configure(v)
+	}
+
+	return nil
+}
+
 // ProcessConfigFile updates the Options structure with options
 // present in the given configuration file.
 // This version is convenient if one wants to set some default
@@ -398,6 +429,12 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	errors := make([]error, 0)
 	warnings := make([]error, 0)
 
+	// First check whether a system account has been defined,
+	// as that is a condition for other features to be enabled.
+	if err := configureSystemAccount(o, m); err != nil {
+		errors = append(errors, err)
+	}
+
 	for k, v := range m {
 		tk, v := unwrapValue(v)
 		switch strings.ToLower(k) {
@@ -413,6 +450,8 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 			o.ClientAdvertise = v.(string)
 		case "port":
 			o.Port = int(v.(int64))
+		case "server_name":
+			o.ServerName = v.(string)
 		case "host", "net":
 			o.Host = v.(string)
 		case "debug":
@@ -677,12 +716,9 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 				}
 			}
 		case "system_account", "system":
-			if sa, ok := v.(string); !ok {
-				err := &configErr{tk, fmt.Sprintf("system account name must be a string")}
-				errors = append(errors, err)
-			} else {
-				o.SystemAccount = sa
-			}
+			// Already processed at the beginning so we just skip them
+			// to not treat them as unknown values.
+			continue
 		case "trusted", "trusted_keys":
 			switch v := v.(type) {
 			case string:
@@ -1014,20 +1050,21 @@ func parseLeafNodes(v interface{}, opts *Options, errors *[]error, warnings *[]e
 		case "host", "net":
 			opts.LeafNode.Host = mv.(string)
 		case "authorization":
-			auth, err := parseAuthorization(tk, opts, errors, warnings)
+			auth, err := parseLeafAuthorization(tk, errors, warnings)
 			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			if auth.users != nil {
-				err := &configErr{tk, fmt.Sprintf("Leafnode authorization does not allow multiple users")}
 				*errors = append(*errors, err)
 				continue
 			}
 			opts.LeafNode.Username = auth.user
 			opts.LeafNode.Password = auth.pass
 			opts.LeafNode.AuthTimeout = auth.timeout
-
+			opts.LeafNode.Account = auth.acc
+			opts.LeafNode.Users = auth.users
+			// Validate user info config for leafnode authorization
+			if err := validateLeafNodeAuthOptions(opts); err != nil {
+				*errors = append(*errors, &configErr{tk, err.Error()})
+				continue
+			}
 		case "remotes":
 			// Parse the remote options here.
 			remotes, err := parseRemoteLeafNodes(mv, errors, warnings)
@@ -1070,6 +1107,114 @@ func parseLeafNodes(v interface{}, opts *Options, errors *[]error, warnings *[]e
 	return nil
 }
 
+// This is the authorization parser adapter for the leafnode's
+// authorization config.
+func parseLeafAuthorization(v interface{}, errors *[]error, warnings *[]error) (*authorization, error) {
+	var (
+		am   map[string]interface{}
+		tk   token
+		auth = &authorization{}
+	)
+	_, v = unwrapValue(v)
+	am = v.(map[string]interface{})
+	for mk, mv := range am {
+		tk, mv = unwrapValue(mv)
+		switch strings.ToLower(mk) {
+		case "user", "username":
+			auth.user = mv.(string)
+		case "pass", "password":
+			auth.pass = mv.(string)
+		case "timeout":
+			at := float64(1)
+			switch mv := mv.(type) {
+			case int64:
+				at = float64(mv)
+			case float64:
+				at = mv
+			}
+			auth.timeout = at
+		case "users":
+			users, err := parseLeafUsers(tk, errors, warnings)
+			if err != nil {
+				*errors = append(*errors, err)
+				continue
+			}
+			auth.users = users
+		case "account":
+			auth.acc = mv.(string)
+		default:
+			if !tk.IsUsedVariable() {
+				err := &unknownConfigFieldErr{
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
+				}
+				*errors = append(*errors, err)
+			}
+			continue
+		}
+	}
+	return auth, nil
+}
+
+// This is a trimmed down version of parseUsers that is adapted
+// for the users possibly defined in the authorization{} section
+// of leafnodes {}.
+func parseLeafUsers(mv interface{}, errors *[]error, warnings *[]error) ([]*User, error) {
+	var (
+		tk    token
+		users = []*User{}
+	)
+	tk, mv = unwrapValue(mv)
+	// Make sure we have an array
+	uv, ok := mv.([]interface{})
+	if !ok {
+		return nil, &configErr{tk, fmt.Sprintf("Expected users field to be an array, got %v", mv)}
+	}
+	for _, u := range uv {
+		tk, u = unwrapValue(u)
+		// Check its a map/struct
+		um, ok := u.(map[string]interface{})
+		if !ok {
+			err := &configErr{tk, fmt.Sprintf("Expected user entry to be a map/struct, got %v", u)}
+			*errors = append(*errors, err)
+			continue
+		}
+		user := &User{}
+		for k, v := range um {
+			tk, v = unwrapValue(v)
+			switch strings.ToLower(k) {
+			case "user", "username":
+				user.Username = v.(string)
+			case "pass", "password":
+				user.Password = v.(string)
+			case "account":
+				// We really want to save just the account name here, but
+				// the User object is *Account. So we create an account object
+				// but it won't be registered anywhere. The server will just
+				// use opts.LeafNode.Users[].Account.Name. Alternatively
+				// we need to create internal objects to store u/p and account
+				// name and have a server structure to hold that.
+				user.Account = NewAccount(v.(string))
+			default:
+				if !tk.IsUsedVariable() {
+					err := &unknownConfigFieldErr{
+						field: k,
+						configErr: configErr{
+							token: tk,
+						},
+					}
+					*errors = append(*errors, err)
+					continue
+				}
+			}
+		}
+		users = append(users, user)
+	}
+	return users, nil
+}
+
 func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]*RemoteLeafOpts, error) {
 	tk, v := unwrapValue(v)
 	ra, ok := v.([]interface{})
@@ -1109,7 +1254,12 @@ func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]
 			case "account", "local":
 				remote.LocalAccount = v.(string)
 			case "creds", "credentials":
-				remote.Credentials = v.(string)
+				p, err := expandPath(v.(string))
+				if err != nil {
+					*errors = append(*errors, &configErr{tk, err.Error()})
+					continue
+				}
+				remote.Credentials = p
 			case "tls":
 				tc, err := parseTLS(tk)
 				if err != nil {
@@ -1250,6 +1400,7 @@ type export struct {
 	sub  string
 	accs []string
 	rt   ServiceRespType
+	lat  *serviceLatency
 }
 
 type importStream struct {
@@ -1447,6 +1598,20 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 			*errors = append(*errors, &configErr{tk, msg})
 			continue
 		}
+
+		if service.lat != nil {
+			if opts.SystemAccount == "" {
+				msg := fmt.Sprintf("Error adding service latency sampling for %q: %v", service.sub, ErrNoSysAccount.Error())
+				*errors = append(*errors, &configErr{tk, msg})
+				continue
+			}
+
+			if err := service.acc.TrackServiceExportWithSampling(service.sub, service.lat.subject, int(service.lat.sampling)); err != nil {
+				msg := fmt.Sprintf("Error adding service latency sampling for %q on subject %q: %v", service.sub, service.lat.subject, err)
+				*errors = append(*errors, &configErr{tk, msg})
+				continue
+			}
+		}
 	}
 	for _, stream := range importStreams {
 		ta := am[stream.an]
@@ -1481,7 +1646,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 	return nil
 }
 
-// Parse the account imports
+// Parse the account exports
 func parseAccountExports(v interface{}, acc *Account, errors, warnings *[]error) ([]*export, []*export, error) {
 	// This should be an array of objects/maps.
 	tk, v := unwrapValue(v)
@@ -1523,6 +1688,7 @@ func parseAccountImports(v interface{}, acc *Account, errors, warnings *[]error)
 
 	var services []*importService
 	var streams []*importStream
+	svcSubjects := map[string]*importService{}
 
 	for _, v := range ims {
 		// Should have stream or service
@@ -1532,6 +1698,15 @@ func parseAccountImports(v interface{}, acc *Account, errors, warnings *[]error)
 			continue
 		}
 		if service != nil {
+			if dup := svcSubjects[service.to]; dup != nil {
+				tk, _ := unwrapValue(v)
+				err := &configErr{tk,
+					fmt.Sprintf("Duplicate service import subject %q, previously used in import for account %q, subject %q",
+						service.to, dup.an, dup.sub)}
+				*errors = append(*errors, err)
+				continue
+			}
+			svcSubjects[service.to] = service
 			service.acc = acc
 			services = append(services, service)
 		}
@@ -1568,7 +1743,7 @@ func parseAccount(v map[string]interface{}, errors, warnings *[]error) (string, 
 	return accountName, subject, nil
 }
 
-// Parse an import stream or service.
+// Parse an export stream or service.
 // e.g.
 //   {stream: "public.>"} # No accounts means public.
 //   {stream: "synadia.private.>", accounts: [cncf, natsio]}
@@ -1581,6 +1756,9 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 		accounts   []string
 		rt         ServiceRespType
 		rtSeen     bool
+		rtToken    token
+		lat        *serviceLatency
+		latToken   token
 	)
 	tk, v := unwrapValue(v)
 	vv, ok := v.(map[string]interface{})
@@ -1596,8 +1774,13 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 				*errors = append(*errors, err)
 				continue
 			}
-			if rtSeen {
-				err := &configErr{tk, "Detected response directive on non-service"}
+			if rtToken != nil {
+				err := &configErr{rtToken, "Detected response directive on non-service"}
+				*errors = append(*errors, err)
+				continue
+			}
+			if latToken != nil {
+				err := &configErr{latToken, "Detected latency directive on non-service"}
 				*errors = append(*errors, err)
 				continue
 			}
@@ -1613,6 +1796,7 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 			}
 		case "response", "response_type":
 			rtSeen = true
+			rtToken = tk
 			mvs, ok := mv.(string)
 			if !ok {
 				err := &configErr{tk, fmt.Sprintf("Expected response type to be string, got %T", mv)}
@@ -1657,6 +1841,9 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 			if rtSeen {
 				curService.rt = rt
 			}
+			if lat != nil {
+				curService.lat = lat
+			}
 		case "accounts":
 			for _, iv := range mv.([]interface{}) {
 				_, mv := unwrapValue(iv)
@@ -1666,6 +1853,22 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 				curStream.accs = accounts
 			} else if curService != nil {
 				curService.accs = accounts
+			}
+		case "latency":
+			latToken = tk
+			var err error
+			lat, err = parseServiceLatency(tk, mv)
+			if err != nil {
+				*errors = append(*errors, err)
+				continue
+			}
+			if curStream != nil {
+				err = &configErr{tk, "Detected latency directive on non-service"}
+				*errors = append(*errors, err)
+				continue
+			}
+			if curService != nil {
+				curService.lat = lat
 			}
 		default:
 			if !tk.IsUsedVariable() {
@@ -1678,9 +1881,75 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 				*errors = append(*errors, err)
 			}
 		}
-
 	}
 	return curStream, curService, nil
+}
+
+// parseServiceLatency returns a latency config block.
+func parseServiceLatency(root token, v interface{}) (*serviceLatency, error) {
+	if subject, ok := v.(string); ok {
+		return &serviceLatency{
+			subject:  subject,
+			sampling: DEFAULT_SERVICE_LATENCY_SAMPLING,
+		}, nil
+	}
+
+	latency, ok := v.(map[string]interface{})
+	if !ok {
+		return nil, &configErr{token: root,
+			reason: fmt.Sprintf("Expected latency entry to be a map/struct or string, got %T", v)}
+	}
+
+	sl := serviceLatency{
+		sampling: DEFAULT_SERVICE_LATENCY_SAMPLING,
+	}
+
+	// Read sampling value.
+	if v, ok := latency["sampling"]; ok {
+		tk, v := unwrapValue(v)
+
+		var sample int64
+		switch vv := v.(type) {
+		case int64:
+			// Sample is an int, like 50.
+			sample = vv
+		case string:
+			// Sample is a string, like "50%".
+			s := strings.TrimSuffix(vv, "%")
+			n, err := strconv.Atoi(s)
+			if err != nil {
+				return nil, &configErr{token: tk,
+					reason: fmt.Sprintf("Failed to parse latency sample: %v", err)}
+			}
+			sample = int64(n)
+		default:
+			return nil, &configErr{token: tk,
+				reason: fmt.Sprintf("Expected latency sample to be a string or map/struct, got %T", v)}
+		}
+		if sample < 1 || sample > 100 {
+			return nil, &configErr{token: tk,
+				reason: ErrBadSampling.Error()}
+		}
+
+		sl.sampling = int8(sample)
+	}
+
+	// Read subject value.
+	v, ok = latency["subject"]
+	if !ok {
+		return nil, &configErr{token: root,
+			reason: "Latency subject required, but missing"}
+	}
+
+	tk, v := unwrapValue(v)
+	subject, ok := v.(string)
+	if !ok {
+		return nil, &configErr{token: tk,
+			reason: fmt.Sprintf("Expected latency subject to be a string, got %T", subject)}
+	}
+	sl.subject = subject
+
+	return &sl, nil
 }
 
 // Parse an import stream or service.
@@ -2068,7 +2337,12 @@ func parseAllowResponses(v interface{}, errors, warnings *[]error) *ResponsePerm
 		tk, v = unwrapValue(v)
 		switch strings.ToLower(k) {
 		case "max", "max_msgs", "max_messages", "max_responses":
-			rp.MaxMsgs = int(v.(int64))
+			max := int(v.(int64))
+			// Negative values are accepted (mean infinite), and 0
+			// means default value (set above).
+			if max != 0 {
+				rp.MaxMsgs = max
+			}
 		case "expires", "expiration", "ttl":
 			wd, ok := v.(string)
 			if ok {
@@ -2078,7 +2352,11 @@ func parseAllowResponses(v interface{}, errors, warnings *[]error) *ResponsePerm
 					*errors = append(*errors, err)
 					return nil
 				}
-				rp.Expires = ttl
+				// Negative values are accepted (mean infinite), and 0
+				// means default value (set above).
+				if ttl != 0 {
+					rp.Expires = ttl
+				}
 			} else {
 				err := &configErr{tk, "error parsing expires, not a duration string"}
 				*errors = append(*errors, err)
@@ -2885,6 +3163,15 @@ func overrideCluster(opts *Options) error {
 		opts.Cluster.Port = 0
 		return nil
 	}
+	// -1 will fail url.Parse, so if we have -1, change it to
+	// 0, and then after parse, replace the port with -1 so we get
+	// automatic port allocation
+	wantsRandom := false
+	if strings.HasSuffix(opts.Cluster.ListenStr, ":-1") {
+		wantsRandom = true
+		cls := fmt.Sprintf("%s:0", opts.Cluster.ListenStr[0:len(opts.Cluster.ListenStr)-3])
+		opts.Cluster.ListenStr = cls
+	}
 	clusterURL, err := url.Parse(opts.Cluster.ListenStr)
 	if err != nil {
 		return err
@@ -2892,6 +3179,9 @@ func overrideCluster(opts *Options) error {
 	h, p, err := net.SplitHostPort(clusterURL.Host)
 	if err != nil {
 		return err
+	}
+	if wantsRandom {
+		p = "-1"
 	}
 	opts.Cluster.Host = h
 	_, err = fmt.Sscan(p, &opts.Cluster.Port)
@@ -2944,4 +3234,42 @@ func maybeReadPidFile(pidStr string) string {
 		return string(b)
 	}
 	return pidStr
+}
+
+func homeDir() (string, error) {
+	if runtime.GOOS == "windows" {
+		homeDrive, homePath := os.Getenv("HOMEDRIVE"), os.Getenv("HOMEPATH")
+		userProfile := os.Getenv("USERPROFILE")
+
+		home := filepath.Join(homeDrive, homePath)
+		if homeDrive == "" || homePath == "" {
+			if userProfile == "" {
+				return "", errors.New("nats: failed to get home dir, require %HOMEDRIVE% and %HOMEPATH% or %USERPROFILE%")
+			}
+			home = userProfile
+		}
+
+		return home, nil
+	}
+
+	home := os.Getenv("HOME")
+	if home == "" {
+		return "", errors.New("failed to get home dir, require $HOME")
+	}
+	return home, nil
+}
+
+func expandPath(p string) (string, error) {
+	p = os.ExpandEnv(p)
+
+	if !strings.HasPrefix(p, "~") {
+		return p, nil
+	}
+
+	home, err := homeDir()
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(home, p[1:]), nil
 }
