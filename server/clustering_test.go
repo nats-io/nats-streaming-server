@@ -6996,3 +6996,151 @@ func TestClusteringPendingCountOnFollowers(t *testing.T) {
 		// ok
 	}
 }
+
+func TestClusteringSubStateProperlyResetOnLeadershipAcquired(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use 2 NATS Servers that do not advertise so that
+	// a streaming server does not reconnect to the other NATS server
+	// when shuting one down.
+	nsAopts := natsdTest.DefaultTestOptions
+	nsAopts.Port = 4222
+	nsAopts.Cluster.Host = "127.0.0.1"
+	nsAopts.Cluster.Port = -1
+	nsAopts.Cluster.NoAdvertise = true
+	nsA := natsdTest.RunServer(&nsAopts)
+	defer nsA.Shutdown()
+
+	nsBCopts := natsdTest.DefaultTestOptions
+	nsBCopts.Port = 4223
+	nsBCopts.Cluster.Host = "127.0.0.1"
+	nsBCopts.Cluster.Port = -1
+	nsBCopts.Routes = natsd.RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%v", nsAopts.Cluster.Port))
+	nsBCopts.Cluster.NoAdvertise = true
+	nsBC := natsdTest.RunServer(&nsBCopts)
+	defer nsBC.Shutdown()
+
+	// Need to wait for cluster to form
+	waitFor(t, 2*time.Second, 15*time.Millisecond, func() error {
+		if nsBC.NumRoutes() != 1 || nsA.NumRoutes() != 1 {
+			return fmt.Errorf("cluster not formed yet")
+		}
+		return nil
+	})
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.NATSServerURL = "nats://127.0.0.1:4222"
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.NATSServerURL = "nats://127.0.0.1:4223"
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.NATSServerURL = "nats://127.0.0.1:4223"
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2, s3)
+
+	sc, err := stan.Connect(clusterName, clientName, stan.NatsURL("nats://127.0.0.1:4223"))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc.Close()
+
+	// Send 5 messages
+	for i := 0; i < 5; i++ {
+		sc.Publish("foo", []byte("hello"))
+	}
+
+	// Now create a subscription with MaxInflight 3 and make sure the consumer
+	// stalls (by not acking messages until told to do so)
+	canAck := int32(0)
+	ch := make(chan bool, 1)
+	cb := func(m *stan.Msg) {
+		if atomic.LoadInt32(&canAck) == 1 {
+			m.Ack()
+			if m.Sequence >= 5 {
+				ch <- true
+			}
+		} else if !m.Redelivered && m.Sequence == 3 {
+			ch <- true
+		}
+	}
+	if _, err := sc.QueueSubscribe("foo", "bar", cb,
+		stan.DeliverAllAvailable(),
+		stan.SetManualAckMode(),
+		stan.MaxInflight(3),
+		stan.AckWait(time.Second)); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	// Wait for 3 messages to be received, which means that consumer will be marked as stalled.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our 3 messages")
+	}
+
+	// Wait to make sure that the sub on s1 is marked as stalled
+	waitForAcks(t, s1, clientName, 1, 3)
+	// Wait for sub sent to be replicated on all 3 servers
+	waitForAcks(t, s2, clientName, 1, 3)
+	waitForAcks(t, s3, clientName, 1, 3)
+	// Shutdown NATS Server that streaming server s1 is connected to.
+	nsA.Shutdown()
+
+	// That would split the cluster in 2, A and (B, C). Wait for an election between B and C
+	leader := getLeader(t, 10*time.Second, s2, s3)
+
+	// Now that we have a new leader, tell the consumer that it can ack the messages.
+	atomic.StoreInt32(&canAck, 1)
+
+	// And wait for all 5 messages to be received and ack'ed.
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our 5 messages")
+	}
+
+	// Now restart nsA so that s1 is reunited with the cluster.
+	nsA = natsdTest.RunServer(&nsAopts)
+	defer nsA.Shutdown()
+
+	// Wait for the synchronization to happen and have s1 with 5 messages and 0 pending acks
+	waitForAcks(t, s1, clientName, 1, 0)
+
+	// Shutdown the current leader (B or C)
+	remaining := s2
+	if leader == s2 {
+		remaining = s3
+	}
+	leader.Shutdown()
+
+	// Now wait for new leader... but we want it to be s1.
+	var ok bool
+	for i := 0; i < 10; i++ {
+		newLeader := getLeader(t, 10*time.Second, s1, remaining)
+		if newLeader == s1 {
+			ok = true
+			break
+		}
+		remaining.Shutdown()
+		remaining = runServerWithOpts(t, remaining.opts, nil)
+		defer remaining.Shutdown()
+	}
+	if !ok {
+		t.Fatalf("Wanted to have s1 become leader, but it did not, got %s", remaining.opts.Clustering.NodeID)
+	}
+
+	// Now publish a new message, it should be received.
+	sc.Publish("foo", []byte("last"))
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get message 6")
+	}
+}
