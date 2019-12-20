@@ -72,6 +72,14 @@ type ConnzOptions struct {
 
 	// Filter by connection state.
 	State ConnState `json:"state"`
+
+	// The below options only apply if auth is true.
+
+	// Filter by username.
+	User string `json:"user"`
+
+	// Filter by account.
+	Account string `json:"acc"`
 }
 
 // ConnState is for filtering states of connections. We will only have two, open and closed.
@@ -110,6 +118,7 @@ type ConnInfo struct {
 	TLSVersion     string     `json:"tls_version,omitempty"`
 	TLSCipher      string     `json:"tls_cipher_suite,omitempty"`
 	AuthorizedUser string     `json:"authorized_user,omitempty"`
+	Account        string     `json:"account,omitempty"`
 	Subs           []string   `json:"subscriptions_list,omitempty"`
 }
 
@@ -121,7 +130,7 @@ const DefaultSubListSize = 1024
 
 const defaultStackBufSize = 10000
 
-// Connz returns a Connz struct containing inormation about connections.
+// Connz returns a Connz struct containing information about connections.
 func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 	var (
 		sortOpt = ByCid
@@ -131,6 +140,8 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		limit   = DefaultConnListSize
 		cid     = uint64(0)
 		state   = ConnOpen
+		user    string
+		acc     string
 	)
 
 	if opts != nil {
@@ -143,7 +154,15 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 				return nil, fmt.Errorf("invalid sorting option: %s", sortOpt)
 			}
 		}
+
+		// Auth specifics.
 		auth = opts.Username
+		if !auth && (user != "" || acc != "") {
+			return nil, fmt.Errorf("filter by user or account only allowed with auth option")
+		}
+		user = opts.User
+		acc = opts.Account
+
 		subs = opts.Subscriptions
 		offset = opts.Offset
 		if offset < 0 {
@@ -247,6 +266,14 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		// Gather all open clients.
 		if state == ConnOpen || state == ConnAll {
 			for _, client := range s.clients {
+				// If we have an account specified we need to filter.
+				if acc != "" && (client.acc == nil || client.acc.Name != acc) {
+					continue
+				}
+				// Do user filtering second
+				if user != "" && client.opts.Username != user {
+					continue
+				}
 				openClients = append(openClients, client)
 			}
 		}
@@ -277,6 +304,10 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		// Fill in user if auth requested.
 		if auth {
 			ci.AuthorizedUser = client.opts.Username
+			// Add in account iff not the global account.
+			if client.acc != nil && (client.acc.Name != globalAccountName) {
+				ci.Account = client.acc.Name
+			}
 		}
 		client.mu.Unlock()
 		pconns[i] = ci
@@ -288,6 +319,15 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		needCopy = true
 	}
 	for _, cc := range closedClients {
+		// If we have an account specified we need to filter.
+		if acc != "" && cc.acc != acc {
+			continue
+		}
+		// Do user filtering second
+		if user != "" && cc.user != user {
+			continue
+		}
+
 		// Copy if needed for any changes to the ConnInfo
 		if needCopy {
 			cx := *cc
@@ -300,9 +340,19 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		// Fill in user if auth requested.
 		if auth {
 			cc.AuthorizedUser = cc.user
+			// Add in account iff not the global account.
+			if cc.acc != "" && (cc.acc != globalAccountName) {
+				cc.Account = cc.acc
+			}
 		}
 		pconns[i] = &cc.ConnInfo
 		i++
+	}
+
+	// This will trip if we have filtered out client connections.
+	if len(pconns) != i {
+		pconns = pconns[:i]
+		totalClients = i
 	}
 
 	switch sortOpt {
@@ -398,8 +448,8 @@ func (c *client) getRTT() string {
 	if c.rtt == 0 {
 		// If a real client, go ahead and send ping now to get a value
 		// for RTT. For tests and telnet, or if client is closing, etc skip.
-		if !c.flags.isSet(clearConnection) && c.flags.isSet(connectReceived) && c.opts.Lang != "" {
-			c.sendPing()
+		if c.opts.Lang != "" {
+			c.sendRTTPingLocked()
 		}
 		return ""
 	}
@@ -502,6 +552,9 @@ func (s *Server) HandleConnz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user := r.URL.Query().Get("user")
+	acc := r.URL.Query().Get("acc")
+
 	connzOpts := &ConnzOptions{
 		Sort:          sortOpt,
 		Username:      auth,
@@ -510,6 +563,8 @@ func (s *Server) HandleConnz(w http.ResponseWriter, r *http.Request) {
 		Limit:         limit,
 		CID:           cid,
 		State:         state,
+		User:          user,
+		Account:       acc,
 	}
 
 	s.mu.Lock()
@@ -558,6 +613,7 @@ type RouteInfo struct {
 	Import       *SubjectPermission `json:"import,omitempty"`
 	Export       *SubjectPermission `json:"export,omitempty"`
 	Pending      int                `json:"pending_size"`
+	RTT          string             `json:"rtt,omitempty"`
 	InMsgs       int64              `json:"in_msgs"`
 	OutMsgs      int64              `json:"out_msgs"`
 	InBytes      int64              `json:"in_bytes"`
@@ -566,7 +622,7 @@ type RouteInfo struct {
 	Subs         []string           `json:"subscriptions_list,omitempty"`
 }
 
-// Routez returns a Routez struct containing inormation about routes.
+// Routez returns a Routez struct containing information about routes.
 func (s *Server) Routez(routezOpts *RoutezOptions) (*Routez, error) {
 	rs := &Routez{Routes: []*RouteInfo{}}
 	rs.Now = time.Now()
@@ -600,6 +656,7 @@ func (s *Server) Routez(routezOpts *RoutezOptions) (*Routez, error) {
 			NumSubs:      uint32(len(r.subs)),
 			Import:       r.opts.Import,
 			Export:       r.opts.Export,
+			RTT:          r.getRTT(),
 		}
 
 		if subs && len(r.subs) > 0 {
@@ -836,6 +893,7 @@ func (s *Server) HandleStacksz(w http.ResponseWriter, r *http.Request) {
 // Varz will output server information on the monitoring port at /varz.
 type Varz struct {
 	ID                string            `json:"server_id"`
+	Name              string            `json:"server_name"`
 	Version           string            `json:"version"`
 	Proto             int               `json:"proto"`
 	GitCommit         string            `json:"git_commit,omitempty"`
@@ -980,9 +1038,10 @@ func (s *Server) HandleRoot(w http.ResponseWriter, r *http.Request) {
 	<a href=/connz>connz</a><br/>
 	<a href=/routez>routez</a><br/>
 	<a href=/gatewayz>gatewayz</a><br/>
+	<a href=/leafz>leafz</a><br/>
 	<a href=/subsz>subsz</a><br/>
     <br/>
-    <a href=https://nats-io.github.io/docs/nats_server/monitoring.html>help</a>
+    <a href=https://docs.nats.io/nats-server/configuration/monitoring.html>help</a>
   </body>
 </html>`)
 }
@@ -1019,6 +1078,7 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 		Proto:     info.Proto,
 		GitCommit: info.GitCommit,
 		GoVersion: info.GoVersion,
+		Name:      info.Name,
 		Host:      info.Host,
 		Port:      info.Port,
 		IP:        info.IP,
@@ -1526,6 +1586,111 @@ func (s *Server) HandleGatewayz(w http.ResponseWriter, r *http.Request) {
 	b, err := json.MarshalIndent(gw, "", "  ")
 	if err != nil {
 		s.Errorf("Error marshaling response to /gatewayz request: %v", err)
+	}
+
+	// Handle response
+	ResponseHandler(w, r, b)
+}
+
+// Leafz represents detailed information on Leafnodes.
+type Leafz struct {
+	ID       string      `json:"server_id"`
+	Now      time.Time   `json:"now"`
+	NumLeafs int         `json:"leafnodes"`
+	Leafs    []*LeafInfo `json:"leafs"`
+}
+
+// LeafzOptions are options passed to Leafz
+type LeafzOptions struct {
+	// Subscriptions indicates that Leafz will return a leafnode's subscriptions
+	Subscriptions bool `json:"subscriptions"`
+}
+
+// LeafInfo has detailed information on each remote leafnode connection.
+type LeafInfo struct {
+	Account  string   `json:"account"`
+	IP       string   `json:"ip"`
+	Port     int      `json:"port"`
+	RTT      string   `json:"rtt,omitempty"`
+	InMsgs   int64    `json:"in_msgs"`
+	OutMsgs  int64    `json:"out_msgs"`
+	InBytes  int64    `json:"in_bytes"`
+	OutBytes int64    `json:"out_bytes"`
+	NumSubs  uint32   `json:"subscriptions"`
+	Subs     []string `json:"subscriptions_list,omitempty"`
+}
+
+// Leafz returns a Leafz structure containing information about leafnodes.
+func (s *Server) Leafz(opts *LeafzOptions) (*Leafz, error) {
+	// Grab leafnodes
+	var lconns []*client
+	s.mu.Lock()
+	if len(s.leafs) > 0 {
+		lconns = make([]*client, 0, len(s.leafs))
+		for _, ln := range s.leafs {
+			lconns = append(lconns, ln)
+		}
+	}
+	s.mu.Unlock()
+
+	var leafnodes []*LeafInfo
+	if len(lconns) > 0 {
+		leafnodes = make([]*LeafInfo, 0, len(lconns))
+		for _, ln := range lconns {
+			ln.mu.Lock()
+			lni := &LeafInfo{
+				Account:  ln.acc.Name,
+				IP:       ln.host,
+				Port:     int(ln.port),
+				RTT:      ln.getRTT(),
+				InMsgs:   atomic.LoadInt64(&ln.inMsgs),
+				OutMsgs:  ln.outMsgs,
+				InBytes:  atomic.LoadInt64(&ln.inBytes),
+				OutBytes: ln.outBytes,
+				NumSubs:  uint32(len(ln.subs)),
+			}
+			if opts != nil && opts.Subscriptions {
+				lni.Subs = make([]string, 0, len(ln.subs))
+				for _, sub := range ln.subs {
+					lni.Subs = append(lni.Subs, string(sub.subject))
+				}
+			}
+			ln.mu.Unlock()
+			leafnodes = append(leafnodes, lni)
+		}
+	}
+	return &Leafz{
+		ID:       s.ID(),
+		Now:      time.Now(),
+		NumLeafs: len(leafnodes),
+		Leafs:    leafnodes,
+	}, nil
+}
+
+// HandleLeafz process HTTP requests for leafnode information.
+func (s *Server) HandleLeafz(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	s.httpReqStats[LeafzPath]++
+	s.mu.Unlock()
+
+	subs, err := decodeBool(w, r, "subs")
+	if err != nil {
+		return
+	}
+	var opts *LeafzOptions
+	if subs {
+		opts = &LeafzOptions{Subscriptions: true}
+	}
+
+	l, err := s.Leafz(opts)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
+		return
+	}
+	b, err := json.MarshalIndent(l, "", "  ")
+	if err != nil {
+		s.Errorf("Error marshaling response to /leafz request: %v", err)
 	}
 
 	// Handle response

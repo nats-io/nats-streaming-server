@@ -193,6 +193,31 @@ func (s *Server) assignGlobalAccountToOrphanUsers() {
 	}
 }
 
+// If the given permissions has a ResponsePermission
+// set, ensure that defaults are set (if values are 0)
+// and that a Publish permission is set, and Allow
+// is disabled if not explicitly set.
+func validateResponsePermissions(p *Permissions) {
+	if p == nil || p.Response == nil {
+		return
+	}
+	if p.Publish == nil {
+		p.Publish = &SubjectPermission{}
+	}
+	if p.Publish.Allow == nil {
+		// We turn off the blanket allow statement.
+		p.Publish.Allow = []string{}
+	}
+	// If there is a response permission, ensure
+	// that if value is 0, we set the default value.
+	if p.Response.MaxMsgs == 0 {
+		p.Response.MaxMsgs = DEFAULT_ALLOW_RESPONSE_MAX_MSGS
+	}
+	if p.Response.Expires == 0 {
+		p.Response.Expires = DEFAULT_ALLOW_RESPONSE_EXPIRATION
+	}
+}
+
 // configureAuthorization will do any setup needed for authorization.
 // Lock is assumed held.
 func (s *Server) configureAuthorization() {
@@ -220,6 +245,9 @@ func (s *Server) configureAuthorization() {
 						copy.Account = v.(*Account)
 					}
 				}
+				if copy.Permissions != nil {
+					validateResponsePermissions(copy.Permissions)
+				}
 				s.nkeys[u.Nkey] = copy
 			}
 		}
@@ -231,6 +259,9 @@ func (s *Server) configureAuthorization() {
 					if v, ok := s.accounts.Load(u.Account.Name); ok {
 						copy.Account = v.(*Account)
 					}
+				}
+				if copy.Permissions != nil {
+					validateResponsePermissions(copy.Permissions)
 				}
 				s.users[u.Username] = copy
 			}
@@ -265,23 +296,19 @@ func (s *Server) checkAuthentication(c *client) bool {
 // isClientAuthorized will check the client against the proper authorization method and data.
 // This could be nkey, token, or username/password based.
 func (s *Server) isClientAuthorized(c *client) bool {
-	// Snapshot server options by hand and only grab what we really need.
-	s.optsMu.RLock()
-	customClientAuthentication := s.opts.CustomClientAuthentication
-	authorization := s.opts.Authorization
-	username := s.opts.Username
-	password := s.opts.Password
-	tlsMap := s.opts.TLSMap
-	s.optsMu.RUnlock()
+	opts := s.getOpts()
 
 	// Check custom auth first, then jwts, then nkeys, then
 	// multiple users with TLS map if enabled, then token,
 	// then single user/pass.
-	if customClientAuthentication != nil {
-		return customClientAuthentication.Check(c)
+	if opts.CustomClientAuthentication != nil {
+		return opts.CustomClientAuthentication.Check(c)
 	}
 
-	// Grab under lock but process after.
+	return s.processClientOrLeafAuthentication(c)
+}
+
+func (s *Server) processClientOrLeafAuthentication(c *client) bool {
 	var (
 		nkey *NkeyUser
 		juc  *jwt.UserClaims
@@ -289,6 +316,7 @@ func (s *Server) isClientAuthorized(c *client) bool {
 		user *User
 		ok   bool
 		err  error
+		opts = s.getOpts()
 	)
 
 	s.mu.Lock()
@@ -333,7 +361,7 @@ func (s *Server) isClientAuthorized(c *client) bool {
 		}
 	} else if hasUsers {
 		// Check if we are tls verify and are mapping users from the client_certificate
-		if tlsMap {
+		if opts.TLSMap {
 			var euser string
 			authorized := checkClientTLSCertSubject(c, func(u string) bool {
 				var ok bool
@@ -417,7 +445,9 @@ func (s *Server) isClientAuthorized(c *client) bool {
 		}
 
 		nkey = buildInternalNkeyUser(juc, acc)
-		c.RegisterNkeyUser(nkey)
+		if err := c.RegisterNkeyUser(nkey); err != nil {
+			return false
+		}
 
 		// Generate an event if we have a system account.
 		s.accountConnectEvent(c)
@@ -450,7 +480,9 @@ func (s *Server) isClientAuthorized(c *client) bool {
 			c.Debugf("Signature not verified")
 			return false
 		}
-		c.RegisterNkeyUser(nkey)
+		if err := c.RegisterNkeyUser(nkey); err != nil {
+			return false
+		}
 		return true
 	}
 
@@ -460,17 +492,27 @@ func (s *Server) isClientAuthorized(c *client) bool {
 		// for pub/sub authorizations.
 		if ok {
 			c.RegisterUser(user)
+			// Generate an event if we have a system account and this is not the $G account.
+			s.accountConnectEvent(c)
 		}
 		return ok
 	}
 
-	if authorization != "" {
-		return comparePasswords(authorization, c.opts.Authorization)
-	} else if username != "" {
-		if username != c.opts.Username {
-			return false
+	if c.kind == CLIENT {
+		if opts.Authorization != "" {
+			return comparePasswords(opts.Authorization, c.opts.Authorization)
+		} else if opts.Username != "" {
+			if opts.Username != c.opts.Username {
+				return false
+			}
+			return comparePasswords(opts.Password, c.opts.Password)
 		}
-		return comparePasswords(password, c.opts.Password)
+	} else if c.kind == LEAF {
+		// There is no required username/password to connect and
+		// there was no u/p in the CONNECT or none that matches the
+		// know users. Register the leaf connection with global account
+		// or the one specified in config (if provided).
+		return s.registerLeafWithAccount(c, opts.LeafNode.Account)
 	}
 
 	return false
@@ -574,120 +616,62 @@ func (s *Server) isGatewayAuthorized(c *client) bool {
 	return comparePasswords(opts.Gateway.Password, c.opts.Password)
 }
 
-// isLeafNodeAuthorized will check for auth for an inbound leaf node connection.
-func (s *Server) isLeafNodeAuthorized(c *client) bool {
-	// FIXME(dlc) - This is duplicated from client auth, should be able to combine
-	// and not fail so bad on DRY.
-
-	// Grab under lock but process after.
-	var (
-		juc *jwt.UserClaims
-		acc *Account
-		err error
-	)
-
-	s.mu.Lock()
-
-	// Check if we have trustedKeys defined in the server. If so we require a user jwt.
-	if s.trustedKeys != nil {
-		if c.opts.JWT == "" {
-			s.mu.Unlock()
-			c.Debugf("Authentication requires a user JWT")
-			return false
-		}
-		// So we have a valid user jwt here.
-		juc, err = jwt.DecodeUserClaims(c.opts.JWT)
+func (s *Server) registerLeafWithAccount(c *client, account string) bool {
+	var err error
+	acc := s.globalAccount()
+	if account != _EMPTY_ {
+		acc, err = s.lookupAccount(account)
 		if err != nil {
-			s.mu.Unlock()
-			c.Debugf("User JWT not valid: %v", err)
-			return false
-		}
-		vr := jwt.CreateValidationResults()
-		juc.Validate(vr)
-		if vr.IsBlocking(true) {
-			s.mu.Unlock()
-			c.Debugf("User JWT no longer valid: %+v", vr)
+			s.Errorf("authentication of user %q failed, unable to lookup account %q: %v",
+				c.opts.Username, account, err)
 			return false
 		}
 	}
-	s.mu.Unlock()
-
-	// If we have a jwt and a userClaim, make sure we have the Account, etc associated.
-	// We need to look up the account. This will use an account resolver if one is present.
-	if juc != nil {
-		issuer := juc.Issuer
-		if juc.IssuerAccount != "" {
-			issuer = juc.IssuerAccount
-		}
-		if acc, err = s.LookupAccount(issuer); acc == nil {
-			c.Debugf("Account JWT lookup error: %v", err)
-			return false
-		}
-		if !s.isTrustedIssuer(acc.Issuer) {
-			c.Debugf("Account JWT not signed by trusted operator")
-			return false
-		}
-		if juc.IssuerAccount != "" && !acc.hasIssuer(juc.Issuer) {
-			c.Debugf("User JWT issuer is not known")
-			return false
-		}
-		if acc.IsExpired() {
-			c.Debugf("Account JWT has expired")
-			return false
-		}
-		// Verify the signature against the nonce.
-		if c.opts.Sig == "" {
-			c.Debugf("Signature missing")
-			return false
-		}
-		sig, err := base64.RawURLEncoding.DecodeString(c.opts.Sig)
-		if err != nil {
-			// Allow fallback to normal base64.
-			sig, err = base64.StdEncoding.DecodeString(c.opts.Sig)
-			if err != nil {
-				c.Debugf("Signature not valid base64")
-				return false
-			}
-		}
-		pub, err := nkeys.FromPublicKey(juc.Subject)
-		if err != nil {
-			c.Debugf("User nkey not valid: %v", err)
-			return false
-		}
-		if err := pub.Verify(c.nonce, sig); err != nil {
-			c.Debugf("Signature not verified")
-			return false
-		}
-
-		nkey := buildInternalNkeyUser(juc, acc)
-		if err := c.RegisterNkeyUser(nkey); err != nil {
-			return false
-		}
-
-		// Generate an event if we have a system account.
-		s.accountConnectEvent(c)
-
-		// Check if we need to set an auth timer if the user jwt expires.
-		c.checkExpiration(juc.Claims())
-		return true
-	}
-
-	// FIXME(dlc) - Add ability to support remote account bindings via
-	// other auth like user or nkey and tlsMapping.
-
-	// For now this means we are binding the leafnode to the global account.
-	c.registerWithAccount(s.globalAccount())
-
-	// Snapshot server options.
-	opts := s.getOpts()
-
-	if opts.LeafNode.Username == "" {
-		return true
-	}
-	if opts.LeafNode.Username != c.opts.Username {
+	if err = c.registerWithAccount(acc); err != nil {
 		return false
 	}
-	return comparePasswords(opts.LeafNode.Password, c.opts.Password)
+	return true
+}
+
+// isLeafNodeAuthorized will check for auth for an inbound leaf node connection.
+func (s *Server) isLeafNodeAuthorized(c *client) bool {
+	opts := s.getOpts()
+
+	isAuthorized := func(username, password, account string) bool {
+		if username != c.opts.Username {
+			return false
+		}
+		if !comparePasswords(password, c.opts.Password) {
+			return false
+		}
+		return s.registerLeafWithAccount(c, account)
+	}
+
+	// If leafnodes config has an authorization{} stanza, this takes precedence.
+	// The user in CONNECT mutch match. We will bind to the account associated
+	// with that user (from the leafnode's authorization{} config).
+	if opts.LeafNode.Username != _EMPTY_ {
+		return isAuthorized(opts.LeafNode.Username, opts.LeafNode.Password, opts.LeafNode.Account)
+	} else if len(opts.LeafNode.Users) > 0 {
+		// This is expected to be a very small array.
+		for _, u := range opts.LeafNode.Users {
+			if u.Username == c.opts.Username {
+				var accName string
+				if u.Account != nil {
+					accName = u.Account.Name
+				}
+				return isAuthorized(u.Username, u.Password, accName)
+			}
+		}
+		return false
+	}
+
+	// We are here if we accept leafnode connections without any credential.
+
+	// Still, if the CONNECT has some user info, we will bind to the
+	// user's account or to the specified default account (if provided)
+	// or to the global account.
+	return s.processClientOrLeafAuthentication(c)
 }
 
 // Support for bcrypt stored passwords and tokens.
