@@ -2580,6 +2580,17 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 	for qs, c := range queues {
 		qs.Lock()
 		qs.newOnHold = false
+		// This is required in cluster mode if a node was leader,
+		// lost it and then becomes leader again, all that without
+		// restoring from snapshot.
+		qs.stalledSubCount = 0
+		for _, sub := range qs.subs {
+			sub.RLock()
+			if sub.stalled {
+				qs.stalledSubCount++
+			}
+			sub.RUnlock()
+		}
 		qs.Unlock()
 		s.sendAvailableMessagesToQueue(c, qs)
 	}
@@ -3862,8 +3873,7 @@ func (s *StanServer) processReplicatedSendAndAck(ssa *spb.SubSentAndAck) {
 	for _, sequence := range ssa.Ack {
 		delete(sub.acksPending, sequence)
 	}
-	// Don't set the sub.stalled here. Let that be done if the server
-	// becomes leader and attempt the first deliveries.
+	sub.stalled = len(sub.acksPending) >= int(sub.MaxInFlight)
 }
 
 // Sends the message to the subscriber
