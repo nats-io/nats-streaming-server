@@ -765,6 +765,7 @@ type queueState struct {
 	sync.RWMutex
 	lastSent        uint64
 	subs            []*subState
+	rdlvCount       map[uint64]uint32
 	shadow          *subState // For durable case, when last member leaves and group is not closed.
 	stalledSubCount int       // number of stalled members
 	newOnHold       bool
@@ -794,6 +795,8 @@ type subState struct {
 
 	replicate *subSentAndAck // Used in Clustering mode
 	norepl    bool           // When a sub is being closed, prevents collectSentOrAck to recreate `replicate`.
+
+	rdlvCount map[uint64]uint32 // Used only when not a queue sub, otherwise queueState's rldvCount is used.
 
 	// So far, compacting these booleans into a byte flag would not save space.
 	// May change if we need to add more.
@@ -1135,7 +1138,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 				// Need to update if this member was the one with the last
 				// message of the group.
 				storageUpdate = sub.LastSent == qs.lastSent
-				sortedPendingMsgs := makeSortedPendingMsgs(sub.acksPending)
+				sortedPendingMsgs := sub.makeSortedPendingMsgs()
 				for _, pm := range sortedPendingMsgs {
 					// Get one of the remaning queue subscribers.
 					qsub := qs.subs[idx]
@@ -2580,6 +2583,13 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 	for qs, c := range queues {
 		qs.Lock()
 		qs.newOnHold = false
+		// Reset redelivery count map (this is to be consistent that if
+		// in cluster mode a node regains leadership the count restarts
+		// at 1. Otherwise, you could get something like this:
+		// node A is leader: 1, 2, 3 - then loses leadership (but does not exit)
+		// node B is leader: 1, 2, 3, 4, 5, 6 - then loses leadership
+		// node A is leader: 4, 5, 6, ...
+		qs.rdlvCount = nil
 		// This is required in cluster mode if a node was leader,
 		// lost it and then becomes leader again, all that without
 		// restoring from snapshot.
@@ -3384,9 +3394,9 @@ func (a bySeq) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a bySeq) Less(i, j int) bool { return a[i] < a[j] }
 
 // Returns an array of message sequence numbers ordered by sequence.
-func makeSortedSequences(sequences map[uint64]int64) []uint64 {
-	results := make([]uint64, 0, len(sequences))
-	for seq := range sequences {
+func (sub *subState) makeSortedSequences() []uint64 {
+	results := make([]uint64, 0, len(sub.acksPending))
+	for seq := range sub.acksPending {
 		results = append(results, seq)
 	}
 	sort.Sort(bySeq(results))
@@ -3413,23 +3423,36 @@ func (a byExpire) Less(i, j int) bool {
 // the expiration date in the pendingMsgs map is not set (0), which
 // happens after a server restart. In this case, the array is ordered
 // by message sequence numbers.
-func makeSortedPendingMsgs(pendingMsgs map[uint64]int64) []*pendingMsg {
-	results := make([]*pendingMsg, 0, len(pendingMsgs))
-	for seq, expire := range pendingMsgs {
+func (sub *subState) makeSortedPendingMsgs() []*pendingMsg {
+	results := make([]*pendingMsg, 0, len(sub.acksPending))
+	for seq, expire := range sub.acksPending {
 		results = append(results, &pendingMsg{seq: seq, expire: expire})
 	}
 	sort.Sort(byExpire(results))
 	return results
 }
 
+func qsLock(qs *queueState) {
+	if qs != nil {
+		qs.Lock()
+	}
+}
+
+func qsUnlock(qs *queueState) {
+	if qs != nil {
+		qs.Unlock()
+	}
+}
+
 // Redeliver all outstanding messages to a durable subscriber, used on resubscribe.
 func (s *StanServer) performDurableRedelivery(c *channel, sub *subState) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.RLock()
-	sortedSeqs := makeSortedSequences(sub.acksPending)
+	sortedSeqs := sub.makeSortedSequences()
 	clientID := sub.ClientID
 	newOnHold := sub.newOnHold
 	subID := sub.ID
+	qs := sub.qstate
 	sub.RUnlock()
 
 	if s.debug && len(sortedSeqs) > 0 {
@@ -3458,10 +3481,12 @@ func (s *StanServer) performDurableRedelivery(c *channel, sub *subState) {
 			// Flag as redelivered.
 			m.Redelivered = true
 
+			qsLock(qs)
 			sub.Lock()
 			// Force delivery
 			s.sendMsgToSub(sub, m, forceDelivery)
 			sub.Unlock()
+			qsUnlock(qs)
 		}
 	}
 	// Release newOnHold if needed.
@@ -3476,7 +3501,7 @@ func (s *StanServer) performDurableRedelivery(c *channel, sub *subState) {
 func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup bool) {
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.Lock()
-	sortedPendingMsgs := makeSortedPendingMsgs(sub.acksPending)
+	sortedPendingMsgs := sub.makeSortedPendingMsgs()
 	if len(sortedPendingMsgs) == 0 {
 		sub.clearAckTimer()
 		sub.Unlock()
@@ -3582,9 +3607,11 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 				s.processAck(c, sub, m.Sequence, false)
 			}
 		} else {
+			qsLock(qs)
 			sub.Lock()
 			s.sendMsgToSub(sub, m, forceDelivery)
 			sub.Unlock()
+			qsUnlock(qs)
 		}
 	}
 	if foundWithZero {
@@ -3634,6 +3661,7 @@ func (s *StanServer) subChangesOnLeadershipAcquired(sub *subState) {
 
 func (s *StanServer) subChangesOnLeadershipLost(sub *subState) {
 	sub.Lock()
+	sub.rdlvCount = nil
 	sub.stopAckSub()
 	sub.clearAckTimer()
 	s.clearSentAndAck(sub)
@@ -3904,6 +3932,9 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 			sub.ClientID, action, sub.ID, m.Subject, m.Sequence)
 	}
 
+	if m.Redelivered {
+		sub.updateRedeliveryCount(m)
+	}
 	// Marshal of a pb.MsgProto cannot fail
 	b, _ := m.Marshal()
 	// but protect against a store implementation that may incorrectly
@@ -3973,6 +4004,28 @@ func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bo
 	}
 
 	return true, true
+}
+
+// Will set the redelivery count for this message that is ready to be redelivered.
+// sub's lock is held on entry, and if it is a queue sub, qstate's lock is held too.
+func (sub *subState) updateRedeliveryCount(m *pb.MsgProto) {
+	var rdlvCountMap *map[uint64]uint32
+	if sub.qstate != nil {
+		rdlvCountMap = &sub.qstate.rdlvCount
+	} else {
+		rdlvCountMap = &sub.rdlvCount
+	}
+	if *rdlvCountMap == nil {
+		*rdlvCountMap = make(map[uint64]uint32)
+	}
+	for {
+		(*rdlvCountMap)[m.Sequence]++
+		m.RedeliveryCount = (*rdlvCountMap)[m.Sequence]
+		// Just in case we rolled over...
+		if m.RedeliveryCount != 0 {
+			break
+		}
+	}
 }
 
 // Sets up the ackTimer to fire at the given duration.

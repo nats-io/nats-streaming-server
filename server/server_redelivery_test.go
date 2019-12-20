@@ -1644,3 +1644,94 @@ func TestQueueRedeliveryWithMsgsReassignedToMemberWithAcksPending(t *testing.T) 
 		t.Fatalf("Message 2 was not immediately redelivered")
 	}
 }
+
+func TestPersistentStoreRedeliveryCount(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
+	opts := getTestDefaultOptsForPersistentStore()
+	s := runServerWithOpts(t, opts, nil)
+	defer shutdownRestartedServerOnTestExit(&s)
+
+	sc, nc := createConnectionWithNatsOpts(t, clientName,
+		nats.ReconnectWait(100*time.Millisecond))
+	defer nc.Close()
+	defer sc.Close()
+
+	restarted := int32(0)
+	rdlv := uint32(0)
+	errCh := make(chan error, 1)
+	ch := make(chan bool, 1)
+	if _, err := sc.Subscribe("foo",
+		func(m *stan.Msg) {
+			if !m.Redelivered && m.RedeliveryCount != 0 {
+				m.Sub.Close()
+				errCh <- fmt.Errorf("redelivery count is set although redelivered flag is not: %v", m)
+				return
+			}
+			if !m.Redelivered {
+				return
+			}
+			rd := atomic.AddUint32(&rdlv, 1)
+			if rd != m.RedeliveryCount {
+				m.Sub.Close()
+				errCh <- fmt.Errorf("expected redelivery count to be %v, got %v", rd, m.RedeliveryCount)
+				return
+			}
+			if m.RedeliveryCount == 3 {
+				if atomic.LoadInt32(&restarted) == 1 {
+					m.Ack()
+				}
+				ch <- true
+			}
+		},
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(100))); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	sc.Publish("foo", []byte("msg"))
+
+	select {
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("Timedout")
+	}
+
+	s.Shutdown()
+	atomic.StoreUint32(&rdlv, 0)
+	atomic.StoreInt32(&restarted, 1)
+	s = runServerWithOpts(t, opts, nil)
+
+	select {
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("Timedout")
+	}
+
+	// Now start a new subscription and make sure that redelivery count is not set
+	// for message 1 on initial delivery.
+	if _, err := sc.Subscribe("foo",
+		func(m *stan.Msg) {
+			if m.RedeliveryCount != 0 {
+				m.Sub.Close()
+				errCh <- fmt.Errorf("redelivery count is set although redelivered flag is not: %v", m)
+				return
+			}
+			ch <- true
+		},
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	select {
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("Timedout")
+	}
+}

@@ -1269,3 +1269,43 @@ func TestPersistentStoreDurableQueueSubRaceBetweenCreateAndClose(t *testing.T) {
 		t.Fatalf("Duplicate shadow subscription found!")
 	}
 }
+
+func TestQueueRedeliveryCount(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	errCh := make(chan error, 2)
+	var mu sync.Mutex
+	var prev uint32
+	cb := func(m *stan.Msg) {
+		if m.Redelivered {
+			mu.Lock()
+			if m.RedeliveryCount != prev+1 {
+				m.Sub.Close()
+				errCh <- fmt.Errorf("previous was %v, current %v", prev, m.RedeliveryCount)
+				mu.Unlock()
+				return
+			}
+			prev = m.RedeliveryCount
+			mu.Unlock()
+		}
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := sc.QueueSubscribe("foo", "bar", cb, stan.AckWait(ackWaitInMs(50)), stan.SetManualAckMode()); err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+	}
+
+	sc.Publish("foo", []byte("msg"))
+
+	select {
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	case <-time.After(500 * time.Millisecond):
+		// ok!
+	}
+}

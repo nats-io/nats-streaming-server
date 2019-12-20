@@ -7144,3 +7144,112 @@ func TestClusteringSubStateProperlyResetOnLeadershipAcquired(t *testing.T) {
 		t.Fatal("Did not get message 6")
 	}
 }
+
+func TestClusteringRedeliveryCount(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2, s3)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	restarted := int32(0)
+	rdlv := uint32(0)
+	errCh := make(chan error, 1)
+	ch := make(chan bool, 1)
+	if _, err := sc.Subscribe("foo",
+		func(m *stan.Msg) {
+			if !m.Redelivered && m.RedeliveryCount != 0 {
+				m.Sub.Close()
+				errCh <- fmt.Errorf("redelivery count is set although redelivered flag is not: %v", m)
+				return
+			}
+			if !m.Redelivered {
+				return
+			}
+			rd := atomic.AddUint32(&rdlv, 1)
+			if rd != m.RedeliveryCount {
+				m.Sub.Close()
+				errCh <- fmt.Errorf("expected redelivery count to be %v, got %v", rd, m.RedeliveryCount)
+				return
+			}
+			if m.RedeliveryCount == 3 {
+				if atomic.LoadInt32(&restarted) == 1 {
+					m.Ack()
+				}
+				ch <- true
+			}
+		},
+		stan.SetManualAckMode(),
+		stan.AckWait(ackWaitInMs(100))); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	sc.Publish("foo", []byte("msg"))
+
+	select {
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("Timedout")
+	}
+
+	s1.Shutdown()
+	atomic.StoreUint32(&rdlv, 0)
+	atomic.StoreInt32(&restarted, 1)
+	s1 = runServerWithOpts(t, s1sOpts, nil)
+	getLeader(t, 10*time.Second, s1, s2, s3)
+
+	select {
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("Timedout")
+	}
+
+	// Now start a new subscription and make sure that redelivery count is not set
+	// for message 1 on initial delivery.
+	if _, err := sc.Subscribe("foo",
+		func(m *stan.Msg) {
+			if m.RedeliveryCount != 0 {
+				m.Sub.Close()
+				errCh <- fmt.Errorf("redelivery count is set although redelivered flag is not: %v", m)
+				return
+			}
+			ch <- true
+		},
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	select {
+	case e := <-errCh:
+		t.Fatal(e.Error())
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("Timedout")
+	}
+}
