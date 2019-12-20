@@ -1211,7 +1211,7 @@ func TestSQLSubStoreCachingAndRecovery(t *testing.T) {
 	acks := make(map[uint64]struct{})
 	acks[2] = struct{}{}
 	ackBytes, _ := sqlEncodeSeqs(acks, func(_ uint64) {})
-	stmt := "INSERT INTO SubsPending (subid, row, lastsent, pending, acks) VALUES (?, ?, ?, ?, ?)"
+	stmt := "INSERT INTO SubsPending (subid, `row`, lastsent, pending, acks) VALUES (?, ?, ?, ?, ?)"
 	if testSQLDriver == driverPostgres {
 		stmt = "INSERT INTO SubsPending (subid, row, lastsent, pending, acks) VALUES ($1, $2, $3, $4, $5)"
 	}
