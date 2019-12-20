@@ -238,22 +238,23 @@ func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...Subs
 		}
 	}
 	sc.Lock()
-	if sc.nc == nil {
+	if sc.closed {
 		sc.Unlock()
 		return nil, ErrConnectionClosed
 	}
 
 	// Register subscription.
 	sc.subMap[sub.inbox] = sub
-	nc := sc.nc
 	sc.Unlock()
 
 	// Hold lock throughout.
 	sub.Lock()
 	defer sub.Unlock()
 
+	// sc.nc is immutable and never nil once connection is created.
+
 	// Listen for actual messages.
-	nsub, err := nc.Subscribe(sub.inbox, sc.processMsg)
+	nsub, err := sc.nc.Subscribe(sub.inbox, sc.processMsg)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +283,7 @@ func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...Subs
 	}
 
 	b, _ := sr.Marshal()
-	reply, err := nc.Request(sc.subRequests, b, sc.opts.ConnectTimeout)
+	reply, err := sc.nc.Request(sc.subRequests, b, sc.opts.ConnectTimeout)
 	if err != nil {
 		sub.inboxSub.Unsubscribe()
 		if err == nats.ErrTimeout {
@@ -408,7 +409,7 @@ func (sub *subscription) closeOrUnsubscribe(doClose bool) error {
 	sub.Unlock()
 
 	sc.Lock()
-	if sc.nc == nil {
+	if sc.closed {
 		sc.Unlock()
 		return ErrConnectionClosed
 	}
@@ -422,11 +423,9 @@ func (sub *subscription) closeOrUnsubscribe(doClose bool) error {
 			return ErrNoServerSupport
 		}
 	}
-
-	// Snapshot connection to avoid data race, since the connection may be
-	// closing while we try to send the request
-	nc := sc.nc
 	sc.Unlock()
+
+	// sc.nc is immutable and never nil once connection is created.
 
 	usr := &pb.UnsubscribeRequest{
 		ClientID: sc.clientID,
@@ -434,7 +433,7 @@ func (sub *subscription) closeOrUnsubscribe(doClose bool) error {
 		Inbox:    sub.ackInbox,
 	}
 	b, _ := usr.Marshal()
-	reply, err := nc.Request(reqSubject, b, sc.opts.ConnectTimeout)
+	reply, err := sc.nc.Request(reqSubject, b, sc.opts.ConnectTimeout)
 	if err != nil {
 		if err == nats.ErrTimeout {
 			if doClose {
@@ -486,16 +485,15 @@ func (msg *Msg) Ack() error {
 	if sc == nil {
 		return ErrBadSubscription
 	}
-	// Get nc from the connection (needs locking to avoid race)
-	sc.RLock()
-	nc := sc.nc
-	sc.RUnlock()
-	if nc == nil {
-		return ErrBadConnection
-	}
+
+	// sc.nc is immutable and never nil once connection is created.
 
 	// Ack here.
 	ack := &pb.Ack{Subject: msg.Subject, Sequence: msg.Sequence}
 	b, _ := ack.Marshal()
-	return nc.Publish(ackSubject, b)
+	err := sc.nc.Publish(ackSubject, b)
+	if err == nats.ErrConnectionClosed {
+		return ErrBadConnection
+	}
+	return err
 }

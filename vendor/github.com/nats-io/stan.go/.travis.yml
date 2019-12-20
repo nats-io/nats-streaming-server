@@ -1,8 +1,8 @@
 language: go
 sudo: false
 go:
-- 1.11.x
 - 1.12.x
+- 1.13.x
 env:
 - GO111MODULE=off
 go_import_path: github.com/nats-io/stan.go
@@ -20,4 +20,4 @@ script:
 - go test -i -v ./...
 - go test -v -race ./...
 after_success:
-- if [[ "$TRAVIS_GO_VERSION" =~ 1.12 ]]; then ./scripts/cov.sh TRAVIS; fi
+- if [[ "$TRAVIS_GO_VERSION" =~ 1.13 ]]; then ./scripts/cov.sh TRAVIS; fi
