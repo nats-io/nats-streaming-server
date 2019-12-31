@@ -622,6 +622,7 @@ func TestPersistentStoreRedeliveryCbPerSub(t *testing.T) {
 			if len(sub.acksPending) == 1 {
 				good++
 			}
+			sub.Unlock()
 		}
 		return "pending message per sub", good
 	})

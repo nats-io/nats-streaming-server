@@ -3499,6 +3499,16 @@ func (s *StanServer) performDurableRedelivery(c *channel, sub *subState) {
 
 // Redeliver all outstanding messages that have expired.
 func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup bool) {
+	// If server has been shutdown, clear timer and be done (will happen only in tests)
+	s.mu.RLock()
+	shutdown := s.shutdown
+	s.mu.RUnlock()
+	if shutdown {
+		sub.Lock()
+		sub.clearAckTimer()
+		sub.Unlock()
+		return
+	}
 	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.Lock()
 	sortedPendingMsgs := sub.makeSortedPendingMsgs()
@@ -5520,7 +5530,21 @@ func (s *StanServer) Shutdown() {
 	if s.partitions != nil {
 		s.partitions.shutdown()
 	}
+	var channels map[string]*channel
+	if s.channels != nil {
+		channels = s.channels.getAll()
+	}
 	s.mu.Unlock()
+
+	// Stop all redelivery timers.
+	for _, c := range channels {
+		subs := c.ss.getAllSubs()
+		for _, sub := range subs {
+			sub.Lock()
+			sub.clearAckTimer()
+			sub.Unlock()
+		}
+	}
 
 	// Make sure the StoreIOLoop returns before closing the Store
 	if waitForIOStoreLoop {

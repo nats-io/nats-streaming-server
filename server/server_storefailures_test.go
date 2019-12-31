@@ -345,6 +345,9 @@ func TestDeleteSubFailures(t *testing.T) {
 	if err := sc.Publish("foo", []byte("hello")); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
+	if err := Wait(ch); err != nil {
+		t.Fatal("Did not get our message")
+	}
 	// Create 2 more durable queue subs
 	dqsub2, err := sc.QueueSubscribe("foo", "dqueue", func(_ *stan.Msg) {},
 		stan.DurableName("dur"))

@@ -1,8 +1,8 @@
 language: go
 sudo: false
 go:
-- 1.11.x
 - 1.12.x
+- 1.13.x
 addons:
   apt:
     packages:
@@ -30,14 +30,14 @@ script:
 - set -e
 - mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;"
 - go test -i ./...
-- if [[ "$TRAVIS_GO_VERSION" =~ 1.12 ]]; then ./scripts/cov.sh TRAVIS; else go test -failfast ./...; fi
+- if [[ "$TRAVIS_GO_VERSION" =~ 1.13 ]]; then ./scripts/cov.sh TRAVIS; else go test -v -failfast -p=1 ./...; fi
 - set +e
 
 deploy:
   provider: script
-  skip_cleanup: true
+  skip_cleanup: false
   script: curl -sL http://git.io/goreleaser | bash
   verbose: true
   on:
     tags: true
-    condition: $TRAVIS_GO_VERSION =~ 1.11
+    condition: $TRAVIS_GO_VERSION =~ 1.12

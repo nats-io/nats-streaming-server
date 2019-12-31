@@ -1019,6 +1019,7 @@ func TestGhostDurableSubs(t *testing.T) {
 	waitForNumClients(t, s, 0)
 
 	// Change store to simulate no flush on simulated crash
+	orgStore := s.store
 	s.store = &storeNoClose{Store: s.store}
 	s.Shutdown()
 
@@ -1027,6 +1028,7 @@ func TestGhostDurableSubs(t *testing.T) {
 	check(false)
 
 	sc.Close()
+	orgStore.Close()
 }
 
 func TestGetNATSOptions(t *testing.T) {
