@@ -4599,17 +4599,17 @@ func TestClusteringInstallSnapshotFailure(t *testing.T) {
 	sc := NewDefaultConnection(t)
 	defer sc.Close()
 
+	follower := followers[0]
 	for ns := 0; ns < 2; ns++ {
 		for i := 0; i < 25; i++ {
 			sc.Publish(fmt.Sprintf("foo.%d", ns*25+i), []byte("hello"))
 		}
-		if err := s2.raft.Snapshot().Error(); err != nil {
+		if err := follower.raft.Snapshot().Error(); err != nil {
 			t.Fatalf("Error during snapshot: %v", err)
 		}
 	}
 
 	// Start by shuting down one of the follower
-	follower := followers[0]
 	follower.Shutdown()
 
 	remaining := followers[1]
@@ -4670,14 +4670,17 @@ func TestClusteringInstallSnapshotFailure(t *testing.T) {
 	s5 := restartSrv(follower)
 	defer s5.Shutdown()
 
-	getLeader(t, 10*time.Second, remaining, s4, s5)
+	newLeader := getLeader(t, 10*time.Second, remaining, s4, s5)
 
 	sc = NewDefaultConnection(t)
 	// explicitly close/shutdown to make test faster.
 	sc.Close()
-	s4.Shutdown()
-	s5.Shutdown()
-	remaining.Shutdown()
+	newLeader.Shutdown()
+	servers = []*StanServer{remaining, s4, s5}
+	servers = removeServer(servers, newLeader)
+	for _, s := range servers {
+		s.Shutdown()
+	}
 }
 
 func TestClusteringSubDontStallDueToMsgExpiration(t *testing.T) {
@@ -7221,6 +7224,7 @@ func TestClusteringRedeliveryCount(t *testing.T) {
 	atomic.StoreUint32(&rdlv, 0)
 	atomic.StoreInt32(&restarted, 1)
 	s1 = runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
 	getLeader(t, 10*time.Second, s1, s2, s3)
 
 	select {

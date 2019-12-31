@@ -1212,7 +1212,7 @@ func TestMonitorClusterRole(t *testing.T) {
 				t.Fatalf("Got an error unmarshalling the body: %v", err)
 			}
 			if sz.Role != test.expectedRole {
-				t.Fatalf("Expected role to be %v, gt %v", test.expectedRole, sz.Role)
+				t.Fatalf("Expected role to be %v, got %v", test.expectedRole, sz.Role)
 			}
 		})
 	}

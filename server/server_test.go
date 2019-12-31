@@ -1124,10 +1124,12 @@ func TestDontSendEmptyMsgProto(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error on connect: %v", err)
 	}
+	defer nc.Close()
 	sc, err := stan.Connect(clusterName, clientName, stan.NatsConn(nc))
 	if err != nil {
 		t.Fatalf("Error on connect: %v", err)
 	}
+	defer sc.Close()
 	// Since server is expected to crash, do not attempt to close sc
 	// because it would delay test by 2 seconds.
 
@@ -1148,8 +1150,8 @@ func TestDontSendEmptyMsgProto(t *testing.T) {
 
 	m := &pb.MsgProto{}
 	sub.Lock()
+	defer sub.Unlock()
 	s.sendMsgToSub(sub, m, false)
-	sub.Unlock()
 }
 
 func TestMsgsNotSentToSubBeforeSubReqResponse(t *testing.T) {

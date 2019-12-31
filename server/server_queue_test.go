@@ -757,7 +757,10 @@ type queueGroupStalledMsgStore struct {
 }
 
 func (s *queueGroupStalledMsgStore) Lookup(seq uint64) (*pb.MsgProto, error) {
-	s.lookupCh <- struct{}{}
+	select {
+	case s.lookupCh <- struct{}{}:
+	default:
+	}
 	return s.MsgStore.Lookup(seq)
 }
 
