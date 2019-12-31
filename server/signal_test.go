@@ -131,7 +131,7 @@ func (sc *stderrCatcher) Write(p []byte) (n int, err error) {
 }
 
 func TestSignalTrapsSIGTERM(t *testing.T) {
-	// This test requires that the
+	// This test requires that the server be installed.
 	cmd := exec.Command("nats-streaming-server")
 	sc := &stderrCatcher{}
 	cmd.Stderr = sc
@@ -144,7 +144,7 @@ func TestSignalTrapsSIGTERM(t *testing.T) {
 		if ready {
 			return nil
 		}
-		return fmt.Errorf("process not started yet")
+		return fmt.Errorf("process not started yet, make sure you `go install` first!")
 	})
 	syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
 	cmd.Wait()
