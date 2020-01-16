@@ -3831,23 +3831,22 @@ func (ms *FileMsgStore) Empty() error {
 	defer ms.Unlock()
 
 	var err error
-	// Remove/close all file slices
+	// Close all file slices
 	for sliceID, slice := range ms.files {
 		ms.fm.remove(slice.file)
 		ms.fm.remove(slice.idxFile)
 		if slice.file.handle != nil {
 			err = util.CloseFile(err, slice.file.handle)
 		}
-		if lerr := os.Remove(slice.file.name); lerr != nil && err == nil {
-			err = lerr
-		}
 		if slice.idxFile.handle != nil {
 			err = util.CloseFile(err, slice.idxFile.handle)
 		}
-		if lerr := os.Remove(slice.idxFile.name); lerr != nil && err == nil {
-			err = lerr
-		}
 		delete(ms.files, sliceID)
+	}
+	// Remove all message files (dat and idx) present
+	msgfiles, _ := filepath.Glob(filepath.Join(ms.fm.rootDir, ms.channelName, msgFilesPrefix+"*.*"))
+	for _, f := range msgfiles {
+		os.Remove(f)
 	}
 	// Reset generic counters
 	ms.empty()
