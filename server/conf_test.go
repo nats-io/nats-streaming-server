@@ -227,6 +227,9 @@ func TestParseConfig(t *testing.T) {
 			t.Fatalf("Expected peer %q, got %q", peers[i], p)
 		}
 	}
+	if !opts.Clustering.ProceedOnRestoreFailure {
+		t.Fatalf("Expected ProceedOnRestoreFailure to be true, got false")
+	}
 	if opts.Clustering.RaftLogPath != "/path/to/log" {
 		t.Fatalf("Expected RaftLogPath to be %q, got %q", "/path/to/log", opts.Clustering.RaftLogPath)
 	}
@@ -472,6 +475,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "cluster:{log_snapshots:false}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{trailing_logs:false}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{sync:1}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{proceed_on_restore_failure:123}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{raft_logging:1}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{raft_heartbeat_timeout:123}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{raft_heartbeat_timeout:\"not_a_time\"}", wrongTimeErr)
