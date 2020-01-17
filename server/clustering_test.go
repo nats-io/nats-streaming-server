@@ -6406,6 +6406,11 @@ func TestClusteringRestoreSnapshotMsgsBailIfNoLeader(t *testing.T) {
 			t.Fatalf(e.Error())
 		}
 	}
+
+	// Now restart it with an option to force start...
+	s3sOpts.Clustering.ProceedOnRestoreFailure = true
+	s3 = runServerWithOpts(t, s3sOpts, nil)
+	s3.Shutdown()
 }
 
 func TestClusteringSQLMsgStoreFlushed(t *testing.T) {

@@ -287,6 +287,11 @@ func parseCluster(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.Clustering.Sync = v.(bool)
+		case "proceed_on_restore_failure":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.Clustering.ProceedOnRestoreFailure = v.(bool)
 		case "raft_logging":
 			if err := checkType(k, reflect.Bool, v); err != nil {
 				return err
@@ -646,6 +651,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.Int64Var(&sopts.Clustering.TrailingLogs, "cluster_trailing_logs", DefaultTrailingLogs, "stan.Clustering.TrailingLogs")
 	fs.BoolVar(&sopts.Clustering.Sync, "cluster_sync", false, "stan.Clustering.Sync")
 	fs.BoolVar(&sopts.Clustering.RaftLogging, "cluster_raft_logging", false, "")
+	fs.BoolVar(&sopts.Clustering.ProceedOnRestoreFailure, "cluster_proceed_on_restore_failure", false, "")
 	fs.StringVar(&sopts.SQLStoreOpts.Driver, "sql_driver", "", "SQL Driver")
 	fs.StringVar(&sopts.SQLStoreOpts.Source, "sql_source", "", "SQL Data Source")
 	defSQLOpts := stores.DefaultSQLStoreOptions()

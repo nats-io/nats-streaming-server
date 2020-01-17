@@ -64,6 +64,14 @@ type ClusteringOptions struct {
 	Sync         bool     // Do a file sync after every write to the Raft log and message store.
 	RaftLogging  bool     // Enable logging of Raft library (disabled by default since really verbose).
 
+	// When a node processes a snapshot (either on startup or if falling behind) and its is
+	// not in phase with the message store's state, it is required to reconcile its state
+	// with the current leader. If it is unable, the node will fail to start or exit.
+	// If all nodes are starting and there is no way to have a leader at this point,
+	// then if this boolean is set to true, then the node will attempt to reconcile but
+	// if it can't it will still proceed.
+	ProceedOnRestoreFailure bool
+
 	// These will be set to some sane defaults. Change only if experiencing raft issues.
 	RaftHeartbeatTimeout time.Duration
 	RaftElectionTimeout  time.Duration

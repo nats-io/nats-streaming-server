@@ -398,23 +398,27 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 		// messages and fail, keep trying until a leader is avail and
 		// able to serve this node.
 		ok := false
-		for i := 0; i < restoreMsgsAttempts; i++ {
+		for i := 0; !ok && i < restoreMsgsAttempts; i++ {
 			if err := r.restoreMsgsFromSnapshot(c, sc.First, sc.Last, false); err != nil {
-				s.log.Errorf("channel %q - unable to restore messages, can't start until leader is available",
-					sc.Channel)
+				sf, sl, _ := c.store.Msgs.FirstAndLastSequence()
+				s.log.Errorf("channel %q - unable to restore messages (snapshot %v/%v, store %v/%v, cfs %v): %v",
+					sc.Channel, sc.First, sc.Last, sf, sl, atomic.LoadUint64(&c.firstSeq), err)
 				time.Sleep(restoreMsgsSleepBetweenAttempts)
 			} else {
 				ok = true
-				break
 			}
 		}
 		if !ok {
-			err = fmt.Errorf("channel %q - unable to restore messages, aborting", sc.Channel)
-			s.log.Fatalf(err.Error())
-			// In tests, we use a "dummy" logger, so process will not exit
-			// (and we would not want that anyway), so make sure we return
-			// an error.
-			return false, err
+			if s.opts.Clustering.ProceedOnRestoreFailure {
+				s.log.Errorf("channel %q - was not able to restore from the leader, proceeding anyway")
+			} else {
+				err = fmt.Errorf("channel %q - unable to restore messages, aborting", sc.Channel)
+				s.log.Fatalf(err.Error())
+				// In tests, we use a "dummy" logger, so process will not exit
+				// (and we would not want that anyway), so make sure we return
+				// an error.
+				return false, err
+			}
 		}
 		if !inNewRaftCall {
 			delete(channelsBeforeRestore, sc.Channel)
