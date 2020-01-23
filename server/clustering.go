@@ -1,4 +1,4 @@
-// Copyright 2017-2019 The NATS Authors
+// Copyright 2017-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -100,8 +100,8 @@ type replicatedSub struct {
 
 type raftFSM struct {
 	sync.Mutex
-	snapshotsOnInit int
 	server          *StanServer
+	restoreFromInit bool
 }
 
 // shutdown attempts to stop the Raft node.
@@ -297,6 +297,20 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
+	// Get through the list of channels that we have recovered from streaming store
+	// and set their corresponding UID.
+	s.channels.Lock()
+	for cname, c := range s.channels.channels {
+		id, err := store.GetChannelID(cname)
+		if err != nil {
+			s.channels.Unlock()
+			return false, err
+		}
+		c.id = id
+	}
+	s.channels.Unlock()
+
 	cacheStore, err := raft.NewLogCache(s.opts.Clustering.LogCacheSize, store)
 	if err != nil {
 		store.Close()
@@ -309,7 +323,7 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 	if runningInTests {
 		config.ElectionTimeout = 100 * time.Millisecond
 		config.HeartbeatTimeout = 100 * time.Millisecond
-		config.LeaderLeaseTimeout = 50 * time.Millisecond
+		config.LeaderLeaseTimeout = 100 * time.Millisecond
 	} else {
 		if s.opts.Clustering.RaftHeartbeatTimeout == 0 {
 			s.opts.Clustering.RaftHeartbeatTimeout = defaultRaftHBTimeout
@@ -359,9 +373,15 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 	config.NotifyCh = raftNotifyCh
 
 	fsm := &raftFSM{server: s}
-	fsm.Lock()
-	fsm.snapshotsOnInit = len(sl)
-	fsm.Unlock()
+	// We want to know in snapshot.go:Restore() if we are called from NewRaft() or
+	// at runtime when catching up with the leader. To do so we will set this boolean
+	// if there were more than one snapshot before the call. The boolean will be cleared
+	// in Restore() itself.
+	if len(sl) > 0 {
+		fsm.Lock()
+		fsm.restoreFromInit = true
+		fsm.Unlock()
+	}
 	s.raft.fsm = fsm
 	node, err := raft.NewRaft(config, fsm, cacheStore, store, snapshotStore, transport)
 	if err != nil {
@@ -513,40 +533,42 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 	switch op.OpType {
 	case spb.RaftOperation_Publish:
 		// Message replication.
-		var (
-			c   *channel
-			err error
-		)
-		for _, msg := range op.PublishBatch.Messages {
-			// This is a batch for a given channel, so lookup channel once.
-			if c == nil {
-				c, err = s.lookupOrCreateChannel(msg.Subject)
-				// That should not be the case, but if it happens,
-				// just bail out.
-				if err == ErrChanDelInProgress {
-					return nil
-				} else if err == nil && !c.lSeqChecked {
-					// If msg.Sequence is > 1, then make sure we have no gap.
-					if msg.Sequence > 1 {
-						// We pass `1` for the `first` sequence. The function we call
-						// will do the right thing when it comes to restore possible
-						// missing messages.
-						err = s.raft.fsm.restoreMsgsFromSnapshot(c, 1, msg.Sequence-1, true)
-					}
-					if err == nil {
-						c.lSeqChecked = true
-					}
+		if len(op.PublishBatch.Messages) == 0 {
+			return nil
+		}
+		// This is a batch for a given channel, so lookup channel once.
+		msg := op.PublishBatch.Messages[0]
+		c, err := r.lookupOrCreateChannel(msg.Subject, op.ChannelID)
+		if err != nil {
+			goto FATAL_ERROR
+		}
+		// `c` will be nil if the existing channel has an ID > than op.ChannelID.
+		// This will be the case in RAFT log replay if we have several "versions"
+		// of the same channel. In that case, simply ignore the log replay.
+		if c == nil {
+			return nil
+		}
+		if !c.lSeqChecked {
+			// If msg.Sequence is > 1, then make sure we have no gap.
+			if msg.Sequence > 1 {
+				// We pass `1` for the `first` sequence. The function we call
+				// will do the right thing when it comes to restore possible
+				// missing messages.
+				if err = s.raft.fsm.restoreMsgsFromSnapshot(c, 1, msg.Sequence-1, true); err != nil {
+					goto FATAL_ERROR
 				}
 			}
-			if err == nil {
-				_, err = c.store.Msgs.Store(msg)
-			}
-			if err != nil {
-				panic(fmt.Errorf("failed to store replicated message %d on channel %s: %v",
-					msg.Sequence, msg.Subject, err))
+			c.lSeqChecked = true
+		}
+		for _, msg = range op.PublishBatch.Messages {
+			if _, err = c.store.Msgs.Store(msg); err != nil {
+				goto FATAL_ERROR
 			}
 		}
 		return c.store.Msgs.Flush()
+	FATAL_ERROR:
+		panic(fmt.Errorf("failed to store replicated message %d on channel %s: %v",
+			msg.Sequence, msg.Subject, err))
 	case spb.RaftOperation_Connect:
 		// Client connection create replication.
 		return s.processConnect(op.ClientConnect.Request, op.ClientConnect.Refresh)
@@ -555,7 +577,15 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 		return s.closeClient(op.ClientDisconnect.ClientID)
 	case spb.RaftOperation_Subscribe:
 		// Subscription replication.
-		sub, err := s.processSub(nil, op.Sub.Request, op.Sub.AckInbox, op.Sub.ID)
+		c, err := r.lookupOrCreateChannel(op.Sub.Request.Subject, op.ChannelID)
+		if c == nil && err == nil {
+			err = fmt.Errorf("unable to process subscription on channel %q, wrong ID %v",
+				op.Sub.Request.Subject, op.ChannelID)
+		}
+		if err != nil {
+			return &replicatedSub{sub: nil, err: err}
+		}
+		sub, err := s.processSub(c, op.Sub.Request, op.Sub.AckInbox, op.Sub.ID)
 		return &replicatedSub{sub: sub, err: err}
 	case spb.RaftOperation_RemoveSubscription:
 		fallthrough
@@ -572,9 +602,75 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 		}
 		return nil
 	case spb.RaftOperation_DeleteChannel:
+		// Delete only if the channel exists and has the same ID.
+		if r.lookupChannel(op.Channel, op.ChannelID) == nil {
+			return nil
+		}
 		s.processDeleteChannel(op.Channel)
 		return nil
 	default:
 		panic(fmt.Sprintf("unknown op type %s", op.OpType))
 	}
+}
+
+// This returns a channel object only if it is found with the proper ID.
+func (r *raftFSM) lookupChannel(name string, id uint64) *channel {
+	s := r.server
+	cs := s.channels
+	cs.RLock()
+	defer cs.RUnlock()
+
+	c := cs.channels[name]
+	// Consider no ID (either in channel or from param) to be a match.
+	if c != nil && (id == 0 || c.id == 0 || c.id == id) {
+		return c
+	}
+	// No channel, or wrong ID
+	return nil
+}
+
+// Returns the channel with this name and ID.
+// If channel exists and has an ID that is greater than the given `id`, then
+// this function will return `nil` to indicate that the streaming version
+// is more recent than the asked version. Otherwise, if `id` is greater,
+// the channel is first deleted then recreated with the given `id`.
+//
+// Note that to support existing streaming and RAFT stores, the given `id` may
+// be empty when processing existing RAFT snapshots/logs, or the streaming
+// channel may not have an ID. In any of those cases, the existing channel
+// object is returned.
+func (r *raftFSM) lookupOrCreateChannel(name string, id uint64) (*channel, error) {
+	s := r.server
+	cs := s.channels
+	cs.Lock()
+	defer cs.Unlock()
+
+	c := cs.channels[name]
+	if c != nil {
+		// Consider no ID (either in channel or from param) to be a match.
+		if id == 0 || c.id == 0 || c.id == id {
+			return c, nil
+		}
+		// If this channel is a more recent version than the asked `id` return
+		// nil to indicate this to the caller.
+		if c.id > id {
+			return nil, nil
+		}
+		// Here the existing channel has an older ID (version) so replace.
+		err := cs.store.DeleteChannel(name)
+		if err == nil {
+			err = s.raft.store.DeleteChannelID(name)
+		}
+		if err != nil {
+			s.log.Errorf("Error deleting channel %q: %v", name, err)
+			if s.isLeader() && c.activity != nil {
+				c.activity.deleteInProgress = false
+				c.startDeleteTimer()
+			}
+			return nil, err
+		}
+		delete(cs.channels, name)
+	}
+	// Channel does exist or has been deleted. Create now with given ID.
+	return cs.createChannelLocked(s, name, id)
 }

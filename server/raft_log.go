@@ -1,4 +1,4 @@
-// Copyright 2018 The NATS Authors
+// Copyright 2018-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -31,6 +31,7 @@ import (
 var (
 	logsBucket = []byte("logs")
 	confBucket = []byte("conf")
+	chanBucket = []byte("channels")
 )
 
 // When a key is not found. Raft checks the error text, and it needs to be exactly "not found"
@@ -102,6 +103,9 @@ func (r *raftLog) init() error {
 		return err
 	}
 	if _, err := tx.CreateBucketIfNotExists(logsBucket); err != nil {
+		return err
+	}
+	if _, err := tx.CreateBucketIfNotExists(chanBucket); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -310,13 +314,17 @@ func (r *raftLog) deleteRange(min, max uint64) error {
 
 // Set implements the Stable interface
 func (r *raftLog) Set(k, v []byte) error {
+	return r.set(confBucket, k, v)
+}
+
+func (r *raftLog) set(bucketName, k, v []byte) error {
 	r.Lock()
 	tx, err := r.conn.Begin(true)
 	if err != nil {
 		r.Unlock()
 		return err
 	}
-	bucket := tx.Bucket(confBucket)
+	bucket := tx.Bucket(bucketName)
 	err = bucket.Put(k, v)
 	if err != nil {
 		tx.Rollback()
@@ -329,6 +337,10 @@ func (r *raftLog) Set(k, v []byte) error {
 
 // Get implements the Stable interface
 func (r *raftLog) Get(k []byte) ([]byte, error) {
+	return r.get(confBucket, k)
+}
+
+func (r *raftLog) get(bucketName, k []byte) ([]byte, error) {
 	r.RLock()
 	tx, err := r.conn.Begin(false)
 	if err != nil {
@@ -336,7 +348,7 @@ func (r *raftLog) Get(k []byte) ([]byte, error) {
 		return nil, err
 	}
 	var v []byte
-	bucket := tx.Bucket(confBucket)
+	bucket := tx.Bucket(bucketName)
 	val := bucket.Get(k)
 	if val == nil {
 		err = errKeyNotFound
@@ -351,18 +363,57 @@ func (r *raftLog) Get(k []byte) ([]byte, error) {
 
 // SetUint64 implements the Stable interface
 func (r *raftLog) SetUint64(k []byte, v uint64) error {
+	return r.setUint64(confBucket, k, v)
+}
+
+func (r *raftLog) setUint64(bucket, k []byte, v uint64) error {
 	var vbytes [8]byte
 	binary.BigEndian.PutUint64(vbytes[:], v)
-	err := r.Set(k, vbytes[:])
+	err := r.set(bucket, k, vbytes[:])
 	return err
 }
 
 // GetUint64 implements the Stable interface
 func (r *raftLog) GetUint64(k []byte) (uint64, error) {
+	return r.getUint64(confBucket, k)
+}
+
+func (r *raftLog) getUint64(bucket, k []byte) (uint64, error) {
 	var v uint64
-	vbytes, err := r.Get(k)
+	vbytes, err := r.get(bucket, k)
 	if err == nil {
 		v = binary.BigEndian.Uint64(vbytes)
 	}
 	return v, err
+}
+
+func (r *raftLog) SetChannelID(name string, id uint64) error {
+	return r.setUint64(chanBucket, []byte(name), id)
+}
+
+func (r *raftLog) DeleteChannelID(name string) error {
+	r.Lock()
+	tx, err := r.conn.Begin(true)
+	if err != nil {
+		r.Unlock()
+		return err
+	}
+	bucket := tx.Bucket(chanBucket)
+	err = bucket.Delete([]byte(name))
+	if err != nil {
+		tx.Rollback()
+	} else {
+		err = tx.Commit()
+	}
+	r.Unlock()
+	return err
+}
+
+func (r *raftLog) GetChannelID(name string) (uint64, error) {
+	id, err := r.getUint64(chanBucket, []byte(name))
+	if err == errKeyNotFound {
+		err = nil
+		id = 0
+	}
+	return id, err
 }

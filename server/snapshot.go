@@ -1,4 +1,4 @@
-// Copyright 2017-2019 The NATS Authors
+// Copyright 2017-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -187,6 +187,7 @@ func (s *serverSnapshot) snapshotChannels(snap *spb.RaftSnapshot) error {
 			First:     first,
 			Last:      last,
 			NextSubID: c.nextSubID,
+			ChannelID: c.id,
 		}
 
 		// Start with count of all plain subs...
@@ -258,60 +259,32 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 
 	shouldSnapshot := false
 	defer func() {
-		if retErr == nil && shouldSnapshot {
-			s.wg.Add(1)
-			go func() {
-				defer s.wg.Done()
-				// s.raft.Snapshot() is actually s.raft.Raft.Snapshot()
-				// (our raft structure embeds Raft). But it is set after
-				// the call to NewRaft() - which invokes this function on
-				// startup. However, this runs under the server's lock, so
-				// simply grab the lock to ensure that Snapshot() will be
-				// able to execute.
-				// Also don't use startGoRoutine() here since it needs the
-				// server lock, which we already have.
-				s.mu.Lock()
-				s.raft.Snapshot().Error()
-				s.mu.Unlock()
-			}()
+		if retErr == nil {
+			s.log.Noticef("done restoring from snapshot")
+			r.restoreFromInit = false
+			if shouldSnapshot {
+				s.wg.Add(1)
+				go func() {
+					defer s.wg.Done()
+					// s.raft.Snapshot() is actually s.raft.Raft.Snapshot()
+					// (our raft structure embeds Raft). But it is set after
+					// the call to NewRaft() - which invokes this function on
+					// startup. However, this runs under the server's lock, so
+					// simply grab the lock to ensure that Snapshot() will be
+					// able to execute.
+					// Also don't use startGoRoutine() here since it needs the
+					// server lock, which we already have.
+					s.mu.Lock()
+					s.raft.Snapshot().Error()
+					s.mu.Unlock()
+				}()
+			}
+		} else {
+			s.log.Errorf("error restoring from snapshot: %v", retErr)
 		}
 	}()
 
-	// This function may be invoked directly from raft.NewRaft() when
-	// the node is initialized and if there were exisiting local snapshots,
-	// or later, when catching up with a leader. We behave differently
-	// depending on the situation. So we need to know if we are called
-	// from NewRaft().
-	//
-	// To do so, we first look at the number of local snapshots before
-	// calling NewRaft(). If the number is > 0, it means that Raft will
-	// call us within NewRaft(). Raft will restore the latest snapshot
-	// first, and only in case of Restore() returning an error will move
-	// to the next (earliest) one. When there are none and Restore() still
-	// returns an error raft.NewRaft() will return an error.
-	//
-	// So on error we decrement the number of snapshots, on success we set
-	// it to 0. This means that next time Restore() is invoked, we know it
-	// is restoring from a leader, not from the local snapshots.
-	inNewRaftCall := r.snapshotsOnInit != 0
-	if inNewRaftCall {
-		defer func() {
-			if retErr != nil {
-				r.snapshotsOnInit--
-			} else {
-				r.snapshotsOnInit = 0
-			}
-		}()
-	} else {
-		s.log.Noticef("restoring from snapshot")
-		defer func() {
-			if retErr == nil {
-				s.log.Noticef("done restoring from snapshot")
-			} else {
-				s.log.Errorf("error restoring from snapshot: %v", retErr)
-			}
-		}()
-	}
+	s.log.Noticef("restoring from snapshot")
 
 	// We need to drop current state. The server will recover from snapshot
 	// and all newer Raft entry logs (basically the entire state is being
@@ -356,7 +329,7 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 		return err
 	}
 	var err error
-	shouldSnapshot, err = r.restoreChannelsFromSnapshot(serverSnap, inNewRaftCall)
+	shouldSnapshot, err = r.restoreChannelsFromSnapshot(serverSnap, r.restoreFromInit)
 	return err
 }
 
@@ -380,10 +353,25 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 		channelsBeforeRestore = s.channels.getAll()
 	}
 	for _, sc := range serverSnap.Channels {
-		c, err := s.lookupOrCreateChannel(sc.Channel)
-		if err != nil {
-			return false, err
+		var c *channel
+		var err error
+		if inNewRaftCall {
+			// When starting the node and recovering from a local snapshot,
+			// ignore if the channel did not exist in our streaming store
+			// or if its UID does not match the one in the snapshot operation.
+			if c = r.lookupChannel(sc.Channel, sc.ChannelID); c == nil {
+				continue
+			}
+		} else {
+			// When restoring from a snapshot at runtime, this function will
+			// return the channel if it has the same ID, otherwise will create
+			// the channel (will first delete the old one if exits).
+			c, err = r.lookupOrCreateChannel(sc.Channel, sc.ChannelID)
+			if err != nil {
+				return false, err
+			}
 		}
+		s.log.Noticef("restoring channel %q from snapshot", sc.Channel)
 		// Keep track of first/last sequence in this channel's snapshot.
 		// It can help to detect that all messages in the leader have expired
 		// and this is what we should report/use as our store first/last.
@@ -403,7 +391,11 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 				sf, sl, _ := c.store.Msgs.FirstAndLastSequence()
 				s.log.Errorf("channel %q - unable to restore messages (snapshot %v/%v, store %v/%v, cfs %v): %v",
 					sc.Channel, sc.First, sc.Last, sf, sl, atomic.LoadUint64(&c.firstSeq), err)
-				time.Sleep(restoreMsgsSleepBetweenAttempts)
+				select {
+				case <-time.After(restoreMsgsSleepBetweenAttempts):
+				case <-s.shutdownCh:
+					return false, fmt.Errorf("server shutting down")
+				}
 			} else {
 				ok = true
 			}

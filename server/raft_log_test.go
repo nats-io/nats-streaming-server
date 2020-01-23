@@ -1,4 +1,4 @@
-// Copyright 2018 The NATS Authors
+// Copyright 2018-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -436,4 +436,79 @@ func TestRaftLogMultipleCiphers(t *testing.T) {
 			t.Fatalf("Expected message %q, got %q", payloads[i], l.Data)
 		}
 	}
+}
+
+func TestRaftLogChannelID(t *testing.T) {
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	store := createTestRaftLog(t, false, 0)
+	defer store.Close()
+
+	storeID := func(name string, id uint64) {
+		t.Helper()
+		if err := store.SetChannelID(name, id); err != nil {
+			t.Fatalf("Error storing channel ID: %v", err)
+		}
+	}
+	getID := func(name string, expected uint64) {
+		t.Helper()
+		if id, err := store.GetChannelID(name); err != nil || id != expected {
+			t.Fatalf("Expected ID for %q to be %v, got %v (err=%v)", name, expected, id, err)
+		}
+	}
+	deleteID := func(name string) {
+		t.Helper()
+		if err := store.DeleteChannelID(name); err != nil {
+			t.Fatalf("Error deleting channel %q id: %v", name, err)
+		}
+	}
+
+	// Store different channels
+	storeID("foo", 1)
+	storeID("bar", 2)
+
+	// Get returns what is expected
+	getID("foo", 1)
+	getID("bar", 2)
+	// Get for unknown channel returns 0, no error
+	getID("baz", 0)
+
+	// Update the ID
+	storeID("foo", 3)
+	// Check that new value is returned
+	getID("foo", 3)
+
+	// Delete a channel
+	deleteID("bar")
+	// and make sure that its ID is now returned as empty but no error
+	getID("bar", 0)
+
+	// Try to delete a channel that does not exist should not report an error
+	deleteID("baz")
+
+	store.Close()
+	store = createTestRaftLog(t, false, 0)
+	defer store.Close()
+
+	// Make sure that last ID is returned
+	getID("foo", 3)
+
+	// Recreate this channel with new ID
+	storeID("bar", 4)
+	// ID is as expected
+	getID("bar", 4)
+
+	// Delete all channels
+	deleteID("foo")
+	deleteID("bar")
+
+	store.Close()
+	store = createTestRaftLog(t, false, 0)
+	defer store.Close()
+
+	// No ID returned
+	getID("foo", 0)
+	getID("bar", 0)
+	getID("baz", 0)
 }
