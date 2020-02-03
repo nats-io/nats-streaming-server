@@ -298,7 +298,7 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 		return false, err
 	}
 
-	// Get through the list of channels that we have recovered from streaming store
+	// Go through the list of channels that we have recovered from streaming store
 	// and set their corresponding UID.
 	s.channels.Lock()
 	for cname, c := range s.channels.channels {

@@ -585,8 +585,8 @@ func (s *StanServer) subToSnapshotRestoreRequests() error {
 				}
 				sendingTheFirstAvail = msg != nil
 				if sendingTheFirstAvail && msg.Sequence < seq {
-					// it could be that a follower tries to restore from
-					// snapshot of previous version of same channel name
+					// It could be that a follower tries to restore from
+					// a snapshot of previous version of the same channel name
 					// that had more messages than current channel. So
 					// bail out if the first avail is below the last seq
 					// we dealt with.

@@ -358,14 +358,14 @@ func (r *raftFSM) restoreChannelsFromSnapshot(serverSnap *spb.RaftSnapshot, inNe
 		if inNewRaftCall {
 			// When starting the node and recovering from a local snapshot,
 			// ignore if the channel did not exist in our streaming store
-			// or if its UID does not match the one in the snapshot operation.
+			// or if its ID does not match the one in the snapshot operation.
 			if c = r.lookupChannel(sc.Channel, sc.ChannelID); c == nil {
 				continue
 			}
 		} else {
 			// When restoring from a snapshot at runtime, this function will
 			// return the channel if it has the same ID, otherwise will create
-			// the channel (will first delete the old one if exits).
+			// the channel (will first delete the old one if it exits).
 			c, err = r.lookupOrCreateChannel(sc.Channel, sc.ChannelID)
 			if err != nil {
 				return false, err
