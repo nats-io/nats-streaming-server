@@ -622,6 +622,8 @@ func (r *raftFSM) lookupChannel(name string, id uint64) *channel {
 
 	c := cs.channels[name]
 	// Consider no ID (either in channel or from param) to be a match.
+	// See note in raftFSM.lookupOrCreateChannel() regarding id == 0
+	// when dealing with channels created by older versions.
 	if c != nil && (id == 0 || c.id == 0 || c.id == id) {
 		return c
 	}
@@ -648,6 +650,7 @@ func (r *raftFSM) lookupOrCreateChannel(name string, id uint64) (*channel, error
 	c := cs.channels[name]
 	if c != nil {
 		// Consider no ID (either in channel or from param) to be a match.
+		// See note above regarding meaning of id == 0.
 		if id == 0 || c.id == 0 || c.id == id {
 			return c, nil
 		}
