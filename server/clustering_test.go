@@ -1,4 +1,4 @@
-// Copyright 2017-2019 The NATS Authors
+// Copyright 2017-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -208,42 +208,69 @@ type msg struct {
 
 func verifyChannelConsistency(t *testing.T, channel string, timeout time.Duration,
 	expectedFirstSeq, expectedLastSeq uint64, expectedMsgs map[uint64]msg, servers ...*StanServer) {
-	deadline := time.Now().Add(timeout)
-OUTER:
-	for time.Now().Before(deadline) {
+	t.Helper()
+	waitFor(t, timeout, 15*time.Millisecond, func() error {
 		for _, server := range servers {
+			nodeID := server.opts.Clustering.NodeID
 			c := server.channels.get(channel)
 			if c == nil {
-				time.Sleep(15 * time.Millisecond)
-				continue OUTER
+				return fmt.Errorf("node %q - channel %q not yet present",
+					nodeID, channel)
 			}
 			store := c.store.Msgs
 			first, last, err := store.FirstAndLastSequence()
 			if err != nil {
-				stackFatalf(t, "Error getting sequence numbers: %v", err)
+				return fmt.Errorf("node %q - error getting sequence numbers: %v",
+					nodeID, err)
 			}
 			if first != expectedFirstSeq {
-				time.Sleep(15 * time.Millisecond)
-				continue OUTER
+				return fmt.Errorf("node %q - expected store first sequence to be %v, got %v",
+					nodeID, expectedFirstSeq, first)
 			}
 			if last != expectedLastSeq {
-				time.Sleep(15 * time.Millisecond)
-				continue OUTER
+				return fmt.Errorf("node %q - expected store last sequence to be %v, got %v",
+					nodeID, expectedLastSeq, last)
 			}
 			for i := first; i <= last; i++ {
 				msg, err := store.Lookup(i)
 				if err != nil {
-					stackFatalf(t, "Error getting message %d: %v", i, err)
+					return fmt.Errorf("node %q - error getting message %v: %v",
+						nodeID, i, err)
 				}
 				if msg == nil {
-					stackFatalf(t, "No stored message for i=%v expected=%v", i, expectedMsgs[i])
+					return fmt.Errorf("node %q - expected stored message seq %v to be %q, got nothing",
+						nodeID, expectedMsgs[i].sequence, expectedMsgs[i].data)
 				}
-				assertMsg(t, *msg, expectedMsgs[i].data, expectedMsgs[i].sequence)
+				if msg.Sequence != expectedMsgs[i].sequence {
+					return fmt.Errorf("node %q - expected message sequence to be %v, got: %v",
+						nodeID, expectedMsgs[i].sequence, msg.Sequence)
+				}
+				if !bytes.Equal(msg.Data, expectedMsgs[i].data) {
+					return fmt.Errorf("node %q - expected message data to be %q, got: %q",
+						nodeID, expectedMsgs[i].data, msg.Data)
+				}
 			}
 		}
-		return
+		return nil
+	})
+}
+
+func restartServers(t *testing.T, servers []*StanServer) []*StanServer {
+	t.Helper()
+	for _, s := range servers {
+		s.Shutdown()
 	}
-	stackFatalf(t, "Message stores are inconsistent")
+	newServers := make([]*StanServer, len(servers))
+	for i, s := range servers {
+		newServers[i] = runServerWithOpts(t, s.opts, nil)
+	}
+	return newServers
+}
+
+func shutdownServers(servers []*StanServer) {
+	for _, s := range servers {
+		s.Shutdown()
+	}
 }
 
 func removeServer(servers []*StanServer, s *StanServer) []*StanServer {
@@ -1733,7 +1760,9 @@ func verifyChannelExist(t *testing.T, s *StanServer, channel string, expectedToE
 	stackFatalf(t, "Channel %q was %s to exist on server %v", channel, expStr, s.info.NodeID)
 }
 
-func TestClusteringLogSnapshotRestoreAfterChannelDeleted(t *testing.T) {
+// This test ensures that a follower deletes a channel that it had on
+// restart but that is not present in a snapshot received by the leader.
+func TestClusteringFollowerDeleteChannelNotInSnapshot(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 	cleanupRaftLog(t)
@@ -1788,6 +1817,7 @@ func TestClusteringLogSnapshotRestoreAfterChannelDeleted(t *testing.T) {
 	if err := sc.Publish(channel, expectedMsg[1].data); err != nil {
 		t.Fatalf("Error on publish: %v", err)
 	}
+	sc.Close()
 	// Wait for channel to be replicated in all servers
 	verifyChannelConsistency(t, channel, 5*time.Second, 1, 1, expectedMsg, servers...)
 
@@ -1818,14 +1848,242 @@ func TestClusteringLogSnapshotRestoreAfterChannelDeleted(t *testing.T) {
 
 	getLeader(t, 10*time.Second, servers...)
 
-	// Produce some activity to speed up snapshot recovery
-	sc.Publish("bar", []byte("hello"))
-
-	// The follower will have recovered foo, but then from
-	// the snapshot should realize that the channel no longer
-	// exits and should delete it.
+	// The follower will have recovered foo (from streaming store), but then from
+	// the snapshot should realize that the channel no longer exits and should delete it.
 	verifyChannelExist(t, follower, channel, false, 5*time.Second)
+}
+
+// This test ensures that if the whole cluster is restarted and each node
+// has a snapshot that references a channel with several messages that has been
+// since deleted, they correctly ignore this snapshot and not try to restore
+// from the leader. Then send a single message on the same channel name (but
+// really this is a new channel) and the cluster is again restarted, the
+// channel content is as expected.
+func TestClusteringRestartClusterWithSnapshotOfDeletedChannel(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	restoreMsgsAttempts = 2
+	restoreMsgsRcvTimeout = 50 * time.Millisecond
+	restoreMsgsSleepBetweenAttempts = 0
+	defer func() {
+		restoreMsgsAttempts = defaultRestoreMsgsAttempts
+		restoreMsgsRcvTimeout = defaultRestoreMsgsRcvTimeout
+		restoreMsgsSleepBetweenAttempts = defaultRestoreMsgsSleepBetweenAttempts
+	}()
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	maxInactivity := 250 * time.Millisecond
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.TrailingLogs = 0
+	s1sOpts.MaxInactivity = maxInactivity
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.TrailingLogs = 0
+	s2sOpts.MaxInactivity = maxInactivity
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.Clustering.TrailingLogs = 0
+	s3sOpts.MaxInactivity = maxInactivity
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+
+	// Wait for leader to be elected.
+	getLeader(t, 10*time.Second, servers...)
+
+	// Create a client connection.
+	sc, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Send a message, which will create the channel
+	channel := "foo"
+	expectedMsg := make(map[uint64]msg)
+	expectedMsg[1] = msg{sequence: 1, data: []byte("first")}
+	expectedMsg[2] = msg{sequence: 2, data: []byte("second")}
+	expectedMsg[3] = msg{sequence: 3, data: []byte("third")}
+	for i := 1; i < 4; i++ {
+		if err := sc.Publish(channel, expectedMsg[uint64(i)].data); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
 	sc.Close()
+	// Wait for channel to be replicated in all servers
+	verifyChannelConsistency(t, channel, 5*time.Second, 1, 3, expectedMsg, servers...)
+
+	// Perform snapshot on all servers.
+	for _, s := range servers {
+		if err := s.raft.Snapshot().Error(); err != nil {
+			t.Fatalf("Error during snapshot: %v", err)
+		}
+	}
+
+	// Wait for channel to be removed due to inactivity..
+	time.Sleep(2 * maxInactivity)
+
+	// Restart all servers
+	servers = restartServers(t, servers)
+	defer shutdownServers(servers)
+	getLeader(t, 10*time.Second, servers...)
+
+	// Now send a single message. The channel will be recreated.
+	sc, err = stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	expectedMsg = make(map[uint64]msg)
+	expectedMsg[1] = msg{sequence: 1, data: []byte("new first")}
+	if err := sc.Publish(channel, expectedMsg[1].data); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	sc.Close()
+
+	// Wait for channel to be replicated in all servers
+	verifyChannelConsistency(t, channel, 5*time.Second, 1, 1, expectedMsg, servers...)
+
+	// Shutdown all servers and restart them
+	servers = restartServers(t, servers)
+	defer shutdownServers(servers)
+	// Make sure they succeed
+	getLeader(t, 10*time.Second, servers...)
+	verifyChannelConsistency(t, channel, 5*time.Second, 1, 1, expectedMsg, servers...)
+}
+
+// This test ensures that a follower that had been stopped after holding
+// onto a channel with some messages, properly restores if receiving a snapshot
+// from the leader regarding a channel with the same name. The follower
+// should realize that the snapshot is for a different incarnation of the channel
+// that is has and delete it prior to the restore.
+func TestClusteringFollowerDeleteOldChannelPriorToSnapshotRestore(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	restoreMsgsAttempts = 2
+	restoreMsgsRcvTimeout = 50 * time.Millisecond
+	restoreMsgsSleepBetweenAttempts = 0
+	defer func() {
+		restoreMsgsAttempts = defaultRestoreMsgsAttempts
+		restoreMsgsRcvTimeout = defaultRestoreMsgsRcvTimeout
+		restoreMsgsSleepBetweenAttempts = defaultRestoreMsgsSleepBetweenAttempts
+	}()
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	maxInactivity := 250 * time.Millisecond
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.TrailingLogs = 0
+	s1sOpts.MaxInactivity = maxInactivity
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.TrailingLogs = 0
+	s2sOpts.MaxInactivity = maxInactivity
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.Clustering.TrailingLogs = 0
+	s3sOpts.MaxInactivity = maxInactivity
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	// Create a client connection.
+	sc, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Send a message, which will create the channel
+	channel := "foo"
+	expectedMsg := make(map[uint64]msg)
+	expectedMsg[1] = msg{sequence: 1, data: []byte("1")}
+	expectedMsg[2] = msg{sequence: 2, data: []byte("2")}
+	expectedMsg[3] = msg{sequence: 3, data: []byte("3")}
+	for i := 1; i < 4; i++ {
+		if err := sc.Publish(channel, expectedMsg[uint64(i)].data); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	// Wait for channel to be replicated in all servers
+	verifyChannelConsistency(t, channel, 5*time.Second, 1, 3, expectedMsg, servers...)
+
+	// Shutdown a follower
+	var follower *StanServer
+	for _, s := range servers {
+		if leader != s {
+			follower = s
+			break
+		}
+	}
+	servers = removeServer(servers, follower)
+	follower.Shutdown()
+
+	// Let the channel be deleted
+	time.Sleep(2 * maxInactivity)
+
+	// Now send a message that causes the channel to be recreated
+	expectedMsg = make(map[uint64]msg)
+	expectedMsg[1] = msg{sequence: 1, data: []byte("4")}
+	if err := sc.Publish(channel, expectedMsg[1].data); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	verifyChannelConsistency(t, channel, 5*time.Second, 1, 1, expectedMsg, servers...)
+
+	// Perform snapshot on the leader.
+	if err := leader.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error during snapshot: %v", err)
+	}
+
+	// Now send another message then a sub to prevent deletion
+	expectedMsg[2] = msg{sequence: 2, data: []byte("5")}
+	if err := sc.Publish(channel, expectedMsg[2].data); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	verifyChannelConsistency(t, channel, 5*time.Second, 1, 2, expectedMsg, servers...)
+	sc.Subscribe(channel, func(_ *stan.Msg) {}, stan.DeliverAllAvailable())
+
+	// Now restart the follower...
+	follower = runServerWithOpts(t, follower.opts, nil)
+	defer follower.Shutdown()
+	servers = append(servers, follower)
+	getLeader(t, 10*time.Second, servers...)
+
+	// Now check content of channel on the follower.
+	verifyChannelConsistency(t, channel, 5*time.Second, 1, 2, expectedMsg, follower)
 }
 
 func TestClusteringLogSnapshotRestoreOnInit(t *testing.T) {
@@ -1869,10 +2127,10 @@ func TestClusteringLogSnapshotRestoreOnInit(t *testing.T) {
 	getLeader(t, 10*time.Second, s)
 
 	s.raft.fsm.Lock()
-	soi := s.raft.fsm.snapshotsOnInit
+	rfi := s.raft.fsm.restoreFromInit
 	s.raft.fsm.Unlock()
-	if soi != 0 {
-		t.Fatalf("snapshotsOnInit should be 0, got %v", soi)
+	if rfi {
+		t.Fatalf("restoreFromInit should be false, got %v", rfi)
 	}
 }
 
@@ -3353,6 +3611,88 @@ func TestClusteringDeleteChannel(t *testing.T) {
 	assertMsg(t, *m, []byte("new"), 1)
 }
 
+func TestClusteringRaftLogReplayDoesNotDeleteLatestVersionOfChannel(t *testing.T) {
+	if persistentStoreType != stores.TypeFile {
+		t.Skip()
+	}
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	maxInactivity := 500 * time.Millisecond
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.MaxInactivity = maxInactivity
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.MaxInactivity = maxInactivity
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+	// Wait for leader to be elected.
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	// Create a client connection.
+	sc, err := stan.Connect(clusterName, clientName)
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	// Send a message, which will create the channel
+	channel := "foo"
+	if err := sc.Publish(channel, []byte("msg")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	// Wait for channel to be deleted
+	time.Sleep(2 * maxInactivity)
+
+	// Recreate by sending a 2 new messages
+	for i := 0; i < 2; i++ {
+		if err := sc.Publish(channel, []byte("msg")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	// Create a sub to prevent deletion
+	if _, err := sc.Subscribe(channel, func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	// Get the follower and add a file into the "foo" directory..
+	follower := removeServer(servers, leader)[0]
+	follower.Shutdown()
+	witnessFile := filepath.Join(follower.opts.FilestoreDir, channel, "deleted.txt")
+	if err := ioutil.WriteFile(witnessFile, []byte("if present, channel has not been deleted then recreated"), 0666); err != nil {
+		t.Fatalf("Error creating file: %v", err)
+	}
+	// Now restart..
+	follower = runServerWithOpts(t, follower.opts, nil)
+	defer follower.Shutdown()
+
+	getLeader(t, 5*time.Second, leader, follower)
+
+	// Verify that channel on follower has the 2 expected messages.
+	expectedMsg := make(map[uint64]msg)
+	expectedMsg[1] = msg{sequence: 1, data: []byte("msg")}
+	expectedMsg[2] = msg{sequence: 2, data: []byte("msg")}
+	verifyChannelConsistency(t, channel, 5*time.Second, 1, 2, expectedMsg, follower)
+
+	// Now check if the witness file is present..
+	if _, err := os.Stat(witnessFile); err != nil {
+		t.Fatal("Looks like the channel was deleted and then recreated")
+	}
+}
+
 func TestClusteringCrashOnRestart(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -4199,15 +4539,13 @@ func TestClusteringDeadlockOnChannelDelete(t *testing.T) {
 	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1sOpts.MaxInactivity = maxInactivity
 	s1 := runServerWithOpts(t, s1sOpts, nil)
-	// No defer in case deadlock is detected, it would
-	// prevent the print of t.Fatalf()
+	defer s1.Shutdown()
 
 	// Configure second server.
 	s2sOpts := getTestDefaultOptsForClustering("b", false)
 	s2sOpts.MaxInactivity = maxInactivity
 	s2 := runServerWithOpts(t, s2sOpts, nil)
-	// No defer in case deadlock is detected, it would
-	// prevent the print of t.Fatalf()
+	defer s2.Shutdown()
 
 	servers := []*StanServer{s1, s2}
 	// Wait for leader to be elected.
@@ -4224,36 +4562,56 @@ func TestClusteringDeadlockOnChannelDelete(t *testing.T) {
 	unsubSubject := leader.info.SubClose
 	leader.mu.RUnlock()
 
+	// Create a STAN connection but we will send the subscription requests manually
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
 	req := pb.SubscriptionRequest{
-		ClientID:      "me",
+		ClientID:      clientName,
 		AckWaitInSecs: 30,
 		MaxInFlight:   1,
 	}
 
-	inboxes := make([]string, 0, 1000)
-
-	for i := 0; i < 1000; i++ {
+	total := 100
+	for i := 0; i < total; i++ {
 		leader.lookupOrCreateChannel(fmt.Sprintf("foo.%d", i))
 	}
 
 	time.Sleep(990 * time.Millisecond)
 
-	for i := 0; i < 1000; i++ {
+	reply := nats.NewInbox()
+	respSub, _ := nc.SubscribeSync(reply)
+	for i := 0; i < total; i++ {
 		req.Inbox = nats.NewInbox()
-		inboxes = append(inboxes, req.Inbox)
 		req.Subject = fmt.Sprintf("foo.%d", i)
 		b, _ := req.Marshal()
-		nc.Publish(newSubSubject, b)
+		nc.PublishRequest(newSubSubject, reply, b)
 	}
 
 	// Technically, it is possible that some subscriptions have prevented
 	// the channel from being deleted (if they made it before the channel
 	// was deleted). So send close requests.
-	for i := 0; i < 1000; i++ {
+	type sub struct {
+		i        int
+		ackInbox string
+	}
+	subs := make([]*sub, 0, total)
+	for i := 0; i < total; i++ {
+		resp, err := respSub.NextMsg(time.Second)
+		if err != nil {
+			t.Fatalf("Error getting subscribe reply: %v", err)
+		}
+		rr := &pb.SubscriptionResponse{}
+		rr.Unmarshal(resp.Data)
+		if rr.Error == "" {
+			subs = append(subs, &sub{i, rr.AckInbox})
+		}
+	}
+	for _, sub := range subs {
 		req := pb.UnsubscribeRequest{
-			ClientID: "me",
-			Inbox:    inboxes[i],
-			Subject:  fmt.Sprintf("foo.%d", i),
+			ClientID: clientName,
+			Inbox:    sub.ackInbox,
+			Subject:  fmt.Sprintf("foo.%d", sub.i),
 		}
 		b, _ := req.Marshal()
 		nc.Publish(unsubSubject, b)
@@ -4505,7 +4863,7 @@ func TestClusteringNoPanicOnChannelDelete(t *testing.T) {
 	}
 	defer sc.Close()
 
-	if _, err := s1.lookupOrCreateChannel("foo"); err != nil {
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
 		t.Fatalf("Error creating channel: %v", err)
 	}
 
@@ -6411,6 +6769,99 @@ func TestClusteringRestoreSnapshotMsgsBailIfNoLeader(t *testing.T) {
 	s3sOpts.Clustering.ProceedOnRestoreFailure = true
 	s3 = runServerWithOpts(t, s3sOpts, nil)
 	s3.Shutdown()
+}
+
+func TestClusteringRestoreSnapshotWithDifferentVersionsOfSameChannel(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	restoreMsgsAttempts = 2
+	restoreMsgsRcvTimeout = 50 * time.Millisecond
+	restoreMsgsSleepBetweenAttempts = 0
+	defer func() {
+		restoreMsgsAttempts = defaultRestoreMsgsAttempts
+		restoreMsgsRcvTimeout = defaultRestoreMsgsRcvTimeout
+		restoreMsgsSleepBetweenAttempts = defaultRestoreMsgsSleepBetweenAttempts
+	}()
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	maxInactivity := 250 * time.Millisecond
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.TrailingLogs = 0
+	s1sOpts.MaxInactivity = maxInactivity
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.TrailingLogs = 0
+	s2sOpts.MaxInactivity = maxInactivity
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	for i := 0; i < 3; i++ {
+		if err := sc.Publish("foo", []byte("msg")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+	if err := leader.raft.Snapshot().Error(); err != nil {
+		t.Fatalf("Error on snapshot")
+	}
+	// Wait for channel to be deleted
+	time.Sleep(2 * maxInactivity)
+
+	// Recreate the channel with 2 msgs
+	for i := 0; i < 2; i++ {
+		if err := sc.Publish("foo", []byte("msg")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+	}
+
+	// Wait for channel to be deleted
+	time.Sleep(2 * maxInactivity)
+
+	// Recreate the channel with 1 msg and create sub
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	ch := make(chan bool, 1)
+	if _, err := sc.Subscribe("foo", func(_ *stan.Msg) {
+		select {
+		case ch <- true:
+		default:
+		}
+	},
+		stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	// Start 3rd server
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.Clustering.TrailingLogs = 0
+	s3sOpts.MaxInactivity = maxInactivity
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers = append(servers, s3)
+	expectedMsg := make(map[uint64]msg)
+	expectedMsg[1] = msg{sequence: 1, data: []byte("msg")}
+
+	// Verify channel on server 3
+	verifyChannelConsistency(t, "foo", 5*time.Second, 1, 1, expectedMsg, servers...)
 }
 
 func TestClusteringSQLMsgStoreFlushed(t *testing.T) {

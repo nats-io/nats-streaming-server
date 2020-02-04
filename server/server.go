@@ -1,4 +1,4 @@
-// Copyright 2016-2019 The NATS Authors
+// Copyright 2016-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -302,12 +302,12 @@ func (cs *channelStore) getIfNotAboutToBeDeleted(name string) *channel {
 
 func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, error) {
 	cs.Lock()
-	c, err := cs.createChannelLocked(s, name)
+	c, err := cs.createChannelLocked(s, name, 0)
 	cs.Unlock()
 	return c, err
 }
 
-func (cs *channelStore) createChannelLocked(s *StanServer, name string) (*channel, error) {
+func (cs *channelStore) createChannelLocked(s *StanServer, name string, id uint64) (*channel, error) {
 	// It is possible that there were 2 concurrent calls to lookupOrCreateChannel
 	// which first uses `channelStore.get()` and if not found, calls this function.
 	// So we need to check now that we have the write lock that the channel has
@@ -319,19 +319,30 @@ func (cs *channelStore) createChannelLocked(s *StanServer, name string) (*channe
 		}
 		return c, nil
 	}
+	if s.isClustered {
+		if s.isLeader() && id == 0 {
+			var err error
+			if id, err = s.raft.store.LastIndex(); err != nil {
+				return nil, err
+			}
+		}
+		if err := s.raft.store.SetChannelID(name, id); err != nil {
+			return nil, err
+		}
+	}
 	sc, err := cs.store.CreateChannel(name)
 	if err != nil {
 		return nil, err
 	}
 	c, err = cs.create(s, name, sc)
 	if err != nil {
+		if id != 0 {
+			cs.stan.raft.store.DeleteChannelID(name)
+		}
 		return nil, err
 	}
-	isStandaloneOrLeader := true
-	if s.isClustered && !s.isLeader() {
-		isStandaloneOrLeader = false
-	}
-	if isStandaloneOrLeader && c.activity != nil {
+	c.id = id
+	if s.isStandaloneOrLeader() && c.activity != nil {
 		c.startDeleteTimer()
 	}
 	cs.stan.log.Noticef("Channel %q has been created", name)
@@ -433,6 +444,7 @@ type channel struct {
 	firstSeq     uint64
 	nextSequence uint64
 	name         string
+	id           uint64
 	store        *stores.Channel
 	ss           *subStore
 	lTimestamp   int64
@@ -572,6 +584,14 @@ func (s *StanServer) subToSnapshotRestoreRequests() error {
 					return
 				}
 				sendingTheFirstAvail = msg != nil
+				if sendingTheFirstAvail && msg.Sequence < seq {
+					// It could be that a follower tries to restore from
+					// a snapshot of previous version of the same channel name
+					// that had more messages than current channel. So
+					// bail out if the first avail is below the last seq
+					// we dealt with.
+					msg = nil
+				}
 			}
 			if msg == nil {
 				// We don't have this message because of channel limits.
@@ -749,6 +769,10 @@ func (s *StanServer) isLeader() bool {
 	return atomic.LoadInt64(&s.raft.leader) == 1
 }
 
+func (s *StanServer) isStandaloneOrLeader() bool {
+	return !s.isClustered || s.isLeader()
+}
+
 // subStore holds all known state for all subscriptions
 type subStore struct {
 	sync.RWMutex
@@ -870,7 +894,7 @@ func (s *StanServer) lookupOrCreateChannelPreventDelete(name string) (*channel, 
 		}
 	} else {
 		var err error
-		c, err = cs.createChannelLocked(s, name)
+		c, err = cs.createChannelLocked(s, name, 0)
 		if err != nil {
 			cs.Unlock()
 			return nil, false, err
@@ -2844,10 +2868,11 @@ func waitForReplicationErrResponse(f raft.ApplyFuture) error {
 }
 
 // Leader invokes this to replicate the command to delete a channel.
-func (s *StanServer) replicateDeleteChannel(channel string) {
+func (s *StanServer) replicateDeleteChannel(c *channel) {
 	op := &spb.RaftOperation{
-		OpType:  spb.RaftOperation_DeleteChannel,
-		Channel: channel,
+		OpType:    spb.RaftOperation_DeleteChannel,
+		Channel:   c.name,
+		ChannelID: c.id,
 	}
 	data, err := op.Marshal()
 	if err != nil {
@@ -2858,8 +2883,7 @@ func (s *StanServer) replicateDeleteChannel(channel string) {
 		// If we have lost leadership, clear the deleteInProgress flag.
 		cs := s.channels
 		cs.Lock()
-		c := cs.channels[channel]
-		if c != nil && c.activity != nil {
+		if c.activity != nil {
 			c.activity.deleteInProgress = false
 		}
 		cs.Unlock()
@@ -2912,7 +2936,7 @@ func (s *StanServer) handleChannelDelete(c *channel) {
 			time.Sleep(time.Second)
 		}
 		if s.isClustered {
-			s.replicateDeleteChannel(c.name)
+			s.replicateDeleteChannel(c)
 		} else {
 			s.processDeleteChannel(c.name)
 		}
@@ -2934,9 +2958,14 @@ func (s *StanServer) processDeleteChannel(channel string) {
 		return
 	}
 	// Delete from store
-	if err := cs.store.DeleteChannel(channel); err != nil {
+	err := cs.store.DeleteChannel(channel)
+	if err == nil && s.isClustered {
+		// In cluster mode, delete the ID from the RAFT store
+		err = s.raft.store.DeleteChannelID(channel)
+	}
+	if err != nil {
 		s.log.Errorf("Error deleting channel %q: %v", channel, err)
-		if c.activity != nil {
+		if s.isStandaloneOrLeader() && c.activity != nil {
 			c.activity.deleteInProgress = false
 			c.startDeleteTimer()
 		}
@@ -4299,6 +4328,7 @@ func (s *StanServer) replicate(iopms []*ioPendingMsg) (map[*channel]raft.Future,
 		op := &spb.RaftOperation{
 			OpType:       spb.RaftOperation_Publish,
 			PublishBatch: batch,
+			ChannelID:    c.id,
 		}
 		data, err := op.Marshal()
 		if err != nil {
@@ -4675,9 +4705,8 @@ func durableKey(sr *pb.SubscriptionRequest) string {
 	return fmt.Sprintf("%s-%s-%s", sr.ClientID, sr.Subject, sr.DurableName)
 }
 
-// replicateSub replicates the SubscriptionRequest to nodes in the cluster via
-// Raft.
-func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string, subID uint64) (*subState, error) {
+// replicateSub replicates the SubscriptionRequest to nodes in the cluster via Raft.
+func (s *StanServer) replicateSub(c *channel, sr *pb.SubscriptionRequest, ackInbox string, subID uint64) (*subState, error) {
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_Subscribe,
 		Sub: &spb.AddSubscription{
@@ -4685,6 +4714,7 @@ func (s *StanServer) replicateSub(sr *pb.SubscriptionRequest, ackInbox string, s
 			AckInbox: ackInbox,
 			ID:       subID,
 		},
+		ChannelID: c.id,
 	}
 	data, err := op.Marshal()
 	if err != nil {
@@ -4739,16 +4769,8 @@ func (s *StanServer) updateDurable(ss *subStore, sub *subState, clientID string)
 
 // processSub adds the subscription to the server.
 func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox string, subID uint64) (*subState, error) {
-	// If channel not provided, we have to look it up
-	var err error
-	if c == nil {
-		c, err = s.lookupOrCreateChannel(sr.Subject)
-		if err != nil {
-			s.log.Errorf("Unable to create channel for subscription on %q", sr.Subject)
-			return nil, err
-		}
-	}
 	var (
+		err error
 		sub *subState
 		ss  = c.ss
 	)
@@ -5026,7 +5048,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 				c.ss.Lock()
 				subID := c.nextSubID
 				c.ss.Unlock()
-				sub, err = s.replicateSub(sr, ackInbox, subID)
+				sub, err = s.replicateSub(c, sr, ackInbox, subID)
 			}
 		} else {
 			sub, err = s.processSub(c, sr, ackInbox, 0)

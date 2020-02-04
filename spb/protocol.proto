@@ -1,4 +1,4 @@
-// Copyright 2016-2018 The NATS Authors
+// Copyright 2016-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -124,6 +124,7 @@ message RaftOperation {
   AddClient             ClientConnect    = 7; // Connect operation data.
   pb.CloseRequest       ClientDisconnect = 8; // Disconnect operation data.
   string                Channel          = 9; // Channel name.
+  uint64                ChannelID        =10; // Channel ID.
 }
 
 // Batch is a batch of messages for replication.
@@ -166,6 +167,7 @@ message ChannelSnapshot {
   uint64                        Last          = 3;
   repeated SubscriptionSnapshot Subscriptions = 4;
   uint64                        NextSubID     = 5;
+  uint64                        ChannelID     = 6;
 }
 
 // SubscriptionSnaphot is the snapshot of a subscription
