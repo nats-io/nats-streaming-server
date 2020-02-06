@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -737,26 +738,28 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 
 		c.Noticef("Creating outbound gateway connection to %q", cfg.Name)
 	} else {
+		c.flags.set(expectConnect)
 		// Inbound gateway connection
 		c.Noticef("Processing inbound gateway connection")
 	}
 
 	// Check for TLS
 	if tlsRequired {
+		var host string
 		var timeout float64
 		// If we solicited, we will act like the client, otherwise the server.
 		if solicit {
 			c.Debugf("Starting TLS gateway client handshake")
 			cfg.RLock()
 			tlsName := cfg.tlsName
-			tlsConfig := cfg.TLSConfig
+			tlsConfig := cfg.TLSConfig.Clone()
 			timeout = cfg.TLSTimeout
 			cfg.RUnlock()
 			if tlsConfig.ServerName == "" {
 				// If the given url is a hostname, use this hostname for the
 				// ServerName. If it is an IP, use the cfg's tlsName. If none
 				// is available, resort to current IP.
-				host := url.Hostname()
+				host = url.Hostname()
 				if tlsName != "" && net.ParseIP(host) != nil {
 					host = tlsName
 				}
@@ -778,6 +781,17 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 
 		c.mu.Unlock()
 		if err := conn.Handshake(); err != nil {
+			if solicit {
+				// Based on type of error, possibly clear the saved tlsName
+				// See: https://github.com/nats-io/nats-server/issues/1256
+				if _, ok := err.(x509.HostnameError); ok {
+					cfg.Lock()
+					if host == cfg.tlsName {
+						cfg.tlsName = ""
+					}
+					cfg.Unlock()
+				}
+			}
 			c.Errorf("TLS gateway handshake error: %v", err)
 			c.sendErr("Secure Connection - TLS Required")
 			c.closeConnection(TLSHandshakeError)
@@ -789,8 +803,11 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 		// Re-Grab lock
 		c.mu.Lock()
 
+		// To be consistent with client, set this flag to indicate that handshake is done
+		c.flags.set(handshakeComplete)
+
 		// Verify that the connection did not go away while we released the lock.
-		if c.nc == nil {
+		if c.isClosed() {
 			c.mu.Unlock()
 			return
 		}
@@ -817,7 +834,7 @@ func (s *Server) createGateway(cfg *gatewayCfg, url *url.URL, conn net.Conn) {
 	// Only send if we accept a connection. Will send CONNECT+INFO as an
 	// outbound only after processing peer's INFO protocol.
 	if !solicit {
-		c.sendInfo(infoJSON)
+		c.enqueueProto(infoJSON)
 	}
 
 	// Spin up the read loop.
@@ -861,7 +878,7 @@ func (c *client) sendGatewayConnect() {
 	if err != nil {
 		panic(err)
 	}
-	c.sendProto([]byte(fmt.Sprintf(ConProto, b)), true)
+	c.enqueueProto([]byte(fmt.Sprintf(ConProto, b)))
 }
 
 // Process the CONNECT protocol from a gateway connection.
@@ -998,7 +1015,7 @@ func (c *client) processGatewayInfo(info *Info) {
 			c.sendGatewayConnect()
 			c.Debugf("Gateway connect protocol sent to %q", gwName)
 			// Send INFO too
-			c.sendInfo(c.gw.infoJSON)
+			c.enqueueProto(c.gw.infoJSON)
 			c.gw.infoJSON = nil
 			c.gw.useOldPrefix = !info.GatewayNRP
 			c.mu.Unlock()
@@ -1085,7 +1102,7 @@ func (s *Server) gossipGatewaysToInboundGateway(gwName string, c *client) {
 			info.GatewayURLs = urls
 			b, _ := json.Marshal(&info)
 			c.mu.Lock()
-			c.sendProto([]byte(fmt.Sprintf(InfoProto, b)), true)
+			c.enqueueProto([]byte(fmt.Sprintf(InfoProto, b)))
 			c.mu.Unlock()
 		}
 	}
@@ -1114,7 +1131,7 @@ func (s *Server) forwardNewGatewayToLocalCluster(oinfo *Info) {
 
 	for _, r := range s.routes {
 		r.mu.Lock()
-		r.sendInfo(infoJSON)
+		r.enqueueProto(infoJSON)
 		r.mu.Unlock()
 	}
 }
@@ -1135,13 +1152,29 @@ func (s *Server) sendAccountSubsToGateway(c *client, accName []byte) {
 	s.sendSubsToGateway(c, accName)
 }
 
+func gwBuildSubProto(buf *bytes.Buffer, accName []byte, acc map[string]*sitally, doQueues bool) {
+	for saq, si := range acc {
+		if doQueues && si.q || !doQueues && !si.q {
+			buf.Write(rSubBytes)
+			buf.Write(accName)
+			buf.WriteByte(' ')
+			// For queue subs (si.q is true), saq will be
+			// subject + ' ' + queue, for plain subs, this is
+			// just the subject.
+			buf.WriteString(saq)
+			if doQueues {
+				buf.WriteString(" 1")
+			}
+			buf.WriteString(CR_LF)
+		}
+	}
+}
+
 // Sends subscriptions to remote gateway.
 func (s *Server) sendSubsToGateway(c *client, accountName []byte) {
 	var (
 		bufa = [32 * 1024]byte{}
-		buf  = bufa[:0]
-		epa  = [1024]int{}
-		ep   = epa[:0]
+		bbuf = bytes.NewBuffer(bufa[:0])
 	)
 
 	gw := s.gateway
@@ -1150,29 +1183,10 @@ func (s *Server) sendSubsToGateway(c *client, accountName []byte) {
 	gw.pasi.Lock()
 	defer gw.pasi.Unlock()
 
-	// Build the protocols
-	buildProto := func(accName []byte, acc map[string]*sitally, doQueues bool) {
-		for saq, si := range acc {
-			if doQueues && si.q || !doQueues && !si.q {
-				buf = append(buf, rSubBytes...)
-				buf = append(buf, accName...)
-				buf = append(buf, ' ')
-				// For queue subs (si.q is true), saq will be
-				// subject + ' ' + queue, for plain subs, this is
-				// just the subject.
-				buf = append(buf, saq...)
-				if doQueues {
-					buf = append(buf, ' ', '1')
-				}
-				buf = append(buf, CR_LF...)
-				ep = append(ep, len(buf))
-			}
-		}
-	}
 	// If account is specified...
 	if accountName != nil {
 		// Simply send all plain subs (no queues) for this specific account
-		buildProto(accountName, gw.pasi.m[string(accountName)], false)
+		gwBuildSubProto(bbuf, accountName, gw.pasi.m[string(accountName)], false)
 		// Instruct to send all subs (RS+/-) for this account from now on.
 		c.mu.Lock()
 		e := c.gw.insim[string(accountName)]
@@ -1185,9 +1199,11 @@ func (s *Server) sendSubsToGateway(c *client, accountName []byte) {
 	} else {
 		// Send queues for all accounts
 		for accName, acc := range gw.pasi.m {
-			buildProto([]byte(accName), acc, true)
+			gwBuildSubProto(bbuf, []byte(accName), acc, true)
 		}
 	}
+
+	buf := bbuf.Bytes()
 
 	// Nothing to send.
 	if len(buf) == 0 {
@@ -1197,43 +1213,10 @@ func (s *Server) sendSubsToGateway(c *client, accountName []byte) {
 		s.Debugf("Sending subscriptions to %q, buffer size: %v", c.gw.name, len(buf))
 	}
 	// Send
-	mbs := gw.sqbsz
-	mp := int(c.out.mp / 2)
-	if mbs > mp {
-		mbs = mp
-	}
-	le := 0
-	li := 0
-	for i := 0; i < len(ep); i++ {
-		if ep[i]-le > mbs {
-			var end int
-			// If single proto is bigger than our max buffer size,
-			// send anyway. If it reaches a max in queueOutbound,
-			// that function will close the connection.
-			if i-li <= 1 {
-				end = ep[i]
-			} else {
-				end = ep[i-1]
-				i--
-			}
-			c.mu.Lock()
-			c.queueOutbound(buf[le:end])
-			c.flushOutbound()
-			closed := c.flags.isSet(clearConnection)
-			c.mu.Unlock()
-			if closed {
-				return
-			}
-			le = ep[i]
-			li = i
-		}
-	}
 	c.mu.Lock()
-	c.queueOutbound(buf[le:])
-	c.flushOutbound()
-	if !c.flags.isSet(clearConnection) {
-		c.Debugf("Sent queue subscriptions to gateway")
-	}
+	c.queueOutbound(buf)
+	c.flushSignal()
+	c.Debugf("Sent queue subscriptions to gateway")
 	c.mu.Unlock()
 }
 
@@ -1288,7 +1271,7 @@ func (s *Server) sendGatewayConfigsToRoute(route *client) {
 			info.GatewayURLs = urls
 			b, _ := json.Marshal(&info)
 			route.mu.Lock()
-			route.sendProto([]byte(fmt.Sprintf(InfoProto, b)), true)
+			route.enqueueProto([]byte(fmt.Sprintf(InfoProto, b)))
 			route.mu.Unlock()
 		}
 	}
@@ -2114,7 +2097,7 @@ func (s *Server) maybeSendSubOrUnsubToGateways(accName string, sub *subscription
 			}
 		}
 		if proto != nil {
-			c.sendProto(proto, false)
+			c.enqueueProto(proto)
 			if c.trace {
 				c.traceOutOp("", proto[:len(proto)-LEN_CR_LF])
 			}
@@ -2169,7 +2152,7 @@ func (s *Server) sendQueueSubOrUnsubToGateways(accName string, qsub *subscriptio
 				delete(c.gw.insim, accName)
 			}
 		}
-		c.sendProto(proto, false)
+		c.enqueueProto(proto)
 		if c.trace {
 			c.traceOutOp("", proto[:len(proto)-LEN_CR_LF])
 		}
@@ -2505,7 +2488,7 @@ func (c *client) sendAccountUnsubToGateway(accName []byte) {
 		proto = append(proto, aUnsubBytes...)
 		proto = append(proto, accName...)
 		proto = append(proto, CR_LF...)
-		c.sendProto(proto, false)
+		c.enqueueProto(proto)
 		if c.trace {
 			c.traceOutOp("", proto[:len(proto)-LEN_CR_LF])
 		}
@@ -2524,8 +2507,17 @@ func (s *Server) gatewayHandleSubjectNoInterest(c *client, acc *Account, accName
 	s.gateway.pasi.Lock()
 	defer s.gateway.pasi.Unlock()
 
+	// If there is no subscription for this account, we would normally
+	// send an A-, however, if this account has the internal subscription
+	// for service reply, send a specific RS- for the subject instead.
+	hasSubs := acc.sl.Count() > 0
+	if !hasSubs {
+		acc.mu.RLock()
+		hasSubs = acc.siReply != nil
+		acc.mu.RUnlock()
+	}
 	// If there is at least a subscription, possibly send RS-
-	if acc.sl.Count() != 0 {
+	if hasSubs {
 		sendProto := false
 		c.mu.Lock()
 		// Send an RS- protocol if not already done and only if
@@ -2561,7 +2553,7 @@ func (s *Server) gatewayHandleSubjectNoInterest(c *client, acc *Account, accName
 			proto = append(proto, ' ')
 			proto = append(proto, subject...)
 			proto = append(proto, CR_LF...)
-			c.sendProto(proto, false)
+			c.enqueueProto(proto)
 			if c.trace {
 				c.traceOutOp("", proto[:len(proto)-LEN_CR_LF])
 			}
@@ -2719,7 +2711,7 @@ func (c *client) handleGatewayReply(msg []byte) (processed bool) {
 		buf = append(buf, msg...)
 
 		route.mu.Lock()
-		route.sendProto(buf, true)
+		route.enqueueProto(buf)
 		if route.trace {
 			route.traceOutOp("", buf[:mhEnd])
 		}
@@ -2868,9 +2860,11 @@ func getAccountFromGatewayCommand(c *client, info *Info, cmd string) string {
 // The client's lock is held on entry.
 // <Invoked from inbound connection's readLoop>
 func (c *client) gatewaySwitchAccountToSendAllSubs(e *insie, accName string) {
-	// Set this map to nil so that the no-interest is
-	// no longer checked.
+	// Set this map to nil so that the no-interest is no longer checked.
 	e.ni = nil
+	// Switch mode to transitioning to prevent switchAccountToInterestMode
+	// to possibly call this function multiple times.
+	e.mode = Transitioning
 	s := c.srv
 
 	remoteGWName := c.gw.name
@@ -2893,7 +2887,7 @@ func (c *client) gatewaySwitchAccountToSendAllSubs(e *insie, accName string) {
 		if useLock {
 			c.mu.Lock()
 		}
-		c.sendProto(infoJSON, true)
+		c.enqueueProto(infoJSON)
 		if useLock {
 			c.mu.Unlock()
 		}

@@ -1,4 +1,4 @@
-// Copyright 2012-2019 The NATS Authors
+// Copyright 2012-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -66,6 +66,10 @@ var (
 	// attempted to connect to the leaf node listen port.
 	ErrClientConnectedToLeafNodePort = errors.New("attempted to connect to leaf node port")
 
+	// ErrConnectedToWrongPort represents an error condition when a connection is attempted
+	// to the wrong listen port (for instance a LeafNode to a client port, etc...)
+	ErrConnectedToWrongPort = errors.New("attempted to connect to wrong port")
+
 	// ErrAccountExists is returned when an account is attempted to be registered
 	// but already exists.
 	ErrAccountExists = errors.New("account exists")
@@ -108,6 +112,9 @@ var (
 
 	// ErrStreamImportBadPrefix is returned when a stream import prefix contains wildcards.
 	ErrStreamImportBadPrefix = errors.New("stream import prefix can not contain wildcard tokens")
+
+	// ErrStreamImportDuplicate is returned when a stream import is a duplicate of one that already exists.
+	ErrStreamImportDuplicate = errors.New("stream import already exists")
 
 	// ErrServiceImportAuthorization is returned when a service import is not authorized.
 	ErrServiceImportAuthorization = errors.New("service import not authorized")

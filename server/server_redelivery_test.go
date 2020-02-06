@@ -1650,13 +1650,16 @@ func TestPersistentStoreRedeliveryCount(t *testing.T) {
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 
+	// For this test, use a separate NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
 	opts := getTestDefaultOptsForPersistentStore()
+	opts.NATSServerURL = ns.ClientURL()
 	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 
-	sc, nc := createConnectionWithNatsOpts(t, clientName,
-		nats.ReconnectWait(100*time.Millisecond))
-	defer nc.Close()
+	sc := NewDefaultConnection(t)
 	defer sc.Close()
 
 	restarted := int32(0)
@@ -1683,7 +1686,10 @@ func TestPersistentStoreRedeliveryCount(t *testing.T) {
 				if atomic.LoadInt32(&restarted) == 1 {
 					m.Ack()
 				}
-				ch <- true
+				select {
+				case ch <- true:
+				default:
+				}
 			}
 		},
 		stan.SetManualAckMode(),

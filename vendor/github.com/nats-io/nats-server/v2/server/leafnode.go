@@ -1,4 +1,4 @@
-// Copyright 2019 The NATS Authors
+// Copyright 2019-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,6 +17,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -471,7 +472,10 @@ func (c *client) sendLeafConnect(tlsRequired bool) {
 		c.closeConnection(ProtocolViolation)
 		return
 	}
-	c.sendProto([]byte(fmt.Sprintf(ConProto, b)), true)
+	// Although this call is made before the writeLoop is created,
+	// we don't really need to send in place. The protocol will be
+	// sent out by the writeLoop.
+	c.enqueueProto([]byte(fmt.Sprintf(ConProto, b)))
 }
 
 // Makes a deep copy of the LeafNode Info structure.
@@ -542,7 +546,7 @@ func (s *Server) generateLeafNodeInfoJSON() {
 func (s *Server) sendAsyncLeafNodeInfo() {
 	for _, c := range s.leafs {
 		c.mu.Lock()
-		c.sendInfo(s.leafNodeInfoJSON)
+		c.enqueueProto(s.leafNodeInfoJSON)
 		c.mu.Unlock()
 	}
 }
@@ -588,6 +592,8 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 		}
 		c.mu.Lock()
 		c.acc = acc
+	} else {
+		c.flags.set(expectConnect)
 	}
 	c.mu.Unlock()
 
@@ -621,42 +627,46 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 		c.nc.SetReadDeadline(time.Time{})
 
 		c.mu.Unlock()
-		// Error will be handled below, so ignore here.
-		c.parse([]byte(info))
+		// Handle only connection to wrong port here, others will be handled below.
+		if err := c.parse([]byte(info)); err == ErrConnectedToWrongPort {
+			c.Errorf(err.Error())
+			c.closeConnection(WrongPort)
+			return nil
+		}
 		c.mu.Lock()
 
 		if !c.flags.isSet(infoReceived) {
 			c.mu.Unlock()
-			c.Debugf("Did not get the remote leafnode's INFO, timed-out")
+			c.Errorf("Did not get the remote leafnode's INFO, timed-out")
 			c.closeConnection(ReadError)
 			return nil
 		}
 
 		// Do TLS here as needed.
-		tlsRequired := c.leaf.remote.TLS || c.leaf.remote.TLSConfig != nil
+		tlsRequired := remote.TLS || remote.TLSConfig != nil
 		if tlsRequired {
 			c.Debugf("Starting TLS leafnode client handshake")
 			// Specify the ServerName we are expecting.
 			var tlsConfig *tls.Config
-			if c.leaf.remote.TLSConfig != nil {
-				tlsConfig = c.leaf.remote.TLSConfig.Clone()
+			if remote.TLSConfig != nil {
+				tlsConfig = remote.TLSConfig.Clone()
 			} else {
 				tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 			}
 
-			url := c.leaf.remote.getCurrentURL()
-			host, _, _ := net.SplitHostPort(url.Host)
-			// We need to check if this host is an IP. If so, we probably
-			// had this advertised to us an should use the configured host
-			// name for the TLS server name.
-			if net.ParseIP(host) != nil {
-				if c.leaf.remote.tlsName != "" {
-					host = c.leaf.remote.tlsName
-				} else {
-					host, _, _ = net.SplitHostPort(c.leaf.remote.curURL.Host)
+			var host string
+			// If ServerName was given to us from the option, use that, always.
+			if tlsConfig.ServerName == "" {
+				url := remote.getCurrentURL()
+				host = url.Hostname()
+				// We need to check if this host is an IP. If so, we probably
+				// had this advertised to us and should use the configured host
+				// name for the TLS server name.
+				if remote.tlsName != "" && net.ParseIP(host) != nil {
+					host = remote.tlsName
 				}
+				tlsConfig.ServerName = host
 			}
-			tlsConfig.ServerName = host
 
 			c.nc = tls.Client(c.nc, tlsConfig)
 
@@ -664,17 +674,30 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 
 			// Setup the timeout
 			var wait time.Duration
-			if c.leaf.remote.TLSTimeout == 0 {
+			if remote.TLSTimeout == 0 {
 				wait = TLS_TIMEOUT
 			} else {
-				wait = secondsToDuration(c.leaf.remote.TLSTimeout)
+				wait = secondsToDuration(remote.TLSTimeout)
 			}
 			time.AfterFunc(wait, func() { tlsTimeout(c, conn) })
 			conn.SetReadDeadline(time.Now().Add(wait))
 
 			// Force handshake
 			c.mu.Unlock()
-			if err := conn.Handshake(); err != nil {
+			if err = conn.Handshake(); err != nil {
+				if solicited {
+					// If we overrode and used the saved tlsName but that failed
+					// we will clear that here. This is for the case that another server
+					// does not have the same tlsName, maybe only IPs.
+					// https://github.com/nats-io/nats-server/issues/1256
+					if _, ok := err.(x509.HostnameError); ok {
+						remote.Lock()
+						if host == remote.tlsName {
+							remote.tlsName = ""
+						}
+						remote.Unlock()
+					}
+				}
 				c.Errorf("TLS handshake error: %v", err)
 				c.closeConnection(TLSHandshakeError)
 				return nil
@@ -698,7 +721,11 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 		info.CID = c.cid
 		b, _ := json.Marshal(info)
 		pcs := [][]byte{[]byte("INFO"), b, []byte(CR_LF)}
-		c.sendInfo(bytes.Join(pcs, []byte(" ")))
+		// We have to send from this go routine because we may
+		// have to block for TLS handshake before we start our
+		// writeLoop go routine. The other side needs to receive
+		// this before it can initiate the TLS handshake..
+		c.sendProtoNow(bytes.Join(pcs, []byte(" ")))
 
 		// Check to see if we need to spin up TLS.
 		if info.TLSRequired {
@@ -731,7 +758,7 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 		// Leaf nodes will always require a CONNECT to let us know
 		// when we are properly bound to an account.
 		// The connection may have been closed
-		if c.nc != nil {
+		if !c.isClosed() {
 			c.setAuthTimer(secondsToDuration(opts.LeafNode.AuthTimeout))
 		}
 	}
@@ -762,18 +789,40 @@ func (s *Server) createLeafNode(conn net.Conn, remote *leafNodeCfg) *client {
 	return c
 }
 
-func (c *client) processLeafnodeInfo(info *Info) {
+func (c *client) processLeafnodeInfo(info *Info) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.leaf == nil || c.nc == nil {
-		return
+	if c.leaf == nil || c.isClosed() {
+		return nil
 	}
 
 	// Mark that the INFO protocol has been received.
 	// Note: For now, only the initial INFO has a nonce. We
 	// will probably do auto key rotation at some point.
 	if c.flags.setIfNotSet(infoReceived) {
+		// Prevent connecting to non leafnode port. Need to do this only for
+		// the first INFO, not for async INFO updates...
+		//
+		// Content of INFO sent by the server when accepting a tcp connection.
+		// -------------------------------------------------------------------
+		// Listen Port Of | CID | ClientConnectURLs | LeafNodeURLs | Gateway |
+		// -------------------------------------------------------------------
+		//      CLIENT    |  X* |        X**        |              |         |
+		//      ROUTE     |     |        X**        |      X***    |         |
+		//     GATEWAY    |     |                   |              |    X    |
+		//     LEAFNODE   |  X  |                   |       X      |         |
+		// -------------------------------------------------------------------
+		// *   Not on older servers.
+		// **  Not if "no advertise" is enabled.
+		// *** Not if leafnode's "no advertise" is enabled.
+		//
+		// As seen from above, a solicited LeafNode connection should receive
+		// from the remote server an INFO with CID and LeafNodeURLs. Anything
+		// else should be considered an attempt to connect to a wrong port.
+		if c.leaf.remote != nil && (info.CID == 0 || info.LeafNodeURLs == nil) {
+			return ErrConnectedToWrongPort
+		}
 		// Capture a nonce here.
 		c.nonce = []byte(info.Nonce)
 		if info.TLSRequired && c.leaf.remote != nil {
@@ -787,6 +836,8 @@ func (c *client) processLeafnodeInfo(info *Info) {
 		// representation of the remote cluster's list of URLs.
 		c.updateLeafNodeURLs(info)
 	}
+
+	return nil
 }
 
 // When getting a leaf node INFO protocol, use the provided
@@ -1092,7 +1143,7 @@ func (c *client) updateSmap(sub *subscription, delta int32) {
 	} else {
 		delete(c.leaf.smap, key)
 	}
-	if update && c.flags.isSet(leafAllSubsSent) {
+	if update {
 		c.sendLeafNodeSubUpdate(key, n)
 	}
 	c.mu.Unlock()
@@ -1104,7 +1155,7 @@ func (c *client) sendLeafNodeSubUpdate(key string, n int32) {
 	_b := [64]byte{}
 	b := bytes.NewBuffer(_b[:0])
 	c.writeLeafSub(b, key, n)
-	c.sendProto(b.Bytes(), false)
+	c.enqueueProto(b.Bytes())
 }
 
 // Helper function to build the key.
@@ -1131,19 +1182,13 @@ func (c *client) sendAllLeafSubs() {
 	var b bytes.Buffer
 
 	c.mu.Lock()
-	// Set the flag here before first call to flushOutbound() since that
-	// releases the lock and so an update could sneak in.
-	c.flags.set(leafAllSubsSent)
-
 	for key, n := range c.leaf.smap {
 		c.writeLeafSub(&b, key, n)
 	}
-
-	// We will make sure we don't overflow here due to a max_pending.
-	chunks := protoChunks(b.Bytes(), MAX_PAYLOAD_SIZE)
-	for _, chunk := range chunks {
-		c.queueOutbound(chunk)
-		c.flushOutbound()
+	buf := b.Bytes()
+	if len(buf) > 0 {
+		c.queueOutbound(buf)
+		c.flushSignal()
 	}
 	c.mu.Unlock()
 }
@@ -1211,7 +1256,7 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	sub.subject = args[0]
 
 	c.mu.Lock()
-	if c.nc == nil {
+	if c.isClosed() {
 		c.mu.Unlock()
 		return nil
 	}
@@ -1317,7 +1362,7 @@ func (c *client) processLeafUnsub(arg []byte) error {
 	srv := c.srv
 
 	c.mu.Lock()
-	if c.nc == nil {
+	if c.isClosed() {
 		c.mu.Unlock()
 		return nil
 	}
@@ -1500,36 +1545,4 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 	if c.srv.gateway.enabled {
 		c.sendMsgToGateways(acc, msg, c.pa.subject, c.pa.reply, qnames)
 	}
-}
-
-// This functional will take a larger buffer and break it into
-// chunks that are protocol correct. Reason being is that we are
-// doing this in the first place to get things in smaller sizes
-// out the door but we may allow someone to get in between us as
-// we do.
-// NOTE - currently this does not process MSG protos.
-func protoChunks(b []byte, csz int) [][]byte {
-	if b == nil {
-		return nil
-	}
-	if len(b) <= csz {
-		return [][]byte{b}
-	}
-	var (
-		chunks [][]byte
-		start  int
-	)
-	for i := csz; i < len(b); {
-		// Walk forward to find a CR_LF
-		delim := bytes.Index(b[i:], []byte(CR_LF))
-		if delim < 0 {
-			chunks = append(chunks, b[start:])
-			break
-		}
-		end := delim + LEN_CR_LF + i
-		chunks = append(chunks, b[start:end])
-		start = end
-		i = end + csz
-	}
-	return chunks
 }
