@@ -1838,6 +1838,11 @@ func (s *StanServer) configureLogger() {
 
 	if nOpts.LogFile != "" {
 		newLogger = natsdLogger.NewFileLogger(nOpts.LogFile, nOpts.Logtime, enableDebug, enableTrace, true)
+		if nOpts.LogSizeLimit > 0 {
+			if l, ok := newLogger.(*natsdLogger.Logger); ok {
+				l.SetSizeLimit(nOpts.LogSizeLimit)
+			}
+		}
 	} else if nOpts.RemoteSyslog != "" {
 		newLogger = natsdLogger.NewRemoteSysLogger(nOpts.RemoteSyslog, enableDebug, enableTrace)
 	} else if syslog {
