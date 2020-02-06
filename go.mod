@@ -14,7 +14,6 @@ require (
 	go.etcd.io/bbolt v1.3.3
 	golang.org/x/crypto v0.0.0-20200206161412-a0c6ece9d31a
 	golang.org/x/sys v0.0.0-20200202164722-d101bd2416d5
-	google.golang.org/appengine v1.6.1 // indirect
 )
 
 go 1.13
