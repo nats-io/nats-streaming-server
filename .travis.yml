@@ -40,4 +40,4 @@ deploy:
   verbose: true
   on:
     tags: true
-    condition: $TRAVIS_GO_VERSION =~ 1.12
+    condition: $TRAVIS_GO_VERSION =~ 1.13
