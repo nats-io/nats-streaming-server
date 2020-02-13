@@ -31,11 +31,12 @@ import (
 
 // Routes for the monitoring pages
 const (
-	RootPath     = "/streaming"
-	ServerPath   = RootPath + "/serverz"
-	StorePath    = RootPath + "/storez"
-	ClientsPath  = RootPath + "/clientsz"
-	ChannelsPath = RootPath + "/channelsz"
+	RootPath       = "/streaming"
+	ServerPath     = RootPath + "/serverz"
+	StorePath      = RootPath + "/storez"
+	ClientsPath    = RootPath + "/clientsz"
+	ChannelsPath   = RootPath + "/channelsz"
+	IsFTActivePath = RootPath + "/isFTActive"
 
 	defaultMonitorListLimit = 1024
 )
@@ -160,6 +161,7 @@ func (s *StanServer) startMonitoring(nOpts *natsd.Options) error {
 	mux.HandleFunc(StorePath, s.handleStorez)
 	mux.HandleFunc(ClientsPath, s.handleClientsz)
 	mux.HandleFunc(ChannelsPath, s.handleChannelsz)
+	mux.HandleFunc(IsFTActivePath, s.handleIsFTActivez)
 
 	return nil
 }
@@ -243,6 +245,17 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 		MaxFDs:        maxFDs,
 	}
 	s.sendResponse(w, r, serverz)
+}
+
+func (s *StanServer) handleIsFTActivez(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	state := s.state
+	s.mu.RUnlock()
+	if state == FTActive {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 func myUptime(d time.Duration) string {

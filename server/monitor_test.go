@@ -377,6 +377,46 @@ func TestMonitorServerz(t *testing.T) {
 	monitorExpectStatus(t, ServerPath, http.StatusInternalServerError)
 }
 
+func TestMonitorIsFTActiveStandaloneServer(t *testing.T) {
+	expectedStatusCode := http.StatusNoContent
+
+	resetPreviousHTTPConnections()
+	s := runMonitorServer(t, GetDefaultOptions())
+	defer s.Shutdown()
+
+	resp, _ := getBodyEx(t, http.DefaultClient, "http", IsFTActivePath, expectedStatusCode, "")
+	defer resp.Body.Close()
+
+	if expectedStatusCode != resp.StatusCode {
+		t.Fatalf("Expected status code %v, got %v", expectedStatusCode, resp.StatusCode)
+	}
+}
+
+func TestMonitorIsFTActiveFTServer(t *testing.T) {
+	expectedStatusCode := http.StatusOK
+
+	resetPreviousHTTPConnections()
+
+	ncOpts := natsdTest.DefaultTestOptions
+	ns := natsdTest.RunServer(&ncOpts)
+	defer ns.Shutdown()
+
+	opts := getTestFTDefaultOptions()
+	opts.NATSServerURL = "nats://localhost:4222"
+
+	ft := runServerWithOpts(t, opts, &defaultMonitorOptions)
+	defer ft.Shutdown()
+
+	time.Sleep(2 * time.Second)
+
+	resp, _ := getBodyEx(t, http.DefaultClient, "http", IsFTActivePath, expectedStatusCode, "")
+	defer resp.Body.Close()
+
+	if expectedStatusCode != resp.StatusCode {
+		t.Fatalf("Expected status code %v, got %v", expectedStatusCode, resp.StatusCode)
+	}
+}
+
 func TestMonitorUptime(t *testing.T) {
 	expected := []string{"1y2d3h4m5s", "1d2h3m4s", "1h2m3s", "1m2s", "1s"}
 	durations := []time.Duration{
