@@ -377,43 +377,45 @@ func TestMonitorServerz(t *testing.T) {
 	monitorExpectStatus(t, ServerPath, http.StatusInternalServerError)
 }
 
-func TestMonitorIsFTActiveStandaloneServer(t *testing.T) {
-	expectedStatusCode := http.StatusNoContent
-
-	resetPreviousHTTPConnections()
-	s := runMonitorServer(t, GetDefaultOptions())
-	defer s.Shutdown()
-
-	resp, _ := getBodyEx(t, http.DefaultClient, "http", IsFTActivePath, expectedStatusCode, "")
-	defer resp.Body.Close()
-
-	if expectedStatusCode != resp.StatusCode {
-		t.Fatalf("Expected status code %v, got %v", expectedStatusCode, resp.StatusCode)
-	}
-}
-
 func TestMonitorIsFTActiveFTServer(t *testing.T) {
-	expectedStatusCode := http.StatusOK
+	for _, test := range []struct {
+		name           string
+		checkActive    bool
+		expectedStatus int
+	}{
+		{"active", true, http.StatusOK},
+		{"standby", false, http.StatusNoContent},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetPreviousHTTPConnections()
 
-	resetPreviousHTTPConnections()
+			cleanupFTDatastore(t)
+			defer cleanupFTDatastore(t)
 
-	ncOpts := natsdTest.DefaultTestOptions
-	ns := natsdTest.RunServer(&ncOpts)
-	defer ns.Shutdown()
+			nopts := defaultMonitorOptions
+			var aNOpts *natsd.Options
+			var sNOpts *natsd.Options
 
-	opts := getTestFTDefaultOptions()
-	opts.NATSServerURL = "nats://localhost:4222"
+			if test.checkActive {
+				aNOpts = &nopts
+			} else {
+				sNOpts = &nopts
+			}
 
-	ft := runServerWithOpts(t, opts, &defaultMonitorOptions)
-	defer ft.Shutdown()
+			opts := getTestFTDefaultOptions()
+			active := runServerWithOpts(t, opts, aNOpts)
+			defer active.Shutdown()
 
-	time.Sleep(2 * time.Second)
+			getFTActiveServer(t, active)
 
-	resp, _ := getBodyEx(t, http.DefaultClient, "http", IsFTActivePath, expectedStatusCode, "")
-	defer resp.Body.Close()
+			opts = getTestFTDefaultOptions()
+			opts.NATSServerURL = "nats://127.0.0.1:4222"
+			standby := runServerWithOpts(t, opts, sNOpts)
+			defer standby.Shutdown()
 
-	if expectedStatusCode != resp.StatusCode {
-		t.Fatalf("Expected status code %v, got %v", expectedStatusCode, resp.StatusCode)
+			resp, _ := getBodyEx(t, http.DefaultClient, "http", IsFTActivePath, test.expectedStatus, "")
+			defer resp.Body.Close()
+		})
 	}
 }
 
