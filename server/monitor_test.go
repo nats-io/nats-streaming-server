@@ -377,6 +377,48 @@ func TestMonitorServerz(t *testing.T) {
 	monitorExpectStatus(t, ServerPath, http.StatusInternalServerError)
 }
 
+func TestMonitorIsFTActiveFTServer(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		checkActive    bool
+		expectedStatus int
+	}{
+		{"active", true, http.StatusOK},
+		{"standby", false, http.StatusNoContent},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetPreviousHTTPConnections()
+
+			cleanupFTDatastore(t)
+			defer cleanupFTDatastore(t)
+
+			nopts := defaultMonitorOptions
+			var aNOpts *natsd.Options
+			var sNOpts *natsd.Options
+
+			if test.checkActive {
+				aNOpts = &nopts
+			} else {
+				sNOpts = &nopts
+			}
+
+			opts := getTestFTDefaultOptions()
+			active := runServerWithOpts(t, opts, aNOpts)
+			defer active.Shutdown()
+
+			getFTActiveServer(t, active)
+
+			opts = getTestFTDefaultOptions()
+			opts.NATSServerURL = "nats://127.0.0.1:4222"
+			standby := runServerWithOpts(t, opts, sNOpts)
+			defer standby.Shutdown()
+
+			resp, _ := getBodyEx(t, http.DefaultClient, "http", IsFTActivePath, test.expectedStatus, "")
+			defer resp.Body.Close()
+		})
+	}
+}
+
 func TestMonitorUptime(t *testing.T) {
 	expected := []string{"1y2d3h4m5s", "1d2h3m4s", "1h2m3s", "1m2s", "1s"}
 	durations := []time.Duration{
