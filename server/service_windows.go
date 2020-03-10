@@ -131,7 +131,7 @@ func Run(sOpts *Options, nOpts *natsd.Options) (*StanServer, error) {
 	}
 	if isInteractive {
 		run = debug.Run
-	} else {
+	} else if nOpts.Syslog || nOpts.LogFile == "" {
 		sysLogInitLock.Lock()
 		// We create a syslog here because we want to capture possible startup
 		// failure message.
