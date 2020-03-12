@@ -78,6 +78,9 @@ func TestRunServerFailureLogsCause(t *testing.T) {
 }
 
 func TestServerLoggerDebugAndTrace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
 	sOpts := GetDefaultOptions()
 	sOpts.EnableLogging = true
 	sOpts.Debug = true
@@ -91,19 +94,19 @@ func TestServerLoggerDebugAndTrace(t *testing.T) {
 	}()
 	os.Stderr = w
 	done := make(chan bool, 1)
-	buf := make([]byte, 1024)
+	buf := make([]byte, 10000)
 	out := make([]byte, 0)
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for {
+			n, _ := r.Read(buf)
+			out = append(out, buf[:n]...)
 			select {
 			case <-done:
 				return
 			default:
-				n, _ := r.Read(buf)
-				out = append(out, buf[:n]...)
 			}
 		}
 	}()

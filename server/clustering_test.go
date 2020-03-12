@@ -1129,6 +1129,7 @@ func TestClusteringLogSnapshotRestoreAfterChannelLimitHit(t *testing.T) {
 	s1sOpts := getTestDefaultOptsForClustering("a", true)
 	s1sOpts.Clustering.TrailingLogs = 0
 	s1sOpts.MaxMsgs = 20
+	s1sOpts.Clustering.LogSnapshots = 2
 	s1 := runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
 
