@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 
@@ -559,6 +560,9 @@ func TestFSCompactSubsUpdateLastSent(t *testing.T) {
 }
 
 func TestFSSubStoreVariousBufferSizes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
 	cleanupFSDatastore(t)
 	defer cleanupFSDatastore(t)
 

@@ -1,3 +1,6 @@
+os:
+- linux
+- windows
 language: go
 sudo: false
 go:
@@ -13,24 +16,33 @@ go_import_path: github.com/nats-io/nats-streaming-server
 install:
 - go get -t ./...
 - go get github.com/nats-io/nats-server
-- go get -u honnef.co/go/tools/cmd/staticcheck
-- go get -u github.com/client9/misspell/cmd/misspell
-- go get -u github.com/go-sql-driver/mysql
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
+    go get -u honnef.co/go/tools/cmd/staticcheck;
+    go get -u github.com/client9/misspell/cmd/misspell;
+    go get -u github.com/go-sql-driver/mysql;
+  fi
 services:
 - mysql
 before_script:
-# Remove the "spb" directory that contains protobuf
-- GO_LIST=$(go list ./... | grep -v "/spb")
-- go install
-- $(exit $(go fmt $GO_LIST | wc -l))
-- go vet $GO_LIST
-- find . -type f -name "*.go" | grep -v "/vendor/" | grep -v "/spb/" | xargs misspell -error -locale US
-- staticcheck $GO_LIST
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
+    GO_LIST=$(go list ./... | grep -v "/spb");
+    go install;
+    $(exit $(go fmt $GO_LIST | wc -l));
+    go vet $GO_LIST;
+    find . -type f -name "*.go" | grep -v "/vendor/" | grep -v "/spb/" | xargs misspell -error -locale US;
+    staticcheck $GO_LIST;
+  fi
 script:
 - set -e
-- mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;"
-- go test -i ./...
-- if [[ "$TRAVIS_GO_VERSION" =~ 1.13 ]]; then ./scripts/cov.sh TRAVIS; else go test -v -failfast -p=1 ./...; fi
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
+    mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;";
+    go test -i ./...;
+    if [[ "$TRAVIS_GO_VERSION" =~ 1.13 ]]; then ./scripts/cov.sh TRAVIS; else go test -v -failfast -p=1 ./...; fi;
+  fi
+- if [[ "$TRAVIS_OS_NAME" == "windows" ]]; then
+    go install;
+    go test -v -p=1 ./... -count=1 -sql=false -failfast;
+  fi
 - set +e
 
 deploy:
@@ -40,4 +52,4 @@ deploy:
   verbose: true
   on:
     tags: true
-    condition: $TRAVIS_GO_VERSION =~ 1.13
+    condition: ("$TRAVIS_OS_NAME" = "linux") && ("$TRAVIS_GO_VERSION" =~ "1.13")
