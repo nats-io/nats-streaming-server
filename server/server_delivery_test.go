@@ -281,7 +281,7 @@ func TestPersistentStoreSQLSubsPendingRows(t *testing.T) {
 	defer ns.Shutdown()
 
 	opts := GetDefaultOptions()
-	opts.NATSServerURL = "nats://localhost:4222"
+	opts.NATSServerURL = "nats://127.0.0.1:4222"
 	opts.StoreType = stores.TypeSQL
 	opts.SQLStoreOpts.Driver = testSQLDriver
 	opts.SQLStoreOpts.Source = source
