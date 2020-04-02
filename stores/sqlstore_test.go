@@ -2042,7 +2042,7 @@ func TestSQLDeadlines(t *testing.T) {
 	} else {
 		port = 5432
 	}
-	proxy, err := newProxy(fmt.Sprintf("localhost:%d", port))
+	proxy, err := newProxy(fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatalf("Error creating proxy: %v", err)
 	}
@@ -2050,7 +2050,7 @@ func TestSQLDeadlines(t *testing.T) {
 
 	pport := proxy.getPort()
 	if testSQLDriver == driverMySQL {
-		source = fmt.Sprintf("nss:password@tcp(localhost:%d)/%s?readTimeout=500ms&writeTimeout=500ms", pport, testDefaultDatabaseName)
+		source = fmt.Sprintf("nss:password@tcp(127.0.0.1:%d)/%s?readTimeout=500ms&writeTimeout=500ms", pport, testDefaultDatabaseName)
 		mysql.SetLogger(&silenceMySQLLogger{})
 	} else {
 		source = fmt.Sprintf("port=%d dbname=%s readTimeout=500ms writeTimeout=500ms sslmode=disable", pport, testDefaultDatabaseName)

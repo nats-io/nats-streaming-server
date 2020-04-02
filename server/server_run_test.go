@@ -62,7 +62,7 @@ func TestRunServerFailureLogsCause(t *testing.T) {
 	d := &dummyLogger{}
 
 	sOpts := GetDefaultOptions()
-	sOpts.NATSServerURL = "nats://localhost:4444"
+	sOpts.NATSServerURL = "nats://127.0.0.1:4444"
 	sOpts.CustomLogger = d
 
 	// We expect the server to fail to start
@@ -513,7 +513,7 @@ func TestDontEmbedNATSNotRunning(t *testing.T) {
 	s.Shutdown()
 
 	// Point to a NATS Server that will not be running
-	sOpts.NATSServerURL = "nats://localhost:5223"
+	sOpts.NATSServerURL = "nats://127.0.0.1:5223"
 
 	// Don't start a NATS Server, starting streaming server
 	// should fail.
@@ -526,7 +526,7 @@ func TestDontEmbedNATSNotRunning(t *testing.T) {
 
 func TestDontEmbedNATSRunning(t *testing.T) {
 	sOpts := GetDefaultOptions()
-	sOpts.NATSServerURL = "nats://localhost:5223"
+	sOpts.NATSServerURL = "nats://127.0.0.1:5223"
 
 	nOpts := DefaultNatsServerOptions
 	nOpts.Host = "127.0.0.1"
@@ -540,7 +540,7 @@ func TestDontEmbedNATSRunning(t *testing.T) {
 
 func TestDontEmbedNATSMultipleURLs(t *testing.T) {
 	nOpts := DefaultNatsServerOptions
-	nOpts.Host = "localhost"
+	nOpts.Host = "127.0.0.1"
 	nOpts.Port = 5223
 	nOpts.Username = "ivan"
 	nOpts.Password = "pwd"
@@ -550,9 +550,9 @@ func TestDontEmbedNATSMultipleURLs(t *testing.T) {
 	sOpts := GetDefaultOptions()
 
 	workingURLs := []string{
-		"nats://localhost:5223",
-		"nats://ivan:pwd@localhost:5223",
-		"nats://ivan:pwd@localhost:5223, nats://ivan:pwd@localhost:5224",
+		"nats://127.0.0.1:5223",
+		"nats://ivan:pwd@127.0.0.1:5223",
+		"nats://ivan:pwd@127.0.0.1:5223, nats://ivan:pwd@127.0.0.1:5224",
 	}
 	for _, url := range workingURLs {
 		sOpts.NATSServerURL = url
@@ -561,11 +561,11 @@ func TestDontEmbedNATSMultipleURLs(t *testing.T) {
 	}
 
 	notWorkingURLs := []string{
-		"nats://ivan:incorrect@localhost:5223",
-		"nats://localhost:5223,nats://ivan:pwd@localhost:5224",
-		"nats://localhost",
-		"localhost:5223",
-		"localhost",
+		"nats://ivan:incorrect@127.0.0.1:5223",
+		"nats://127.0.0.1:5223,nats://ivan:pwd@127.0.0.1:5224",
+		"nats://127.0.0.1",
+		"127.0.0.1:5223",
+		"127.0.0.1",
 		"nats://ivan:pwd@:5224",
 		" ",
 	}
@@ -1130,7 +1130,7 @@ func TestDontExposeUserPassword(t *testing.T) {
 	l := &captureNoticesLogger{}
 	sOpts := GetDefaultOptions()
 	sOpts.CustomLogger = l
-	sOpts.NATSServerURL = "nats://localhost:4222"
+	sOpts.NATSServerURL = "nats://127.0.0.1:4222"
 	nOpts := natsdTest.DefaultTestOptions
 	nOpts.Username = "ivan"
 	nOpts.Password = "password"
@@ -1170,7 +1170,7 @@ func TestDontExposeUserPassword(t *testing.T) {
 	l.Lock()
 	l.notices = l.notices[:0]
 	l.Unlock()
-	sOpts.NATSServerURL = "nats://ivan:password@localhost:4222"
+	sOpts.NATSServerURL = "nats://ivan:password@127.0.0.1:4222"
 	s = runServerWithOpts(t, sOpts, nil)
 	defer s.Shutdown()
 
@@ -1180,7 +1180,7 @@ func TestDontExposeUserPassword(t *testing.T) {
 	ns = natsdTest.RunDefaultServer()
 
 	msg = collectNotice(t)
-	if !strings.Contains(msg, "nats://[REDACTED]@localhost:") {
+	if !strings.Contains(msg, "nats://[REDACTED]@127.0.0.1:") {
 		t.Fatalf("Password exposed in url: %v", msg)
 	}
 }
@@ -1231,7 +1231,7 @@ func TestStreamingServerReadyLog(t *testing.T) {
 	sOpts := GetDefaultOptions()
 	l := &captureNoticesLogger{}
 	sOpts.CustomLogger = l
-	sOpts.NATSServerURL = "nats://localhost:4222"
+	sOpts.NATSServerURL = "nats://127.0.0.1:4222"
 	s := runServerWithOpts(t, sOpts, nil)
 	defer s.Shutdown()
 	checkLog(t, l, true)
@@ -1241,7 +1241,7 @@ func TestStreamingServerReadyLog(t *testing.T) {
 	sOpts = getTestFTDefaultOptions()
 	l = &captureNoticesLogger{}
 	sOpts.CustomLogger = l
-	sOpts.NATSServerURL = "nats://localhost:4222"
+	sOpts.NATSServerURL = "nats://127.0.0.1:4222"
 	s = runServerWithOpts(t, sOpts, nil)
 	defer s.Shutdown()
 	checkLog(t, l, true)
@@ -1249,7 +1249,7 @@ func TestStreamingServerReadyLog(t *testing.T) {
 	sOpts = getTestFTDefaultOptions()
 	l2 := &captureNoticesLogger{}
 	sOpts.CustomLogger = l2
-	sOpts.NATSServerURL = "nats://localhost:4222"
+	sOpts.NATSServerURL = "nats://127.0.0.1:4222"
 	s2 := runServerWithOpts(t, sOpts, nil)
 	defer s2.Shutdown()
 	// At first, we should not get the lock since server
