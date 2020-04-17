@@ -1344,13 +1344,13 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 	// in APPEND mode to allow truncate to work).
 	fs.serverFile, err = fs.fm.createFile(serverFileName, os.O_RDWR|os.O_CREATE, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to recover server file %q: %v", serverFileName, err)
 	}
 
 	// Open/Create the client file.
 	fs.clientsFile, err = fs.fm.createFile(clientsFileName, defaultFileFlags, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to recover client file %q: %v", clientsFileName, err)
 	}
 
 	// Recover the server file.
@@ -3872,7 +3872,7 @@ func (ms *FileMsgStore) Empty() error {
 ////////////////////////////////////////////////////////////////////////////
 
 // newFileSubStore returns a new instace of a file SubStore.
-func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doRecover bool) (*FileSubStore, error) {
+func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doRecover bool) (fss *FileSubStore, retErr error) {
 	ss := &FileSubStore{
 		fstore:   fs,
 		fm:       fs.fm,
@@ -3883,8 +3883,17 @@ func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doR
 	// Convert the CompactInterval in time.Duration
 	ss.compactItvl = time.Duration(ss.opts.CompactInterval) * time.Second
 
-	var err error
+	defer func() {
+		if retErr != nil {
+			action := "create"
+			if doRecover {
+				action = "recover"
+			}
+			retErr = fmt.Errorf("unable to %s subscription store for [%s]: %v", action, channel, retErr)
+		}
+	}()
 
+	var err error
 	fileName := filepath.Join(channel, subsFileName)
 	ss.file, err = fs.fm.createFile(fileName, defaultFileFlags, func() error {
 		ss.writer = nil
@@ -3905,7 +3914,7 @@ func (fs *FileStore) newFileSubStore(channel string, limits *SubStoreLimits, doR
 		if err := ss.recoverSubscriptions(); err != nil {
 			fs.fm.unlockFile(ss.file)
 			ss.Close()
-			return nil, fmt.Errorf("unable to recover subscription store for [%s]: %v", channel, err)
+			return nil, err
 		}
 	}
 	// Do not attempt to shrink unless the option is greater than the

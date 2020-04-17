@@ -2045,3 +2045,46 @@ func TestFSAutoSync(t *testing.T) {
 		t.Fatalf("Subscription store was not sync'ed after new activity (sync count was %v, now %v)", ssSynced, n)
 	}
 }
+
+func TestFSServerAndClientFilesVersionError(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		server bool
+		fname  string
+	}{
+		{"server", true, serverFileName},
+		{"client", false, clientsFileName},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cleanupFSDatastore(t)
+			defer cleanupFSDatastore(t)
+
+			s := createDefaultFileStore(t)
+			defer s.Close()
+
+			var fname string
+			s.Lock()
+			if test.server {
+				fname = s.serverFile.name
+			} else {
+				fname = s.clientsFile.name
+			}
+			s.Unlock()
+
+			s.Close()
+			os.Remove(fname)
+			if err := ioutil.WriteFile(fname, []byte(""), 0666); err != nil {
+				t.Fatalf("Error creating file: %v", err)
+			}
+
+			s, err := NewFileStore(testLogger, testFSDefaultDatastore, nil)
+			if err != nil {
+				t.Fatalf("Error creating file store: %v", err)
+			}
+			defer s.Close()
+			if _, err := s.Recover(); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("unable to recover %s file %q", test.name, test.fname)) {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+		})
+	}
+}
