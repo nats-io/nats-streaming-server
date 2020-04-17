@@ -2271,3 +2271,55 @@ func TestFSExpirationError(t *testing.T) {
 		t.Fatalf("Expected next expiration to be set to 5secs from now, got %v", time.Duration(nextExpiration))
 	}
 }
+
+func TestFSMsgsFileVersionError(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		dat    bool
+		suffix string
+	}{
+		{"data", true, datSuffix},
+		{"index", false, idxSuffix},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cleanupFSDatastore(t)
+			defer cleanupFSDatastore(t)
+
+			s := createDefaultFileStore(t)
+			defer s.Close()
+
+			c := storeCreateChannel(t, s, "foo")
+			storeMsg(t, c, "foo", 1, []byte("hello"))
+			if err := c.Msgs.Flush(); err != nil {
+				t.Fatalf("Error flushing store: %v", err)
+			}
+			var fname string
+			ms := c.Msgs.(*FileMsgStore)
+			ms.Lock()
+			if test.dat {
+				fname = ms.files[1].file.name
+			} else {
+				fname = ms.files[1].idxFile.name
+			}
+			ms.Unlock()
+
+			s.Close()
+
+			os.Remove(fname)
+			if err := ioutil.WriteFile(fname, []byte(""), 0666); err != nil {
+				t.Fatalf("Error writing file: %v", err)
+			}
+
+			s, err := NewFileStore(testLogger, testFSDefaultDatastore, nil)
+			if err != nil {
+				t.Fatalf("Error creating filestore: %v", err)
+			}
+			defer s.Close()
+			if _, err := s.Recover(); err == nil ||
+				!strings.Contains(err.Error(), "unable to recover message store for [foo]") ||
+				!strings.Contains(err.Error(), fmt.Sprintf("%s1%s", msgFilesPrefix, test.suffix)) {
+				t.Fatalf("Unexpected error: %v", err)
+			}
+		})
+	}
+}

@@ -2016,6 +2016,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, limits *Msg
 
 	// Use this variable for all errors below so we can do the cleanup
 	var err error
+	var fname string
 
 	// Recovery case
 	if doRecover {
@@ -2048,11 +2049,13 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, limits *Msg
 			if s, statErr := os.Stat(filepath.Join(channelDirName, idxFName)); s != nil && statErr == nil {
 				useIdxFile = true
 			}
-			datFile, err = ms.fm.createFile(filepath.Join(channel, fileName), defaultFileFlags, nil)
+			fname = filepath.Join(channel, fileName)
+			datFile, err = ms.fm.createFile(fname, defaultFileFlags, nil)
 			if err != nil {
 				break
 			}
-			idxFile, err = ms.fm.createFile(filepath.Join(channel, idxFName), defaultFileFlags, nil)
+			fname = filepath.Join(channel, idxFName)
+			idxFile, err = ms.fm.createFile(fname, defaultFileFlags, nil)
 			if err != nil {
 				ms.fm.unlockFile(datFile)
 				break
@@ -2125,7 +2128,7 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, limits *Msg
 		if doRecover {
 			action = "recover"
 		}
-		err = fmt.Errorf("unable to %s message store for [%s]: %v", action, channel, err)
+		err = fmt.Errorf("unable to %s message store for [%s](file: %q): %v", action, channel, fname, err)
 		return nil, err
 	}
 
