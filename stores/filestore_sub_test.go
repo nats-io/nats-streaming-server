@@ -15,10 +15,12 @@ package stores
 
 import (
 	"hash/crc32"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -881,5 +883,44 @@ func TestFSSubscriptionsFileWithExtraZeros(t *testing.T) {
 		if !reflect.DeepEqual(sub.Sub, osub) {
 			t.Fatalf("Expected subscription %v, got %v", osub, sub.Sub)
 		}
+	}
+}
+
+func TestFSSubscriptionsFileVersionError(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+	ss := c.Subs
+	sub1 := &spb.SubState{
+		ClientID:      "me",
+		Inbox:         "inbox",
+		AckInbox:      "ackInbox",
+		AckWaitInSecs: 10,
+	}
+	if err := ss.CreateSub(sub1); err != nil {
+		t.Fatalf("Error creating sub: %v", err)
+	}
+	ss.(*FileSubStore).RLock()
+	fname := ss.(*FileSubStore).file.name
+	ss.(*FileSubStore).RUnlock()
+
+	s.Close()
+
+	os.Remove(fname)
+	if err := ioutil.WriteFile(fname, []byte(""), 0666); err != nil {
+		t.Fatalf("Error writing file: %v", err)
+	}
+
+	s, err := NewFileStore(testLogger, testFSDefaultDatastore, nil)
+	if err != nil {
+		t.Fatalf("Error creating filestore: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.Recover(); err == nil || !strings.Contains(err.Error(), "recover subscription store for [foo]") {
+		t.Fatalf("Unexpected error: %v", err)
 	}
 }

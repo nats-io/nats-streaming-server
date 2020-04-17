@@ -1148,7 +1148,7 @@ func TestDontExposeUserPassword(t *testing.T) {
 		waitFor(t, 2*time.Second, 15*time.Millisecond, func() error {
 			l.Lock()
 			for _, n := range l.notices {
-				if strings.Contains(n, "reconnected to NATS Server at") {
+				if strings.Contains(n, "general\" reconnected to NATS Server at") {
 					msg = n
 					l.Unlock()
 					return nil
