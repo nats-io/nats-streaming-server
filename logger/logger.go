@@ -1,4 +1,4 @@
-// Copyright 2017-2019 The NATS Authors
+// Copyright 2017-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -32,11 +32,14 @@ type Logger natsd.Logger
 // the Logger interface.
 type StanLogger struct {
 	mu    sync.RWMutex
+	ns    *natsd.Server
 	debug bool
 	trace bool
 	ltime bool
 	lfile string
 	fszl  int64
+	ndbg  bool
+	ntrc  bool
 	log   natsd.Logger
 }
 
@@ -46,6 +49,7 @@ func NewStanLogger() *StanLogger {
 }
 
 // SetLogger sets the logger, debug and trace
+// DEPRECATED: Use SetLoggerWithOpts instead.
 func (s *StanLogger) SetLogger(log Logger, logtime, debug, trace bool, logfile string) {
 	s.mu.Lock()
 	s.log = log
@@ -57,9 +61,34 @@ func (s *StanLogger) SetLogger(log Logger, logtime, debug, trace bool, logfile s
 }
 
 // SetFileSizeLimit sets the size limit for a logfile
+// DEPRECATED: Use SetLoggerWithOpts instead.
 func (s *StanLogger) SetFileSizeLimit(limit int64) {
 	s.mu.Lock()
 	s.fszl = limit
+	s.mu.Unlock()
+}
+
+// SetLoggerWithOpts sets the logger and various options.
+// Note that `debug` and `trace` here are for STAN.
+func (s *StanLogger) SetLoggerWithOpts(log Logger, nOpts *natsd.Options, debug, trace bool) {
+	s.mu.Lock()
+	s.log = log
+	s.ltime = nOpts.Logtime
+	s.debug = debug
+	s.trace = trace
+	s.lfile = nOpts.LogFile
+	s.fszl = nOpts.LogSizeLimit
+	s.ndbg = nOpts.Debug
+	s.ntrc = nOpts.Trace
+	s.mu.Unlock()
+}
+
+// SetNATSServer allows the logger to have a handle to the embedded NATS Server.
+// This sets the logger for the NATS Server and used during logfile re-opening.
+func (s *StanLogger) SetNATSServer(ns *natsd.Server) {
+	s.mu.Lock()
+	s.ns = ns
+	ns.SetLogger(s.log, s.ndbg, s.ntrc)
 	s.mu.Unlock()
 }
 
@@ -87,9 +116,13 @@ func (s *StanLogger) ReopenLogFile() {
 			return
 		}
 	}
-	fileLog := natsdLogger.NewFileLogger(s.lfile, s.ltime, s.debug, s.trace, true)
+	// Pass true for debug and trace here. The higher level will suppress the debug/traces if needed.
+	fileLog := natsdLogger.NewFileLogger(s.lfile, s.ltime, true, true, true)
 	if s.fszl > 0 {
 		fileLog.SetSizeLimit(s.fszl)
+	}
+	if s.ns != nil {
+		s.ns.SetLogger(fileLog, s.ndbg, s.ntrc)
 	}
 	s.log = fileLog
 	s.mu.Unlock()
