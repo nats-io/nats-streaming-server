@@ -11,7 +11,7 @@ require (
 	github.com/nats-io/nuid v1.0.1
 	github.com/nats-io/stan.go v0.6.0
 	github.com/prometheus/procfs v0.0.8
-	go.etcd.io/bbolt v1.3.3
+	go.etcd.io/bbolt v1.3.4
 	golang.org/x/crypto v0.0.0-20200206161412-a0c6ece9d31a
 	golang.org/x/sys v0.0.0-20200202164722-d101bd2416d5
 )
