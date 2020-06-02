@@ -1,4 +1,4 @@
-// Copyright 2016-2019 The NATS Authors
+// Copyright 2016-2020 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,6 +17,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"reflect"
 	"runtime"
@@ -1276,4 +1277,83 @@ func TestStreamingServerReadyLog(t *testing.T) {
 
 	getLeader(t, 5*time.Second, s, s2)
 	checkLog(t, l, true)
+}
+
+func TestReopenLogFileStopsNATSDebugTrace(t *testing.T) {
+	tmpDir, err := ioutil.TempDir("", "nats-streaming-server")
+	if err != nil {
+		t.Fatal("Could not create tmp dir")
+	}
+	defer os.RemoveAll(tmpDir)
+	file, err := ioutil.TempFile(tmpDir, "log_")
+	if err != nil {
+		t.Fatalf("Could not create the temp file: %v", err)
+	}
+	file.Close()
+
+	nOpts := natsdTest.DefaultTestOptions
+	nOpts.LogFile = file.Name()
+	nOpts.Debug = true
+	nOpts.Trace = true
+	nOpts.Logtime = true
+	nOpts.LogSizeLimit = 10 * 1024
+
+	sOpts := GetDefaultOptions()
+	// Ensure STAN debug and trace are set to false. This was the issue
+	sOpts.Debug = false
+	sOpts.Trace = false
+	sOpts.EnableLogging = true
+	s := runServerWithOpts(t, sOpts, &nOpts)
+	defer s.Shutdown()
+
+	check := func(str string, expected bool) {
+		t.Helper()
+		buf, err := ioutil.ReadFile(nOpts.LogFile)
+		if err != nil {
+			t.Fatalf("Error reading file: %v", err)
+		}
+		sbuf := string(buf)
+		present := strings.Contains(sbuf, str)
+		if expected && !present {
+			t.Fatalf("Expected to find %q, did not: %s", str, sbuf)
+		} else if !expected && present {
+			t.Fatalf("Expected to not find %q, but it was: %s", str, sbuf)
+		}
+	}
+	sc, err := stan.Connect(clusterName, "before_reopen")
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc.Close()
+	check("before_reopen", true)
+	check("[DBG] STREAM: [Client:before_reopen]", false)
+
+	s.log.ReopenLogFile()
+	check("File log re-opened", true)
+
+	sc.Close()
+	sc, err = stan.Connect(clusterName, "after_reopen")
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer sc.Close()
+	check("after_reopen", true)
+	check("[DBG] STREAM: [Client:after_reopen]", false)
+
+	payload := make([]byte, 1000)
+	for i := 0; i < len(payload); i++ {
+		payload[i] = 'A'
+	}
+	pstr := string(payload)
+	for i := 0; i < 10; i++ {
+		s.log.Noticef(pstr)
+	}
+	// Check that size limit has been applied.
+	files, err := ioutil.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("Error reading directory: %v", err)
+	}
+	if len(files) == 1 {
+		t.Fatal("Expected log to have been rotated, was not")
+	}
 }

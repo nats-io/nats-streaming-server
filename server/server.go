@@ -1858,7 +1858,7 @@ func (s *StanServer) configureLogger() {
 		newLogger = natsdLogger.NewStdLogger(nOpts.Logtime, enableDebug, enableTrace, colors, true)
 	}
 
-	s.log.SetLogger(newLogger, nOpts.Logtime, sOpts.Debug, sOpts.Trace, nOpts.LogFile)
+	s.log.SetLoggerWithOpts(newLogger, nOpts, sOpts.Debug, sOpts.Trace)
 }
 
 // This is either running inside RunServerWithOpts() and before any reference
@@ -2366,9 +2366,7 @@ func (s *StanServer) startNATSServer() error {
 	if s.natsServer == nil {
 		return fmt.Errorf("no NATS Server object returned")
 	}
-	if stanLogger := s.log.GetLogger(); stanLogger != nil {
-		s.natsServer.SetLogger(stanLogger, opts.Debug, opts.Trace)
-	}
+	s.log.SetNATSServer(s.natsServer)
 	// Run server in Go routine.
 	go s.natsServer.Start()
 	// Wait for accept loop(s) to be started
