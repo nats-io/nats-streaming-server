@@ -3,8 +3,9 @@ module github.com/nats-io/nats-streaming-server
 require (
 	github.com/go-sql-driver/mysql v1.5.0
 	github.com/gogo/protobuf v1.3.1
+	github.com/hashicorp/go-hclog v0.9.1
 	github.com/hashicorp/go-msgpack v0.5.5
-	github.com/hashicorp/raft v1.1.1
+	github.com/hashicorp/raft v1.1.2
 	github.com/lib/pq v1.3.0
 	github.com/nats-io/nats-server/v2 v2.1.4
 	github.com/nats-io/nats.go v1.9.1
