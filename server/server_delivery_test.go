@@ -353,10 +353,12 @@ func TestDeliveryRaceBetweenNextMsgAndStoring(t *testing.T) {
 
 	sc.Publish("foo", []byte("msg1"))
 
-	c := s.channels.get("foo")
 	ch1 := make(chan struct{})
 	ch2 := make(chan bool)
+	s.channels.Lock()
+	c := s.channels.channels["foo"]
 	c.store.Msgs = &blockingLookupStore{MsgStore: c.store.Msgs, inLookupCh: ch1, releaseCh: ch2}
+	s.channels.Unlock()
 
 	sub := s.clients.getSubs(clientName)[0]
 	wg := sync.WaitGroup{}
