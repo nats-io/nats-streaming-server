@@ -7139,10 +7139,12 @@ func TestClusteringRestoreSnapshotErrorDontSkipSeq(t *testing.T) {
 		t.Fatalf("Error on snapshot: %v", err)
 	}
 
-	c := s1.channels.get("foo")
 	ch1 := make(chan struct{})
 	ch2 := make(chan bool)
+	s1.channels.Lock()
+	c := s1.channels.channels["foo"]
 	c.store.Msgs = &blockingLookupStore{MsgStore: c.store.Msgs, inLookupCh: ch1, releaseCh: ch2}
+	s1.channels.Unlock()
 
 	// Configure second server.
 	s3sOpts := getTestDefaultOptsForClustering("c", false)
@@ -7257,10 +7259,12 @@ func TestClusteringRestoreSnapshotGapInSeq(t *testing.T) {
 		t.Fatalf("Error on snapshot: %v", err)
 	}
 
-	c := s1.channels.get("foo")
 	ch1 := make(chan struct{})
 	ch2 := make(chan bool)
+	s1.channels.Lock()
+	c := s1.channels.channels["foo"]
 	c.store.Msgs = &blockingLookupStore{MsgStore: c.store.Msgs, inLookupCh: ch1, releaseCh: ch2}
+	s1.channels.Unlock()
 
 	// Configure second server.
 	s3sOpts := getTestDefaultOptsForClustering("c", false)
