@@ -384,3 +384,106 @@ func TestDeliveryRaceBetweenNextMsgAndStoring(t *testing.T) {
 		t.Fatal("Timeout!")
 	}
 }
+
+func TestDeliveryStopsWhenSubClosed(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	// Use a bare NATS connection to send incorrect requests
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	// Get the connect subject
+	connSubj := fmt.Sprintf("%s.%s", s.opts.DiscoverPrefix, clusterName)
+	connReq := &pb.ConnectRequest{
+		ClientID:       clientName,
+		HeartbeatInbox: nats.NewInbox(),
+	}
+	crb, _ := connReq.Marshal()
+	respMsg, err := nc.Request(connSubj, crb, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Request error: %v", err)
+	}
+	connResponse := &pb.ConnectResponse{}
+	connResponse.Unmarshal(respMsg.Data)
+
+	subSubj := connResponse.SubRequests
+	subCloseSubj := connResponse.SubCloseRequests
+
+	subReq := &pb.SubscriptionRequest{
+		ClientID:      clientName,
+		MaxInFlight:   1024,
+		Subject:       "foo",
+		StartPosition: pb.StartPosition_NewOnly,
+		AckWaitInSecs: 1,
+	}
+	subCloseReq := &pb.UnsubscribeRequest{
+		ClientID: clientName,
+		Subject:  "foo",
+	}
+
+	inbox := nats.NewInbox()
+	sub, err := nc.SubscribeSync(inbox)
+	if err != nil {
+		t.Fatalf("Unable to create nats subscriber: %v", err)
+	}
+	// Send a subscription request
+	subReq.Inbox = inbox
+	bytes, _ := subReq.Marshal()
+	msg, err := nc.Request(subSubj, bytes, time.Second)
+	if err != nil {
+		t.Fatalf("Error sending subscription request: %v", err)
+	}
+	// Parse the response
+	subReqResp := &pb.SubscriptionResponse{}
+	if err := subReqResp.Unmarshal(msg.Data); err != nil {
+		t.Fatalf(" Invalid subscription create response: %v", err)
+	}
+	if subReqResp.Error != "" {
+		t.Fatalf("Received response error: %q", subReqResp.Error)
+	}
+
+	ssub := s.clients.getSubs(clientName)[0]
+
+	// Close
+	subCloseReq.Inbox = subReqResp.AckInbox
+	bytes, _ = subCloseReq.Marshal()
+	msg, err = nc.Request(subCloseSubj, bytes, time.Second)
+	if err != nil {
+		t.Fatalf("Unable to sending unsub request: %v", err)
+	}
+	// Parse the response
+	subCloseResp := &pb.SubscriptionResponse{}
+	if err := subCloseResp.Unmarshal(msg.Data); err != nil {
+		t.Fatalf("Invalid subscription close response: %v", err)
+	}
+	if subCloseResp.Error != "" {
+		t.Fatalf("Error on close: %q", subCloseResp.Error)
+	}
+
+	// Now check that if the server was trying to send a message, the
+	// message would not be sent and ack timer not setup.
+	m := &pb.MsgProto{
+		Subject:   "foo",
+		Sequence:  1,
+		Data:      []byte("hello"),
+		Timestamp: time.Now().UnixNano(),
+	}
+	sent, sendMore := s.sendMsgToSub(ssub, m, false)
+	if sent || sendMore {
+		t.Fatalf("Should have returned false and false, but returned %v and %v", sent, sendMore)
+	}
+	// Expect to no receive anything on the sub
+	if msg, err := sub.NextMsg(100 * time.Millisecond); msg != nil || err == nil {
+		t.Fatalf("No message expected, got %+v", msg)
+	}
+	ssub.RLock()
+	timerSet := ssub.ackTimer != nil
+	ssub.RUnlock()
+	if timerSet {
+		t.Fatal("Ack timer should not be set, but it was")
+	}
+}
