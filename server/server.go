@@ -3952,7 +3952,7 @@ func (s *StanServer) processReplicatedSendAndAck(ssa *spb.SubSentAndAck) {
 // are not sent and subscriber is marked as stalled.
 // Sub lock should be held before calling.
 func (s *StanServer) sendMsgToSub(sub *subState, m *pb.MsgProto, force bool) (bool, bool) {
-	if sub == nil || m == nil || !sub.initialized || (sub.newOnHold && !m.Redelivered) {
+	if sub == nil || m == nil || !sub.initialized || sub.ClientID == "" || (sub.newOnHold && !m.Redelivered) {
 		return false, false
 	}
 
