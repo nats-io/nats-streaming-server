@@ -17,13 +17,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"log"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"github.com/nats-io/nats-server/v2/server"
 	natsdTest "github.com/nats-io/nats-server/v2/test"
@@ -50,14 +50,18 @@ func (a *testLoggerAdapter) Write(d []byte) (int, error) {
 		d = d[:len(d)-1]
 	}
 	str := string(d)
-	if strings.Contains(str, "[ERR]") {
+	if strings.Contains(str, "[ERROR]") {
 		stackFatalf(a.t, "NetTransport error: %v", str)
 	}
 	return len(d), nil
 }
 
-func newTestLogger(t *testing.T) *log.Logger {
-	return log.New(&testLoggerAdapter{t: t}, "", log.Lmicroseconds)
+func newTestLogger(t *testing.T) hclog.Logger {
+	return hclog.New(&hclog.LoggerOptions{
+		Name:   natsLogAppName,
+		Level:  hclog.Debug,
+		Output: &testLoggerAdapter{t: t},
+	})
 }
 
 func runRaftTportServer() *server.Server {
