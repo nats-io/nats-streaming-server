@@ -3677,6 +3677,7 @@ func (s *StanServer) getMsgForRedelivery(c *channel, sub *subState, seq uint64) 
 		if err != nil {
 			s.log.Errorf("Error getting message for redelivery subid=%d, seq=%d, err=%v",
 				sub.ID, seq, err)
+			return nil
 		}
 		// Ack it so that it does not reincarnate on restart
 		s.processAck(c, sub, seq, false)
