@@ -208,3 +208,63 @@ func TestSignalReload(t *testing.T) {
 		t.Fatalf("Did not get the Reload trace (make sure you did a `go install` prior to running the test")
 	}
 }
+
+func TestNATSServerConfigReloadFollowedByReopen(t *testing.T) {
+	lfile := "nss.log"
+	ctemp := `
+	logfile: "%s"
+	debug: false
+	trace: %s
+	streaming {
+		sd: false
+		sv: false
+	}
+	`
+	conf := createConfFile(t, []byte(fmt.Sprintf(ctemp, lfile, "false")))
+	defer os.Remove(conf)
+	defer os.Remove(lfile)
+
+	// This test requires that the server be installed.
+	cmd := exec.Command("nats-streaming-server", "-c", conf)
+	cmd.Start()
+	// Wait for it to print some startup trace
+	waitFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		content, err := ioutil.ReadFile(lfile)
+		if err != nil {
+			return err
+		}
+		if bytes.Contains(content, []byte(streamingReadyLog)) {
+			return nil
+		}
+		return fmt.Errorf("process not started yet, make sure you `go install` first!")
+	})
+	changeCurrentConfigContentWithNewContent(t, conf, []byte(fmt.Sprintf(ctemp, lfile, "true")))
+	syscall.Kill(cmd.Process.Pid, syscall.SIGHUP)
+	time.Sleep(500 * time.Millisecond)
+	c := NewDefaultConnection(t)
+	c.Publish("foo", []byte("hello"))
+	c.Close()
+	syscall.Kill(cmd.Process.Pid, syscall.SIGUSR1)
+	time.Sleep(500 * time.Millisecond)
+	c = NewDefaultConnection(t)
+	c.Publish("bar", []byte("hello"))
+	c.Close()
+	syscall.Kill(cmd.Process.Pid, syscall.SIGINT)
+	cmd.Wait()
+	content, err := ioutil.ReadFile(lfile)
+	if err != nil {
+		t.Fatalf("Error reading log file: %v", err)
+	}
+
+	if n := bytes.Count(content, []byte("CONNECT {")); n != 2 {
+		t.Fatalf("Expected 2 connects, got %v\n%s\n", n, content)
+	}
+	idx := bytes.LastIndex(content, []byte("CONNECT {"))
+	backward := content[idx-150 : idx]
+	start := bytes.LastIndexByte(backward, '\n')
+	line := backward[start:]
+	// If we lost notion of logtime, we would have [pid] [TRC] directly..
+	if bytes.Contains(line, []byte("] [TRC] ")) {
+		t.Fatalf("Logtime was lost during reload: %q", line)
+	}
+}
