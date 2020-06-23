@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -72,6 +73,7 @@ type Info struct {
 	MaxPayload        int32    `json:"max_payload"`
 	IP                string   `json:"ip,omitempty"`
 	CID               uint64   `json:"client_id,omitempty"`
+	ClientIP          string   `json:"client_ip,omitempty"`
 	Nonce             string   `json:"nonce,omitempty"`
 	Cluster           string   `json:"cluster,omitempty"`
 	ClientConnectURLs []string `json:"connect_urls,omitempty"` // Contains URLs a client can connect to.
@@ -126,6 +128,7 @@ type Server struct {
 	start            time.Time
 	http             net.Listener
 	httpHandler      http.Handler
+	httpBasePath     string
 	profiler         net.Listener
 	httpReqStats     map[string]uint64
 	routeListener    net.Listener
@@ -139,7 +142,8 @@ type Server struct {
 		dialTimeout time.Duration
 	}
 
-	quitCh chan struct{}
+	quitCh           chan struct{}
+	shutdownComplete chan struct{}
 
 	// Tracking Go routines
 	grMu         sync.Mutex
@@ -152,9 +156,10 @@ type Server struct {
 
 	logging struct {
 		sync.RWMutex
-		logger Logger
-		trace  int32
-		debug  int32
+		logger      Logger
+		trace       int32
+		debug       int32
+		traceSysAcc int32
 	}
 
 	clientConnectURLs []string
@@ -236,21 +241,14 @@ func NewServer(opts *Options) (*Server, error) {
 		serverName = opts.ServerName
 	}
 
+	httpBasePath := normalizeBasePath(opts.HTTPBasePath)
+
 	// Validate some options. This is here because we cannot assume that
 	// server will always be started with configuration parsing (that could
 	// report issues). Its options can be (incorrectly) set by hand when
 	// server is embedded. If there is an error, return nil.
 	if err := validateOptions(opts); err != nil {
 		return nil, err
-	}
-
-	// If there is an URL account resolver, do basic test to see if anyone is home
-	if ar := opts.AccountResolver; ar != nil {
-		if ur, ok := ar.(*URLAccResolver); ok {
-			if _, err := ur.Fetch(""); err != nil {
-				return nil, err
-			}
-		}
 	}
 
 	info := Info{
@@ -270,15 +268,16 @@ func NewServer(opts *Options) (*Server, error) {
 
 	now := time.Now()
 	s := &Server{
-		kp:         kp,
-		configFile: opts.ConfigFile,
-		info:       info,
-		prand:      rand.New(rand.NewSource(time.Now().UnixNano())),
-		opts:       opts,
-		done:       make(chan bool, 1),
-		start:      now,
-		configTime: now,
-		gwLeafSubs: NewSublistWithCache(),
+		kp:           kp,
+		configFile:   opts.ConfigFile,
+		info:         info,
+		prand:        rand.New(rand.NewSource(time.Now().UnixNano())),
+		opts:         opts,
+		done:         make(chan bool, 1),
+		start:        now,
+		configTime:   now,
+		gwLeafSubs:   NewSublistWithCache(),
+		httpBasePath: httpBasePath,
 	}
 
 	// Trusted root operator keys.
@@ -332,10 +331,24 @@ func NewServer(opts *Options) (*Server, error) {
 	// Used to kick out all go routines possibly waiting on server
 	// to shutdown.
 	s.quitCh = make(chan struct{})
+	// Closed when Shutdown() is complete. Allows WaitForShutdown() to block
+	// waiting for complete shutdown.
+	s.shutdownComplete = make(chan struct{})
 
 	// For tracking accounts
 	if err := s.configureAccounts(); err != nil {
 		return nil, err
+	}
+
+	// If there is an URL account resolver, do basic test to see if anyone is home.
+	// Do this after configureAccounts() which calls configureResolver(), which will
+	// set TLSConfig if specified.
+	if ar := opts.AccountResolver; ar != nil {
+		if ur, ok := ar.(*URLAccResolver); ok {
+			if _, err := ur.Fetch(""); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// In local config mode, check that leafnode configuration
@@ -400,6 +413,10 @@ func validateOptions(o *Options) error {
 	// Check on leaf nodes which will require a system
 	// account when gateways are also configured.
 	if err := validateLeafNode(o); err != nil {
+		return err
+	}
+	// Check that authentication is properly configured.
+	if err := validateAuth(o); err != nil {
 		return err
 	}
 	// Check that gateway is properly configured. Returns no error
@@ -495,8 +512,16 @@ func (s *Server) configureAccounts() error {
 	if opts.SystemAccount != _EMPTY_ {
 		// Lock may be acquired in lookupAccount, so release to call lookupAccount.
 		s.mu.Unlock()
-		_, err := s.lookupAccount(opts.SystemAccount)
+		acc, err := s.lookupAccount(opts.SystemAccount)
 		s.mu.Lock()
+		if err == nil && s.sys != nil && acc != s.sys.account {
+			// sys.account.clients (including internal client)/respmap/etc... are transferred separately
+			s.sys.account = acc
+			s.mu.Unlock()
+			// acquires server lock separately
+			s.addSystemAccountExports(acc)
+			s.mu.Lock()
+		}
 		if err != nil {
 			return fmt.Errorf("error resolving system account: %v", err)
 		}
@@ -505,21 +530,32 @@ func (s *Server) configureAccounts() error {
 	return nil
 }
 
-// Setup the memory resolver, make sure the JWTs are properly formed but do not
-// enforce expiration etc.
+// Setup the account resolver. For memory resolver, make sure the JWTs are
+// properly formed but do not enforce expiration etc.
 func (s *Server) configureResolver() error {
-	opts := s.opts
+	opts := s.getOpts()
 	s.accResolver = opts.AccountResolver
-	if opts.AccountResolver != nil && len(opts.resolverPreloads) > 0 {
-		if _, ok := s.accResolver.(*MemAccResolver); !ok {
-			return fmt.Errorf("resolver preloads only available for resolver type MEM")
-		}
-		for k, v := range opts.resolverPreloads {
-			_, err := jwt.DecodeAccountClaims(v)
-			if err != nil {
-				return fmt.Errorf("preload account error for %q: %v", k, err)
+	if opts.AccountResolver != nil {
+		// For URL resolver, set the TLSConfig if specified.
+		if opts.AccountResolverTLSConfig != nil {
+			if ar, ok := opts.AccountResolver.(*URLAccResolver); ok {
+				if t, ok := ar.c.Transport.(*http.Transport); ok {
+					t.CloseIdleConnections()
+					t.TLSClientConfig = opts.AccountResolverTLSConfig.Clone()
+				}
 			}
-			s.accResolver.Store(k, v)
+		}
+		if len(opts.resolverPreloads) > 0 {
+			if _, ok := s.accResolver.(*MemAccResolver); !ok {
+				return fmt.Errorf("resolver preloads only available for resolver type MEM")
+			}
+			for k, v := range opts.resolverPreloads {
+				_, err := jwt.DecodeAccountClaims(v)
+				if err != nil {
+					return fmt.Errorf("preload account error for %q: %v", k, err)
+				}
+				s.accResolver.Store(k, v)
+			}
 		}
 	}
 	return nil
@@ -764,12 +800,13 @@ func (s *Server) SetSystemAccount(accName string) error {
 
 // SystemAccount returns the system account if set.
 func (s *Server) SystemAccount() *Account {
+	var sacc *Account
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.sys != nil {
-		return s.sys.account
+		sacc = s.sys.account
 	}
-	return nil
+	s.mu.Unlock()
+	return sacc
 }
 
 // For internal sends.
@@ -817,6 +854,7 @@ func (s *Server) setSystemAccount(acc *Account) error {
 		subs:    make(map[string]msgHandler),
 		replies: make(map[string]msgHandler),
 		sendq:   make(chan *pubMsg, internalSendQLen),
+		resetCh: make(chan struct{}),
 		statsz:  eventsHBInterval,
 		orphMax: 5 * eventsHBInterval,
 		chkOrph: 3 * eventsHBInterval,
@@ -828,6 +866,8 @@ func (s *Server) setSystemAccount(acc *Account) error {
 
 	// Register with the account.
 	s.sys.client.registerWithAccount(acc)
+
+	s.addSystemAccountExports(acc)
 
 	// Start our internal loop to serialize outbound messages.
 	// We do our own wg here since we will stop first during shutdown.
@@ -842,17 +882,16 @@ func (s *Server) setSystemAccount(acc *Account) error {
 	// Send out statsz updates periodically.
 	s.wrapChk(s.startStatszTimer)()
 
-	return nil
-}
-
-func (s *Server) systemAccount() *Account {
-	var sacc *Account
+	// If we have existing accounts make sure we enable account tracking.
 	s.mu.Lock()
-	if s.sys != nil {
-		sacc = s.sys.account
-	}
+	s.accounts.Range(func(k, v interface{}) bool {
+		acc := v.(*Account)
+		s.enableAccountTracking(acc)
+		return true
+	})
 	s.mu.Unlock()
-	return sacc
+
+	return nil
 }
 
 // Determine if accounts should track subscriptions for
@@ -908,7 +947,7 @@ func (s *Server) registerAccountNoLock(acc *Account) *Account {
 		acc.maxnrm = DEFAULT_MAX_ACCOUNT_INTERNAL_RESPONSE_MAPS
 	}
 	if acc.clients == nil {
-		acc.clients = make(map[*client]*client)
+		acc.clients = make(map[*client]struct{})
 	}
 	// If we are capable of routing we will track subscription
 	// information for efficient interest propagation.
@@ -1134,7 +1173,7 @@ func (s *Server) Start() {
 		return
 	}
 
-	// Setup system account which will start eventing stack.
+	// Setup system account which will start the eventing stack.
 	if sa := opts.SystemAccount; sa != _EMPTY_ {
 		if err := s.SetSystemAccount(sa); err != nil {
 			s.Fatalf("Can't set system account: %v", err)
@@ -1321,6 +1360,13 @@ func (s *Server) Shutdown() {
 			l.Close()
 		}
 	}
+	// Notify that the shutdown is complete
+	close(s.shutdownComplete)
+}
+
+// WaitForShutdown will block until the server has been fully shutdown.
+func (s *Server) WaitForShutdown() {
+	<-s.shutdownComplete
 }
 
 // AcceptLoop is exported for easier testing.
@@ -1523,6 +1569,10 @@ const (
 	StackszPath  = "/stacksz"
 )
 
+func (s *Server) basePath(p string) string {
+	return path.Join(s.httpBasePath, p)
+}
+
 // Start the monitoring server
 func (s *Server) startMonitoring(secure bool) error {
 	// Snapshot server options.
@@ -1577,23 +1627,23 @@ func (s *Server) startMonitoring(secure bool) error {
 	mux := http.NewServeMux()
 
 	// Root
-	mux.HandleFunc(RootPath, s.HandleRoot)
+	mux.HandleFunc(s.basePath(RootPath), s.HandleRoot)
 	// Varz
-	mux.HandleFunc(VarzPath, s.HandleVarz)
+	mux.HandleFunc(s.basePath(VarzPath), s.HandleVarz)
 	// Connz
-	mux.HandleFunc(ConnzPath, s.HandleConnz)
+	mux.HandleFunc(s.basePath(ConnzPath), s.HandleConnz)
 	// Routez
-	mux.HandleFunc(RoutezPath, s.HandleRoutez)
+	mux.HandleFunc(s.basePath(RoutezPath), s.HandleRoutez)
 	// Gatewayz
-	mux.HandleFunc(GatewayzPath, s.HandleGatewayz)
+	mux.HandleFunc(s.basePath(GatewayzPath), s.HandleGatewayz)
 	// Leafz
-	mux.HandleFunc(LeafzPath, s.HandleLeafz)
+	mux.HandleFunc(s.basePath(LeafzPath), s.HandleLeafz)
 	// Subz
-	mux.HandleFunc(SubszPath, s.HandleSubsz)
+	mux.HandleFunc(s.basePath(SubszPath), s.HandleSubsz)
 	// Subz alias for backwards compatibility
-	mux.HandleFunc("/subscriptionsz", s.HandleSubsz)
+	mux.HandleFunc(s.basePath("/subscriptionsz"), s.HandleSubsz)
 	// Stacksz
-	mux.HandleFunc(StackszPath, s.HandleStacksz)
+	mux.HandleFunc(s.basePath(StackszPath), s.HandleStacksz)
 
 	// Do not set a WriteTimeout because it could cause cURL/browser
 	// to return empty response or unable to display page if the
@@ -1754,6 +1804,12 @@ func (s *Server) createClient(conn net.Conn) *client {
 	// The connection may have been closed
 	if c.isClosed() {
 		c.mu.Unlock()
+		// If it was due to TLS timeout, teardownConn() has already been called.
+		// Otherwise, if connection was marked as closed while sending the INFO,
+		// we need to call teardownConn() directly here.
+		if !info.TLSRequired {
+			c.teardownConn()
+		}
 		return c
 	}
 
@@ -1766,8 +1822,8 @@ func (s *Server) createClient(conn net.Conn) *client {
 
 	// Do final client initialization
 
-	// Set the First Ping timer.
-	s.setFirstPingTimer(c)
+	// Set the Ping timer. Will be reset once connect was received.
+	c.setPingTimer()
 
 	// Spin up the read loop.
 	s.startGoRoutine(func() { c.readLoop() })
@@ -1802,9 +1858,9 @@ func (s *Server) saveClosedClient(c *client, nc net.Conn, reason ClosedState) {
 
 	// Do subs, do not place by default in main ConnInfo
 	if len(c.subs) > 0 {
-		cc.subs = make([]string, 0, len(c.subs))
+		cc.subs = make([]SubDetail, 0, len(c.subs))
 		for _, sub := range c.subs {
-			cc.subs = append(cc.subs, string(sub.subject))
+			cc.subs = append(cc.subs, newSubDetail(sub))
 		}
 	}
 	// Hold user as well.
@@ -1903,8 +1959,10 @@ func tlsVersion(ver uint16) string {
 		return "1.1"
 	case tls.VersionTLS12:
 		return "1.2"
+	case tls.VersionTLS13:
+		return "1.3"
 	}
-	return fmt.Sprintf("Unknown [%x]", ver)
+	return fmt.Sprintf("Unknown [0x%x]", ver)
 }
 
 // We use hex here so we don't need multiple versions
@@ -1913,7 +1971,7 @@ func tlsCipher(cs uint16) string {
 	if present {
 		return name
 	}
-	return fmt.Sprintf("Unknown [%x]", cs)
+	return fmt.Sprintf("Unknown [0x%x]", cs)
 }
 
 // Remove a client or route from our internal accounting.

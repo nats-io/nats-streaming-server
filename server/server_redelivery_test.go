@@ -1210,10 +1210,10 @@ func TestQueueRedeliveryOnStartup(t *testing.T) {
 	}
 	// Now stop server and wait more than AckWait before resarting.
 	s.Shutdown()
-	// We need to  make sure that the first redelivery on startup will
+	// We need to make sure that the first redelivery on startup will
 	// actually send messages to original qsub. This happens only if
 	// the AckWait has elapsed. So make sure that we wait long enough.
-	time.Sleep(800 * time.Millisecond)
+	time.Sleep(time.Second)
 	l := &trackDeliveredMsgs{newSeq: int(totalMsgs + 1), errCh: make(chan error, 1)}
 	opts.Trace = true
 	opts.CustomLogger = l
