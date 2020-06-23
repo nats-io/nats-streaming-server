@@ -73,13 +73,26 @@ func (s *StanLogger) SetFileSizeLimit(limit int64) {
 func (s *StanLogger) SetLoggerWithOpts(log Logger, nOpts *natsd.Options, debug, trace bool) {
 	s.mu.Lock()
 	s.log = log
-	s.ltime = nOpts.Logtime
 	s.debug = debug
 	s.trace = trace
+	s.updateNATSOptions(nOpts)
+	s.mu.Unlock()
+}
+
+func (s *StanLogger) updateNATSOptions(nOpts *natsd.Options) {
+	s.ltime = nOpts.Logtime
 	s.lfile = nOpts.LogFile
 	s.fszl = nOpts.LogSizeLimit
 	s.ndbg = nOpts.Debug
 	s.ntrc = nOpts.Trace
+}
+
+// UpdateNATSOptions refreshes the NATS related options, for instance after a
+// configuration reload, so that if ReopenLogFile() is called, the logger new
+// options are applied.
+func (s *StanLogger) UpdateNATSOptions(nOpts *natsd.Options) {
+	s.mu.Lock()
+	s.updateNATSOptions(nOpts)
 	s.mu.Unlock()
 }
 
