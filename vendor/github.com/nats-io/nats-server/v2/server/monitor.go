@@ -32,9 +32,11 @@ import (
 
 // Snapshot this
 var numCores int
+var maxProcs int
 
 func init() {
 	numCores = runtime.NumCPU()
+	maxProcs = runtime.GOMAXPROCS(0)
 }
 
 // Connz represents detailed information on current client connections.
@@ -59,6 +61,9 @@ type ConnzOptions struct {
 
 	// Subscriptions indicates if subscriptions should be included in the results.
 	Subscriptions bool `json:"subscriptions"`
+
+	// SubscriptionsDetail indicates if subscription details should be included in the results
+	SubscriptionsDetail bool `json:"subscriptions_detail"`
 
 	// Offset is used for pagination. Connz() only returns connections starting at this
 	// offset from the global results.
@@ -96,30 +101,31 @@ const (
 
 // ConnInfo has detailed information on a per connection basis.
 type ConnInfo struct {
-	Cid            uint64     `json:"cid"`
-	IP             string     `json:"ip"`
-	Port           int        `json:"port"`
-	Start          time.Time  `json:"start"`
-	LastActivity   time.Time  `json:"last_activity"`
-	Stop           *time.Time `json:"stop,omitempty"`
-	Reason         string     `json:"reason,omitempty"`
-	RTT            string     `json:"rtt,omitempty"`
-	Uptime         string     `json:"uptime"`
-	Idle           string     `json:"idle"`
-	Pending        int        `json:"pending_bytes"`
-	InMsgs         int64      `json:"in_msgs"`
-	OutMsgs        int64      `json:"out_msgs"`
-	InBytes        int64      `json:"in_bytes"`
-	OutBytes       int64      `json:"out_bytes"`
-	NumSubs        uint32     `json:"subscriptions"`
-	Name           string     `json:"name,omitempty"`
-	Lang           string     `json:"lang,omitempty"`
-	Version        string     `json:"version,omitempty"`
-	TLSVersion     string     `json:"tls_version,omitempty"`
-	TLSCipher      string     `json:"tls_cipher_suite,omitempty"`
-	AuthorizedUser string     `json:"authorized_user,omitempty"`
-	Account        string     `json:"account,omitempty"`
-	Subs           []string   `json:"subscriptions_list,omitempty"`
+	Cid            uint64      `json:"cid"`
+	IP             string      `json:"ip"`
+	Port           int         `json:"port"`
+	Start          time.Time   `json:"start"`
+	LastActivity   time.Time   `json:"last_activity"`
+	Stop           *time.Time  `json:"stop,omitempty"`
+	Reason         string      `json:"reason,omitempty"`
+	RTT            string      `json:"rtt,omitempty"`
+	Uptime         string      `json:"uptime"`
+	Idle           string      `json:"idle"`
+	Pending        int         `json:"pending_bytes"`
+	InMsgs         int64       `json:"in_msgs"`
+	OutMsgs        int64       `json:"out_msgs"`
+	InBytes        int64       `json:"in_bytes"`
+	OutBytes       int64       `json:"out_bytes"`
+	NumSubs        uint32      `json:"subscriptions"`
+	Name           string      `json:"name,omitempty"`
+	Lang           string      `json:"lang,omitempty"`
+	Version        string      `json:"version,omitempty"`
+	TLSVersion     string      `json:"tls_version,omitempty"`
+	TLSCipher      string      `json:"tls_cipher_suite,omitempty"`
+	AuthorizedUser string      `json:"authorized_user,omitempty"`
+	Account        string      `json:"account,omitempty"`
+	Subs           []string    `json:"subscriptions_list,omitempty"`
+	SubsDetail     []SubDetail `json:"subscriptions_list_detail,omitempty"`
 }
 
 // DefaultConnListSize is the default size of the connection list.
@@ -130,12 +136,29 @@ const DefaultSubListSize = 1024
 
 const defaultStackBufSize = 10000
 
+func newSubsDetailList(client *client) []SubDetail {
+	subsDetail := make([]SubDetail, 0, len(client.subs))
+	for _, sub := range client.subs {
+		subsDetail = append(subsDetail, newSubDetail(sub))
+	}
+	return subsDetail
+}
+
+func newSubsList(client *client) []string {
+	subs := make([]string, 0, len(client.subs))
+	for _, sub := range client.subs {
+		subs = append(subs, string(sub.subject))
+	}
+	return subs
+}
+
 // Connz returns a Connz struct containing information about connections.
 func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 	var (
 		sortOpt = ByCid
 		auth    bool
 		subs    bool
+		subsDet bool
 		offset  int
 		limit   = DefaultConnListSize
 		cid     = uint64(0)
@@ -164,6 +187,7 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		acc = opts.Account
 
 		subs = opts.Subscriptions
+		subsDet = opts.SubscriptionsDetail
 		offset = opts.Offset
 		if offset < 0 {
 			offset = 0
@@ -295,10 +319,11 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		ci := &conns[i]
 		ci.fill(client, client.nc, c.Now)
 		// Fill in subscription data if requested.
-		if subs && len(client.subs) > 0 {
-			ci.Subs = make([]string, 0, len(client.subs))
-			for _, sub := range client.subs {
-				ci.Subs = append(ci.Subs, string(sub.subject))
+		if len(client.subs) > 0 {
+			if subsDet {
+				ci.SubsDetail = newSubsDetailList(client)
+			} else if subs {
+				ci.Subs = newSubsList(client)
 			}
 		}
 		// Fill in user if auth requested.
@@ -334,8 +359,15 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 			cc = &cx
 		}
 		// Fill in subscription data if requested.
-		if subs && len(cc.subs) > 0 {
-			cc.Subs = cc.subs
+		if len(cc.subs) > 0 {
+			if subsDet {
+				cc.SubsDetail = cc.subs
+			} else if subs {
+				cc.Subs = make([]string, 0, len(cc.subs))
+				for _, sub := range cc.subs {
+					cc.Subs = append(cc.Subs, sub.Subject)
+				}
+			}
 		}
 		// Fill in user if auth requested.
 		if auth {
@@ -524,6 +556,14 @@ func decodeState(w http.ResponseWriter, r *http.Request) (ConnState, error) {
 	return 0, err
 }
 
+func decodeSubs(w http.ResponseWriter, r *http.Request) (subs bool, subsDet bool, err error) {
+	subsDet = strings.ToLower(r.URL.Query().Get("subs")) == "detail"
+	if !subsDet {
+		subs, err = decodeBool(w, r, "subs")
+	}
+	return
+}
+
 // HandleConnz process HTTP requests for connection information.
 func (s *Server) HandleConnz(w http.ResponseWriter, r *http.Request) {
 	sortOpt := SortOpt(r.URL.Query().Get("sort"))
@@ -531,7 +571,7 @@ func (s *Server) HandleConnz(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	subs, err := decodeBool(w, r, "subs")
+	subs, subsDet, err := decodeSubs(w, r)
 	if err != nil {
 		return
 	}
@@ -556,15 +596,16 @@ func (s *Server) HandleConnz(w http.ResponseWriter, r *http.Request) {
 	acc := r.URL.Query().Get("acc")
 
 	connzOpts := &ConnzOptions{
-		Sort:          sortOpt,
-		Username:      auth,
-		Subscriptions: subs,
-		Offset:        offset,
-		Limit:         limit,
-		CID:           cid,
-		State:         state,
-		User:          user,
-		Account:       acc,
+		Sort:                sortOpt,
+		Username:            auth,
+		Subscriptions:       subs,
+		SubscriptionsDetail: subsDet,
+		Offset:              offset,
+		Limit:               limit,
+		CID:                 cid,
+		State:               state,
+		User:                user,
+		Account:             acc,
 	}
 
 	s.mu.Lock()
@@ -600,6 +641,8 @@ type Routez struct {
 type RoutezOptions struct {
 	// Subscriptions indicates that Routez will return a route's subscriptions
 	Subscriptions bool `json:"subscriptions"`
+	// SubscriptionsDetail indicates if subscription details should be included in the results
+	SubscriptionsDetail bool `json:"subscriptions_detail"`
 }
 
 // RouteInfo has detailed information on a per connection basis.
@@ -620,6 +663,7 @@ type RouteInfo struct {
 	OutBytes     int64              `json:"out_bytes"`
 	NumSubs      uint32             `json:"subscriptions"`
 	Subs         []string           `json:"subscriptions_list,omitempty"`
+	SubsDetail   []SubDetail        `json:"subscriptions_list_detail,omitempty"`
 }
 
 // Routez returns a Routez struct containing information about routes.
@@ -627,7 +671,9 @@ func (s *Server) Routez(routezOpts *RoutezOptions) (*Routez, error) {
 	rs := &Routez{Routes: []*RouteInfo{}}
 	rs.Now = time.Now()
 
-	subs := routezOpts != nil && routezOpts.Subscriptions
+	if routezOpts == nil {
+		routezOpts = &RoutezOptions{}
+	}
 
 	s.mu.Lock()
 	rs.NumRoutes = len(s.routes)
@@ -659,12 +705,14 @@ func (s *Server) Routez(routezOpts *RoutezOptions) (*Routez, error) {
 			RTT:          r.getRTT(),
 		}
 
-		if subs && len(r.subs) > 0 {
-			ri.Subs = make([]string, 0, len(r.subs))
-			for _, sub := range r.subs {
-				ri.Subs = append(ri.Subs, string(sub.subject))
+		if len(r.subs) > 0 {
+			if routezOpts.SubscriptionsDetail {
+				ri.SubsDetail = newSubsDetailList(r)
+			} else if routezOpts.Subscriptions {
+				ri.Subs = newSubsList(r)
 			}
 		}
+
 		switch conn := r.nc.(type) {
 		case *net.TCPConn, *tls.Conn:
 			addr := conn.RemoteAddr().(*net.TCPAddr)
@@ -680,21 +728,19 @@ func (s *Server) Routez(routezOpts *RoutezOptions) (*Routez, error) {
 
 // HandleRoutez process HTTP requests for route information.
 func (s *Server) HandleRoutez(w http.ResponseWriter, r *http.Request) {
-	subs, err := decodeBool(w, r, "subs")
+	subs, subsDetail, err := decodeSubs(w, r)
 	if err != nil {
 		return
 	}
-	var opts *RoutezOptions
-	if subs {
-		opts = &RoutezOptions{Subscriptions: true}
-	}
+
+	opts := RoutezOptions{Subscriptions: subs, SubscriptionsDetail: subsDetail}
 
 	s.mu.Lock()
 	s.httpReqStats[RoutezPath]++
 	s.mu.Unlock()
 
 	// As of now, no error is ever returned.
-	rs, _ := s.Routez(opts)
+	rs, _ := s.Routez(&opts)
 	b, err := json.MarshalIndent(rs, "", "  ")
 	if err != nil {
 		s.Errorf("Error marshaling response to /routez request: %v", err)
@@ -706,6 +752,8 @@ func (s *Server) HandleRoutez(w http.ResponseWriter, r *http.Request) {
 
 // Subsz represents detail information on current connections.
 type Subsz struct {
+	ID  string    `json:"server_id"`
+	Now time.Time `json:"now"`
 	*SublistStats
 	Total  int         `json:"total"`
 	Offset int         `json:"offset"`
@@ -741,6 +789,17 @@ type SubDetail struct {
 	Cid     uint64 `json:"cid"`
 }
 
+func newSubDetail(sub *subscription) SubDetail {
+	return SubDetail{
+		Subject: string(sub.subject),
+		Queue:   string(sub.queue),
+		Sid:     string(sub.sid),
+		Msgs:    sub.nm,
+		Max:     sub.max,
+		Cid:     sub.client.cid,
+	}
+}
+
 // Subsz returns a Subsz struct containing subjects statistics
 func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 	var (
@@ -770,15 +829,21 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 		}
 	}
 
+	slStats := &SublistStats{}
+
 	// FIXME(dlc) - Make account aware.
-	sz := &Subsz{s.gacc.sl.Stats(), 0, offset, limit, nil}
+	sz := &Subsz{s.info.ID, time.Now(), slStats, 0, offset, limit, nil}
 
 	if subdetail {
-		// Now add in subscription's details
 		var raw [4096]*subscription
 		subs := raw[:0]
+		s.accounts.Range(func(k, v interface{}) bool {
+			acc := v.(*Account)
+			slStats.add(acc.sl.Stats())
+			acc.sl.localSubs(&subs)
+			return true
+		})
 
-		s.gacc.sl.localSubs(&subs)
 		details := make([]SubDetail, len(subs))
 		i := 0
 		// TODO(dlc) - may be inefficient and could just do normal match when total subs is large and filtering.
@@ -791,14 +856,7 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 				continue
 			}
 			sub.client.mu.Lock()
-			details[i] = SubDetail{
-				Subject: string(sub.subject),
-				Queue:   string(sub.queue),
-				Sid:     string(sub.sid),
-				Msgs:    sub.nm,
-				Max:     sub.max,
-				Cid:     sub.client.cid,
-			}
+			details[i] = newSubDetail(sub)
 			sub.client.mu.Unlock()
 			i++
 		}
@@ -816,6 +874,12 @@ func (s *Server) Subsz(opts *SubszOptions) (*Subsz, error) {
 		}
 		sz.Subs = details[minoff:maxoff]
 		sz.Total = len(sz.Subs)
+	} else {
+		s.accounts.Range(func(k, v interface{}) bool {
+			acc := v.(*Account)
+			slStats.add(acc.sl.Stats())
+			return true
+		})
 	}
 
 	return sz, nil
@@ -911,6 +975,7 @@ type Varz struct {
 	MaxPingsOut       int               `json:"ping_max"`
 	HTTPHost          string            `json:"http_host"`
 	HTTPPort          int               `json:"http_port"`
+	HTTPBasePath      string            `json:"http_base_path"`
 	HTTPSPort         int               `json:"https_port"`
 	AuthTimeout       float64           `json:"auth_timeout"`
 	MaxControlLine    int32             `json:"max_control_line"`
@@ -926,6 +991,7 @@ type Varz struct {
 	Uptime            string            `json:"uptime"`
 	Mem               int64             `json:"mem"`
 	Cores             int               `json:"cores"`
+	MaxProcs          int               `json:"gomaxprocs"`
 	CPU               float64           `json:"cpu"`
 	Connections       int               `json:"connections"`
 	TotalConnections  uint64            `json:"total_connections"`
@@ -1016,7 +1082,7 @@ func myUptime(d time.Duration) string {
 // HandleRoot will show basic info and links to others handlers.
 func (s *Server) HandleRoot(w http.ResponseWriter, r *http.Request) {
 	// This feels dumb to me, but is required: https://code.google.com/p/go/issues/detail?id=4799
-	if r.URL.Path != "/" {
+	if r.URL.Path != s.httpBasePath {
 		http.NotFound(w, r)
 		return
 	}
@@ -1034,16 +1100,23 @@ func (s *Server) HandleRoot(w http.ResponseWriter, r *http.Request) {
   <body>
     <img src="http://nats.io/img/logo.png" alt="NATS">
     <br/>
-	<a href=/varz>varz</a><br/>
-	<a href=/connz>connz</a><br/>
-	<a href=/routez>routez</a><br/>
-	<a href=/gatewayz>gatewayz</a><br/>
-	<a href=/leafz>leafz</a><br/>
-	<a href=/subsz>subsz</a><br/>
+	<a href=%s>varz</a><br/>
+	<a href=%s>connz</a><br/>
+	<a href=%s>routez</a><br/>
+	<a href=%s>gatewayz</a><br/>
+	<a href=%s>leafz</a><br/>
+	<a href=%s>subsz</a><br/>
     <br/>
     <a href=https://docs.nats.io/nats-server/configuration/monitoring.html>help</a>
   </body>
-</html>`)
+</html>`,
+		s.basePath(VarzPath),
+		s.basePath(ConnzPath),
+		s.basePath(RoutezPath),
+		s.basePath(GatewayzPath),
+		s.basePath(LeafzPath),
+		s.basePath(SubszPath),
+	)
 }
 
 // Varz returns a Varz struct containing the server information.
@@ -1073,18 +1146,19 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 	gw := &opts.Gateway
 	ln := &opts.LeafNode
 	varz := &Varz{
-		ID:        info.ID,
-		Version:   info.Version,
-		Proto:     info.Proto,
-		GitCommit: info.GitCommit,
-		GoVersion: info.GoVersion,
-		Name:      info.Name,
-		Host:      info.Host,
-		Port:      info.Port,
-		IP:        info.IP,
-		HTTPHost:  opts.HTTPHost,
-		HTTPPort:  opts.HTTPPort,
-		HTTPSPort: opts.HTTPSPort,
+		ID:           info.ID,
+		Version:      info.Version,
+		Proto:        info.Proto,
+		GitCommit:    info.GitCommit,
+		GoVersion:    info.GoVersion,
+		Name:         info.Name,
+		Host:         info.Host,
+		Port:         info.Port,
+		IP:           info.IP,
+		HTTPHost:     opts.HTTPHost,
+		HTTPPort:     opts.HTTPPort,
+		HTTPBasePath: opts.HTTPBasePath,
+		HTTPSPort:    opts.HTTPSPort,
 		Cluster: ClusterOptsVarz{
 			Host:        c.Host,
 			Port:        c.Port,
@@ -1108,8 +1182,10 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 			TLSTimeout:  ln.TLSTimeout,
 			Remotes:     []RemoteLeafOptsVarz{},
 		},
-		Start:   s.start,
-		MaxSubs: opts.MaxSubs,
+		Start:    s.start,
+		MaxSubs:  opts.MaxSubs,
+		Cores:    numCores,
+		MaxProcs: maxProcs,
 	}
 	if len(opts.Routes) > 0 {
 		varz.Cluster.URLs = urlsToStrings(opts.Routes)
@@ -1189,7 +1265,6 @@ func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64
 	v.Uptime = myUptime(time.Since(s.start))
 	v.Mem = rss
 	v.CPU = pcpu
-	v.Cores = numCores
 	if l := len(s.info.ClientConnectURLs); l > 0 {
 		v.ClientConnectURLs = make([]string, l)
 		copy(v.ClientConnectURLs, s.info.ClientConnectURLs)
@@ -1284,13 +1359,13 @@ func (s *Server) HandleVarz(w http.ResponseWriter, r *http.Request) {
 // GatewayzOptions are the options passed to Gatewayz()
 type GatewayzOptions struct {
 	// Name will output only remote gateways with this name
-	Name string
+	Name string `json:"name"`
 
 	// Accounts indicates if accounts with its interest should be included in the results.
-	Accounts bool
+	Accounts bool `json:"accounts"`
 
 	// AccountName will limit the list of accounts to that account name (makes Accounts implicit)
-	AccountName string
+	AccountName string `json:"account_name"`
 }
 
 // Gatewayz represents detailed information on Gateways

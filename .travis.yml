@@ -36,7 +36,7 @@ script:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
     mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;";
     go test -i ./...;
-    if [[ "$TRAVIS_GO_VERSION" =~ 1.13 ]]; then ./scripts/cov.sh TRAVIS; else go test -v -failfast -p=1 ./...; fi;
+    if [[ "$TRAVIS_GO_VERSION" =~ 1.14 ]]; then ./scripts/cov.sh TRAVIS; else go test -v -failfast -p=1 ./...; fi;
   fi
 - if [[ "$TRAVIS_OS_NAME" == "windows" ]]; then
     go install;
@@ -50,4 +50,4 @@ deploy:
   script: curl -sL http://git.io/goreleaser | bash
   on:
     tags: true
-    condition: ("$TRAVIS_OS_NAME" = "linux") && ("$TRAVIS_GO_VERSION" =~ "1.13")
+    condition: ("$TRAVIS_OS_NAME" = "linux") && ("$TRAVIS_GO_VERSION" =~ "1.14")

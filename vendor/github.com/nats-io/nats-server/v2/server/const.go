@@ -40,7 +40,7 @@ var (
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "2.1.4"
+	VERSION = "2.1.7"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
@@ -96,6 +96,9 @@ const (
 
 	// DEFAULT_HTTP_PORT is the default monitoring port.
 	DEFAULT_HTTP_PORT = 8222
+
+	// DEFAULT_HTTP_BASE_PATH is the default base path for monitoring.
+	DEFAULT_HTTP_BASE_PATH = "/"
 
 	// ACCEPT_MIN_SLEEP is the minimum acceptable sleep times on temporary errors.
 	ACCEPT_MIN_SLEEP = 10 * time.Millisecond

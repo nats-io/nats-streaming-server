@@ -19,9 +19,12 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/nats-io/jwt"
 )
 
 // FlagSnapshot captures the server options as specified by CLI flags at
@@ -40,6 +43,10 @@ type option interface {
 	// IsLoggingChange indicates if this option requires reloading the logger.
 	IsLoggingChange() bool
 
+	// IsTraceLevelChange indicates if this option requires reloading cached trace level.
+	// Clients store trace level separately.
+	IsTraceLevelChange() bool
+
 	// IsAuthChange indicates if this option requires reloading authorization.
 	IsAuthChange() bool
 
@@ -52,6 +59,10 @@ type option interface {
 type noopOption struct{}
 
 func (n noopOption) IsLoggingChange() bool {
+	return false
+}
+
+func (n noopOption) IsTraceLevelChange() bool {
 	return false
 }
 
@@ -73,15 +84,36 @@ func (l loggingOption) IsLoggingChange() bool {
 	return true
 }
 
+// traceLevelOption is a base struct that provides default option behaviors for
+// tracelevel-related options.
+type traceLevelOption struct {
+	loggingOption
+}
+
+func (l traceLevelOption) IsTraceLevelChange() bool {
+	return true
+}
+
 // traceOption implements the option interface for the `trace` setting.
 type traceOption struct {
-	loggingOption
+	traceLevelOption
 	newValue bool
 }
 
 // Apply is a no-op because logging will be reloaded after options are applied.
 func (t *traceOption) Apply(server *Server) {
 	server.Noticef("Reloaded: trace = %v", t.newValue)
+}
+
+// traceOption implements the option interface for the `trace` setting.
+type traceVerboseOption struct {
+	traceLevelOption
+	newValue bool
+}
+
+// Apply is a no-op because logging will be reloaded after options are applied.
+func (t *traceVerboseOption) Apply(server *Server) {
+	server.Noticef("Reloaded: trace_verbose = %v", t.newValue)
 }
 
 // debugOption implements the option interface for the `debug` setting.
@@ -643,11 +675,65 @@ func (s *Server) reloadOptions(curOpts, newOpts *Options) error {
 	if err != nil {
 		return err
 	}
+
+	if len(changed) != 0 {
+		if err := validateOptions(newOpts); err != nil {
+			return err
+		}
+	}
+
 	// Create a context that is used to pass special info that we may need
 	// while applying the new options.
 	ctx := reloadContext{oldClusterPerms: curOpts.Cluster.Permissions}
 	s.setOpts(newOpts)
 	s.applyOptions(&ctx, changed)
+	return nil
+}
+
+// For the purpose of comparing, impose a order on slice data types where order does not matter
+func imposeOrder(value interface{}) error {
+	switch value := value.(type) {
+	case []*Account:
+		sort.Slice(value, func(i, j int) bool {
+			return value[i].Name < value[j].Name
+		})
+		for _, a := range value {
+			sort.Slice(a.imports.streams, func(i, j int) bool {
+				return a.imports.streams[i].acc.Name < a.imports.streams[j].acc.Name
+			})
+		}
+	case []*User:
+		sort.Slice(value, func(i, j int) bool {
+			return value[i].Username < value[j].Username
+		})
+	case []*NkeyUser:
+		sort.Slice(value, func(i, j int) bool {
+			return value[i].Nkey < value[j].Nkey
+		})
+	case []*url.URL:
+		sort.Slice(value, func(i, j int) bool {
+			return value[i].String() < value[j].String()
+		})
+	case []string:
+		sort.Slice(value, func(i, j int) bool {
+			return value[i] < value[j]
+		})
+	case []*jwt.OperatorClaims:
+		sort.Slice(value, func(i, j int) bool {
+			return value[i].Issuer < value[j].Issuer
+		})
+	case GatewayOpts:
+		sort.Slice(value.Gateways, func(i, j int) bool {
+			return value.Gateways[i].Name < value.Gateways[j].Name
+		})
+	case string, bool, int, int32, int64, time.Duration, float64, nil,
+		LeafNodeOpts, ClusterOpts, *tls.Config, *URLAccResolver, *MemAccResolver, Authentication:
+		// explicitly skipped types
+	default:
+		// this will fail during unit tests
+		return fmt.Errorf("OnReload, sort or explicitly skip type: %s",
+			reflect.TypeOf(value))
+	}
 	return nil
 }
 
@@ -670,12 +756,19 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 		var (
 			oldValue = oldConfig.Field(i).Interface()
 			newValue = newConfig.Field(i).Interface()
-			changed  = !reflect.DeepEqual(oldValue, newValue)
 		)
-		if !changed {
+		if err := imposeOrder(oldValue); err != nil {
+			return nil, err
+		}
+		if err := imposeOrder(newValue); err != nil {
+			return nil, err
+		}
+		if changed := !reflect.DeepEqual(oldValue, newValue); !changed {
 			continue
 		}
 		switch strings.ToLower(field.Name) {
+		case "traceverbose":
+			diffOpts = append(diffOpts, &traceVerboseOption{newValue: newValue.(bool)})
 		case "trace":
 			diffOpts = append(diffOpts, &traceOption{newValue: newValue.(bool)})
 		case "debug":
@@ -749,6 +842,8 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 				return nil, fmt.Errorf("config reload does not support moving to or from an account resolver")
 			}
 			diffOpts = append(diffOpts, &accountsOption{})
+		case "accountresolvertlsconfig":
+			diffOpts = append(diffOpts, &accountsOption{})
 		case "gateway":
 			// Not supported for now, but report warning if configuration of gateway
 			// is actually changed so that user knows that it won't take effect.
@@ -817,11 +912,15 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 		reloadLogging      = false
 		reloadAuth         = false
 		reloadClusterPerms = false
+		reloadClientTrcLvl = false
 	)
 	for _, opt := range opts {
 		opt.Apply(s)
 		if opt.IsLoggingChange() {
 			reloadLogging = true
+		}
+		if opt.IsTraceLevelChange() {
+			reloadClientTrcLvl = true
 		}
 		if opt.IsAuthChange() {
 			reloadAuth = true
@@ -834,6 +933,9 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 	if reloadLogging {
 		s.ConfigureLogger()
 	}
+	if reloadClientTrcLvl {
+		s.reloadClientTraceLevel()
+	}
 	if reloadAuth {
 		s.reloadAuthorization()
 	}
@@ -842,6 +944,55 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 	}
 
 	s.Noticef("Reloaded server configuration")
+}
+
+// Update all cached debug and trace settings for every client
+func (s *Server) reloadClientTraceLevel() {
+	opts := s.getOpts()
+
+	if opts.NoLog {
+		return
+	}
+
+	// Create a list of all clients.
+	// Update their trace level when not holding server or gateway lock
+
+	s.mu.Lock()
+	clientCnt := 1 + len(s.clients) + len(s.grTmpClients) + len(s.routes) + len(s.leafs)
+	s.mu.Unlock()
+
+	s.gateway.RLock()
+	clientCnt += len(s.gateway.in) + len(s.gateway.outo)
+	s.gateway.RUnlock()
+
+	clients := make([]*client, 0, clientCnt)
+
+	s.mu.Lock()
+	if s.eventsEnabled() {
+		clients = append(clients, s.sys.client)
+	}
+
+	cMaps := []map[uint64]*client{s.clients, s.grTmpClients, s.routes, s.leafs}
+	for _, m := range cMaps {
+		for _, c := range m {
+			clients = append(clients, c)
+		}
+	}
+	s.mu.Unlock()
+
+	s.gateway.RLock()
+	for _, c := range s.gateway.in {
+		clients = append(clients, c)
+	}
+	clients = append(clients, s.gateway.outo...)
+	s.gateway.RUnlock()
+
+	for _, c := range clients {
+		// client.trace is commonly read while holding the lock
+		c.mu.Lock()
+		c.setTraceLevel()
+		c.mu.Unlock()
+	}
 }
 
 // reloadAuthorization reconfigures the server authorization settings,
@@ -880,9 +1031,9 @@ func (s *Server) reloadAuthorization() {
 				// sublist and client map to the new account.
 				acc.mu.RLock()
 				if len(acc.clients) > 0 {
-					newAcc.clients = make(map[*client]*client, len(acc.clients))
-					for _, c := range acc.clients {
-						newAcc.clients[c] = c
+					newAcc.clients = make(map[*client]struct{}, len(acc.clients))
+					for c := range acc.clients {
+						newAcc.clients[c] = struct{}{}
 					}
 				}
 				newAcc.sl = acc.sl
@@ -955,7 +1106,16 @@ func (s *Server) reloadAuthorization() {
 	for _, route := range s.routes {
 		routes = append(routes, route)
 	}
+	var resetCh chan struct{}
+	if s.sys != nil {
+		// can't hold the lock as go routine reading it may be waiting for lock as well
+		resetCh = s.sys.resetCh
+	}
 	s.mu.Unlock()
+
+	if resetCh != nil {
+		resetCh <- struct{}{}
+	}
 
 	// Close clients that have moved accounts
 	for _, client := range cclients {
@@ -1054,6 +1214,7 @@ func (s *Server) reloadClusterPermissions(oldPerms *RoutePermissions) {
 	// Regenerate route INFO
 	s.generateRouteInfoJSON()
 	infoJSON = s.routeInfoJSON
+	gacc := s.gacc
 	s.mu.Unlock()
 
 	// If there were no route, we are done
@@ -1084,7 +1245,7 @@ func (s *Server) reloadClusterPermissions(oldPerms *RoutePermissions) {
 		deleteRoutedSubs []*subscription
 	)
 	// FIXME(dlc) - Change for accounts.
-	s.gacc.sl.localSubs(&localSubs)
+	gacc.sl.localSubs(&localSubs)
 
 	// Go through all local subscriptions
 	for _, sub := range localSubs {
@@ -1133,7 +1294,7 @@ func (s *Server) reloadClusterPermissions(oldPerms *RoutePermissions) {
 	}
 	// Remove as a batch all the subs that we have removed from each route.
 	// FIXME(dlc) - Change for accounts.
-	s.gacc.sl.RemoveBatch(deleteRoutedSubs)
+	gacc.sl.RemoveBatch(deleteRoutedSubs)
 }
 
 // validateClusterOpts ensures the new ClusterOpts does not change host or
