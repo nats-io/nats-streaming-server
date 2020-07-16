@@ -1573,9 +1573,7 @@ func (ms *SQLMsgStore) expireMsgs() {
 		expiredTimestamp := time.Now().UnixNano() - int64(ms.limits.MaxAge)
 		r := ms.sqlStore.preparedStmts[sqlGetExpiredMessages].QueryRow(ms.channelID, expiredTimestamp)
 
-		// It has been observed that, there are cases where sqlErrNoRows
-		// is returned in this case we shouldn't reset the timer
-		if err := r.Scan(&count, &maxSeq, &totalSize); (err != nil) && (err != sql.ErrNoRows) {
+		if err := r.Scan(&count, &maxSeq, &totalSize); err != nil {
 			processErr(sqlGetExpiredMessages, err)
 			return
 		}
@@ -1603,7 +1601,7 @@ func (ms *SQLMsgStore) expireMsgs() {
 		// timer needs to be set to.
 		if ms.totalCount > 0 {
 			r = ms.sqlStore.preparedStmts[sqlGetFirstMsgTimestamp].QueryRow(ms.channelID, ms.first)
-			if err := r.Scan(&ms.fTimestamp); err != nil {
+			if err := r.Scan(&ms.fTimestamp); (err != nil) && (err != sql.ErrNoRows) {
 				processErr(sqlGetFirstMsgTimestamp, err)
 				return
 			}
