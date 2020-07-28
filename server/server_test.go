@@ -1370,3 +1370,22 @@ func TestAckProcessedBeforeClose(t *testing.T) {
 		dur.Unsubscribe()
 	}
 }
+
+func TestServerRandomPort(t *testing.T) {
+	natsOpts := natsdTest.DefaultTestOptions
+	natsOpts.Port = natsd.RANDOM_PORT
+	opts := GetDefaultOptions()
+	s := runServerWithOpts(t, opts, &natsOpts)
+	defer s.Shutdown()
+
+	if natsOpts.Port == natsd.RANDOM_PORT {
+		t.Fatal("port was not updated")
+	}
+	s.Shutdown()
+
+	// Try with no nats options provided to make sure we don't
+	// access natsOpts without checking that it is not nil
+	s = runServerWithOpts(t, opts, nil)
+	s.Shutdown()
+}
+

@@ -1763,6 +1763,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		if err := s.startNATSServer(); err != nil {
 			return nil, err
 		}
+		if natsOpts != nil && natsOpts.Port == server.RANDOM_PORT {
+			natsOpts.Port = nOpts.Port
+		}
 	}
 	// Check for monitoring
 	if nOpts.HTTPPort != 0 || nOpts.HTTPSPort != 0 {
