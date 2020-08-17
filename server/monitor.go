@@ -178,10 +178,10 @@ func (s *StanServer) handleRootz(w http.ResponseWriter, r *http.Request) {
   <body>
     <img src="http://nats.io/img/logo.png" alt="NATS Streaming">
     <br/>
-	<a href=%s>server</a><br/>
-	<a href=%s>store</a><br/>
-	<a href=%s>clients</a><br/>
-	<a href=%s>channels</a><br/>
+	<a href=.%s>server</a><br/>
+	<a href=.%s>store</a><br/>
+	<a href=.%s>clients</a><br/>
+	<a href=.%s>channels</a><br/>
     <br/>
     <a href=http://nats.io/documentation/server/gnatsd-monitoring/>help</a>
   </body>
