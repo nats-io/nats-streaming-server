@@ -2378,6 +2378,9 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 		// We are going to write the index file while recovering the data file
 		bw := bufio.NewWriterSize(fslice.idxFile.handle, msgIndexRecSize*1000)
 
+		// Reset offset in case we come from a mismatch between .dat and .idx files.
+		offset = int64(4)
+
 		for {
 			ms.tmpMsgBuf, msgSize, _, err = readRecord(br, ms.tmpMsgBuf, false, crcTable, doCRC)
 			if err != nil {
