@@ -1745,6 +1745,53 @@ func TestFSRecoverEmptyIndexMsgFile(t *testing.T) {
 	}
 }
 
+func TestFSEnsureLastMsgAndIndexMatch(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	s := createDefaultFileStore(t)
+	defer s.Close()
+
+	c := storeCreateChannel(t, s, "foo")
+	storeMsg(t, c, "foo", 1, []byte("msg1"))
+	storeMsg(t, c, "foo", 2, []byte("msg2"))
+	ms := c.Msgs.(*FileMsgStore)
+	ms.RLock()
+	fname := ms.files[1].file.name
+	offset := ms.wOffset
+	ms.RUnlock()
+	storeMsg(t, c, "foo", 3, []byte("msg3"))
+
+	s.Close()
+
+	f, err := os.OpenFile(fname, os.O_RDWR, 0666)
+	if err != nil {
+		t.Fatalf("Error opening file: %v", err)
+	}
+	defer f.Close()
+	if err := f.Truncate(offset); err != nil {
+		t.Fatalf("Error on truncate: %v", err)
+	}
+	f.Close()
+	f, err = os.OpenFile(fname, os.O_RDWR|os.O_APPEND, 0666)
+	if err != nil {
+		t.Fatalf("Error opening file: %v", err)
+	}
+	defer f.Close()
+	m3 := &pb.MsgProto{Sequence: 3, Subject: "foo", Data: []byte("msg3_modified")}
+	if _, _, err := writeRecord(f, nil, recNoType, m3, m3.Size(), crc32.IEEETable); err != nil {
+		t.Fatalf("Error rewriting file: %v", err)
+	}
+	f.Close()
+
+	s, rs := openDefaultFileStore(t)
+	defer s.Close()
+	c = getRecoveredChannel(t, rs, "foo")
+	if _, err := c.Msgs.Lookup(3); err != nil {
+		t.Fatalf("Error on lookup: %v", err)
+	}
+}
+
 func TestFSEmptyRemovesAllMsgsFiles(t *testing.T) {
 	cleanupFSDatastore(t)
 	defer cleanupFSDatastore(t)
