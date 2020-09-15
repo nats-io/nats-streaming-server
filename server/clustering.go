@@ -297,6 +297,7 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	store.setCacheSize(s.opts.Clustering.LogCacheSize)
 
 	// Go through the list of channels that we have recovered from streaming store
 	// and set their corresponding UID.
@@ -310,12 +311,6 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 		c.id = id
 	}
 	s.channels.Unlock()
-
-	cacheStore, err := raft.NewLogCache(s.opts.Clustering.LogCacheSize, store)
-	if err != nil {
-		store.Close()
-		return false, err
-	}
 
 	addr := s.getClusteringAddr(name)
 	config := raft.DefaultConfig()
@@ -383,7 +378,7 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 		fsm.Unlock()
 	}
 	s.raft.fsm = fsm
-	node, err := raft.NewRaft(config, fsm, cacheStore, store, snapshotStore, transport)
+	node, err := raft.NewRaft(config, fsm, store, store, snapshotStore, transport)
 	if err != nil {
 		transport.Close()
 		store.Close()
@@ -392,7 +387,7 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 	if testPauseAfterNewRaftCalled {
 		time.Sleep(time.Second)
 	}
-	existingState, err := raft.HasExistingState(cacheStore, store, snapshotStore)
+	existingState, err := raft.HasExistingState(store, store, snapshotStore)
 	if err != nil {
 		node.Shutdown()
 		transport.Close()

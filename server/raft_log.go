@@ -47,6 +47,10 @@ type raftLog struct {
 	codec    *codec.MsgpackHandle
 	closed   bool
 
+	// Our cache
+	cache     []*raft.Log
+	cacheSize uint64 // Save size as uint64 to not have to case during store/load
+
 	// If the store is using encryption
 	encryption    bool
 	eds           *stores.EDStore
@@ -89,6 +93,13 @@ func newRaftLog(log logger.Logger, fileName string, sync bool, _ int, encrypt bo
 		r.encryptOffset = eds.EncryptionOffset()
 	}
 	return r, nil
+}
+
+func (r *raftLog) setCacheSize(cacheSize int) {
+	r.Lock()
+	defer r.Unlock()
+	r.cacheSize = uint64(cacheSize)
+	r.cache = make([]*raft.Log, cacheSize)
 }
 
 func (r *raftLog) init() error {
@@ -213,6 +224,14 @@ func (r *raftLog) getIndex(first bool) (uint64, error) {
 // GetLog implements the LogStore interface
 func (r *raftLog) GetLog(idx uint64, log *raft.Log) error {
 	r.RLock()
+	if r.cache != nil {
+		cached := r.cache[idx%r.cacheSize]
+		if cached != nil && cached.Index == idx {
+			*log = *cached
+			r.RUnlock()
+			return nil
+		}
+	}
 	tx, err := r.conn.Begin(false)
 	if err != nil {
 		r.RUnlock()
@@ -265,6 +284,12 @@ func (r *raftLog) StoreLogs(logs []*raft.Log) error {
 		tx.Rollback()
 	} else {
 		err = tx.Commit()
+		if err == nil && r.cache != nil {
+			// Cache only on success
+			for _, l := range logs {
+				r.cache[l.Index%r.cacheSize] = l
+			}
+		}
 	}
 	r.Unlock()
 	return err
@@ -274,6 +299,11 @@ func (r *raftLog) StoreLogs(logs []*raft.Log) error {
 func (r *raftLog) DeleteRange(min, max uint64) (retErr error) {
 	r.Lock()
 	defer r.Unlock()
+
+	if r.cacheSize > 0 {
+		// Reset cache
+		r.cache = make([]*raft.Log, int(r.cacheSize))
+	}
 
 	start := time.Now()
 	r.log.Noticef("Deleting raft logs from %v to %v", min, max)
