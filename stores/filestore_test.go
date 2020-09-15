@@ -1781,7 +1781,7 @@ func TestFSFilesClosedOnRecovery(t *testing.T) {
 	cleanupFSDatastore(t)
 	defer cleanupFSDatastore(t)
 
-	s := createDefaultFileStore(t, SliceConfig(1, 0, 0, ""))
+	s := createDefaultFileStore(t, SliceConfig(1, 0, 0, ""), DoSync(false))
 	defer s.Close()
 
 	limits := testDefaultStoreLimits

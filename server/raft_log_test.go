@@ -512,3 +512,93 @@ func TestRaftLogChannelID(t *testing.T) {
 	getID("bar", 0)
 	getID("baz", 0)
 }
+
+func TestRaftLogCache(t *testing.T) {
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	store := createTestRaftLog(t, false, 0)
+	defer store.Close()
+
+	store.setCacheSize(10)
+
+	store.RLock()
+	lc := len(store.cache)
+	cs := store.cacheSize
+	store.RUnlock()
+	if lc != 10 {
+		t.Fatalf("Expected cache len to be 10, got %v", lc)
+	}
+	if cs != 10 {
+		t.Fatalf("Expected cacheSize to be 10, got %v", cs)
+	}
+
+	l1 := &raft.Log{Index: 1, Data: []byte("msg1")}
+	if err := store.StoreLog(l1); err != nil {
+		t.Fatalf("Error on store: %v", err)
+	}
+
+	l2 := &raft.Log{Index: 2, Data: []byte("msg2")}
+	l3 := &raft.Log{Index: 3, Data: []byte("msg3")}
+	if err := store.StoreLogs([]*raft.Log{l2, l3}); err != nil {
+		t.Fatalf("Error on store: %v", err)
+	}
+
+	store.RLock()
+	cl1 := store.cache[1%10]
+	cl2 := store.cache[2%10]
+	cl3 := store.cache[3%10]
+	store.RUnlock()
+	if cl1 == nil || cl2 == nil || cl3 == nil || cl1.Index != 1 || cl2.Index != 2 || cl3.Index != 3 {
+		t.Fatalf("Wrong content: l1=%v l2=%v l3=%v", cl1, cl2, cl3)
+	}
+
+	l11 := &raft.Log{Index: 11, Data: []byte("msg11")}
+	if err := store.StoreLog(l11); err != nil {
+		t.Fatalf("Error on store: %v", err)
+	}
+	var cl11 raft.Log
+	if err := store.GetLog(11, &cl11); err != nil || cl11.Index != 11 || string(cl11.Data) != "msg11" {
+		t.Fatalf("Unexpected err=%v msg=%v", err, cl11)
+	}
+
+	if err := store.DeleteRange(1, 2); err != nil {
+		t.Fatalf("Error on delete range: %v", err)
+	}
+	var err error
+	store.RLock()
+	lc = len(store.cache)
+	cs = store.cacheSize
+	for _, l := range store.cache {
+		if l != nil {
+			err = fmt.Errorf("Log still in cache: %v", l)
+			break
+		}
+	}
+	store.RUnlock()
+	if lc != 10 {
+		t.Fatalf("Expected cache len to be 10, got %v", lc)
+	}
+	if cs != 10 {
+		t.Fatalf("Expected cacheSize to be 10, got %v", cs)
+	}
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	// Now cause encoding to fail so that storelog fails and
+	// we check that log was not cached.
+	store.Lock()
+	store.conn.Close()
+	store.Unlock()
+	l4 := &raft.Log{Index: 4, Data: []byte("msg4")}
+	if err := store.StoreLog(l4); err == nil {
+		t.Fatal("Expected error on store")
+	}
+	store.RLock()
+	cl4 := store.cache[4%10]
+	store.RUnlock()
+	if cl4 != nil {
+		t.Fatalf("Expected log 4 not to be cached, got %v", cl4)
+	}
+}
