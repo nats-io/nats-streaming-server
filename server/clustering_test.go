@@ -274,12 +274,14 @@ func shutdownServers(servers []*StanServer) {
 }
 
 func removeServer(servers []*StanServer, s *StanServer) []*StanServer {
-	for i, srv := range servers {
+	newservers := make([]*StanServer, 0, len(servers))
+	for _, srv := range servers {
 		if srv == s {
-			servers = append(servers[:i], servers[i+1:]...)
+			continue
 		}
+		newservers = append(newservers, srv)
 	}
-	return servers
+	return newservers
 }
 
 func assertMsg(t *testing.T, msg pb.MsgProto, expectedData []byte, expectedSeq uint64) {
@@ -7716,5 +7718,283 @@ func TestClusteringRedeliveryCount(t *testing.T) {
 	case <-ch:
 	case <-time.After(time.Second):
 		t.Fatalf("Timedout")
+	}
+}
+
+func testRemoveNode(t *testing.T, nc *nats.Conn, node string, timeoutExpected bool) {
+	t.Helper()
+	timeout := 2 * time.Second
+	if timeoutExpected {
+		timeout = 100 * time.Millisecond
+	}
+	resp, err := nc.Request(fmt.Sprintf(removeClusterNodeSubj, clusterName), []byte(node), timeout)
+	if timeoutExpected {
+		if err != nats.ErrTimeout {
+			t.Fatalf("Expected timeout, got %v", err)
+		}
+		return
+	}
+	if string(resp.Data) != "+OK" {
+		t.Fatalf("Removing node %q returned response error: %q", node, resp.Data)
+	}
+}
+
+func TestClusteringAddRemoveClusterNodes(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// First create a cluster and make sure that if option is not
+	// enabled, the request will fail.
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+	testRemoveNode(t, sc.NatsConn(), "b", true)
+	sc.Close()
+	s2.Shutdown()
+	s1.Shutdown()
+
+	cleanupDatastore(t)
+	cleanupRaftLog(t)
+
+	peers := []string{"a", "b", "c", "d", "e"}
+	servers := make([]*StanServer, 0, 5)
+
+	for _, nodeID := range peers {
+		opts := getTestDefaultOptsForClustering(nodeID, false)
+		opts.Clustering.AllowAddRemoveNode = true
+		opts.Clustering.Peers = peers
+		s := runServerWithOpts(t, opts, nil)
+		defer s.Shutdown()
+		servers = append(servers, s)
+	}
+
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	sc = NewDefaultConnection(t)
+	defer sc.Close()
+
+	sc.Publish("foo", []byte("msg"))
+	checkChannelsInAllServers(t, []string{"foo"}, 2*time.Second, servers...)
+
+	// We will use the NATS connection from the STAN connection
+	// to send those add/remove requests
+	nc := sc.NatsConn()
+
+	// Now let's remove 2 followers
+	followers := removeServer(servers, leader)
+	for i := 0; i < 2; i++ {
+		f := followers[i]
+		testRemoveNode(t, nc, f.opts.Clustering.NodeID, false)
+		servers = removeServer(servers, f)
+		f.Shutdown()
+	}
+
+	// Now remove the leader itself
+	testRemoveNode(t, nc, leader.opts.Clustering.NodeID, false)
+	servers = removeServer(servers, leader)
+
+	// The current leader should stepdown. Wait for that to happen.
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		if leader.raft.State() == raft.Leader {
+			return fmt.Errorf("still leader")
+		}
+		return nil
+	})
+
+	// Wait for a new leader
+	oldLeader := leader
+	// Since we sent the remove request to the leader itself,
+	// it should shutdown (and exit, but we don't do it when running in tests).
+	// Check that the status is shutdown.
+	waitFor(t, 2*time.Second, 15*time.Millisecond, func() error {
+		oldLeader.mu.Lock()
+		isShutdown := oldLeader.shutdown
+		oldLeader.mu.Unlock()
+		if !isShutdown {
+			return fmt.Errorf("old leader did not shutdown")
+		}
+		return nil
+	})
+
+	newLeader := getLeader(t, 10*time.Second, servers...)
+	if newLeader == oldLeader {
+		t.Fatalf("Leader %q was not replaced", oldLeader.opts.Clustering.NodeID)
+	}
+
+	// Ask the node to be added back
+	nodeID := oldLeader.opts.Clustering.NodeID
+	resp, err := nc.Request(fmt.Sprintf(addClusterNodeSubj, clusterName), []byte(nodeID), 2*time.Second)
+	if err != nil {
+		t.Fatalf("Request to add node failed: %v", err)
+	}
+	if string(resp.Data) != "+OK" {
+		t.Fatalf("Adding node %q returned response error: %q", nodeID, resp.Data)
+	}
+
+	s := runServerWithOpts(t, oldLeader.opts, nil)
+	defer s.Shutdown()
+	servers = append(servers, s)
+
+	getLeader(t, 10*time.Second, servers...)
+
+	sc.Publish("bar", []byte("msg"))
+	checkChannelsInAllServers(t, []string{"foo", "bar"}, 2*time.Second, servers...)
+}
+
+type captureFailedToContactNodeLogger struct {
+	dummyLogger
+	node        string
+	errMsgFound chan struct{}
+}
+
+func (l *captureFailedToContactNodeLogger) Errorf(format string, args ...interface{}) {
+	l.Lock()
+	msg := fmt.Sprintf(format, args...)
+	if l.node != "" {
+		errMsg := fmt.Sprintf("failed to heartbeat to: peer=%s.%s.%s", clusterName, l.node, clusterName)
+		if strings.Contains(msg, errMsg) {
+			select {
+			case l.errMsgFound <- struct{}{}:
+				l.node = ""
+			default:
+			}
+		}
+	}
+	l.Unlock()
+}
+
+func (l *captureFailedToContactNodeLogger) waitForFailedHearbeat(t *testing.T, node string) {
+	l.Lock()
+	l.node = node
+	l.errMsgFound = make(chan struct{}, 1)
+	l.Unlock()
+	select {
+	case <-l.errMsgFound:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Did not get heartbeat failures yet")
+	}
+}
+
+func (l *captureFailedToContactNodeLogger) makeSureNodeIsNoLongerContacted(t *testing.T, node string) {
+	timeout := time.Now().Add(2 * time.Second)
+	for time.Now().Before(timeout) {
+		l.Lock()
+		l.node = node
+		l.errMsgFound = make(chan struct{}, 1)
+		l.Unlock()
+		select {
+		case <-l.errMsgFound:
+		case <-time.After(1000 * time.Millisecond):
+			// OK!
+			return
+		}
+	}
+	t.Fatalf("Node %q is still being contacted", node)
+}
+
+func TestClusteringAddRemoveClusterNodesWithBootstrap(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	l := &captureFailedToContactNodeLogger{}
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.AllowAddRemoveNode = true
+	s1sOpts.CustomLogger = l
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Wait for it to bootstrap
+	getLeader(t, 10*time.Second, s1)
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.AllowAddRemoveNode = true
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.Clustering.AllowAddRemoveNode = true
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	// Configure fourth server.
+	s4sOpts := getTestDefaultOptsForClustering("d", false)
+	s4sOpts.Clustering.AllowAddRemoveNode = true
+	s4 := runServerWithOpts(t, s4sOpts, nil)
+	defer s4.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2, s3, s4)
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	s4.Shutdown()
+
+	l.waitForFailedHearbeat(t, "d")
+
+	testRemoveNode(t, sc.NatsConn(), "d", false)
+
+	l.makeSureNodeIsNoLongerContacted(t, "d")
+
+	// Check for error cases
+	resp, err := sc.NatsConn().Request(fmt.Sprintf(addClusterNodeSubj, clusterName), []byte(""), 2*time.Second)
+	if err != nil {
+		t.Fatalf("Request to add node failed: %v", err)
+	}
+	respStr := string(resp.Data)
+	if !strings.Contains(respStr, "-ERR adding node") {
+		t.Fatalf("Expected error response, got %q", respStr)
+	}
+
+	// Bring down the cluster to size 2, barely new quorum.
+	s3.Shutdown()
+
+	// Removing inexistent node does not fail, but it will if the leader loses leadership.
+	// So loop removing a node ID and then shutdown s2 (so s1 loses leadership)
+	subj := fmt.Sprintf(removeClusterNodeSubj, clusterName)
+	timeout := time.Now().Add(5 * time.Second)
+	time.AfterFunc(500*time.Millisecond, func() {
+		s2.Shutdown()
+	})
+	// We will try to get the error, but let's have a limit on how long we try.
+	for time.Now().Before(timeout) {
+		resp, err := sc.NatsConn().Request(subj, []byte("somenode"), time.Second)
+		// If the leader lost leadership before request is sent, it will timeout.
+		// So we are done (could not check the error)
+		if err != nil {
+			break
+		}
+		respStr := string(resp.Data)
+		if respStr == "+OK" {
+			continue
+		}
+		if strings.Contains(respStr, "-ERR removing node \"somenode\": leadership lost") {
+			break
+		}
 	}
 }
