@@ -262,7 +262,7 @@ func (cs *clientStore) removeSub(ID string, sub *subState) bool {
 		return false
 	}
 	c.Lock()
-	removed := false
+	var removed bool
 	c.subs, removed = sub.deleteFromList(c.subs)
 	c.Unlock()
 	return removed
