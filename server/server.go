@@ -756,6 +756,9 @@ type StanServer struct {
 	// cause races when running more than 1 server in a program or test.
 	pingResponseOKBytes            []byte
 	pingResponseInvalidClientBytes []byte
+
+	// If using an external server, capture the URL that was given for return in ClientURL().
+	providedServerURL string
 }
 
 type subsSentAndAckReplication struct {
@@ -1442,6 +1445,9 @@ func (s *StanServer) buildServerURLs() ([]string, error) {
 		}
 		// Use net.Join to support IPV6 addresses.
 		hostport = net.JoinHostPort(host, port)
+
+		// Capture for ClientURL()
+		s.providedServerURL = natsURL
 	} else {
 		// We embed the server, so it is local. If host is "any",
 		// use 127.0.0.1 or ::1 for host address (important for
@@ -1763,6 +1769,9 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		if err := s.startNATSServer(); err != nil {
 			return nil, err
 		}
+		if natsOpts != nil && natsOpts.Port == server.RANDOM_PORT {
+			natsOpts.Port = nOpts.Port
+		}
 	}
 	// Check for monitoring
 	if nOpts.HTTPPort != 0 || nOpts.HTTPSPort != 0 {
@@ -1803,6 +1812,19 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		s.handleSignals()
 	}
 	return &s, nil
+}
+
+// ClientURL returns the basic URL string representation suitable for a client to use to connect
+func (s *StanServer) ClientURL() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.providedServerURL != "" {
+		return s.providedServerURL
+	} else if s.natsServer != nil {
+		return s.natsServer.ClientURL()
+	} else {
+		return ""
+	}
 }
 
 // Logging in STAN
