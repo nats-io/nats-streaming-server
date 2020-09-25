@@ -20,7 +20,9 @@ import (
 	"io/ioutil"
 	"os"
 	"reflect"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +30,7 @@ import (
 	"time"
 
 	natsd "github.com/nats-io/nats-server/v2/server"
+	natsdTest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats-streaming-server/logger"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nats-streaming-server/test"
@@ -1389,3 +1392,27 @@ func TestServerRandomPort(t *testing.T) {
 	s.Shutdown()
 }
 
+func TestServerRandomClientURL(t *testing.T) {
+	natsOpts := natsdTest.DefaultTestOptions
+	natsOpts.Port = natsd.RANDOM_PORT
+	opts := GetDefaultOptions()
+	s := runServerWithOpts(t, opts, &natsOpts)
+	clientURL := s.ClientURL()
+	defer s.Shutdown()
+
+	re := regexp.MustCompile(":[0-9]+$")
+	portString := re.FindString( clientURL )
+	if len(portString) == 3 {
+		t.Fatal("could not locate port in clientURL")
+	}
+
+	urlPort, err := strconv.Atoi(portString[1:])
+	if err != nil {
+		t.Fatal("failed to convert clientURL to integer")
+	}
+
+	if natsOpts.Port != urlPort {
+		t.Fatal("options port did not match clientURL port")
+	}
+	s.Shutdown()
+}

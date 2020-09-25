@@ -1808,6 +1808,10 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 	return &s, nil
 }
 
+func (s *StanServer) ClientURL() string {
+	return s.natsServer.ClientURL()
+}
+
 // Logging in STAN
 //
 // The STAN logger is an instance of a NATS logger, (basically duplicated
