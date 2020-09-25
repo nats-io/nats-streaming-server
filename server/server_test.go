@@ -1393,6 +1393,7 @@ func TestServerRandomPort(t *testing.T) {
 }
 
 func TestServerRandomClientURL(t *testing.T) {
+	// Try with an embedded server.
 	natsOpts := natsdTest.DefaultTestOptions
 	natsOpts.Port = natsd.RANDOM_PORT
 	opts := GetDefaultOptions()
@@ -1401,7 +1402,7 @@ func TestServerRandomClientURL(t *testing.T) {
 	defer s.Shutdown()
 
 	re := regexp.MustCompile(":[0-9]+$")
-	portString := re.FindString( clientURL )
+	portString := re.FindString(clientURL)
 	if len(portString) == 3 {
 		t.Fatal("could not locate port in clientURL")
 	}
@@ -1415,4 +1416,30 @@ func TestServerRandomClientURL(t *testing.T) {
 		t.Fatal("options port did not match clientURL port")
 	}
 	s.Shutdown()
+
+	// Try with remote server
+	natsOpts = natsdTest.DefaultTestOptions
+	natsOpts.Port = natsd.RANDOM_PORT
+	ns := natsdTest.RunServer(&natsOpts)
+	defer ns.Shutdown()
+	print(ns.ClientURL())
+
+	opts.NATSServerURL = fmt.Sprintf("nats://%s:%d", natsOpts.Host, natsOpts.Port)
+	s = runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	clientURL = s.ClientURL()
+	portString = re.FindString(clientURL)
+	if len(portString) == 3 {
+		t.Fatal("could not locate port in clientURL")
+	}
+
+	urlPort, err = strconv.Atoi(portString[1:])
+	if err != nil {
+		t.Fatal("failed to convert clientURL to integer")
+	}
+
+	if natsOpts.Port != urlPort {
+		t.Fatal("options port did not match clientURL port")
+	}
 }
