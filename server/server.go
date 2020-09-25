@@ -1816,6 +1816,8 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 
 // ClientURL returns the basic URL string representation suitable for a client to use to connect
 func (s *StanServer) ClientURL() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.providedServerURL != "" {
 		return s.providedServerURL
 	} else if s.natsServer != nil {
