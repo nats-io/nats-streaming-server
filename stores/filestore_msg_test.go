@@ -1328,6 +1328,34 @@ func TestFSPanicOnStoreCloseWhileMsgsExpire(t *testing.T) {
 	fs.Close()
 }
 
+func TestFSPanicOnMsgExpireWithClosedDatFile(t *testing.T) {
+	cleanupFSDatastore(t)
+	defer cleanupFSDatastore(t)
+
+	limits := testDefaultStoreLimits
+	limits.MaxAge = 500 * time.Millisecond
+
+	fs, _ := newFileStore(t, testFSDefaultDatastore, &limits, SliceConfig(1, 0, 0, ""))
+	defer fs.Close()
+
+	cs := storeCreateChannel(t, fs, "foo")
+	for i := 0; i < 3; i++ {
+		storeMsg(t, cs, "foo", uint64(i+1), []byte("msg"))
+	}
+
+	ms := cs.Msgs.(*FileMsgStore)
+	ms.Lock()
+	idxFileName := ms.files[1].idxFile.name
+	os.Remove(idxFileName)
+	err := ioutil.WriteFile(idxFileName, []byte("xxxxxxx"), 0666)
+	ms.Unlock()
+	if err != nil {
+		t.Fatalf("Error rewriting index file: %v", err)
+	}
+
+	time.Sleep(750 * time.Millisecond)
+}
+
 func TestFSMsgIndexFileWithExtraZeros(t *testing.T) {
 	cleanupFSDatastore(t)
 	defer cleanupFSDatastore(t)
