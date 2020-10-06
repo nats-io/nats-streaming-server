@@ -260,6 +260,9 @@ func TestParseConfig(t *testing.T) {
 	if opts.Clustering.RaftCommitTimeout != 50*time.Millisecond {
 		t.Fatalf("Expected RaftCommitTimeout to be 50ms, got %v", opts.Clustering.RaftCommitTimeout)
 	}
+	if !opts.Clustering.AllowAddRemoveNode {
+		t.Fatal("Expected AllowAddRemoveNode to be true")
+	}
 	if opts.SQLStoreOpts.Driver != "mysql" {
 		t.Fatalf("Expected SQL Driver to be %q, got %q", "mysql", opts.SQLStoreOpts.Driver)
 	}
@@ -485,6 +488,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "cluster:{raft_lease_timeout:\"not_a_time\"}", wrongTimeErr)
 	expectFailureFor(t, "cluster:{raft_commit_timeout:123}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{raft_commit_timeout:\"not_a_time\"}", wrongTimeErr)
+	expectFailureFor(t, "cluster:{allow_add_remove_node:1}", wrongTypeErr)
 	expectFailureFor(t, "sql:{driver:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{source:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{no_caching:123}", wrongTypeErr)

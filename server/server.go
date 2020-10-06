@@ -751,6 +751,8 @@ type StanServer struct {
 	subCloseSub *nats.Subscription
 	subUnsubSub *nats.Subscription
 	cliPingSub  *nats.Subscription
+	addNodeSub  *nats.Subscription
+	rmNodeSub   *nats.Subscription
 
 	// For sending responses to client PINGS. Used to be global but would
 	// cause races when running more than 1 server in a program or test.
@@ -2745,7 +2747,22 @@ func (s *StanServer) initInternalSubs(createPub bool) error {
 	}
 	// Receive PINGs from clients.
 	s.cliPingSub, err = s.createSub(s.info.Discovery+".pings", s.processClientPings, "client pings")
-	return err
+	if err != nil {
+		return err
+	}
+	if s.isClustered && s.opts.Clustering.AllowAddRemoveNode {
+		// Add cluster node requests
+		s.addNodeSub, err = s.createSub(fmt.Sprintf(addClusterNodeSubj, s.opts.ID), s.processAddNode, "add node")
+		if err != nil {
+			return err
+		}
+		// Remove cluster node requests
+		s.rmNodeSub, err = s.createSub(fmt.Sprintf(removeClusterNodeSubj, s.opts.ID), s.processRemoveNode, "remove node")
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *StanServer) unsubscribeInternalSubs() {
@@ -2780,6 +2797,14 @@ func (s *StanServer) unsubscribeInternalSubs() {
 	if s.snapReqSub != nil {
 		s.snapReqSub.Unsubscribe()
 		s.snapReqSub = nil
+	}
+	if s.addNodeSub != nil {
+		s.addNodeSub.Unsubscribe()
+		s.addNodeSub = nil
+	}
+	if s.rmNodeSub != nil {
+		s.rmNodeSub.Unsubscribe()
+		s.rmNodeSub = nil
 	}
 }
 

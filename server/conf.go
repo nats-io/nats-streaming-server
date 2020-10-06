@@ -292,6 +292,11 @@ func parseCluster(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.Clustering.ProceedOnRestoreFailure = v.(bool)
+		case "allow_add_remove_node":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.Clustering.AllowAddRemoveNode = v.(bool)
 		case "raft_logging":
 			if err := checkType(k, reflect.Bool, v); err != nil {
 				return err
@@ -652,6 +657,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.BoolVar(&sopts.Clustering.Sync, "cluster_sync", false, "stan.Clustering.Sync")
 	fs.BoolVar(&sopts.Clustering.RaftLogging, "cluster_raft_logging", false, "")
 	fs.BoolVar(&sopts.Clustering.ProceedOnRestoreFailure, "cluster_proceed_on_restore_failure", false, "")
+	fs.BoolVar(&sopts.Clustering.AllowAddRemoveNode, "cluster_allow_add_remove_node", false, "")
 	fs.StringVar(&sopts.SQLStoreOpts.Driver, "sql_driver", "", "SQL Driver")
 	fs.StringVar(&sopts.SQLStoreOpts.Source, "sql_source", "", "SQL Data Source")
 	defSQLOpts := stores.DefaultSQLStoreOptions()
