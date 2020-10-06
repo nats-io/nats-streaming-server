@@ -3801,6 +3801,39 @@ func TestClusteringNodeIDInPeersArray(t *testing.T) {
 	s1.Shutdown()
 }
 
+func TestClusteringNodeWrongPeerList(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	l := &captureWarnLogger{}
+
+	s1Opts := getTestDefaultOptsForClustering("a", false)
+	s1Opts.Clustering.Peers = []string{"a,b,c"}
+	s1Opts.CustomLogger = l
+	s1 := runServerWithOpts(t, s1Opts, nil)
+	defer s1.Shutdown()
+
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		var ok bool
+		l.Lock()
+		for _, line := range l.warnings {
+			if strings.Contains(line, "string with commas") {
+				ok = true
+			}
+		}
+		l.Unlock()
+		if ok {
+			return nil
+		}
+		return fmt.Errorf("Did not print warning about commas in peer list")
+	})
+}
+
 func TestClusteringUnableToContactPeer(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.SkipNow()

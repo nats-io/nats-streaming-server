@@ -2025,6 +2025,19 @@ func (s *StanServer) start(runningState State) error {
 		}
 		s.log.Noticef("Cluster Node ID : %s", s.info.NodeID)
 		s.log.Noticef("Cluster Log Path: %s", s.opts.Clustering.RaftLogPath)
+		if len(s.opts.Clustering.Peers) > 0 {
+			s.log.Noticef("Cluster known peers:")
+			var alert bool
+			for i, peer := range s.opts.Clustering.Peers {
+				if strings.Contains(peer, ",") {
+					alert = true
+				}
+				s.log.Noticef("peer %d: %q", i+1, peer)
+			}
+			if alert {
+				s.log.Warnf("Peer name contains ',' make sure you provided an array of peer names, not a string with commas")
+			}
+		}
 		if err := s.startRaftNode(recoveredState != nil); err != nil {
 			return err
 		}
