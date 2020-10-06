@@ -2213,8 +2213,12 @@ func (ms *FileMsgStore) doLockFiles(fslice *fileSlice, onlyIndexFile bool) error
 	}
 	idxWasOpened, err = ms.fm.lockFile(fslice.idxFile)
 	if err != nil {
-		if !datWasOpened {
-			ms.fm.unlockFile(fslice.file)
+		if !onlyIndexFile {
+			if !datWasOpened {
+				ms.fm.closeLockedFile(fslice.file)
+			} else {
+				ms.fm.unlockFile(fslice.file)
+			}
 		}
 		return err
 	}
