@@ -1,5 +1,7 @@
 # github.com/armon/go-metrics v0.0.0-20190430140413-ec5e00d3c878
 github.com/armon/go-metrics
+# github.com/fatih/color v1.7.0
+github.com/fatih/color
 # github.com/go-sql-driver/mysql v1.5.0
 ## explicit
 github.com/go-sql-driver/mysql
@@ -8,29 +10,34 @@ github.com/go-sql-driver/mysql
 github.com/gogo/protobuf/gogoproto
 github.com/gogo/protobuf/proto
 github.com/gogo/protobuf/protoc-gen-gogo/descriptor
-# github.com/hashicorp/go-hclog v0.9.1
+# github.com/hashicorp/go-hclog v0.14.1
 ## explicit
 github.com/hashicorp/go-hclog
 # github.com/hashicorp/go-immutable-radix v1.0.0
 github.com/hashicorp/go-immutable-radix
-# github.com/hashicorp/go-msgpack v0.5.5
+# github.com/hashicorp/go-msgpack v1.1.5
 ## explicit
 github.com/hashicorp/go-msgpack/codec
 # github.com/hashicorp/golang-lru v0.5.0
 github.com/hashicorp/golang-lru/simplelru
-# github.com/hashicorp/raft v1.1.2
+# github.com/hashicorp/raft v1.2.0
 ## explicit
 github.com/hashicorp/raft
-# github.com/lib/pq v1.7.0
+# github.com/lib/pq v1.8.0
 ## explicit
 github.com/lib/pq
 github.com/lib/pq/oid
 github.com/lib/pq/scram
+# github.com/mattn/go-colorable v0.1.4
+github.com/mattn/go-colorable
+# github.com/mattn/go-isatty v0.0.10
+github.com/mattn/go-isatty
 # github.com/nats-io/jwt v0.3.2
 github.com/nats-io/jwt
-# github.com/nats-io/nats-server/v2 v2.1.7
+# github.com/nats-io/nats-server/v2 v2.1.8
 ## explicit
 github.com/nats-io/nats-server/v2/conf
+github.com/nats-io/nats-server/v2/internal/ldap
 github.com/nats-io/nats-server/v2/logger
 github.com/nats-io/nats-server/v2/server
 github.com/nats-io/nats-server/v2/server/pse
@@ -49,7 +56,7 @@ github.com/nats-io/nuid
 ## explicit
 github.com/nats-io/stan.go
 github.com/nats-io/stan.go/pb
-# github.com/prometheus/procfs v0.0.8
+# github.com/prometheus/procfs v0.2.0
 ## explicit
 github.com/prometheus/procfs
 github.com/prometheus/procfs/internal/fs
@@ -57,7 +64,7 @@ github.com/prometheus/procfs/internal/util
 # go.etcd.io/bbolt v1.3.5
 ## explicit
 go.etcd.io/bbolt
-# golang.org/x/crypto v0.0.0-20200323165209-0ec3e9974c59
+# golang.org/x/crypto v0.0.0-20201002170205-7f63de1d35b0
 ## explicit
 golang.org/x/crypto/bcrypt
 golang.org/x/crypto/blowfish
@@ -67,9 +74,10 @@ golang.org/x/crypto/ed25519
 golang.org/x/crypto/ed25519/internal/edwards25519
 golang.org/x/crypto/internal/subtle
 golang.org/x/crypto/poly1305
-# golang.org/x/sys v0.0.0-20200202164722-d101bd2416d5
+# golang.org/x/sys v0.0.0-20201006155630-ac719f4daadf
 ## explicit
 golang.org/x/sys/cpu
+golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry

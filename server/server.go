@@ -3319,7 +3319,7 @@ func (s *StanServer) processClientPublish(m *nats.Msg) {
 
 	// Check if the client is valid. We do this after the clustered check so
 	// that only the leader performs this check.
-	valid := false
+	var valid bool
 	if s.partitions != nil {
 		// In partitioning mode it is possible that we get there
 		// before the connect request is processed. If so, make sure we wait

@@ -471,11 +471,17 @@ func (c *client) initClient() {
 
 	// snapshot the string version of the connection
 	var conn string
-	if ip, ok := c.nc.(*net.TCPConn); ok {
-		conn = ip.RemoteAddr().String()
-		host, port, _ := net.SplitHostPort(conn)
-		iPort, _ := strconv.Atoi(port)
-		c.host, c.port = host, uint16(iPort)
+	if c.nc != nil {
+		if addr := c.nc.RemoteAddr(); addr != nil {
+			if conn = addr.String(); conn != _EMPTY_ {
+				host, port, _ := net.SplitHostPort(conn)
+				iPort, _ := strconv.Atoi(port)
+				c.host, c.port = host, uint16(iPort)
+				// Now that we have extracted host and port, escape
+				// the string because it is going to be used in Sprintf
+				conn = strings.ReplaceAll(conn, "%", "%%")
+			}
+		}
 	}
 
 	switch c.kind {
@@ -1971,7 +1977,8 @@ func (c *client) processSub(argo []byte, noForward bool) (*subscription, error) 
 	var err error
 
 	// Subscribe here.
-	if c.subs[sid] == nil {
+	es := c.subs[sid]
+	if es == nil {
 		c.subs[sid] = sub
 		if acc != nil && acc.sl != nil {
 			err = acc.sl.Insert(sub)
@@ -1990,6 +1997,11 @@ func (c *client) processSub(argo []byte, noForward bool) (*subscription, error) 
 		return nil, nil
 	} else if c.opts.Verbose && kind != SYSTEM {
 		c.sendOK()
+	}
+
+	// If it was already registered, return it.
+	if es != nil {
+		return es, nil
 	}
 
 	// No account just return.
@@ -2408,7 +2420,7 @@ var needFlush = struct{}{}
 
 // deliverMsg will deliver a message to a matching subscription and its underlying client.
 // We process all connection/client types. mh is the part that will be protocol/client specific.
-func (c *client) deliverMsg(sub *subscription, subject, mh, msg []byte, gwrply bool) bool {
+func (c *client) deliverMsg(sub *subscription, subject, reply, mh, msg []byte, gwrply bool) bool {
 	if sub.client == nil {
 		return false
 	}
@@ -2548,8 +2560,8 @@ func (c *client) deliverMsg(sub *subscription, subject, mh, msg []byte, gwrply b
 
 	// If we are tracking dynamic publish permissions that track reply subjects,
 	// do that accounting here. We only look at client.replies which will be non-nil.
-	if client.replies != nil && len(c.pa.reply) > 0 {
-		client.replies[string(c.pa.reply)] = &resp{time.Now(), 0}
+	if client.replies != nil && len(reply) > 0 {
+		client.replies[string(reply)] = &resp{time.Now(), 0}
 		if len(client.replies) > replyPermLimit {
 			client.pruneReplyPerms()
 		}
@@ -3095,7 +3107,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 		}
 		// Normal delivery
 		mh := c.msgHeader(msgh[:si], sub, creply)
-		c.deliverMsg(sub, subject, mh, msg, rplyHasGWPrefix)
+		c.deliverMsg(sub, subject, creply, mh, msg, rplyHasGWPrefix)
 	}
 
 	// Set these up to optionally filter based on the queue lists.
@@ -3207,7 +3219,7 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, subject,
 			// "rreply" will be stripped of the $GNR prefix (if present)
 			// for client connections only.
 			mh := c.msgHeader(msgh[:si], sub, rreply)
-			if c.deliverMsg(sub, subject, mh, msg, rplyHasGWPrefix) {
+			if c.deliverMsg(sub, subject, rreply, mh, msg, rplyHasGWPrefix) {
 				// Clear rsub
 				rsub = nil
 				if flags&pmrCollectQueueNames != 0 {
@@ -3271,7 +3283,7 @@ sendToRoutesOrLeafs:
 		}
 		mh = append(mh, c.pa.szb...)
 		mh = append(mh, _CRLF_...)
-		c.deliverMsg(rt.sub, subject, mh, msg, false)
+		c.deliverMsg(rt.sub, subject, reply, mh, msg, false)
 	}
 	return queues
 }
@@ -3605,6 +3617,7 @@ func (c *client) teardownConn() {
 				// Update route as normal for a normal subscriber.
 				if sub.queue == nil {
 					srv.updateRouteSubscriptionMap(acc, sub, -1)
+					srv.updateLeafNodes(acc, sub, -1)
 				} else {
 					// We handle queue subscribers special in case we
 					// have a bunch we can just send one update to the
@@ -3619,8 +3632,6 @@ func (c *client) teardownConn() {
 				if srv.gateway.enabled {
 					srv.gatewayUpdateSubInterest(acc.Name, sub, -1)
 				}
-				// Now check on leafnode updates.
-				srv.updateLeafNodes(acc, sub, -1)
 			}
 			// Process any qsubs here.
 			for _, esub := range qsubs {
