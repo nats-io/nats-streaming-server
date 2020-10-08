@@ -194,6 +194,11 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.Token = v.(string)
+		case "nkey_seed_file":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.NKeySeedFile = v.(string)
 		}
 	}
 	return nil
