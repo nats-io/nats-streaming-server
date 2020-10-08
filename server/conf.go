@@ -179,6 +179,21 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 			}
 			opts.Encrypt = true
 			opts.EncryptionKey = []byte(v.(string))
+		case "username", "user":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.Username = v.(string)
+		case "password", "pass":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.Password = v.(string)
+		case "token":
+			if err := checkType(k, reflect.String, v); err != nil {
+				return err
+			}
+			opts.Token = v.(string)
 		}
 	}
 	return nil
