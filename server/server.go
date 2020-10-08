@@ -1322,6 +1322,9 @@ type Options struct {
 	IOSleepTime        int64         // Duration (in micro-seconds) the server waits for more message to fill up a batch.
 	NATSServerURL      string        // URL for external NATS Server to connect to. If empty, NATS Server is embedded.
 	NATSCredentials    string        // Credentials file for connecting to external NATS Server.
+	Username           string        // Username to use if not provided from command line
+	Password           string        // Password to use if not provided from command line
+	Token              string        // Authentication token to use if not provided from command line
 	ClientHBInterval   time.Duration // Interval at which server sends heartbeat to a client.
 	ClientHBTimeout    time.Duration // How long server waits for a heartbeat response.
 	ClientHBFailCount  int           // Number of failed heartbeats before server closes client connection.
@@ -1495,9 +1498,20 @@ func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// From executable, these are provided through the command line `-user ...`,
+	// so they take precedence over streaming's configuration file
 	ncOpts.User = s.natsOpts.Username
+	if ncOpts.User == "" {
+		ncOpts.User = s.opts.Username
+	}
 	ncOpts.Password = s.natsOpts.Password
+	if ncOpts.Password == "" {
+		ncOpts.Password = s.opts.Password
+	}
 	ncOpts.Token = s.natsOpts.Authorization
+	if ncOpts.Token == "" {
+		ncOpts.Token = s.opts.Token
+	}
 
 	ncOpts.Name = fmt.Sprintf("_NSS-%s-%s", s.opts.ID, name)
 

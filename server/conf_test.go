@@ -84,6 +84,15 @@ func TestParseConfig(t *testing.T) {
 	if opts.NATSCredentials != "credentials.creds" {
 		t.Fatalf("Expected Credentials to be %q, got %q", "credentials.creds", opts.NATSCredentials)
 	}
+	if opts.Username != "user" {
+		t.Fatalf("Expected Username to be %q, got %q", "user", opts.Username)
+	}
+	if opts.Password != "password" {
+		t.Fatalf("Expected Password to be %q, got %q", "password", opts.Password)
+	}
+	if opts.Token != "token" {
+		t.Fatalf("Expected Token to be %q, got %q", "token", opts.Token)
+	}
 	if !opts.FileStoreOpts.CompactEnabled {
 		t.Fatalf("Expected CompactEnabled to be true, got false")
 	}
@@ -497,6 +506,9 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "encryption_cipher: 123", wrongTypeErr)
 	expectFailureFor(t, "encryption_key: 123", wrongTypeErr)
 	expectFailureFor(t, "credentials: 123", wrongTypeErr)
+	expectFailureFor(t, "username: 123", wrongTypeErr)
+	expectFailureFor(t, "password: 123", wrongTypeErr)
+	expectFailureFor(t, "token: 123", wrongTypeErr)
 }
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {

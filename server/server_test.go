@@ -1443,3 +1443,93 @@ func TestServerRandomClientURL(t *testing.T) {
 		t.Fatal("options port did not match clientURL port")
 	}
 }
+
+func TestServerAuthInConfig(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+		authorization {
+			users [
+				{user: foo, password: bar}
+			]
+		}
+		streaming {
+			username: foo
+			password: bar
+		}
+	`))
+	defer os.Remove(conf)
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	noPrint := func() {}
+	sopts, nopts, err := ConfigureOptions(fs, []string{"-c", conf}, noPrint, noPrint, noPrint)
+	if err != nil {
+		t.Fatalf("Error on configure: %v", err)
+	}
+	s := runServerWithOpts(t, sopts, nopts)
+	s.Shutdown()
+	s = nil
+
+	// Check that command line still takes precedence
+	fs = flag.NewFlagSet("test", flag.ContinueOnError)
+	sopts, nopts, err = ConfigureOptions(fs, []string{"-c", conf, "-user", "foo", "-pass", "wrong"}, noPrint, noPrint, noPrint)
+	if err != nil {
+		t.Fatalf("Error on configure: %v", err)
+	}
+	s, err = RunServerWithOpts(sopts, nopts)
+	if err == nil {
+		if s != nil {
+			s.Shutdown()
+		}
+		t.Fatal("Expected to fail to start")
+	}
+
+	conf = createConfFile(t, []byte(`
+		authorization {
+			token: mytoken
+		}
+		streaming {
+			token: mytoken
+		}
+	`))
+	defer os.Remove(conf)
+
+	fs = flag.NewFlagSet("test", flag.ContinueOnError)
+	sopts, nopts, err = ConfigureOptions(fs, []string{"-c", conf}, noPrint, noPrint, noPrint)
+	if err != nil {
+		t.Fatalf("Error on configure: %v", err)
+	}
+	s = runServerWithOpts(t, sopts, nopts)
+	s.Shutdown()
+
+	// For token, the authorization{ token: <value> } is replaced with value passed by `-auth`
+	// and also used to connect. So the test here shows that if `-auth` is specified, it
+	// will both use this as the authentication token and use that to create the connections.
+	// We show that streaming { token: wrong } does not prevent from running.
+	conf = createConfFile(t, []byte(`
+		streaming {
+			token: ignored_because_command_line_is_used
+		}
+	`))
+	defer os.Remove(conf)
+
+	fs = flag.NewFlagSet("test", flag.ContinueOnError)
+	sopts, nopts, err = ConfigureOptions(fs, []string{"-c", conf, "-auth", "realtoken"}, noPrint, noPrint, noPrint)
+	if err != nil {
+		t.Fatalf("Error on configure: %v", err)
+	}
+	s = runServerWithOpts(t, sopts, nopts)
+	defer s.Shutdown()
+
+	// Check that NATS connection really need to provide "realtoken" as authentication token.
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err == nil {
+		if nc != nil {
+			nc.Close()
+		}
+		t.Fatal("Should not have connected")
+	}
+	nc, err = nats.Connect(nats.DefaultURL, nats.Token("realtoken"))
+	if err != nil {
+		t.Fatalf("Error connecting: %v", err)
+	}
+	nc.Close()
+}
