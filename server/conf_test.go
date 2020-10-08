@@ -90,6 +90,9 @@ func TestParseConfig(t *testing.T) {
 	if opts.Password != "password" {
 		t.Fatalf("Expected Password to be %q, got %q", "password", opts.Password)
 	}
+	if opts.NKeySeedFile != "seedfile" {
+		t.Fatalf("Expected NKeySeedFile to be %q, got %q", "seedfile", opts.NKeySeedFile)
+	}
 	if opts.Token != "token" {
 		t.Fatalf("Expected Token to be %q, got %q", "token", opts.Token)
 	}
@@ -509,6 +512,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "username: 123", wrongTypeErr)
 	expectFailureFor(t, "password: 123", wrongTypeErr)
 	expectFailureFor(t, "token: 123", wrongTypeErr)
+	expectFailureFor(t, "nkey_seed_file: 123", wrongTypeErr)
 }
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {

@@ -1555,3 +1555,56 @@ func TestServerAuthInConfig(t *testing.T) {
 	}
 	nc.Close()
 }
+
+func TestServerAuthNKey(t *testing.T) {
+	nkeyfile := createConfFile(t, []byte(`
+-----BEGIN USER NKEY SEED-----
+SUACSSL3UAHUDXKFSNVUZRF5UHPMWZ6BFDTJ7M6USDXIEDNPPQYYYCU3VY
+------END USER NKEY SEED------
+	`))
+	defer os.Remove(nkeyfile)
+
+	conf := createConfFile(t, []byte(fmt.Sprintf(`
+		authorization {
+			users [
+				# Streaming Server
+				{nkey: UDXU4RCSJNZOIQHZNWXHXORDPRTGNJAHAHFRGZNEEJCPQTT2M7NLCNF4}
+				# Some other user
+				{nkey: UCNGL4W5QX66CFX6A6DCBVDH5VOHMI7B2UZZU7TXAUQQSI2JPHULCKBR}
+			]
+		}
+		streaming {
+			nkey_seed_file: '%s'
+		}
+	`, nkeyfile)))
+	defer os.Remove(conf)
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	noPrint := func() {}
+	sopts, nopts, err := ConfigureOptions(fs, []string{"-c", conf}, noPrint, noPrint, noPrint)
+	if err != nil {
+		t.Fatalf("Error on configure: %v", err)
+	}
+	s := runServerWithOpts(t, sopts, nopts)
+	s.Shutdown()
+	s = nil
+
+	// Check that it fails with wrong seed
+	changeCurrentConfigContentWithNewContent(t, nkeyfile, []byte(`
+-----BEGIN USER NKEY SEED-----
+SUAKYRHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD43IZY
+------END USER NKEY SEED------
+	`))
+	fs = flag.NewFlagSet("test", flag.ContinueOnError)
+	sopts, nopts, err = ConfigureOptions(fs, []string{"-c", conf}, noPrint, noPrint, noPrint)
+	if err != nil {
+		t.Fatalf("Error on configure: %v", err)
+	}
+	s, err = RunServerWithOpts(sopts, nopts)
+	if err == nil {
+		if s != nil {
+			s.Shutdown()
+		}
+		t.Fatal("Expected failure to start")
+	}
+}
