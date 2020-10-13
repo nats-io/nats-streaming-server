@@ -405,4 +405,33 @@ func TestSublistSubjects(t *testing.T) {
 			t.Fatalf("Result expected to be either %v or %v, got %v", pOne, pTwo, r)
 		}
 	}
+
+	subjects = []string{"bar", "bar.*", "bar.baz", "bar.>", "bar.*.bat", "bar.baz.*", "bar.baz.biz.box", "bar.baz.>"}
+	expected := []string{"bar", "bar.>", "bar.*", "bar.*.bat", "bar.baz", "bar.baz.>", "bar.baz.*", "bar.baz.biz.box"}
+	s := NewSublist()
+	for _, subj := range subjects {
+		s.Insert(subj, subj)
+	}
+	r := s.Match("bar")
+	if len(r) == 0 {
+		t.Fatalf("bar should be in the sublist")
+	}
+	if r[0].(string) != "bar" {
+		t.Fatalf("invalid value for bar: %q", r[0].(string))
+	}
+	subjs := s.Subjects()
+	if !reflect.DeepEqual(subjs, expected) {
+		t.Fatalf("Expected subject:\n%q\n got\n%q", expected, subjs)
+	}
+
+	subjects = []string{"bar", "bar.*.*.box", "bar.baz.bat.*", ">", "*", "bar.baz.bat"}
+	expected = []string{">", "*", "bar", "bar.*.*.box", "bar.baz.bat", "bar.baz.bat.*"}
+	s = NewSublist()
+	for _, subj := range subjects {
+		s.Insert(subj, subj)
+	}
+	subjs = s.Subjects()
+	if !reflect.DeepEqual(subjs, expected) {
+		t.Fatalf("Expected subject:\n%q\n got\n%q", expected, subjs)
+	}
 }

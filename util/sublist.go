@@ -490,7 +490,6 @@ func (s *Sublist) Subjects() []string {
 
 func getSubjects(l *level, subject string, res *[]string) {
 	if l == nil || l.numNodes() == 0 {
-		*res = append(*res, subject)
 		return
 	}
 	var fs string
@@ -500,13 +499,16 @@ func getSubjects(l *level, subject string, res *[]string) {
 		} else {
 			fs = sfwc
 		}
-		getSubjects(l.fwc.next, fs, res)
+		*res = append(*res, fs)
 	}
 	if l.pwc != nil {
 		if subject != "" {
 			fs = subject + tsep + spwc
 		} else {
 			fs = spwc
+		}
+		if len(l.pwc.elements) > 0 {
+			*res = append(*res, fs)
 		}
 		getSubjects(l.pwc.next, fs, res)
 	}
@@ -515,6 +517,9 @@ func getSubjects(l *level, subject string, res *[]string) {
 			fs = subject + tsep + s
 		} else {
 			fs = s
+		}
+		if len(n.elements) > 0 {
+			*res = append(*res, fs)
 		}
 		getSubjects(n.next, fs, res)
 	}
