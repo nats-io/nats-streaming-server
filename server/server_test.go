@@ -1444,7 +1444,6 @@ func TestServerRandomClientURL(t *testing.T) {
 	natsOpts.Port = natsd.RANDOM_PORT
 	ns := natsdTest.RunServer(&natsOpts)
 	defer ns.Shutdown()
-	print(ns.ClientURL())
 
 	opts.NATSServerURL = fmt.Sprintf("nats://%s:%d", natsOpts.Host, natsOpts.Port)
 	s = runServerWithOpts(t, opts, nil)
