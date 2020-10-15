@@ -94,6 +94,7 @@ includes_DragonFly='
 #include <sys/ioctl.h>
 #include <net/bpf.h>
 #include <net/if.h>
+#include <net/if_clone.h>
 #include <net/if_types.h>
 #include <net/route.h>
 #include <netinet/in.h>
@@ -372,6 +373,7 @@ includes_SunOS='
 #include <sys/socket.h>
 #include <sys/sockio.h>
 #include <sys/stat.h>
+#include <sys/stream.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <sys/ioctl.h>
@@ -496,6 +498,7 @@ ccflags="$@"
 		$2 !~ "NLA_TYPE_MASK" &&
 		$2 !~ /^RTC_VL_(ACCURACY|BACKUP|DATA)/ &&
 		$2 ~ /^(NETLINK|NLM|NLMSG|NLA|IFA|IFAN|RT|RTC|RTCF|RTN|RTPROT|RTNH|ARPHRD|ETH_P|NETNSA)_/ ||
+		$2 ~ /^FIORDCHK$/ ||
 		$2 ~ /^SIOC/ ||
 		$2 ~ /^TIOC/ ||
 		$2 ~ /^TCGET/ ||

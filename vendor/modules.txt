@@ -64,7 +64,7 @@ github.com/prometheus/procfs/internal/util
 # go.etcd.io/bbolt v1.3.5
 ## explicit
 go.etcd.io/bbolt
-# golang.org/x/crypto v0.0.0-20201002170205-7f63de1d35b0
+# golang.org/x/crypto v0.0.0-20201012173705-84dcc777aaee
 ## explicit
 golang.org/x/crypto/bcrypt
 golang.org/x/crypto/blowfish
@@ -74,7 +74,7 @@ golang.org/x/crypto/ed25519
 golang.org/x/crypto/ed25519/internal/edwards25519
 golang.org/x/crypto/internal/subtle
 golang.org/x/crypto/poly1305
-# golang.org/x/sys v0.0.0-20201006155630-ac719f4daadf
+# golang.org/x/sys v0.0.0-20201015000850-e3ed0017c211
 ## explicit
 golang.org/x/sys/cpu
 golang.org/x/sys/internal/unsafeheader
