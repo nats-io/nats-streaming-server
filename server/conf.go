@@ -761,6 +761,8 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 			var i64 int64
 			i64, flagErr = getBytes(f)
 			sopts.FileStoreOpts.ReadBufferSize = int(i64)
+		case "file_slice_max_bytes":
+			sopts.FileStoreOpts.SliceMaxBytes, flagErr = getBytes(f)
 		}
 	})
 	if flagErr != nil {

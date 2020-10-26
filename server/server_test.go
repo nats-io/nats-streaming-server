@@ -1607,3 +1607,21 @@ SUAKYRHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD43IZY
 		t.Fatal("Expected failure to start")
 	}
 }
+
+func TestFileSliceMaxBytesCmdLine(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	noPrint := func() {}
+	sopts, nopts, err := ConfigureOptions(fs, []string{"-store", "file", "-dir", defaultDataStore, "-file_slice_max_bytes", "0"}, noPrint, noPrint, noPrint)
+	if err != nil {
+		t.Fatalf("Error on configure: %v", err)
+	}
+	s := runServerWithOpts(t, sopts, nopts)
+	defer s.Shutdown()
+
+	s.mu.Lock()
+	smb := s.opts.FileStoreOpts.SliceMaxBytes
+	s.mu.Unlock()
+	if smb != 0 {
+		t.Fatalf("Expected value to be 0, got %v", smb)
+	}
+}
