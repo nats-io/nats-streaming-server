@@ -38,8 +38,8 @@ under the Apache Version 2.0 license found in the LICENSE file.
 
 [License-Url]: https://www.apache.org/licenses/LICENSE-2.0
 [License-Image]: https://img.shields.io/badge/License-Apache2-blue.svg
-[Build-Status-Url]: http://travis-ci.org/nats-io/nats-streaming-server
-[Build-Status-Image]: https://travis-ci.org/nats-io/nats-streaming-server.svg?branch=master
+[Build-Status-Url]: https://travis-ci.com/github/nats-io/nats-streaming-server
+[Build-Status-Image]: https://travis-ci.com/nats-io/nats-streaming-server.svg?branch=master
 [Coverage-Url]: https://coveralls.io/r/nats-io/nats-streaming-server?branch=master
 [Coverage-image]: https://coveralls.io/repos/github/nats-io/nats-streaming-server/badge.svg?branch=master&t=kIxrDE
 [ReportCard-Url]: http://goreportcard.com/report/nats-io/nats-streaming-server

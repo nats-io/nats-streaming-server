@@ -60,7 +60,7 @@ func TestRunServer(t *testing.T) {
 }
 
 func TestRunServerFailureLogsCause(t *testing.T) {
-	d := &dummyLogger{}
+	d := &captureFatalLogger{}
 
 	sOpts := GetDefaultOptions()
 	sOpts.NATSServerURL = "nats://127.0.0.1:4444"
@@ -72,8 +72,9 @@ func TestRunServerFailureLogsCause(t *testing.T) {
 		s.Shutdown()
 		t.Fatal("Expected error, got none")
 	}
+
 	// We should get a trace in the log
-	if !strings.Contains(d.msg, "available for connection") {
+	if !strings.Contains(d.fatal, "available for connection") {
 		t.Fatalf("Expected to get a cause as invalid connection, got: %v", d.msg)
 	}
 }
