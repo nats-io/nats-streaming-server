@@ -1714,14 +1714,17 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 		// We used to issue panic for common errors but now return error
 		// instead. Still we want to log the reason for the panic.
 		if r := recover(); r != nil {
-			s.Shutdown()
 			s.log.Noticef("Failed to start: %v", r)
+			// For tests, we still shutdown server even before panic since
+			// some tests will do a recover().
+			s.Shutdown()
 			panic(r)
 		} else if returnedError != nil {
-			s.Shutdown()
 			// Log it as a fatal error, process will exit (if
 			// running from executable or logger is configured).
 			s.log.Fatalf("Failed to start: %v", returnedError)
+			// For tests, we call shutdown() for proper cleanup.
+			s.Shutdown()
 		}
 	}()
 
