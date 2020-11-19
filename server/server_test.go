@@ -1609,6 +1609,9 @@ SUAKYRHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD43IZY
 }
 
 func TestFileSliceMaxBytesCmdLine(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	noPrint := func() {}
 	sopts, nopts, err := ConfigureOptions(fs, []string{"-store", "file", "-dir", defaultDataStore, "-file_slice_max_bytes", "0"}, noPrint, noPrint, noPrint)

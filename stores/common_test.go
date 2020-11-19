@@ -267,28 +267,40 @@ func storeSubDelete(t tLogger, cs *Channel, channel string, subID ...uint64) {
 	}
 }
 
-func getRecoveredChannel(t tLogger, state *RecoveredState, name string) *Channel {
+func getRecoveredChannel(t testing.TB, state *RecoveredState, name string) *Channel {
+	t.Helper()
 	if state == nil {
-		stackFatalf(t, "Expected state to be recovered")
+		t.Fatalf("Expected state to be recovered")
+		// For staticcheck SA5011
+		return nil
 	}
 	rc := state.Channels[name]
 	if rc == nil {
-		stackFatalf(t, "Channel %q should have been recovered", name)
+		t.Fatalf("Channel %q should have been recovered", name)
+		// For staticcheck SA5011
+		return nil
 	}
 	return rc.Channel
 }
 
-func getRecoveredSubs(t tLogger, state *RecoveredState, name string, expected int) []*RecoveredSubscription {
+func getRecoveredSubs(t testing.TB, state *RecoveredState, name string, expected int) []*RecoveredSubscription {
+	t.Helper()
 	if state == nil {
-		stackFatalf(t, "Expected state to be recovered")
+		t.Fatalf("Expected state to be recovered")
+		// For staticcheck SA5011
+		return nil
 	}
 	rc := state.Channels[name]
 	if rc == nil {
-		stackFatalf(t, "Channel %q should have been recovered", name)
+		t.Fatalf("Channel %q should have been recovered", name)
+		// For staticcheck SA5011
+		return nil
 	}
 	subs := rc.Subscriptions
 	if len(subs) != expected {
-		stackFatalf(t, "Channel %q should have %v subscriptions, got %v", name, expected, len(subs))
+		t.Fatalf("Channel %q should have %v subscriptions, got %v", name, expected, len(subs))
+		// For staticcheck SA5011
+		return nil
 	}
 	return subs
 }
