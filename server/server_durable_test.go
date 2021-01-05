@@ -16,6 +16,7 @@ package server
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -917,4 +918,54 @@ func TestPersistentStoreDurableClosedStatusOnRestart(t *testing.T) {
 	checkSubs(t, s, clientName, 0)
 	// Restart one last time
 	dur = restartDurable()
+}
+
+func TestDurableReplaced(t *testing.T) {
+	opts := GetDefaultOptions()
+	opts.ReplaceDurable = true
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	testDurableReplaced(t, s)
+}
+
+func testDurableReplaced(t *testing.T, s *StanServer) {
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	count := int32(0)
+	cb := func(_ *stan.Msg) {
+		atomic.AddInt32(&count, 1)
+	}
+	dur1, err := sc.Subscribe("foo", cb, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Unable to start durable: %v", err)
+	}
+
+	dur2, err := sc.Subscribe("foo", cb, stan.DurableName("dur"))
+	if err != nil {
+		t.Fatalf("Unable to start durable: %v", err)
+	}
+
+	sc.Publish("foo", []byte("msg"))
+	time.Sleep(150 * time.Millisecond)
+
+	if c := atomic.LoadInt32(&count); c != 1 {
+		t.Fatalf("Received %v messages!", c)
+	}
+
+	c, err := s.lookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Error on lookup: %v", err)
+	}
+	if subs := c.ss.getAllSubs(); len(subs) > 1 {
+		t.Fatalf("Should have only 1 sub, got %v", len(subs))
+	}
+
+	if err := dur1.Close(); err == nil {
+		t.Fatal("Expected error on close of dur1, but did not get one")
+	}
+	if err := dur2.Close(); err != nil {
+		t.Fatalf("Error on close: %v", err)
+	}
 }

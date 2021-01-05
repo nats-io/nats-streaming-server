@@ -199,6 +199,11 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.NKeySeedFile = v.(string)
+		case "replace_durable", "replace_durables", "replace_duplicate_durable", "replace_duplicate_durables":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.ReplaceDurable = v.(bool)
 		}
 	}
 	return nil

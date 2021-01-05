@@ -1337,6 +1337,7 @@ type Options struct {
 	EncryptionKey      []byte        // Encryption key. The environment NATS_STREAMING_ENCRYPTION_KEY takes precedence and is the preferred way to provide the key.
 	Clustering         ClusteringOptions
 	NATSClientOpts     []nats.Option
+	ReplaceDurable     bool // If true, the subscription request for a durable subscription will replace the current durable instead of failing with duplicate durable error.
 }
 
 // Clone returns a deep copy of the Options object.
@@ -5109,6 +5110,11 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	// until we are done with this subscription. This will also stop
 	// the delete timer if one was set.
 	c, preventDelete, err := s.lookupOrCreateChannelPreventDelete(sr.Subject)
+	// For durable subscriptions, and if allowed, if this is going to be a
+	// duplicate, close the current durable and accept the new one.
+	if err == nil && sr.DurableName != "" && sr.QGroup == "" && s.opts.ReplaceDurable {
+		err = s.closeDurableIfDuplicate(c, sr)
+	}
 	if err == nil {
 		// If clustered, thread operations through Raft.
 		if s.isClustered {
@@ -5171,6 +5177,47 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 	sub.Unlock()
 
 	s.subStartCh <- &subStartInfo{c: c, sub: sub, qs: qs, isDurable: sub.IsDurable}
+}
+
+// This will close (and replicate the close operation if running in cluster mode)
+// the current durable subscription matching this subscription request information.
+// This should be invoked only if ReplaceDurable option is enabled.
+// It is used in case users want to be able to "resend" a subscription request
+// if the original request failed, due to timeout for instance. It could be that
+// the server accepted the original, sent the response back but the client library
+// gave up on it due to its own timeout. In that case, trying to issue the same
+// subscription request would lead to a "duplicate durable" error and the only choice
+// would be to close the connection.
+func (s *StanServer) closeDurableIfDuplicate(c *channel, sr *pb.SubscriptionRequest) error {
+	var duplicate bool
+	var ackInbox string
+	ss := c.ss
+	ss.RLock()
+	sub := ss.durables[durableKey(sr)]
+	if sub != nil {
+		sub.RLock()
+		duplicate = sub.ClientID != ""
+		ackInbox = sub.AckInbox
+		sub.RUnlock()
+	}
+	ss.RUnlock()
+	if !duplicate {
+		return nil
+	}
+	creq := &pb.UnsubscribeRequest{
+		ClientID: sr.ClientID,
+		Subject:  sr.Subject,
+		Inbox:    ackInbox,
+	}
+	var err error
+	if s.isClustered {
+		err = s.replicateCloseSubscription(creq)
+	} else {
+		s.closeMu.Lock()
+		err = s.unsubscribe(creq, true)
+		s.closeMu.Unlock()
+	}
+	return err
 }
 
 type subStateTraceCtx struct {
