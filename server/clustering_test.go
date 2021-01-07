@@ -8031,3 +8031,53 @@ func TestClusteringAddRemoveClusterNodesWithBootstrap(t *testing.T) {
 		}
 	}
 }
+
+func TestClusteringDurableReplaced(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.ReplaceDurable = true
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Wait for it to bootstrap
+	getLeader(t, 10*time.Second, s1)
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.ReplaceDurable = true
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.ReplaceDurable = true
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	testDurableReplaced(t, s1)
+
+	s1.Shutdown()
+	newLeader := getLeader(t, 2*time.Second, s2, s3)
+	c, err := newLeader.lookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Error looking up channel: %v", err)
+	}
+	if subs := c.ss.getAllSubs(); len(subs) != 0 {
+		t.Fatalf("Expected 0 sub, got %v", len(subs))
+	}
+	c.ss.RLock()
+	lenDur := len(c.ss.durables)
+	c.ss.RUnlock()
+	if lenDur != 1 {
+		t.Fatalf("Expected 1 durable, got %v", lenDur)
+	}
+}
