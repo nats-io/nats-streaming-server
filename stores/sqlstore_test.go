@@ -160,8 +160,9 @@ func TestSQLAllOptions(t *testing.T) {
 	defer cleanupSQLDatastore(t)
 
 	opts := &SQLStoreOptions{
-		NoCaching:    true,
-		MaxOpenConns: 123,
+		NoCaching:       true,
+		MaxOpenConns:    123,
+		BulkInsertLimit: 456,
 	}
 	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil, SQLAllOptions(opts))
 	if err != nil {
@@ -177,6 +178,9 @@ func TestSQLAllOptions(t *testing.T) {
 	}
 	if so.MaxOpenConns != 123 {
 		t.Fatalf("MaxOpenConns should be 123, got %v", so.MaxOpenConns)
+	}
+	if so.BulkInsertLimit != 456 {
+		t.Fatalf("BulkInsertLimit should be 456, got %v", so.BulkInsertLimit)
 	}
 }
 
@@ -2137,6 +2141,47 @@ func TestSQLMaxAgeForMsgsWithTimestampInPast(t *testing.T) {
 		// Check that message has expired.
 		if first, err := cs.Msgs.FirstSequence(); err != nil || first != seq+1 {
 			t.Fatal("Message should have expired")
+		}
+	}
+}
+
+func TestSQLBulkInsertLimit(t *testing.T) {
+	if !doSQL {
+		t.SkipNow()
+	}
+
+	cleanupSQLDatastore(t)
+	defer cleanupSQLDatastore(t)
+
+	// Create store with caching enabled and bulk insert limit
+	s, err := NewSQLStore(testLogger, testSQLDriver, testSQLSource, nil,
+		SQLNoCaching(false), SQLBulkInsertLimit(10))
+	if err != nil {
+		t.Fatalf("Error creating store: %v", err)
+	}
+	defer s.Close()
+
+	cs := storeCreateChannel(t, s, "foo")
+	for seq := uint64(1); seq < 127; seq++ {
+		msg := &pb.MsgProto{
+			Sequence:  seq,
+			Subject:   "foo",
+			Data:      []byte(fmt.Sprintf("%v", seq)),
+			Timestamp: time.Now().UnixNano(),
+		}
+		if _, err := cs.Msgs.Store(msg); err != nil {
+			t.Fatalf("Error storing message: %v", err)
+		}
+	}
+	if err := cs.Msgs.Flush(); err != nil {
+		t.Fatalf("Error on flush: %v", err)
+	}
+
+	for seq := uint64(1); seq < 127; seq++ {
+		m := msgStoreLookup(t, cs.Msgs, seq)
+		expected := fmt.Sprintf("%v", seq)
+		if string(m.Data) != expected {
+			t.Fatalf("Expected %q, got %q", expected, m.Data)
 		}
 	}
 }
