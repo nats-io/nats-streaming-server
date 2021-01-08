@@ -24,8 +24,10 @@ import (
 	"time"
 
 	natsdTest "github.com/nats-io/nats-server/v2/test"
+	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/stan.go"
+	"github.com/nats-io/stan.go/pb"
 )
 
 func TestRedelivery(t *testing.T) {
@@ -1740,5 +1742,93 @@ func TestPersistentStoreRedeliveryCount(t *testing.T) {
 	case <-ch:
 	case <-time.After(time.Second):
 		t.Fatalf("Timedout")
+	}
+}
+
+type testRdlvRaceWithAck struct {
+	stores.MsgStore
+	sync.Mutex
+	block bool
+	ch    chan struct{}
+	dch   chan struct{}
+}
+
+func (ms *testRdlvRaceWithAck) Lookup(seq uint64) (*pb.MsgProto, error) {
+	ms.Lock()
+	block := ms.block
+	ch := ms.ch
+	dch := ms.dch
+	ms.Unlock()
+	if block {
+		ch <- struct{}{}
+		<-dch
+	}
+	return ms.MsgStore.Lookup(seq)
+}
+
+func TestRedeliveryRaceWithAck(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	c, err := s.lookupOrCreateChannel("foo")
+	if err != nil {
+		t.Fatalf("Error on lookup: %v", err)
+	}
+	ms := &testRdlvRaceWithAck{
+		MsgStore: c.store.Msgs,
+		ch:       make(chan struct{}, 1),
+		dch:      make(chan struct{}),
+	}
+	s.clients.Lock()
+	c.store.Msgs = ms
+	s.clients.Unlock()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	msgCh := make(chan *stan.Msg, 10)
+	if _, err := sc.Subscribe("foo", func(m *stan.Msg) {
+		msgCh <- m
+	}, stan.SetManualAckMode(), stan.AckWait(ackWaitInMs(250))); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	sc.Publish("foo", []byte("msg"))
+
+	var m *stan.Msg
+	select {
+	case m = <-msgCh:
+	case <-time.After(time.Second):
+		t.Fatalf("Did not get the message")
+	}
+	ms.Lock()
+	ms.block = true
+	ch := ms.ch
+	dch := ms.dch
+	ms.Unlock()
+
+	select {
+	case <-ch:
+		m.Ack()
+		sub := c.ss.getAllSubs()[0]
+		waitFor(t, time.Second, 15*time.Millisecond, func() error {
+			sub.RLock()
+			done := len(sub.acksPending) == 0
+			sub.RUnlock()
+			if !done {
+				return fmt.Errorf("message still pending")
+			}
+			return nil
+		})
+		close(dch)
+	case <-time.After(time.Second):
+		t.Fatalf("Lookup not invoked for redelivery")
+	}
+
+	select {
+	case m := <-msgCh:
+		t.Fatalf("Should not have received redelivered message: %+v", m)
+	case <-time.After(250 * time.Millisecond):
+		// OK
 	}
 }

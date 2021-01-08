@@ -3550,6 +3550,13 @@ func (sub *subState) makeSortedPendingMsgs() []*pendingMsg {
 	return results
 }
 
+// Returns true if the message is in the pending map, false otherwise.
+// Lock is held on entry.
+func (sub *subState) isMsgStillPending(m *pb.MsgProto) bool {
+	_, pending := sub.acksPending[m.Sequence]
+	return pending
+}
+
 func qsLock(qs *queueState) {
 	if qs != nil {
 		qs.Lock()
@@ -3602,7 +3609,9 @@ func (s *StanServer) performDurableRedelivery(c *channel, sub *subState) {
 			qsLock(qs)
 			sub.Lock()
 			// Force delivery
-			s.sendMsgToSub(sub, m, forceDelivery)
+			if sub.isMsgStillPending(m) {
+				s.sendMsgToSub(sub, m, forceDelivery)
+			}
 			sub.Unlock()
 			qsUnlock(qs)
 		}
@@ -3721,9 +3730,12 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 		// otherwise this could cause a message to be redelivered to multiple members.
 		if !isClustered && qs != nil && !isStartup {
 			qs.Lock()
+			sub.Lock()
+			skip := !sub.isMsgStillPending(m)
+			sub.Unlock()
 			pick, sent = s.sendMsgToQueueGroup(qs, m, forceDelivery)
 			qs.Unlock()
-			if pick == nil {
+			if !skip && pick == nil {
 				s.log.Errorf("[Client:%s] Unable to find queue subscriber for subid=%d", clientID, subID)
 				break
 			}
@@ -3731,13 +3743,15 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 			// we need to process an implicit ack for the original subscriber.
 			// We do this only after confirmation that it was successfully added
 			// as pending on the other queue subscriber.
-			if pick != sub && sent {
+			if !skip && pick != sub && sent {
 				s.processAck(c, sub, m.Sequence, false)
 			}
 		} else {
 			qsLock(qs)
 			sub.Lock()
-			s.sendMsgToSub(sub, m, forceDelivery)
+			if sub.isMsgStillPending(m) {
+				s.sendMsgToSub(sub, m, forceDelivery)
+			}
 			sub.Unlock()
 			qsUnlock(qs)
 		}
