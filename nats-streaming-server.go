@@ -91,6 +91,7 @@ Streaming Server SQL Store Options:
     --sql_source <string>            Datasource used when opening an SQL connection to the database
     --sql_no_caching <bool>          Enable/Disable caching for improved performance
     --sql_max_open_conns <int>       Maximum number of opened connections to the database
+    --sql_bulk_insert_limit <int>    Maximum number of messages stored with a single SQL "INSERT" statement
 
 Streaming Server TLS Options:
     -secure <bool>                   Use a TLS connection to the NATS server without

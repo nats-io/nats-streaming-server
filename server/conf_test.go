@@ -287,6 +287,9 @@ func TestParseConfig(t *testing.T) {
 	if opts.SQLStoreOpts.MaxOpenConns != 5 {
 		t.Fatalf("Expected SQL MaxOpenConns to be 5, got %v", opts.SQLStoreOpts.MaxOpenConns)
 	}
+	if opts.SQLStoreOpts.BulkInsertLimit != 1000 {
+		t.Fatalf("Expected SQL BulkInsertLimit to be 1000, got %v", opts.SQLStoreOpts.BulkInsertLimit)
+	}
 	if !opts.Encrypt {
 		t.Fatal("Expected Encrypt to be true")
 	}

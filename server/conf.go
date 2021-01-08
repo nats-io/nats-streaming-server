@@ -595,6 +595,11 @@ func parseSQLOptions(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.SQLStoreOpts.MaxOpenConns = int(v.(int64))
+		case "bulk_insert_limit":
+			if err := checkType(name, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.SQLStoreOpts.BulkInsertLimit = int(v.(int64))
 		}
 	}
 	return nil
@@ -688,6 +693,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	defSQLOpts := stores.DefaultSQLStoreOptions()
 	fs.BoolVar(&sopts.SQLStoreOpts.NoCaching, "sql_no_caching", defSQLOpts.NoCaching, "Enable/Disable caching")
 	fs.IntVar(&sopts.SQLStoreOpts.MaxOpenConns, "sql_max_open_conns", defSQLOpts.MaxOpenConns, "Max opened connections to the database")
+	fs.IntVar(&sopts.SQLStoreOpts.BulkInsertLimit, "sql_bulk_insert_limit", 0, "Limit the number of messages inserted in one SQL query")
 	fs.StringVar(&sopts.SyslogName, "syslog_name", "", "Syslog Name")
 	fs.BoolVar(&sopts.Encrypt, "encrypt", false, "Specify if server should use encryption at rest")
 	fs.StringVar(&sopts.EncryptionCipher, "encryption_cipher", stores.CryptoCipherAutoSelect, "Encryption cipher. Supported are AES and CHACHA (default is AES)")

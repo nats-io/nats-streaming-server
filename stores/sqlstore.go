@@ -185,6 +185,10 @@ const (
 	// Limit of number of messages in the cache before message store
 	// is automatically flushed on a Store() call.
 	sqlDefaultMsgCacheLimit = 1024
+
+	// If bulk insert limit is set, the server will still insert messages
+	// using tx if the limit is below this threshold.
+	sqlMinBulkInsertLimit = 5
 )
 
 // These are initialized based on the constants that have reasonable values.
@@ -215,6 +219,11 @@ type SQLStoreOptions struct {
 	// APIs will cause execution of their respective SQL statements.
 	NoCaching bool
 
+	// If this is non 0, and NoCaching is not enabled, the server will perform
+	// bulk insert of messages. This is the limit of values added to the SQL statement
+	// "INSERT INTO Messages (..) VALUES (..)[,(..)*]".
+	BulkInsertLimit int
+
 	// Maximum number of open connections to the database.
 	// If <= 0, then there is no limit on the number of open connections.
 	// The default is 0 (unlimited).
@@ -240,6 +249,14 @@ func SQLNoCaching(noCaching bool) SQLStoreOption {
 	}
 }
 
+// SQLBulkInsertLimit sets the BulkInsertLimit option
+func SQLBulkInsertLimit(limit int) SQLStoreOption {
+	return func(o *SQLStoreOptions) error {
+		o.BulkInsertLimit = limit
+		return nil
+	}
+}
+
 // SQLMaxOpenConns sets the MaxOpenConns option
 func SQLMaxOpenConns(max int) SQLStoreOption {
 	return func(o *SQLStoreOptions) error {
@@ -254,6 +271,7 @@ func SQLAllOptions(opts *SQLStoreOptions) SQLStoreOption {
 	return func(o *SQLStoreOptions) error {
 		o.NoCaching = opts.NoCaching
 		o.MaxOpenConns = opts.MaxOpenConns
+		o.BulkInsertLimit = opts.BulkInsertLimit
 		return nil
 	}
 }
@@ -275,6 +293,8 @@ type SQLStore struct {
 	wg            sync.WaitGroup
 	preparedStmts []*sql.Stmt
 	ssFlusher     *subStoresFlusher
+	postgres      bool
+	bulkInserts   []string
 }
 
 type sqlDBLock struct {
@@ -410,10 +430,19 @@ func NewSQLStore(log logger.Logger, driver, source string, limits *StoreLimits, 
 		db:            db,
 		doneCh:        make(chan struct{}),
 		preparedStmts: make([]*sql.Stmt, 0, len(sqlStmts)),
+		postgres:      driver == driverPostgres,
 	}
 	if err := s.init(TypeSQL, log, limits); err != nil {
 		s.Close()
 		return nil, err
+	}
+	if s.postgres && opts.BulkInsertLimit > 0 {
+		limit := opts.BulkInsertLimit
+		s.bulkInserts = make([]string, limit)
+		for i := 0; i < limit; i++ {
+			j := i * 5
+			s.bulkInserts[i] = fmt.Sprintf("($%d,$%d,$%d,$%d,$%d)", j+1, j+2, j+3, j+4, j+5)
+		}
 	}
 	if err := s.createPreparedStmts(); err != nil {
 		s.Close()
@@ -1633,6 +1662,9 @@ func (ms *SQLMsgStore) flush() error {
 		ps *sql.Stmt
 	)
 	defer func() {
+		if ms.limits.MaxAge > 0 && ms.expireTimer == nil {
+			ms.createExpireTimer()
+		}
 		ms.writeCache.transferToFreeList()
 		if ps != nil {
 			ps.Close()
@@ -1641,6 +1673,9 @@ func (ms *SQLMsgStore) flush() error {
 			tx.Rollback()
 		}
 	}()
+	if limit := ms.sqlStore.opts.BulkInsertLimit; limit >= sqlMinBulkInsertLimit {
+		return ms.bulkInsert(limit)
+	}
 	tx, err := ms.sqlStore.db.Begin()
 	if err != nil {
 		return err
@@ -1664,8 +1699,80 @@ func (ms *SQLMsgStore) flush() error {
 		return err
 	}
 	tx = nil
-	if ms.limits.MaxAge > 0 && ms.expireTimer == nil {
-		ms.createExpireTimer()
+	return nil
+}
+
+// Insert messages with INSERT INTO MESSAGES () VALUES (),(),()...
+// This is faster than the original insert with transactions.
+// It is done only if user configures the BulkInsertLimit option.
+// Lock held on entry.
+func (ms *SQLMsgStore) bulkInsert(limit int) error {
+	const insertStmt = "INSERT INTO Messages (id, seq, timestamp, size, data) VALUES "
+	const valArgs = "(?,?,?,?,?)"
+
+	count := ms.writeCache.count
+
+	sb := strings.Builder{}
+	size := len(insertStmt) + count // number of "," + last ";"
+	if ms.sqlStore.postgres {
+		for i := 0; i < limit; i++ {
+			size += len(ms.sqlStore.bulkInserts[i])
+		}
+	} else {
+		size += count * len(valArgs)
+	}
+	sb.Grow(size)
+	sb.WriteString(insertStmt)
+
+	for i := 0; i < limit; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		if ms.sqlStore.postgres {
+			sb.WriteString(ms.sqlStore.bulkInserts[i])
+		} else {
+			sb.WriteString(valArgs)
+		}
+	}
+	sb.WriteString(";")
+	stmtb := []byte(sb.String())
+
+	args := make([]interface{}, 0, 5*count)
+	start := ms.writeCache.head
+	for count > 0 {
+		args = args[:0]
+		i := 0
+		l := len(insertStmt)
+		// Iterate through the cache, but do not remove elements from the list.
+		// They are needed by the caller.
+		for cm := start; cm != nil; cm = cm.next {
+			if i > 0 {
+				l++
+			}
+			if ms.sqlStore.postgres {
+				l += len(ms.sqlStore.bulkInserts[i])
+			} else {
+				l += len(valArgs)
+			}
+			args = append(args, ms.channelID, cm.msg.Sequence, cm.msg.Timestamp, len(cm.data), cm.data)
+			i++
+			if i == limit {
+				start = cm.next
+				break
+			}
+		}
+		count -= i
+		var stmt string
+		if i == limit {
+			stmt = sb.String()
+		} else {
+			l++
+			stmtb[l-1] = ';'
+			stmt = string(stmtb[:l])
+		}
+		if _, err := ms.sqlStore.db.Exec(stmt, args[:i*5]...); err != nil {
+			return err
+		}
 	}
 	return nil
 }
