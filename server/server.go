@@ -3731,11 +3731,13 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 		if !isClustered && qs != nil && !isStartup {
 			qs.Lock()
 			sub.Lock()
-			skip := !sub.isMsgStillPending(m)
+			msgPending := sub.isMsgStillPending(m)
 			sub.Unlock()
-			pick, sent = s.sendMsgToQueueGroup(qs, m, forceDelivery)
+			if msgPending {
+				pick, sent = s.sendMsgToQueueGroup(qs, m, forceDelivery)
+			}
 			qs.Unlock()
-			if !skip && pick == nil {
+			if msgPending && pick == nil {
 				s.log.Errorf("[Client:%s] Unable to find queue subscriber for subid=%d", clientID, subID)
 				break
 			}
@@ -3743,7 +3745,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 			// we need to process an implicit ack for the original subscriber.
 			// We do this only after confirmation that it was successfully added
 			// as pending on the other queue subscriber.
-			if !skip && pick != sub && sent {
+			if msgPending && pick != sub && sent {
 				s.processAck(c, sub, m.Sequence, false)
 			}
 		} else {
