@@ -275,8 +275,10 @@ func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration
 		return nil, err
 	}
 
+	peerConn.mu.Lock()
 	peerConn.sub = sub
 	peerConn.outbox = resp.Inbox
+	peerConn.mu.Unlock()
 	n.mu.Lock()
 	n.conns[peerConn] = struct{}{}
 	n.mu.Unlock()
