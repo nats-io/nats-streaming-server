@@ -531,7 +531,7 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 	s := r.server
 	op := &spb.RaftOperation{}
 	if err := op.Unmarshal(l.Data); err != nil {
-		panic(err)
+		return fmt.Errorf("unable to unmarshal RaftOperation: %v", err)
 	}
 	// We don't want snapshot Persist() and Apply() to execute concurrently,
 	// so use common lock.

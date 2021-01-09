@@ -3323,11 +3323,13 @@ func (s *StanServer) sendCloseResponse(subj string, closeErr error) {
 func (s *StanServer) processClientPublish(m *nats.Msg) {
 	iopm := &ioPendingMsg{m: m}
 	pm := &iopm.pm
-	if pm.Unmarshal(m.Data) != nil {
+	if err := pm.Unmarshal(m.Data); err != nil {
 		if s.processCtrlMsg(m) {
 			return
 		}
-		// else we will report an error below...
+		s.log.Errorf("Unable to unmarshal PubMsg: %v", err)
+		s.sendPublishErr(m.Reply, pm.Guid, ErrInvalidPubReq)
+		return
 	}
 	atomic.AddInt64(&s.stats.inMsgs, 1)
 	atomic.AddInt64(&s.stats.inBytes, int64(len(m.Data)))
@@ -5320,10 +5322,12 @@ func (s *StanServer) processSubscriptionsStart() {
 // processAckMsg processes inbound acks from clients for delivered messages.
 func (s *StanServer) processAckMsg(m *nats.Msg) {
 	ack := &pb.Ack{}
-	if ack.Unmarshal(m.Data) != nil {
+	if err := ack.Unmarshal(m.Data); err != nil {
 		if s.processCtrlMsg(m) {
 			return
 		}
+		s.log.Errorf("Unable to unmarshal Ack: %v", err)
+		return
 	}
 	c := s.channels.get(ack.Subject)
 	if c == nil {

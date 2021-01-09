@@ -115,7 +115,9 @@ var RaftOperation_Type_value = map[string]int32{
 func (x RaftOperation_Type) String() string {
 	return proto.EnumName(RaftOperation_Type_name, int32(x))
 }
-func (RaftOperation_Type) EnumDescriptor() ([]byte, []int) { return fileDescriptorProtocol, []int{9, 0} }
+func (RaftOperation_Type) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptorProtocol, []int{9, 0}
+}
 
 // SubState represents the state of a Subscription
 type SubState struct {
@@ -1856,7 +1858,7 @@ func (m *SubState) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -1925,7 +1927,7 @@ func (m *SubStateDelete) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -2013,7 +2015,7 @@ func (m *SubStateUpdate) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -2324,7 +2326,7 @@ func (m *ServerInfo) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -2520,7 +2522,7 @@ func (m *ClientInfo) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -2599,7 +2601,7 @@ func (m *ClientDelete) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -2757,7 +2759,7 @@ func (m *CtrlMsg) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -2865,7 +2867,7 @@ func (m *RaftJoinRequest) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -2944,7 +2946,7 @@ func (m *RaftJoinResponse) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -3259,7 +3261,7 @@ func (m *RaftOperation) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -3340,7 +3342,7 @@ func (m *Batch) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -3471,7 +3473,7 @@ func (m *AddSubscription) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -3703,7 +3705,7 @@ func (m *SubSentAndAck) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -3806,7 +3808,7 @@ func (m *AddClient) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -3949,7 +3951,7 @@ func (m *RaftSnapshot) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -4135,7 +4137,7 @@ func (m *ChannelSnapshot) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -4280,7 +4282,7 @@ func (m *SubscriptionSnapshot) Unmarshal(data []byte) error {
 			if skippy < 0 {
 				return ErrInvalidLengthProtocol
 			}
-			if (iNdEx + skippy) > l {
+			if (iNdEx+skippy) > l || (iNdEx+skippy) < 0 {
 				return io.ErrUnexpectedEOF
 			}
 			iNdEx += skippy
@@ -4378,6 +4380,9 @@ func skipProtocol(data []byte) (n int, err error) {
 					return 0, err
 				}
 				iNdEx = start + next
+				if iNdEx < 0 {
+					return 0, io.ErrUnexpectedEOF
+				}
 			}
 			return iNdEx, nil
 		case 4:

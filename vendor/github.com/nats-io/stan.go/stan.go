@@ -26,7 +26,7 @@ import (
 )
 
 // Version is the NATS Streaming Go Client version
-const Version = "0.7.0"
+const Version = "0.8.1"
 
 const (
 	// DefaultNatsURL is the default URL the client connects to
@@ -43,7 +43,7 @@ const (
 	// DefaultPingInterval is the default interval (in seconds) at which a connection sends a PING to the server
 	DefaultPingInterval = 5
 	// DefaultPingMaxOut is the number of PINGs without a response before the connection is considered lost.
-	DefaultPingMaxOut = 3
+	DefaultPingMaxOut = 88
 )
 
 // Conn represents a connection to the NATS Streaming subsystem. It can Publish and
@@ -700,7 +700,8 @@ func (sc *conn) processAck(m *nats.Msg) {
 	pa := &pb.PubAck{}
 	err := pa.Unmarshal(m.Data)
 	if err != nil {
-		panic(fmt.Errorf("error during ack unmarshal: %v", err))
+		fmt.Printf("error during ack unmarshal: %v\n", err)
+		return
 	}
 
 	// Remove
@@ -846,7 +847,8 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 	msg := &Msg{}
 	err := msg.Unmarshal(raw.Data)
 	if err != nil {
-		panic(fmt.Errorf("error processing unmarshal for msg: %v", err))
+		fmt.Printf("error during message unmarshal: %v\n", err)
+		return
 	}
 	var sub *subscription
 	// Lookup the subscription
