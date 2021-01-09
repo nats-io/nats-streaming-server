@@ -1707,35 +1707,50 @@ func (ms *SQLMsgStore) flush() error {
 // It is done only if user configures the BulkInsertLimit option.
 // Lock held on entry.
 func (ms *SQLMsgStore) bulkInsert(limit int) error {
+	s := ms.sqlStore
+
 	const insertStmt = "INSERT INTO Messages (id, seq, timestamp, size, data) VALUES "
 	const valArgs = "(?,?,?,?,?)"
 
 	count := ms.writeCache.count
+	if count == 1 {
+		cm := ms.writeCache.head
+		stmt := insertStmt
+		if s.postgres {
+			stmt += "($1,$2,$3,$4,$5)"
+		} else {
+			stmt += valArgs
+		}
+		_, err := s.db.Exec(stmt, ms.channelID, cm.msg.Sequence, cm.msg.Timestamp, len(cm.data), cm.data)
+		return err
+	}
 
 	sb := strings.Builder{}
-	size := len(insertStmt) + count // number of "," + last ";"
-	if ms.sqlStore.postgres {
-		for i := 0; i < limit; i++ {
-			size += len(ms.sqlStore.bulkInserts[i])
+	total := count
+	if total > limit {
+		total = limit
+	}
+	size := len(insertStmt) + total - 1 // number of ","
+	if s.postgres {
+		for i := 0; i < total; i++ {
+			size += len(s.bulkInserts[i])
 		}
 	} else {
-		size += count * len(valArgs)
+		size += total * len(valArgs)
 	}
 	sb.Grow(size)
 	sb.WriteString(insertStmt)
 
-	for i := 0; i < limit; i++ {
+	for i := 0; i < total; i++ {
 		if i > 0 {
 			sb.WriteString(",")
 		}
-		if ms.sqlStore.postgres {
-			sb.WriteString(ms.sqlStore.bulkInserts[i])
+		if s.postgres {
+			sb.WriteString(s.bulkInserts[i])
 		} else {
 			sb.WriteString(valArgs)
 		}
 	}
-	sb.WriteString(";")
-	stmtb := []byte(sb.String())
 
 	args := make([]interface{}, 0, 5*count)
 	start := ms.writeCache.head
@@ -1749,8 +1764,8 @@ func (ms *SQLMsgStore) bulkInsert(limit int) error {
 			if i > 0 {
 				l++
 			}
-			if ms.sqlStore.postgres {
-				l += len(ms.sqlStore.bulkInserts[i])
+			if s.postgres {
+				l += len(s.bulkInserts[i])
 			} else {
 				l += len(valArgs)
 			}
@@ -1766,11 +1781,9 @@ func (ms *SQLMsgStore) bulkInsert(limit int) error {
 		if i == limit {
 			stmt = sb.String()
 		} else {
-			l++
-			stmtb[l-1] = ';'
-			stmt = string(stmtb[:l])
+			stmt = sb.String()[:l]
 		}
-		if _, err := ms.sqlStore.db.Exec(stmt, args[:i*5]...); err != nil {
+		if _, err := s.db.Exec(stmt, args[:i*5]...); err != nil {
 			return err
 		}
 	}

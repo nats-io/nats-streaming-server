@@ -23,7 +23,7 @@ github.com/hashicorp/golang-lru/simplelru
 # github.com/hashicorp/raft v1.2.0
 ## explicit
 github.com/hashicorp/raft
-# github.com/lib/pq v1.8.0
+# github.com/lib/pq v1.9.0
 ## explicit
 github.com/lib/pq
 github.com/lib/pq/oid
