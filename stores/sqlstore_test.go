@@ -2176,8 +2176,35 @@ func TestSQLBulkInsertLimit(t *testing.T) {
 	if err := cs.Msgs.Flush(); err != nil {
 		t.Fatalf("Error on flush: %v", err)
 	}
+	for seq := uint64(127); seq < 135; seq++ {
+		msg := &pb.MsgProto{
+			Sequence:  seq,
+			Subject:   "foo",
+			Data:      []byte(fmt.Sprintf("%v", seq)),
+			Timestamp: time.Now().UnixNano(),
+		}
+		if _, err := cs.Msgs.Store(msg); err != nil {
+			t.Fatalf("Error storing message: %v", err)
+		}
+	}
+	if err := cs.Msgs.Flush(); err != nil {
+		t.Fatalf("Error on flush: %v", err)
+	}
 
-	for seq := uint64(1); seq < 127; seq++ {
+	msg := &pb.MsgProto{
+		Sequence:  135,
+		Subject:   "foo",
+		Data:      []byte(fmt.Sprintf("%v", 135)),
+		Timestamp: time.Now().UnixNano(),
+	}
+	if _, err := cs.Msgs.Store(msg); err != nil {
+		t.Fatalf("Error storing message: %v", err)
+	}
+	if err := cs.Msgs.Flush(); err != nil {
+		t.Fatalf("Error on flush: %v", err)
+	}
+
+	for seq := uint64(1); seq < 136; seq++ {
 		m := msgStoreLookup(t, cs.Msgs, seq)
 		expected := fmt.Sprintf("%v", seq)
 		if string(m.Data) != expected {
