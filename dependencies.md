@@ -10,11 +10,11 @@ This file lists the dependencies used in this repository.
 | github.com/gogo/protobuf v1.3.1 | Go |
 | github.com/hashicorp/go-msgpack v1.1.5 | BSD 3-Clause "New" or "Revised" License |
 | github.com/hashicorp/raft v1.2.0 | Mozilla Public License Version 2.0 |
-| github.com/lib/pq v1.8.0 | [MIT-Like](https://github.com/lib/pq/blob/master/LICENSE.md) |
+| github.com/lib/pq v1.9.0 | [MIT-Like](https://github.com/lib/pq/blob/master/LICENSE.md) |
 | github.com/nats-io/nats-server/v2 v2.1.9 | Apache License 2.0 |
 | github.com/nats-io/nats.go v1.10.0 | Apache License 2.0 |
 | github.com/nats-io/nuid v1.0.1 | Apache License 2.0 |
-| github.com/nats-io/stan.go v0.7.0 | Apache License 2.0 |
+| github.com/nats-io/stan.go v0.8.1 | Apache License 2.0 |
 | github.com/nats-io/jwt v1.1.0 | Apache License 2.0 |
 | github.com/prometheus/procfs v0.2.0 | Apache License 2.0 |
 | go.etcd.io/bbolt v1.3.5 | MIT |
