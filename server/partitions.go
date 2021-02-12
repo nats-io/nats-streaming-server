@@ -150,8 +150,10 @@ func (p *partitions) initSubscriptions() error {
 	// NOTE: Use the server's nc connection here, not the partitions' one.
 	for _, channelName := range p.channels {
 		pubSubject := fmt.Sprintf("%s.%s", p.s.info.Publish, channelName)
-		if _, err := p.s.nc.Subscribe(pubSubject, p.s.processClientPublish); err != nil {
+		if sub, err := p.s.nc.Subscribe(pubSubject, p.s.processClientPublish); err != nil {
 			return fmt.Errorf("could not subscribe to publish subject %q, %v", channelName, err)
+		} else {
+			sub.SetPendingLimits(-1, -1)
 		}
 	}
 	return nil
