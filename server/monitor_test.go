@@ -634,8 +634,9 @@ func TestMonitorClientsz(t *testing.T) {
 			cli := s.clients.lookup(cid)
 			cli.RLock()
 			cz := &Clientz{
-				ID:      cid,
-				HBInbox: cli.info.HbInbox,
+				ID:        cid,
+				HBInbox:   cli.info.HbInbox,
+				SubsCount: len(cli.subs),
 			}
 			if expectSubs {
 				cz.Subscriptions = getCliSubs(cli.subs)
@@ -761,8 +762,9 @@ func TestMonitorClientz(t *testing.T) {
 		}
 		cli.RLock()
 		cz := &Clientz{
-			ID:      cid,
-			HBInbox: cli.info.HbInbox,
+			ID:        cid,
+			HBInbox:   cli.info.HbInbox,
+			SubsCount: len(cli.subs),
 		}
 		if expectSubs {
 			cz.Subscriptions = getCliSubs(cli.subs)
@@ -985,6 +987,7 @@ func TestMonitorChannelsWithSubsz(t *testing.T) {
 					qsub.RUnlock()
 				}
 				ss.RUnlock()
+				channelz.SubsCount = len(subscriptions)
 				channelz.Subscriptions = subscriptions
 				channelsz.Channels = append(channelsz.Channels, channelz)
 			}
@@ -1075,16 +1078,18 @@ func TestMonitorChannelz(t *testing.T) {
 		}
 		msgs, bytes := msgStoreState(t, cs.store.Msgs)
 		firstSeq, lastSeq := msgStoreFirstAndLastSequence(t, cs.store.Msgs)
+		ss := cs.ss
+		subs := getChannelSubs(ss.psubs)
 		channelz := &Channelz{
-			Name:     name,
-			FirstSeq: firstSeq,
-			LastSeq:  lastSeq,
-			Msgs:     msgs,
-			Bytes:    bytes,
+			Name:      name,
+			FirstSeq:  firstSeq,
+			LastSeq:   lastSeq,
+			Msgs:      msgs,
+			Bytes:     bytes,
+			SubsCount: len(subs),
 		}
 		if expectedSubs {
-			ss := cs.ss
-			channelz.Subscriptions = getChannelSubs(ss.psubs)
+			channelz.Subscriptions = subs
 		}
 		return channelz
 	}

@@ -92,6 +92,7 @@ type Clientsz struct {
 type Clientz struct {
 	ID            string                      `json:"id"`
 	HBInbox       string                      `json:"hb_inbox"`
+	SubsCount     int                         `json:"subs_count"`
 	Subscriptions map[string][]*Subscriptionz `json:"subscriptions,omitempty"`
 }
 
@@ -115,6 +116,7 @@ type Channelz struct {
 	Bytes         uint64           `json:"bytes"`
 	FirstSeq      uint64           `json:"first_seq"`
 	LastSeq       uint64           `json:"last_seq"`
+	SubsCount     int              `json:"subs_count"`
 	Subscriptions []*Subscriptionz `json:"subscriptions,omitempty"`
 }
 
@@ -331,13 +333,14 @@ func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
 
 		// Since clients may be unregistered between the time we get the client IDs
 		// and the time we build carr array, lets count the number of elements
-		// actually intserted.
+		// actually inserted.
 		carrSize := 0
 		for _, c := range carr {
 			client := s.clients.lookup(c.ID)
 			if client != nil {
 				client.RLock()
 				c.HBInbox = client.info.HbInbox
+				c.SubsCount = len(client.subs)
 				if subsOption == 1 {
 					c.Subscriptions = getMonitorClientSubs(client)
 				}
@@ -368,8 +371,9 @@ func getMonitorClient(s *StanServer, clientID string, subsOption int) *Clientz {
 	cli.RLock()
 	defer cli.RUnlock()
 	cz := &Clientz{
-		HBInbox: cli.info.HbInbox,
-		ID:      cli.info.ID,
+		HBInbox:   cli.info.HbInbox,
+		ID:        cli.info.ID,
+		SubsCount: len(cli.subs),
 	}
 	if subsOption == 1 {
 		cz.Subscriptions = getMonitorClientSubs(cli)
@@ -419,6 +423,29 @@ func getMonitorChannelSubs(ss *subStore) []*Subscriptionz {
 		qsub.RUnlock()
 	}
 	return subsz
+}
+
+func getMonitorChannelSubsCount(ss *subStore) int {
+	ss.RLock()
+	defer ss.RUnlock()
+	count := len(ss.psubs)
+	// Get only offline durables (the online also appear in ss.psubs)
+	for _, sub := range ss.durables {
+		if sub.ClientID == "" {
+			count++
+		}
+	}
+	for _, qsub := range ss.qsubs {
+		qsub.RLock()
+		count += len(qsub.subs)
+		// If this is a durable queue subscription and all members
+		// are offline, qsub.shadow will be not nil. Report this one.
+		if qsub.shadow != nil {
+			count++
+		}
+		qsub.RUnlock()
+	}
+	return count
 }
 
 func createSubscriptionz(sub *subState) *Subscriptionz {
@@ -534,9 +561,14 @@ func (s *StanServer) updateChannelz(cz *Channelz, c *channel, subsOption int) er
 	cz.Bytes = bytes
 	cz.FirstSeq = fseq
 	cz.LastSeq = lseq
+	var subsCount int
 	if subsOption == 1 {
 		cz.Subscriptions = getMonitorChannelSubs(c.ss)
+		subsCount = len(cz.Subscriptions)
+	} else {
+		subsCount = getMonitorChannelSubsCount(c.ss)
 	}
+	cz.SubsCount = subsCount
 	return nil
 }
 
