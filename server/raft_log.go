@@ -64,13 +64,15 @@ func newRaftLog(log logger.Logger, fileName string, sync bool, _ int, encrypt bo
 		fileName: fileName,
 		codec:    &codec.MsgpackHandle{},
 	}
-	db, err := bolt.Open(fileName, 0600, nil)
+	dbOpts := &bolt.Options{
+		NoSync:         !sync,
+		NoFreelistSync: true,
+		FreelistType:   bolt.FreelistMapType,
+	}
+	db, err := bolt.Open(fileName, 0600, dbOpts)
 	if err != nil {
 		return nil, err
 	}
-	db.NoSync = !sync
-	db.NoFreelistSync = true
-	db.FreelistType = bolt.FreelistMapType
 	r.conn = db
 	if err := r.init(); err != nil {
 		r.conn.Close()
