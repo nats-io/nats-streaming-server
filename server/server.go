@@ -2749,7 +2749,6 @@ func (s *StanServer) initInternalSubs(createPub bool) error {
 		if err != nil {
 			return err
 		}
-		s.pubSub.SetPendingLimits(-1, -1)
 	}
 	// Receive subscription requests from clients.
 	s.subSub, err = s.createSub(s.info.Subscribe, s.processSubscriptionRequest, "subscribe request")
@@ -2839,6 +2838,7 @@ func (s *StanServer) createSub(subj string, f nats.MsgHandler, errTxt string) (*
 	if err != nil {
 		return nil, fmt.Errorf("could not subscribe to %s subject: %v", errTxt, err)
 	}
+	sub.SetPendingLimits(-1, -1)
 	return sub, nil
 }
 

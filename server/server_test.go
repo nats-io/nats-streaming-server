@@ -1628,3 +1628,61 @@ func TestFileSliceMaxBytesCmdLine(t *testing.T) {
 		t.Fatalf("Expected value to be 0, got %v", smb)
 	}
 }
+
+func TestInternalSubsLimits(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	for _, test := range []struct {
+		name string
+		opts func() *Options
+	}{
+		{"regular", func() *Options { return GetDefaultOptions() }},
+		{"partition", func() *Options {
+			o := GetDefaultOptions()
+			o.Partitioning = true
+			o.AddPerChannel("foo", &stores.ChannelLimits{})
+			o.AddPerChannel("bar", &stores.ChannelLimits{})
+			return o
+		}},
+		{"ft", func() *Options { return getTestFTDefaultOptions() }},
+		{"clustered", func() *Options { return getTestDefaultOptsForClustering("a", true) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.name == "clustered" {
+				ns := natsdTest.RunDefaultServer()
+				defer ns.Shutdown()
+			}
+			o := test.opts()
+			s := runServerWithOpts(t, o, nil)
+			defer s.Shutdown()
+
+			s.mu.Lock()
+			defer s.mu.Unlock()
+
+			subs := []*nats.Subscription{
+				s.connectSub,
+				s.pubSub,
+				s.subSub,
+				s.subUnsubSub,
+				s.subCloseSub,
+				s.closeSub,
+				s.cliPingSub,
+				s.addNodeSub,
+				s.rmNodeSub,
+			}
+			for _, sub := range subs {
+				// sub can be nil depending on the running mode.
+				if sub == nil {
+					continue
+				}
+				if count, sz, err := sub.PendingLimits(); err != nil || count != -1 || sz != -1 {
+					t.Fatalf("Unexpected values for sub on %q: err=%v count=%v sz=%v",
+						sub.Subject, err, count, sz)
+				}
+			}
+		})
+	}
+}
