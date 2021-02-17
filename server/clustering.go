@@ -89,6 +89,21 @@ type ClusteringOptions struct {
 	RaftElectionTimeout  time.Duration
 	RaftLeaseTimeout     time.Duration
 	RaftCommitTimeout    time.Duration
+
+	// These options influence the RAFT store implementation which uses bolt DB.
+	//
+	// Sync freelist to disk. This reduces the database write performance, but
+	// speed up recovery since there is no need for a full database re-sync.
+	BoltFreeListSync bool
+
+	// BoltFreeListArray sets the backend freelist type to "array".
+	// There are two options:
+	// - "array" which is simple but suffers dramatic performance degradation if database is
+	//   large and framentation in freelist is common.
+	// - "hashmap" which is faster in almost all circumstances but doesn't guarantee
+	//   that it offers the smallest page id available. In normal case it is safe.
+	// Since v0.21.0, the default is "hashmap". Set this option to "true" to use "array" instead.
+	BoltFreeListArray bool
 }
 
 // raftNode is a handle to a member in a Raft consensus group.
@@ -304,12 +319,10 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 	s.raft = &raftNode{}
 
 	raftLogFileName := filepath.Join(path, raftLogFile)
-	store, err := newRaftLog(s.log, raftLogFileName, s.opts.Clustering.Sync, int(s.opts.Clustering.TrailingLogs),
-		s.opts.Encrypt, s.opts.EncryptionCipher, s.opts.EncryptionKey)
+	store, err := newRaftLog(s.log, raftLogFileName, s.opts)
 	if err != nil {
 		return false, err
 	}
-	store.setCacheSize(s.opts.Clustering.LogCacheSize)
 
 	// Go through the list of channels that we have recovered from streaming store
 	// and set their corresponding UID.

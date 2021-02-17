@@ -48,8 +48,8 @@ type raftLog struct {
 	closed   bool
 
 	// Our cache
-	cache     []*raft.Log
-	cacheSize uint64 // Save size as uint64 to not have to case during store/load
+	cache     []*raft.Log // Simple array containing sequence based on modulo
+	cacheSize uint64      // Save size as uint64 to not have to case during store/load
 
 	// If the store is using encryption
 	encryption    bool
@@ -58,16 +58,23 @@ type raftLog struct {
 	encryptOffset int
 }
 
-func newRaftLog(log logger.Logger, fileName string, sync bool, _ int, encrypt bool, encryptionCipher string, encryptionKey []byte) (*raftLog, error) {
+func newRaftLog(log logger.Logger, fileName string, opts *Options) (*raftLog, error) {
+	if opts == nil {
+		opts = GetDefaultOptions()
+	}
 	r := &raftLog{
 		log:      log,
 		fileName: fileName,
 		codec:    &codec.MsgpackHandle{},
 	}
+	freeListType := bolt.FreelistMapType
+	if opts.Clustering.BoltFreeListArray {
+		freeListType = bolt.FreelistArrayType
+	}
 	dbOpts := &bolt.Options{
-		NoSync:         !sync,
-		NoFreelistSync: true,
-		FreelistType:   bolt.FreelistMapType,
+		NoSync:         !opts.Clustering.Sync,
+		NoFreelistSync: !opts.Clustering.BoltFreeListSync,
+		FreelistType:   freeListType,
 	}
 	db, err := bolt.Open(fileName, 0600, dbOpts)
 	if err != nil {
@@ -78,13 +85,13 @@ func newRaftLog(log logger.Logger, fileName string, sync bool, _ int, encrypt bo
 		r.conn.Close()
 		return nil, err
 	}
-	if encrypt {
+	if opts.Encrypt {
 		lastIndex, err := r.getIndex(false)
 		if err != nil {
 			r.conn.Close()
 			return nil, err
 		}
-		eds, err := stores.NewEDStore(encryptionCipher, encryptionKey, lastIndex)
+		eds, err := stores.NewEDStore(opts.EncryptionCipher, opts.EncryptionKey, lastIndex)
 		if err != nil {
 			r.conn.Close()
 			return nil, err
@@ -94,14 +101,11 @@ func newRaftLog(log logger.Logger, fileName string, sync bool, _ int, encrypt bo
 		r.encryptBuf = make([]byte, 100)
 		r.encryptOffset = eds.EncryptionOffset()
 	}
+	if cacheSize := opts.Clustering.LogCacheSize; cacheSize > 0 {
+		r.cacheSize = uint64(cacheSize)
+		r.cache = make([]*raft.Log, cacheSize)
+	}
 	return r, nil
-}
-
-func (r *raftLog) setCacheSize(cacheSize int) {
-	r.Lock()
-	defer r.Unlock()
-	r.cacheSize = uint64(cacheSize)
-	r.cache = make([]*raft.Log, cacheSize)
 }
 
 func (r *raftLog) init() error {

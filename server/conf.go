@@ -351,6 +351,16 @@ func parseCluster(itf interface{}, opts *Options) error {
 			case "raft_commit_timeout":
 				opts.Clustering.RaftCommitTimeout = dur
 			}
+		case "bolt_free_list_sync":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.Clustering.BoltFreeListSync = v.(bool)
+		case "bolt_free_list_array":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.Clustering.BoltFreeListArray = v.(bool)
 		}
 	}
 	return nil

@@ -27,12 +27,12 @@ import (
 	"github.com/nats-io/nats-streaming-server/stores"
 )
 
-func createTestRaftLog(t tLogger, sync bool, trailingLogs int) *raftLog {
+func createTestRaftLog(t tLogger, opts *Options) *raftLog {
 	if err := os.MkdirAll(defaultRaftLog, os.ModeDir+os.ModePerm); err != nil {
 		stackFatalf(t, "Unable to create raft log directory: %v", err)
 	}
 	fileName := filepath.Join(defaultRaftLog, raftLogFile)
-	store, err := newRaftLog(testLogger, fileName, sync, trailingLogs, false, stores.CryptoCipherAutoSelect, nil)
+	store, err := newRaftLog(testLogger, fileName, opts)
 	if err != nil {
 		stackFatalf(t, "Error creating store: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestRaftLogDeleteRange(t *testing.T) {
 	defer cleanupRaftLog(t)
 
 	// No sync (will check that conn's NoSync value is correct after a recreating the file)
-	store := createTestRaftLog(t, false, 0)
+	store := createTestRaftLog(t, nil)
 	defer store.Close()
 
 	// Store in dbConf bucket
@@ -145,7 +145,7 @@ func TestRaftLogEncodeDecodeLogs(t *testing.T) {
 	cleanupRaftLog(t)
 	defer cleanupRaftLog(t)
 
-	store := createTestRaftLog(t, false, 0)
+	store := createTestRaftLog(t, nil)
 	defer store.Close()
 
 	total := 50000
@@ -236,7 +236,7 @@ func TestRaftLogWithEncryption(t *testing.T) {
 	cleanupRaftLog(t)
 	defer cleanupRaftLog(t)
 
-	store := createTestRaftLog(t, false, 0)
+	store := createTestRaftLog(t, nil)
 	defer store.Close()
 	// Plain text log
 	store.StoreLog(&raft.Log{Index: 1, Term: 1, Type: raft.LogCommand, Data: []byte("abcd")})
@@ -248,7 +248,11 @@ func TestRaftLogWithEncryption(t *testing.T) {
 	store.Close()
 
 	// Re-open as encrypted store
-	store, err := newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, []byte("testkey"))
+	opts := GetDefaultOptions()
+	opts.Encrypt = true
+	opts.EncryptionCipher = stores.CryptoCipherAES
+	opts.EncryptionKey = []byte("testkey")
+	store, err := newRaftLog(testLogger, fileName, opts)
 	if err != nil {
 		t.Fatalf("Error opening store: %v", err)
 	}
@@ -275,7 +279,8 @@ func TestRaftLogWithEncryption(t *testing.T) {
 	fileName = filepath.Join(defaultRaftLog, raftLogFile)
 
 	key := []byte("testkey")
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, key)
+	opts.EncryptionKey = key
+	store, err = newRaftLog(testLogger, fileName, opts)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -325,7 +330,9 @@ func TestRaftLogWithEncryption(t *testing.T) {
 	if err := os.Setenv(stores.CryptoStoreEnvKeyName, "testkey"); err != nil {
 		t.Fatalf("Unable to set environment variable: %v", err)
 	}
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, nil)
+	opts.EncryptionCipher = stores.CryptoCipherAES
+	opts.EncryptionKey = nil
+	store, err = newRaftLog(testLogger, fileName, opts)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -341,7 +348,8 @@ func TestRaftLogWithEncryption(t *testing.T) {
 
 	// Ensure that env key override config by providing a wrong key
 	// and notice that we have correct decrypt.
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, []byte("wrongkey"))
+	opts.EncryptionKey = []byte("wrongkey")
+	store, err = newRaftLog(testLogger, fileName, opts)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -357,7 +365,9 @@ func TestRaftLogWithEncryption(t *testing.T) {
 
 	// Now unset env variable and re-open with wrong key
 	os.Unsetenv(stores.CryptoStoreEnvKeyName)
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, []byte("wrongkey"))
+	opts.EncryptionCipher = stores.CryptoCipherAES
+	opts.EncryptionKey = []byte("wrongkey")
+	store, err = newRaftLog(testLogger, fileName, opts)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -369,7 +379,8 @@ func TestRaftLogWithEncryption(t *testing.T) {
 	store.Close()
 
 	// Re-open with encryption but no key, this should fail.
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAES, nil)
+	opts.EncryptionKey = nil
+	store, err = newRaftLog(testLogger, fileName, opts)
 	if err == nil || !strings.Contains(err.Error(), stores.ErrCryptoStoreRequiresKey.Error()) {
 		if store != nil {
 			store.Close()
@@ -387,7 +398,9 @@ func TestRaftLogMultipleCiphers(t *testing.T) {
 	}
 	fileName := filepath.Join(defaultRaftLog, raftLogFile)
 
-	store, err := newRaftLog(testLogger, fileName, false, 0, false, stores.CryptoCipherAutoSelect, nil)
+	opts := GetDefaultOptions()
+	opts.EncryptionCipher = stores.CryptoCipherAutoSelect
+	store, err := newRaftLog(testLogger, fileName, opts)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -406,7 +419,11 @@ func TestRaftLogMultipleCiphers(t *testing.T) {
 
 	storeWithEncryption := func(t *testing.T, encryptionCipher string, payloadIdx int) {
 		t.Helper()
-		store, err := newRaftLog(testLogger, fileName, false, 0, true, encryptionCipher, []byte("mykey"))
+		opts := GetDefaultOptions()
+		opts.Encrypt = true
+		opts.EncryptionCipher = encryptionCipher
+		opts.EncryptionKey = []byte("mykey")
+		store, err := newRaftLog(testLogger, fileName, opts)
 		if err != nil {
 			t.Fatalf("Error creating store: %v", err)
 		}
@@ -422,7 +439,11 @@ func TestRaftLogMultipleCiphers(t *testing.T) {
 
 	// Now re-open with any cipher, use the auto-select one.
 	// We should be able to get all 3 messages correctly.
-	store, err = newRaftLog(testLogger, fileName, false, 0, true, stores.CryptoCipherAutoSelect, []byte("mykey"))
+	opts = GetDefaultOptions()
+	opts.Encrypt = true
+	opts.EncryptionCipher = stores.CryptoCipherAutoSelect
+	opts.EncryptionKey = []byte("mykey")
+	store, err = newRaftLog(testLogger, fileName, opts)
 	if err != nil {
 		t.Fatalf("Error creating store: %v", err)
 	}
@@ -442,7 +463,7 @@ func TestRaftLogChannelID(t *testing.T) {
 	cleanupRaftLog(t)
 	defer cleanupRaftLog(t)
 
-	store := createTestRaftLog(t, false, 0)
+	store := createTestRaftLog(t, nil)
 	defer store.Close()
 
 	storeID := func(name string, id uint64) {
@@ -488,7 +509,7 @@ func TestRaftLogChannelID(t *testing.T) {
 	deleteID("baz")
 
 	store.Close()
-	store = createTestRaftLog(t, false, 0)
+	store = createTestRaftLog(t, nil)
 	defer store.Close()
 
 	// Make sure that last ID is returned
@@ -504,7 +525,7 @@ func TestRaftLogChannelID(t *testing.T) {
 	deleteID("bar")
 
 	store.Close()
-	store = createTestRaftLog(t, false, 0)
+	store = createTestRaftLog(t, nil)
 	defer store.Close()
 
 	// No ID returned
@@ -517,10 +538,10 @@ func TestRaftLogCache(t *testing.T) {
 	cleanupRaftLog(t)
 	defer cleanupRaftLog(t)
 
-	store := createTestRaftLog(t, false, 0)
+	opts := GetDefaultOptions()
+	opts.Clustering.LogCacheSize = 10
+	store := createTestRaftLog(t, opts)
 	defer store.Close()
-
-	store.setCacheSize(10)
 
 	store.RLock()
 	lc := len(store.cache)
