@@ -678,6 +678,7 @@ type StanServer struct {
 	nca  *nats.Conn // used to receive subscriptions acks
 	ncr  *nats.Conn // used for raft messages
 	ncsr *nats.Conn // used for raft snapshot replication
+	ncp  *nats.Conn // used for sending client HBs and PINGs responses
 
 	wg sync.WaitGroup // Wait on go routines during shutdown
 
@@ -1603,6 +1604,9 @@ func (s *StanServer) createNatsConnections() error {
 		if err == nil {
 			s.ncsr, err = s.createNatsClientConn("raft_snap")
 		}
+	}
+	if err == nil {
+		s.ncp, err = s.createNatsClientConn("hb")
 	}
 	return err
 }
@@ -3176,7 +3180,7 @@ func (s *StanServer) checkClientHealth(clientID string) {
 
 	// Sends the HB request. This call blocks for ClientHBTimeout,
 	// do not hold the lock for that long!
-	_, err := s.nc.Request(hbInbox, nil, s.opts.ClientHBTimeout)
+	_, err := s.ncp.Request(hbInbox, nil, s.opts.ClientHBTimeout)
 	// Grab the lock now.
 	client.Lock()
 	// Client could have been unregistered, in which case
@@ -3390,7 +3394,9 @@ func (s *StanServer) processClientPings(m *nats.Msg) {
 		client.RUnlock()
 		if hasFailedHBs {
 			client.Lock()
-			client.hbt.Reset(time.Millisecond)
+			if client.hbt != nil {
+				client.hbt.Reset(time.Millisecond)
+			}
 			client.Unlock()
 		}
 		if s.pingResponseOKBytes == nil {
@@ -3406,7 +3412,7 @@ func (s *StanServer) processClientPings(m *nats.Msg) {
 		}
 		reply = s.pingResponseInvalidClientBytes
 	}
-	s.ncs.Publish(m.Reply, reply)
+	s.ncp.Publish(m.Reply, reply)
 }
 
 // CtrlMsg are no longer used to solve connection and subscription close/unsub
@@ -5690,6 +5696,7 @@ func (s *StanServer) Shutdown() {
 	nc := s.nc
 	ftnc := s.ftnc
 	nca := s.nca
+	ncp := s.ncp
 
 	// Stop processing subscriptions start requests
 	s.subStartQuit <- struct{}{}
@@ -5759,6 +5766,9 @@ func (s *StanServer) Shutdown() {
 	}
 	if nca != nil {
 		nca.Close()
+	}
+	if ncp != nil {
+		ncp.Close()
 	}
 	if ns != nil {
 		ns.Shutdown()
