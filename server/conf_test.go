@@ -275,6 +275,12 @@ func TestParseConfig(t *testing.T) {
 	if !opts.Clustering.AllowAddRemoveNode {
 		t.Fatal("Expected AllowAddRemoveNode to be true")
 	}
+	if !opts.Clustering.BoltFreeListSync {
+		t.Fatal("Expected BoltFreeListSync to be true")
+	}
+	if !opts.Clustering.BoltFreeListArray {
+		t.Fatal("Expected BoltFreeListArray to be true")
+	}
 	if opts.SQLStoreOpts.Driver != "mysql" {
 		t.Fatalf("Expected SQL Driver to be %q, got %q", "mysql", opts.SQLStoreOpts.Driver)
 	}
@@ -505,6 +511,8 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "cluster:{raft_commit_timeout:123}", wrongTypeErr)
 	expectFailureFor(t, "cluster:{raft_commit_timeout:\"not_a_time\"}", wrongTimeErr)
 	expectFailureFor(t, "cluster:{allow_add_remove_node:1}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{bolt_free_list_sync:123}", wrongTypeErr)
+	expectFailureFor(t, "cluster:{bolt_free_list_array:123}", wrongTypeErr)
 	expectFailureFor(t, "sql:{driver:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{source:false}", wrongTypeErr)
 	expectFailureFor(t, "sql:{no_caching:123}", wrongTypeErr)
