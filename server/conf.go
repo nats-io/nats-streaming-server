@@ -356,11 +356,11 @@ func parseCluster(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.Clustering.BoltFreeListSync = v.(bool)
-		case "bolt_free_list_array":
+		case "bolt_free_list_map":
 			if err := checkType(k, reflect.Bool, v); err != nil {
 				return err
 			}
-			opts.Clustering.BoltFreeListArray = v.(bool)
+			opts.Clustering.BoltFreeListMap = v.(bool)
 		case "nodes_connections":
 			if err := checkType(k, reflect.Bool, v); err != nil {
 				return err

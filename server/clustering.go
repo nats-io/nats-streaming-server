@@ -111,14 +111,13 @@ type ClusteringOptions struct {
 	// speed up recovery since there is no need for a full database re-sync.
 	BoltFreeListSync bool
 
-	// BoltFreeListArray sets the backend freelist type to "array".
-	// There are two options:
-	// - "array" which is simple but suffers dramatic performance degradation if database is
-	//   large and framentation in freelist is common.
-	// - "hashmap" which is faster in almost all circumstances but doesn't guarantee
-	//   that it offers the smallest page id available. In normal case it is safe.
-	// Since v0.21.0, the default is "hashmap". Set this option to "true" to use "array" instead.
-	BoltFreeListArray bool
+	// BoltFreeListMap sets the backend freelist type to use a map instead of
+	// the default array type.
+	// The "array" type (the default) is simple but suffers dramatic performance
+	// degradation if database is large and framentation in freelist is common.
+	// The "hashmap which is faster in almost all circumstances but doesn't guarantee
+	// that it offers the smallest page id available. In normal case it is safe.
+	BoltFreeListMap bool
 }
 
 // raftNode is a handle to a member in a Raft consensus group.
