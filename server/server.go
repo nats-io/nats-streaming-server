@@ -1,4 +1,4 @@
-// Copyright 2016-2020 The NATS Authors
+// Copyright 2016-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -760,6 +760,8 @@ type StanServer struct {
 	pingResponseOKBytes            []byte
 	pingResponseInvalidClientBytes []byte
 
+	// List of server URLs built on startup
+	serverURLs []string
 	// If using an external server, capture the URL that was given for return in ClientURL().
 	providedServerURL string
 }
@@ -1497,10 +1499,8 @@ func (s *StanServer) createNatsClientConn(name string) (*nats.Conn, error) {
 			ncOpts.TLSConfig.ServerName, s.opts.TLSServerName)
 	}
 
-	ncOpts.Servers, err = s.buildServerURLs()
-	if err != nil {
-		return nil, err
-	}
+	ncOpts.Servers = s.serverURLs
+
 	// From executable, these are provided through the command line `-user ...`,
 	// so they take precedence over streaming's configuration file
 	ncOpts.User = s.natsOpts.Username
@@ -1812,6 +1812,12 @@ func RunServerWithOpts(stanOpts *Options, natsOpts *server.Options) (newServer *
 			return nil, err
 		}
 	}
+	// Build server URLs
+	urls, err := s.buildServerURLs()
+	if err != nil {
+		return nil, err
+	}
+	s.serverURLs = urls
 	// Create our connections
 	if err := s.createNatsConnections(); err != nil {
 		return nil, err

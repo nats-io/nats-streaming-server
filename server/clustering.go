@@ -1,4 +1,4 @@
-// Copyright 2017-2020 The NATS Authors
+// Copyright 2017-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,6 +70,20 @@ type ClusteringOptions struct {
 	TrailingLogs int64    // Number of logs left after a snapshot.
 	Sync         bool     // Do a file sync after every write to the Raft log and message store.
 	RaftLogging  bool     // Enable logging of Raft library (disabled by default since really verbose).
+
+	// Enable creation of dedicated NATS connections to communicate with other
+	// nodes. Normally, the server has a single NATS connection and subscribes
+	// to a subject where other nodes can submit requests to "connect" to it.
+	// When a remote connects, a new subscription on an inbox is created on
+	// both sides and they use their single "raft" NATS connection to communicate.
+	// If node "A" connects to both "B" and "C" it will have two subscriptions
+	// and two "outbox" subjects (on per remote node) to which send data to.
+	//
+	// With this option enabled, NATS connection(s) will be created per remote
+	// node. This should help with performance and reduce contention.
+	// The RAFT transport is pooling connections, so there may be more than
+	// one connection per remote node.
+	NodesConnections bool
 
 	// If this is enabled, the leader of the cluster will listen to add/remove
 	// requests on NATS subject "_STAN.raft.<cluster ID>.node.[add|remove]".
@@ -379,8 +394,11 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 		return false, err
 	}
 
-	// TODO: using a single NATS conn for every channel might be a bottleneck. Maybe pool conns?
-	transport, err := newNATSTransport(addr, s.ncr, tportTimeout, logWriter)
+	var makeConn natsRaftConnCreator
+	if s.opts.Clustering.NodesConnections {
+		makeConn = s.createNewRaftNATSConn
+	}
+	transport, err := newNATSTransport(addr, s.ncr, tportTimeout, logWriter, makeConn)
 	if err != nil {
 		store.Close()
 		return false, err
@@ -473,6 +491,13 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 	return existingState, nil
 }
 
+func (s *StanServer) createNewRaftNATSConn(name string) (*nats.Conn, error) {
+	remoteNodeID := strings.TrimPrefix(name, s.opts.ID+".")
+	remoteNodeID = strings.TrimSuffix(remoteNodeID, "."+s.opts.ID)
+	conn, err := s.createNatsClientConn(s.opts.Clustering.NodeID + "-to-" + remoteNodeID)
+	return conn, err
+}
+
 // bootstrapCluster bootstraps the node for the provided Raft group either as a
 // seed node or with the given peer configuration, depending on configuration
 // and with the latter taking precedence.
@@ -502,10 +527,16 @@ func (s *StanServer) bootstrapCluster(name string, node *raft.Raft) error {
 	return node.BootstrapCluster(config).Error()
 }
 
+// This is bad because we have something like: "test-cluster.a.test-cluster",
+// unfortunately, we can't change now without breaking backward compatibility,
+// because new/old servers would not be able to connect to each other, since
+// this is used for the subscription's subject to accept/send requests between
+// nodes.
 func (s *StanServer) getClusteringAddr(raftName string) string {
 	return s.getClusteringPeerAddr(raftName, s.opts.Clustering.NodeID)
 }
 
+// See comment above...
 func (s *StanServer) getClusteringPeerAddr(raftName, nodeID string) string {
 	return fmt.Sprintf("%s.%s.%s", s.opts.ID, nodeID, raftName)
 }

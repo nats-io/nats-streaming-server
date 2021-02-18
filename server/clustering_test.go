@@ -1,4 +1,4 @@
-// Copyright 2017-2020 The NATS Authors
+// Copyright 2017-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -106,6 +106,7 @@ func getTestDefaultOptsForClustering(id string, bootstrap bool) *Options {
 	opts.Clustering.LogCacheSize = DefaultLogCacheSize
 	opts.Clustering.LogSnapshots = 1
 	opts.Clustering.RaftLogging = true
+	opts.Clustering.NodesConnections = true
 	opts.NATSServerURL = "nats://127.0.0.1:4222"
 	return opts
 }
