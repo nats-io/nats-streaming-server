@@ -1,4 +1,4 @@
-// Copyright 2017-2019 The NATS Authors
+// Copyright 2017-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -38,6 +38,8 @@ const (
 	natsLogAppName         = "raft-nats"
 )
 
+type natsRaftConnCreator func(name string) (*nats.Conn, error)
+
 // natsAddr implements the net.Addr interface. An address for the NATS
 // transport is simply a node id, which is then used to construct an inbox.
 type natsAddr string
@@ -63,26 +65,57 @@ type connectResponseProto struct {
 // connection between two peers. It does this by establishing a unique inbox at
 // each endpoint which the peers use to stream data to each other.
 type natsConn struct {
+	mu         sync.RWMutex
 	conn       *nats.Conn
+	streamConn bool
 	localAddr  natsAddr
 	remoteAddr natsAddr
 	sub        *nats.Subscription
+	subTimeout time.Duration
+	pending    []byte
 	outbox     string
-	mu         sync.RWMutex
 	closed     bool
-	reader     *timeoutReader
-	writer     io.WriteCloser
 	parent     *natsStreamLayer
 }
 
 func (n *natsConn) Read(b []byte) (int, error) {
 	n.mu.RLock()
 	closed := n.closed
+	subTimeout := n.subTimeout
+	if subTimeout == 0 {
+		subTimeout = time.Duration(0x7FFFFFFFFFFFFFFF)
+	}
 	n.mu.RUnlock()
 	if closed {
-		return 0, errors.New("read from closed conn")
+		return 0, io.EOF
 	}
-	return n.reader.Read(b)
+	buf := n.pending
+	if size := len(buf); size > 0 {
+		nb := copy(b, buf[:len(b)])
+		if nb != size {
+			buf = buf[nb:]
+		} else {
+			buf = nil
+		}
+		n.pending = buf
+		return nb, nil
+	}
+	msg, err := n.sub.NextMsg(subTimeout)
+	if err != nil {
+		return 0, err
+	}
+	if len(msg.Data) == 0 {
+		n.close(false)
+		return 0, io.EOF
+	}
+	buf = msg.Data
+	if nb := len(buf); nb <= len(b) {
+		copy(b, buf)
+		return nb, nil
+	}
+	nb := copy(b, buf[:len(b)])
+	n.pending = buf[nb:]
+	return nb, nil
 }
 
 func (n *natsConn) Write(b []byte) (int, error) {
@@ -90,7 +123,7 @@ func (n *natsConn) Write(b []byte) (int, error) {
 	closed := n.closed
 	n.mu.RUnlock()
 	if closed {
-		return 0, errors.New("write to closed conn")
+		return 0, io.EOF
 	}
 
 	if len(b) == 0 {
@@ -115,14 +148,9 @@ func (n *natsConn) Close() error {
 
 func (n *natsConn) close(signalRemote bool) error {
 	n.mu.Lock()
-	defer n.mu.Unlock()
-
 	if n.closed {
+		n.mu.Unlock()
 		return nil
-	}
-
-	if err := n.sub.Unsubscribe(); err != nil {
-		return err
 	}
 
 	if signalRemote {
@@ -133,13 +161,27 @@ func (n *natsConn) close(signalRemote bool) error {
 		n.conn.FlushTimeout(500 * time.Millisecond)
 	}
 
-	n.closed = true
-	n.parent.mu.Lock()
-	delete(n.parent.conns, n)
-	n.parent.mu.Unlock()
-	n.writer.Close()
+	// If connection is owned by stream, simply unsubscribe. Note that we
+	// check for sub != nil because this can be called during setup where
+	// sub has not been attached.
+	var err error
+	if n.streamConn {
+		if n.sub != nil {
+			err = n.sub.Unsubscribe()
+		}
+	} else {
+		n.conn.Close()
+	}
 
-	return nil
+	n.closed = true
+	stream := n.parent
+	n.mu.Unlock()
+
+	stream.mu.Lock()
+	delete(stream.conns, n)
+	stream.mu.Unlock()
+
+	return err
 }
 
 func (n *natsConn) LocalAddr() net.Addr {
@@ -151,34 +193,28 @@ func (n *natsConn) RemoteAddr() net.Addr {
 }
 
 func (n *natsConn) SetDeadline(t time.Time) error {
-	if err := n.SetReadDeadline(t); err != nil {
-		return err
+	n.mu.Lock()
+	if t.IsZero() {
+		n.subTimeout = 0
+	} else {
+		n.subTimeout = time.Until(t)
 	}
-	return n.SetWriteDeadline(t)
+	n.mu.Unlock()
+	return nil
 }
 
 func (n *natsConn) SetReadDeadline(t time.Time) error {
-	n.reader.SetDeadline(t)
-	return nil
+	return n.SetDeadline(t)
 }
 
 func (n *natsConn) SetWriteDeadline(t time.Time) error {
-	return nil
-}
-
-func (n *natsConn) msgHandler(msg *nats.Msg) {
-	// Check if remote peer disconnected.
-	if len(msg.Data) == 0 {
-		n.close(false)
-		return
-	}
-
-	n.writer.Write(msg.Data)
+	return n.SetDeadline(t)
 }
 
 // natsStreamLayer implements the raft.StreamLayer interface.
 type natsStreamLayer struct {
 	conn      *nats.Conn
+	makeConn  natsRaftConnCreator
 	localAddr natsAddr
 	sub       *nats.Subscription
 	logger    hclog.Logger
@@ -189,10 +225,11 @@ type natsStreamLayer struct {
 	dfTimeout time.Duration
 }
 
-func newNATSStreamLayer(id string, conn *nats.Conn, logger hclog.Logger, timeout time.Duration) (*natsStreamLayer, error) {
+func newNATSStreamLayer(id string, conn *nats.Conn, logger hclog.Logger, timeout time.Duration, makeConn natsRaftConnCreator) (*natsStreamLayer, error) {
 	n := &natsStreamLayer{
 		localAddr: natsAddr(id),
 		conn:      conn,
+		makeConn:  makeConn,
 		logger:    logger,
 		conns:     map[*natsConn]struct{}{},
 		dfTimeout: timeoutForDialAndFlush,
@@ -214,17 +251,26 @@ func newNATSStreamLayer(id string, conn *nats.Conn, logger hclog.Logger, timeout
 	return n, nil
 }
 
-func (n *natsStreamLayer) newNATSConn(address string) *natsConn {
-	// TODO: probably want a buffered pipe.
-	reader, writer := io.Pipe()
-	return &natsConn{
-		conn:       n.conn,
+func (n *natsStreamLayer) newNATSConn(address string) (*natsConn, error) {
+	var conn *nats.Conn
+	var err error
+
+	c := &natsConn{
 		localAddr:  n.localAddr,
 		remoteAddr: natsAddr(address),
-		reader:     newTimeoutReader(reader),
-		writer:     writer,
 		parent:     n,
 	}
+	if n.makeConn == nil {
+		c.conn = n.conn
+		c.streamConn = true
+	} else {
+		conn, err = n.makeConn(address)
+		if err != nil {
+			return nil, err
+		}
+		c.conn = conn
+	}
+	return c, nil
 }
 
 // Dial creates a new net.Conn with the remote address. This is implemented by
@@ -235,12 +281,6 @@ func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration
 		return nil, errors.New("raft-nats: dial failed, not connected")
 	}
 
-	// QUESTION: The Raft NetTransport does connection pooling, which is useful
-	// for TCP sockets. The NATS transport simulates a socket using a
-	// subscription at each endpoint, but everything goes over the same NATS
-	// socket. This means there is little advantage to pooling here currently.
-	// Should we actually Dial a new NATS connection here and rely on pooling?
-
 	connect := &connectRequestProto{
 		ID:    n.localAddr.String(),
 		Inbox: fmt.Sprintf(natsRequestInbox, n.localAddr.String(), nats.NewInbox()),
@@ -250,35 +290,46 @@ func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration
 		panic(err)
 	}
 
-	peerConn := n.newNATSConn(string(address))
-
-	// Setup inbox.
-	sub, err := n.conn.Subscribe(connect.Inbox, peerConn.msgHandler)
-	if err != nil {
-		return nil, err
-	}
-	sub.SetPendingLimits(-1, -1)
-	if err := n.conn.FlushTimeout(n.dfTimeout); err != nil {
-		sub.Unsubscribe()
-		return nil, err
+	// When creating the transport, we pass a 10s timeout, but for Dial, we want
+	// to use a different timeout, unless the one provided is smaller.
+	if timeout > n.dfTimeout {
+		timeout = n.dfTimeout
 	}
 
 	// Make connect request to peer.
-	msg, err := n.conn.Request(fmt.Sprintf(natsConnectInbox, address), data, n.dfTimeout)
+	msg, err := n.conn.Request(fmt.Sprintf(natsConnectInbox, address), data, timeout)
 	if err != nil {
-		sub.Unsubscribe()
 		return nil, err
 	}
 	var resp connectResponseProto
 	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		sub.Unsubscribe()
 		return nil, err
 	}
+
+	// Success, so now create a new NATS connection...
+	peerConn, err := n.newNATSConn(string(address))
+	if err != nil {
+		return nil, fmt.Errorf("raft-nats: unable to create connection to %q: %v", string(address), err)
+	}
+
+	// Setup inbox.
+	sub, err := peerConn.conn.SubscribeSync(connect.Inbox)
+	if err != nil {
+		peerConn.Close()
+		return nil, err
+	}
+	sub.SetPendingLimits(-1, -1)
 
 	peerConn.mu.Lock()
 	peerConn.sub = sub
 	peerConn.outbox = resp.Inbox
 	peerConn.mu.Unlock()
+
+	if err := peerConn.conn.FlushTimeout(timeout); err != nil {
+		peerConn.Close()
+		return nil, err
+	}
+
 	n.mu.Lock()
 	n.conns[peerConn] = struct{}{}
 	n.mu.Unlock()
@@ -303,17 +354,35 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 			continue
 		}
 
-		peerConn := n.newNATSConn(connect.ID)
-		peerConn.outbox = connect.Inbox
+		peerConn, err := n.newNATSConn(connect.ID)
+		if err != nil {
+			n.logger.Error("Unable to create connection to %q: %v", connect.ID, err)
+			continue
+		}
 
 		// Setup inbox for peer.
 		inbox := fmt.Sprintf(natsRequestInbox, n.localAddr.String(), nats.NewInbox())
-		sub, err := n.conn.Subscribe(inbox, peerConn.msgHandler)
+		sub, err := peerConn.conn.SubscribeSync(inbox)
 		if err != nil {
 			n.logger.Error("Failed to create inbox for remote peer", "error", err)
+			peerConn.Close()
 			continue
 		}
 		sub.SetPendingLimits(-1, -1)
+
+		peerConn.mu.Lock()
+		peerConn.outbox = connect.Inbox
+		peerConn.sub = sub
+		shouldFlush := !peerConn.streamConn
+		peerConn.mu.Unlock()
+
+		if shouldFlush {
+			if err := peerConn.conn.FlushTimeout(n.dfTimeout); err != nil {
+				peerConn.Close()
+				continue
+			}
+		}
+
 		// Reply to peer.
 		resp := &connectResponseProto{Inbox: inbox}
 		data, err := json.Marshal(resp)
@@ -322,15 +391,14 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 		}
 		if err := n.conn.Publish(msg.Reply, data); err != nil {
 			n.logger.Error("Failed to send connect response to remote peer", "error", err)
-			sub.Unsubscribe()
+			peerConn.Close()
 			continue
 		}
 		if err := n.conn.FlushTimeout(n.dfTimeout); err != nil {
 			n.logger.Error("Failed to flush connect response to remote peer", "error", err)
-			sub.Unsubscribe()
+			peerConn.Close()
 			continue
 		}
-		peerConn.sub = sub
 		n.mu.Lock()
 		n.conns[peerConn] = struct{}{}
 		n.mu.Unlock()
@@ -363,7 +431,7 @@ func (n *natsStreamLayer) Addr() net.Addr {
 
 // newNATSTransport creates a new raft.NetworkTransport implemented with NATS
 // as the transport layer.
-func newNATSTransport(id string, conn *nats.Conn, timeout time.Duration, logOutput io.Writer) (*raft.NetworkTransport, error) {
+func newNATSTransport(id string, conn *nats.Conn, timeout time.Duration, logOutput io.Writer, makeConn natsRaftConnCreator) (*raft.NetworkTransport, error) {
 	if logOutput == nil {
 		logOutput = os.Stderr
 	}
@@ -372,38 +440,40 @@ func newNATSTransport(id string, conn *nats.Conn, timeout time.Duration, logOutp
 		Level:  hclog.Debug,
 		Output: logOutput,
 	})
-	return newNATSTransportWithLogger(id, conn, timeout, logger)
+	return createNATSTransport(id, conn, timeout, makeConn, logger, nil)
 }
 
 // newNATSTransportWithLogger creates a new raft.NetworkTransport implemented
 // with NATS as the transport layer using the provided Logger.
 func newNATSTransportWithLogger(id string, conn *nats.Conn, timeout time.Duration, logger hclog.Logger) (*raft.NetworkTransport, error) {
-	return createNATSTransport(id, conn, logger, timeout, func(stream raft.StreamLayer) *raft.NetworkTransport {
-		return raft.NewNetworkTransportWithLogger(stream, 3, timeout, logger)
-	})
+	return createNATSTransport(id, conn, timeout, nil, logger, nil)
 }
 
 // newNATSTransportWithConfig returns a raft.NetworkTransport implemented
 // with NATS as the transport layer, using the given config struct.
 func newNATSTransportWithConfig(id string, conn *nats.Conn, config *raft.NetworkTransportConfig) (*raft.NetworkTransport, error) {
-	if config.Timeout == 0 {
-		config.Timeout = defaultTPortTimeout
-	}
-	return createNATSTransport(id, conn, config.Logger, config.Timeout, func(stream raft.StreamLayer) *raft.NetworkTransport {
-		config.Stream = stream
-		return raft.NewNetworkTransportWithConfig(config)
-	})
+	return createNATSTransport(id, conn, 0, nil, nil, config)
 }
 
-func createNATSTransport(id string, conn *nats.Conn, logger hclog.Logger, timeout time.Duration,
-	transportCreator func(stream raft.StreamLayer) *raft.NetworkTransport) (*raft.NetworkTransport, error) {
+func createNATSTransport(id string, conn *nats.Conn, timeout time.Duration, makeConn natsRaftConnCreator,
+	logger hclog.Logger, config *raft.NetworkTransportConfig) (*raft.NetworkTransport, error) {
 
-	stream, err := newNATSStreamLayer(id, conn, logger, timeout)
+	if config != nil {
+		if config.Timeout == 0 {
+			config.Timeout = defaultTPortTimeout
+		}
+		timeout = config.Timeout
+		logger = config.Logger
+	}
+	stream, err := newNATSStreamLayer(id, conn, logger, timeout, makeConn)
 	if err != nil {
 		return nil, err
 	}
-
-	return transportCreator(stream), nil
+	if config != nil {
+		config.Stream = stream
+		return raft.NewNetworkTransportWithConfig(config), nil
+	}
+	return raft.NewNetworkTransportWithLogger(stream, 3, timeout, logger), nil
 }
 
 func min(x, y int64) int64 {

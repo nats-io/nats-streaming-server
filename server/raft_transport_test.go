@@ -1,4 +1,4 @@
-// Copyright 2017-2019 The NATS Authors
+// Copyright 2017-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"sync"
@@ -643,5 +644,224 @@ func TestRAFTTransportPooledConn(t *testing.T) {
 	err = <-ch2
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRAFTTransportConnReader(t *testing.T) {
+	s := runRaftTportServer()
+	defer s.Shutdown()
+
+	nc1 := newNatsConnection(t)
+	defer nc1.Close()
+	stream1, err := newNATSStreamLayer("a", nc1, newTestLogger(t), 2*time.Second, nil)
+	if err != nil {
+		t.Fatalf("Error creating stream: %v", err)
+	}
+	defer stream1.Close()
+
+	// Check dial timeout:
+	start := time.Now()
+	if _, err := stream1.Dial("b", 50*time.Millisecond); err == nil {
+		t.Fatal("Expected failure")
+	}
+	dur := time.Since(start)
+	if dur > 250*time.Millisecond {
+		t.Fatalf("Should have timed out sooner than %v", dur)
+	}
+
+	ch := make(chan *natsConn, 3)
+	go func() {
+		for {
+			c, err := stream1.Accept()
+			if err != nil {
+				ch <- nil
+				return
+			}
+			ch <- c.(*natsConn)
+		}
+	}()
+
+	nc2 := newNatsConnection(t)
+	defer nc2.Close()
+	stream2, err := newNATSStreamLayer("b", nc2, newTestLogger(t), 2*time.Second, nil)
+	if err != nil {
+		t.Fatalf("Error creating stream: %v", err)
+	}
+	defer stream2.Close()
+
+	bToA, err := stream2.Dial("a", time.Second)
+	if err != nil {
+		t.Fatalf("Error dialing: %v", err)
+	}
+	defer bToA.Close()
+
+	var fromB *natsConn
+	select {
+	case fromB = <-ch:
+		if fromB == nil {
+			t.Fatal("Error accepting connection")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Failed to get connection from B")
+	}
+	defer fromB.Close()
+
+	if _, err := bToA.Write([]byte("Hello from A!")); err != nil {
+		t.Fatalf("Error on write: %v", err)
+	}
+
+	var buf [1024]byte
+	for _, test := range []struct {
+		nb       int
+		expected string
+	}{
+		{5, "Hello"},
+		{6, " from "},
+		{2, "A!"},
+	} {
+		t.Run("", func(t *testing.T) {
+			n, err := fromB.Read(buf[:test.nb])
+			if err != nil || n != test.nb {
+				t.Fatalf("Unexpected error on read, n=%v err=%v", n, err)
+			}
+			if got := string(buf[:n]); got != test.expected {
+				t.Fatalf("Unexpected result: %q", got)
+			}
+		})
+	}
+
+	// Write empty message should not go out
+	if n, err := bToA.Write(nil); err != nil || n != 0 {
+		t.Fatalf("Write nil should return 0, nil, got %v and %v", n, err)
+	}
+
+	// Write something else
+	if _, err := bToA.Write([]byte("msg")); err != nil {
+		t.Fatalf("Error on write: %v", err)
+	}
+
+	// Consume all at once
+	n, err := fromB.Read(buf[:])
+	if err != nil || n != 3 {
+		t.Fatalf("Unexpected error on read, n=%v err=%v", n, err)
+	}
+	if got := string(buf[:3]); got != "msg" {
+		t.Fatalf("Unexpected result: %q", got)
+	}
+
+	// Now wait for a timeout
+	fromB.SetDeadline(time.Now().Add(100 * time.Millisecond))
+	start = time.Now()
+	n, err = fromB.Read(buf[:])
+	if err == nil || n != 0 {
+		t.Fatalf("Expected timeout, got err=%v n=%v", err, n)
+	}
+
+	// Clear timeout
+	fromB.SetDeadline(time.Time{})
+
+	// Close the stream1's connection that should send an empty
+	// message to fromB connection to signal that it is closed.
+	if err := bToA.Close(); err != nil {
+		t.Fatalf("Error on close: %v", err)
+	}
+	// Call Write on close connection should fail too.
+	if _, err := bToA.Write([]byte("msg")); err != io.EOF {
+		t.Fatalf("Expected EOF on write, got: %v", err)
+	}
+
+	// Expect an EOF error
+	for i := 0; i < 2; i++ {
+		n, err = fromB.Read(buf[:])
+		if err != io.EOF || n != 0 {
+			t.Fatalf("Expected EOF, got err=%v n=%v", err, n)
+		}
+	}
+
+	// Create a "new" connection. The way the stream was created,
+	// we actually reuse the connection from the stream, so no
+	// new connection is created.
+	tmp, err := stream1.newNATSConn("c")
+	if err != nil {
+		t.Fatalf("Error on create: %v", err)
+	}
+	// Now close and ensure that we did not close the stream connection.
+	tmp.Close()
+
+	stream1.mu.Lock()
+	count := len(stream1.conns)
+	connected := stream1.conn.IsConnected()
+	stream1.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("Expected stream to have no connection, got %v", count)
+	}
+	if !connected {
+		t.Fatal("Stream connection should not have been closed")
+	}
+
+	// Now create a stream that will create a new NATS connection.
+	nc3 := newNatsConnection(t)
+	defer nc3.Close()
+	stream3, err := newNATSStreamLayer("c", nc3, newTestLogger(t), 2*time.Second, func(name string) (*nats.Conn, error) {
+		return nats.Connect(nats.DefaultURL)
+	})
+	if err != nil {
+		t.Fatalf("Error creating stream: %v", err)
+	}
+	defer stream3.Close()
+
+	cToA, err := stream3.Dial("a", time.Second)
+	if err != nil {
+		t.Fatalf("Error dialing: %v", err)
+	}
+	defer cToA.Close()
+
+	var fromC *natsConn
+	select {
+	case fromC = <-ch:
+		if fromC == nil {
+			t.Fatal("Error accepting connection")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Failed to get connection from C")
+	}
+	defer fromC.Close()
+
+	if _, err := cToA.Write([]byte("from C")); err != nil {
+		t.Fatalf("Error on write: %v", err)
+	}
+
+	n, err = fromC.Read(buf[:])
+	if err != nil {
+		t.Fatalf("Error on read: %v", err)
+	}
+	if got := string(buf[:n]); got != "from C" {
+		t.Fatalf("Unexpected read: %q", got)
+	}
+
+	// Close cToA
+	if err := cToA.Close(); err != nil {
+		t.Fatalf("Error on close: %v", err)
+	}
+
+	// The connection "fromC" should be closed too.
+	n, err = fromC.Read(buf[:])
+	if n != 0 || err != io.EOF {
+		t.Fatalf("Expected fromC connection to close, got n=%v err=%v", n, err)
+	}
+
+	// Close all streams.
+	stream3.Close()
+	stream2.Close()
+	stream1.Close()
+
+	// The Accept should return and we should get nil
+	select {
+	case c := <-ch:
+		if c != nil {
+			t.Fatalf("Should have gotten nil, got %v", c)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Accept() did not exit")
 	}
 }
