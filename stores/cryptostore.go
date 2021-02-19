@@ -1,4 +1,4 @@
-// Copyright 2018-2019 The NATS Authors
+// Copyright 2018-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -84,6 +84,7 @@ type EDStore struct {
 	aesgcm         cipher.AEAD // This is to decrypt data encrypted with this AES cipher
 	chachagcm      cipher.AEAD // This is to decrypt data encrypted with this Chacha cipher
 	cryptoOverhead int
+	nonceMu        sync.Mutex
 	nonce          []byte
 	nonceSize      int
 }
@@ -176,8 +177,10 @@ func newEDStore(cipherCode byte, keyHash []byte, idx uint64) (*EDStore, error) {
 		s.gcm = s.chachagcm
 	}
 
+	s.nonceMu.Lock()
 	s.nonce = make([]byte, s.nonceSize)
 	if _, err := io.ReadFull(rand.Reader, s.nonce); err != nil {
+		s.nonceMu.Unlock()
 		return nil, err
 	}
 	idx++
@@ -188,6 +191,7 @@ func newEDStore(cipherCode byte, keyHash []byte, idx uint64) (*EDStore, error) {
 		pos++
 		b -= 8
 	}
+	s.nonceMu.Unlock()
 	return s, nil
 }
 
@@ -211,6 +215,7 @@ func (s *EDStore) Encrypt(pbuf *[]byte, data []byte) ([]byte, error) {
 		*pbuf = buf
 	}
 	buf[0] = s.code
+	s.nonceMu.Lock()
 	copy(buf[1:], s.nonce)
 	copy(buf[1+s.nonceSize:], data)
 	dst := buf[1+s.nonceSize : 1+s.nonceSize+len(data)]
@@ -221,6 +226,7 @@ func (s *EDStore) Encrypt(pbuf *[]byte, data []byte) ([]byte, error) {
 			break
 		}
 	}
+	s.nonceMu.Unlock()
 	return buf[:1+s.nonceSize+len(ed)], nil
 }
 
