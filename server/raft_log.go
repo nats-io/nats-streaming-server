@@ -68,9 +68,9 @@ func newRaftLog(log logger.Logger, fileName string, opts *Options) (*raftLog, er
 		fileName: fileName,
 		codec:    &codec.MsgpackHandle{},
 	}
-	freeListType := bolt.FreelistMapType
-	if opts.Clustering.BoltFreeListArray {
-		freeListType = bolt.FreelistArrayType
+	freeListType := bolt.FreelistArrayType
+	if opts.Clustering.BoltFreeListMap {
+		freeListType = bolt.FreelistMapType
 	}
 	dbOpts := &bolt.Options{
 		NoSync:         !opts.Clustering.Sync,
