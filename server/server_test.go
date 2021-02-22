@@ -1,4 +1,4 @@
-// Copyright 2016-2019 The NATS Authors
+// Copyright 2016-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -1630,6 +1630,9 @@ func TestFileSliceMaxBytesCmdLine(t *testing.T) {
 }
 
 func TestInternalSubsLimits(t *testing.T) {
+	setPartitionsVarsForTest()
+	defer resetDefaultPartitionsVars()
+
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 	cleanupRaftLog(t)
@@ -1659,13 +1662,20 @@ func TestInternalSubsLimits(t *testing.T) {
 			s := runServerWithOpts(t, o, nil)
 			defer s.Shutdown()
 
+			switch test.name {
+			case "clustered":
+				getLeader(t, time.Second, s)
+			case "ft":
+				getFTActiveServer(t, s)
+			default:
+			}
+
 			s.mu.Lock()
 			defer s.mu.Unlock()
 
 			subs := []*nats.Subscription{
 				s.connectSub,
 				s.pubSub,
-				s.subSub,
 				s.subUnsubSub,
 				s.subCloseSub,
 				s.closeSub,
@@ -1682,6 +1692,10 @@ func TestInternalSubsLimits(t *testing.T) {
 					t.Fatalf("Unexpected values for sub on %q: err=%v count=%v sz=%v",
 						sub.Subject, err, count, sz)
 				}
+			}
+			// The subscription on "client subscription requests" should not be unlimited.
+			if count, sz, err := s.subSub.PendingLimits(); err != nil || count == -1 || sz == -1 {
+				t.Fatalf("The subSub subscription should not be unlimited: err=%v count=%v sz=%v", err, count, sz)
 			}
 		})
 	}
