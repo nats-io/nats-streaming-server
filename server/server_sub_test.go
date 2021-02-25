@@ -1281,3 +1281,63 @@ func TestNumSubsOnSubFailure(t *testing.T) {
 	sc.Close()
 	checkNumSubs(t, s, 2)
 }
+
+// This test simulates a client library that would get a timeout on subscribe,
+// and will send an subscription close request with the inbox, not the ack inbox
+// since the library did not get the response back. This test checks that
+// the subscription is properly removed.
+func TestSubCloseByInbox(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	nc := sc.NatsConn()
+
+	// Send raw subscription request, followed by a subscription close with the inbox.
+	inbox := nats.NewInbox()
+	subReq := &pb.SubscriptionRequest{
+		ClientID:    clientName,
+		Subject:     "foo",
+		Inbox:       inbox,
+		MaxInFlight: 1,
+	}
+	b, _ := subReq.Marshal()
+	resp, err := nc.Request(s.info.Subscribe, b, time.Second)
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	subResp := &pb.SubscriptionResponse{}
+	subResp.Unmarshal(resp.Data)
+	if subResp.Error != "" {
+		t.Fatalf("Error on subscribe: %v", subResp.Error)
+	}
+
+	// Now simulate the case where the library would instead have got a timeout
+	// and sent a subscription close request with the inbox (instead of AckInbox)
+	// since it would not have it.
+	subCloseReq := &pb.UnsubscribeRequest{
+		ClientID: clientName,
+		Subject:  "foo",
+		// Normally, the library sends the AckInbox here that it gets from the
+		// subscription response, but in case of timeout, it would not have it.
+		Inbox: inbox,
+	}
+	b, _ = subCloseReq.Marshal()
+	resp, err = nc.Request(s.info.SubClose, b, time.Second)
+	if err != nil {
+		t.Fatalf("Error on subscription close: %v", err)
+	}
+	subResp = &pb.SubscriptionResponse{}
+	subResp.Unmarshal(resp.Data)
+	if subResp.Error != "" {
+		t.Fatalf("Error on subscription close: %v", subResp.Error)
+	}
+
+	// Now verify that the subscription has correctly been removed
+	subs := s.clients.getSubs(clientName)
+	if len(subs) != 0 {
+		t.Fatalf("Should not be any subscription, got %v", subs)
+	}
+}
