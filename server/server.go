@@ -2778,7 +2778,10 @@ func (s *StanServer) initInternalSubs(createPub bool) error {
 		}
 	}
 	// Receive subscription requests from clients.
-	s.subSub, err = s.createSub(s.info.Subscribe, s.processSubscriptionRequest, "subscribe request")
+	// Don't make this subscription unlimited because we would rather drop
+	// subscriptions requests than adding to an already possibly overloaded
+	// server.
+	s.subSub, err = s.createSubWithUnlimited(s.info.Subscribe, s.processSubscriptionRequest, "subscribe request", false)
 	if err != nil {
 		return err
 	}
@@ -2861,11 +2864,17 @@ func (s *StanServer) unsubscribeInternalSubs() {
 }
 
 func (s *StanServer) createSub(subj string, f nats.MsgHandler, errTxt string) (*nats.Subscription, error) {
+	return s.createSubWithUnlimited(subj, f, errTxt, true)
+}
+
+func (s *StanServer) createSubWithUnlimited(subj string, f nats.MsgHandler, errTxt string, setUnlimited bool) (*nats.Subscription, error) {
 	sub, err := s.nc.Subscribe(subj, f)
 	if err != nil {
 		return nil, fmt.Errorf("could not subscribe to %s subject: %v", errTxt, err)
 	}
-	sub.SetPendingLimits(-1, -1)
+	if setUnlimited {
+		sub.SetPendingLimits(-1, -1)
+	}
 	return sub, nil
 }
 
@@ -3223,17 +3232,15 @@ func (s *StanServer) checkClientHealth(clientID string) {
 			// close the client (connection). This locks the
 			// client object internally so unlock here.
 			client.Unlock()
-			s.barrier(func() {
-				// If clustered, thread operations through Raft.
-				if s.isClustered {
-					if err := s.replicateConnClose(&pb.CloseRequest{ClientID: clientID}); err != nil {
-						s.log.Errorf("[Client:%s] Failed to replicate disconnect on heartbeat expiration: %v",
-							clientID, err)
-					}
-				} else {
-					s.closeClient(clientID)
+			// If clustered, thread operations through Raft.
+			if s.isClustered {
+				if err := s.replicateConnClose(&pb.CloseRequest{ClientID: clientID}, false); err != nil {
+					s.log.Errorf("[Client:%s] Failed to replicate disconnect on heartbeat expiration: %v",
+						clientID, err)
 				}
-			})
+			} else {
+				s.closeClient(clientID)
+			}
 			return
 		}
 	} else {
@@ -3305,7 +3312,7 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 		var err error
 		// If clustered, thread operations through Raft.
 		if s.isClustered {
-			err = s.replicateConnClose(req)
+			err = s.replicateConnClose(req, true)
 		} else {
 			err = s.closeClient(req.ClientID)
 		}
@@ -3316,12 +3323,14 @@ func (s *StanServer) processCloseRequest(m *nats.Msg) {
 	})
 }
 
-func (s *StanServer) replicateConnClose(req *pb.CloseRequest) error {
-	// Go through the list of subscriptions and possibly
-	// flush the pending replication of sent/ack.
-	subs := s.clients.getSubs(req.ClientID)
-	for _, sub := range subs {
-		s.endSubSentAndAckReplication(sub, false)
+func (s *StanServer) replicateConnClose(req *pb.CloseRequest, flushSubAcks bool) error {
+	if flushSubAcks {
+		// Go through the list of subscriptions and possibly
+		// flush the pending replication of sent/ack.
+		subs := s.clients.getSubs(req.ClientID)
+		for _, sub := range subs {
+			s.endSubSentAndAckReplication(sub, false)
+		}
 	}
 
 	op := &spb.RaftOperation{
@@ -4873,7 +4882,7 @@ func (s *StanServer) replicateSub(c *channel, sr *pb.SubscriptionRequest, ackInb
 func (s *StanServer) addSubscription(ss *subStore, sub *subState) error {
 	// Store in client
 	if !s.clients.addSub(sub.ClientID, sub) {
-		return fmt.Errorf("can't find clientID: %v", sub.ClientID)
+		return ErrUnknownClient
 	}
 	// Store this subscription in subStore
 	if err := ss.Store(sub); err != nil {
@@ -4887,7 +4896,7 @@ func (s *StanServer) addSubscription(ss *subStore, sub *subState) error {
 func (s *StanServer) updateDurable(ss *subStore, sub *subState, clientID string) error {
 	// Store in the client
 	if !s.clients.addSub(clientID, sub) {
-		return fmt.Errorf("can't find clientID: %v", clientID)
+		return ErrUnknownClient
 	}
 	// Update this subscription in the store
 	sub.Lock()
@@ -5151,6 +5160,10 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSubReq)
 			return
 		}
+	} else if !s.clients.isValid(sr.ClientID, nil) {
+		// If client is not known, fail the request.
+		s.sendSubscriptionResponseErr(m.Reply, ErrUnknownClient)
+		return
 	}
 
 	var (

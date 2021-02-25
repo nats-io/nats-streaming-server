@@ -1,4 +1,4 @@
-// Copyright 2016-2019 The NATS Authors
+// Copyright 2016-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -24,6 +24,7 @@ import (
 	"github.com/nats-io/nats-streaming-server/spb"
 	"github.com/nats-io/nats-streaming-server/stores"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nuid"
 	"github.com/nats-io/stan.go"
 	"github.com/nats-io/stan.go/pb"
 )
@@ -1339,5 +1340,80 @@ func TestSubCloseByInbox(t *testing.T) {
 	subs := s.clients.getSubs(clientName)
 	if len(subs) != 0 {
 		t.Fatalf("Should not be any subscription, got %v", subs)
+	}
+}
+
+func TestSubRequestsFailedIfClientClosed(t *testing.T) {
+	sOpts := GetDefaultOptions()
+	sOpts.ID = clusterName
+	sOpts.ClientHBInterval = 15 * time.Millisecond
+	sOpts.ClientHBTimeout = 15 * time.Millisecond
+	sOpts.ClientHBFailCount = 1
+	sOpts.StoreLimits.SubStoreLimits.MaxSubscriptions = 0
+	nOpts := DefaultNatsServerOptions
+	s := runServerWithOpts(t, sOpts, &nOpts)
+	defer s.Shutdown()
+
+	// Use a bare NATS connection to send incorrect requests
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	sub, err := nc.SubscribeSync("subreply")
+	if err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	sub.SetPendingLimits(-1, -1)
+
+	req := &pb.ConnectRequest{ClientID: clientName, HeartbeatInbox: "hbInbox"}
+	b, _ := req.Marshal()
+	resp, err := nc.Request(s.info.Discovery, b, time.Second)
+	if err != nil {
+		t.Fatalf("Unexpected error on publishing request: %v", err)
+	}
+	r := &pb.ConnectResponse{}
+	err = r.Unmarshal(resp.Data)
+	if err != nil {
+		t.Fatalf("Unexpected response object: %v", err)
+	}
+	if r.Error != "" {
+		t.Fatalf("Unexpected error: %v", r.Error)
+	}
+
+	s.channels.Lock()
+
+	for i := 0; i < 1000; i++ {
+		req := &pb.SubscriptionRequest{
+			ClientID:      clientName,
+			Subject:       "foo",
+			Inbox:         nuid.Next(),
+			MaxInFlight:   1,
+			AckWaitInSecs: 30,
+		}
+		b, _ := req.Marshal()
+		if err := nc.PublishRequest(s.info.Subscribe, sub.Subject, b); err != nil {
+			t.Fatalf("Error on request: %v", err)
+		}
+	}
+
+	s.channels.Unlock()
+
+	for {
+		msg, err := sub.NextMsg(250 * time.Millisecond)
+		if err != nil {
+			break
+		}
+
+		rply := &pb.SubscriptionResponse{}
+		rply.Unmarshal(msg.Data)
+		if rply.Error == "" {
+			continue
+		}
+		if rply.Error != ErrUnknownClient.Error() {
+			t.Fatalf("Expected error %q, got %q", ErrUnknownClient, rply.Error)
+		}
+		break
 	}
 }
