@@ -788,6 +788,7 @@ type subStore struct {
 	qsubs    map[string]*queueState // queue subscribers
 	durables map[string]*subState   // durables lookup
 	acks     map[string]*subState   // ack inbox lookup
+	inboxes  map[string]*subState   // sub inbox lookup
 	stan     *StanServer            // back link to the server
 }
 
@@ -925,6 +926,7 @@ func (s *StanServer) createSubStore() *subStore {
 		qsubs:    make(map[string]*queueState),
 		durables: make(map[string]*subState),
 		acks:     make(map[string]*subState),
+		inboxes:  make(map[string]*subState),
 		stan:     s,
 	}
 	return subs
@@ -987,6 +989,8 @@ func (ss *subStore) updateState(sub *subState) {
 		} else {
 			// Store by ackInbox for ack direct lookup
 			ss.acks[sub.AckInbox] = sub
+			// Store by inbox too.
+			ss.inboxes[sub.Inbox] = sub
 
 			qs.subs = append(qs.subs, sub)
 
@@ -1012,6 +1016,8 @@ func (ss *subStore) updateState(sub *subState) {
 	} else {
 		// First store by ackInbox for ack direct lookup
 		ss.acks[sub.AckInbox] = sub
+		// Store by inbox too.
+		ss.inboxes[sub.Inbox] = sub
 
 		// Plain subscriber.
 		ss.psubs = append(ss.psubs, sub)
@@ -1093,6 +1099,7 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 	subid := sub.ID
 	store := sub.store
 	sub.stopAckSub()
+	inbox := sub.Inbox
 	sub.Unlock()
 
 	reportError := func(err error) {
@@ -1111,6 +1118,8 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 
 	// Delete from ackInbox lookup.
 	delete(ss.acks, ackInbox)
+	// Delete from inbox lookup.
+	delete(ss.inboxes, inbox)
 
 	// Delete from durable if needed
 	if unsubscribe && durableKey != "" {
@@ -1297,6 +1306,14 @@ func (ss *subStore) LookupByDurable(durableName string) *subState {
 func (ss *subStore) LookupByAckInbox(ackInbox string) *subState {
 	ss.RLock()
 	sub := ss.acks[ackInbox]
+	ss.RUnlock()
+	return sub
+}
+
+// Lookup by subscription inbox.
+func (ss *subStore) LookupByInbox(inbox string) *subState {
+	ss.RLock()
+	sub := ss.inboxes[inbox]
 	ss.RUnlock()
 	return sub
 }
@@ -4642,6 +4659,9 @@ func (s *StanServer) unsubscribe(req *pb.UnsubscribeRequest, isSubClose bool) er
 	}
 	sub := c.ss.LookupByAckInbox(req.Inbox)
 	if sub == nil {
+		sub = c.ss.LookupByInbox(req.Inbox)
+	}
+	if sub == nil {
 		s.log.Errorf("[Client:%s] %s request for missing inbox %s",
 			req.ClientID, action, req.Inbox)
 		return ErrInvalidSub
@@ -4883,6 +4903,8 @@ func (s *StanServer) updateDurable(ss *subStore, sub *subState, clientID string)
 	}
 	// And in ackInbox lookup map.
 	ss.acks[sub.AckInbox] = sub
+	// Store by inbox too.
+	ss.inboxes[sub.Inbox] = sub
 
 	return nil
 }
