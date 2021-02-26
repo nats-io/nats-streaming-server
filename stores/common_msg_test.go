@@ -16,7 +16,6 @@ package stores
 import (
 	"fmt"
 	"reflect"
-	"runtime"
 	"testing"
 	"time"
 
@@ -540,13 +539,7 @@ func TestCSGetSeqFromStartTime(t *testing.T) {
 			defer s.Close()
 
 			limits := testDefaultStoreLimits
-			// On windows, the 1ms between each send may actually be more
-			// so we need a bigger expiration value.
-			if runtime.GOOS == "windows" {
-				limits.MaxAge = 1500 * time.Millisecond
-			} else {
-				limits.MaxAge = 500 * time.Millisecond
-			}
+			limits.MaxAge = 1500 * time.Millisecond
 			s.SetLimits(&limits)
 			// Force creation of channel without storing anything yet
 			cs := storeCreateChannel(t, s, "foo")
@@ -556,13 +549,13 @@ func TestCSGetSeqFromStartTime(t *testing.T) {
 				t.Fatalf("Invalid start sequence. Expected %v got %v", 0, seq)
 			}
 
-			count := 100
+			count := 50
 			msgs := make([]*pb.MsgProto, 0, count)
 			payload := []byte("hello")
 			for i := 0; i < count; i++ {
 				m := storeMsg(t, cs, "foo", uint64(i+1), payload)
 				msgs = append(msgs, m)
-				time.Sleep(1 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 			}
 
 			startMsg := msgs[count/2]
@@ -617,7 +610,7 @@ func TestCSGetSeqFromStartTime(t *testing.T) {
 					time.Now().UnixNano() - int64(time.Hour),
 					time.Now().UnixNano() + int64(time.Hour),
 				}
-				expectedSeqs := []uint64{101, 101}
+				expectedSeqs := []uint64{51, 51}
 
 				for i := 0; i < len(times); i++ {
 					s.Close()

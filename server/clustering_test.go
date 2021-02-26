@@ -6793,8 +6793,12 @@ func TestClusteringRestoreSnapshotMsgsBailIfNoLeader(t *testing.T) {
 		errCh <- nil
 	}()
 
+	dur := time.Duration(restoreMsgsAttempts+2) * (restoreMsgsSleepBetweenAttempts + restoreMsgsRcvTimeout)
+	if runtime.GOOS == "windows" {
+		dur = 3 * time.Second
+	}
 	select {
-	case <-time.After(time.Duration(restoreMsgsAttempts+2) * (restoreMsgsSleepBetweenAttempts + restoreMsgsRcvTimeout)):
+	case <-time.After(dur):
 		t.Fatalf("Server should have exited after a certain number of failed attempts")
 	case e := <-errCh:
 		if e != nil {
