@@ -1848,10 +1848,14 @@ func TestFSEmptyRemovesAllMsgsFiles(t *testing.T) {
 	if err := c.Msgs.Empty(); err != nil {
 		t.Fatalf("Error on empty: %v", err)
 	}
-	// Make sure we have remove the index file too.
-	if fi, err := os.Stat(idxname); err == nil || fi != nil {
-		t.Fatalf("Expected index file to be gone, it was not")
+	timeout := time.Now().Add(time.Second)
+	for time.Now().Before(timeout) {
+		// Make sure we have remove the index file too.
+		if fi, err := os.Stat(idxname); err != nil && fi == nil {
+			return
+		}
 	}
+	t.Fatalf("Expected index file to be gone, it was not")
 }
 
 func TestFSGetSeqFromTimestamp(t *testing.T) {

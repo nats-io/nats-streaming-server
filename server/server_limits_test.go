@@ -456,14 +456,13 @@ func TestUnlimitedPerChannelLimits(t *testing.T) {
 		t.Fatal("Expected to fail to subscribe, did not")
 	}
 	// Wait more than MaxAge
-	time.Sleep(15 * time.Millisecond)
-	// Messages should have all disappear
-	s.mu.RLock()
-	n, _, _ = s.channels.msgsState("bar")
-	s.mu.RUnlock()
-	if n != 0 {
-		t.Fatalf("Expected 0 messages, store reports %v", n)
-	}
+	waitForCount(t, 0, func() (string, int) {
+		// Messages should have all disappear
+		s.mu.RLock()
+		n, _, _ = s.channels.msgsState("bar")
+		s.mu.RUnlock()
+		return "messages for bar", n
+	})
 }
 
 func TestPerChannelLimitsSetToUnlimitedPrintedCorrectly(t *testing.T) {
