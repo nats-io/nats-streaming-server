@@ -79,20 +79,35 @@ type natsConn struct {
 }
 
 func (n *natsConn) Read(b []byte) (int, error) {
+	var subTimeout time.Duration
+
 	n.mu.RLock()
 	closed := n.closed
-	subTimeout := n.subTimeout
-	if subTimeout == 0 {
-		subTimeout = time.Duration(0x7FFFFFFFFFFFFFFF)
+	buf := n.pending
+	pendingSize := len(buf)
+	// We need the timeout only if we are going to call NextMsg, and if we
+	// have a pending, we won't.
+	if pendingSize == 0 {
+		subTimeout = n.subTimeout
+		if subTimeout == 0 {
+			subTimeout = time.Duration(0x7FFFFFFFFFFFFFFF)
+		}
 	}
 	n.mu.RUnlock()
 	if closed {
 		return 0, io.EOF
 	}
-	buf := n.pending
-	if size := len(buf); size > 0 {
-		nb := copy(b, buf[:len(b)])
-		if nb != size {
+	// If we have a pending, process that first.
+	if pendingSize > 0 {
+		// We will copy all data that we have if it can fit, or up to the
+		// caller's buffer size.
+		limit := pendingSize
+		if limit > len(b) {
+			limit = len(b)
+		}
+		nb := copy(b, buf[:limit])
+		// If we did not copy everything, reduce size by what we copied.
+		if nb != pendingSize {
 			buf = buf[nb:]
 		} else {
 			buf = nil

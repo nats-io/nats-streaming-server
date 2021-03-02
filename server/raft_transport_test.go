@@ -730,6 +730,47 @@ func TestRAFTTransportConnReader(t *testing.T) {
 		})
 	}
 
+	firstPart := "Partial"
+	secondPart := " and then the rest"
+	if _, err := bToA.Write([]byte(firstPart + secondPart)); err != nil {
+		t.Fatalf("Error on write: %v", err)
+	}
+	n, err := fromB.Read(buf[:7])
+	if err != nil {
+		t.Fatalf("Error on read: %v", err)
+	}
+	if string(buf[:n]) != firstPart {
+		t.Fatalf("Unexpected result: %q", buf[:n])
+	}
+	// Now pass a buffer to Read() that is larger than what is left in pending
+	n, err = fromB.Read(buf[:])
+	if err != nil {
+		t.Fatalf("Error on read: %v", err)
+	}
+	if string(buf[:n]) != secondPart {
+		t.Fatalf("Unexpected result: %q", buf[:n])
+	}
+
+	// Another test with a partial...
+	if _, err := bToA.Write([]byte("ab")); err != nil {
+		t.Fatalf("Error on write: %v", err)
+	}
+	n, err = fromB.Read(buf[:1])
+	if err != nil {
+		t.Fatalf("Error on read: %v", err)
+	}
+	if string(buf[:n]) != "a" {
+		t.Fatalf("Unexpected result: %q", buf[:n])
+	}
+	// There is only 1 byte that should be pending, but call with a large buffer.
+	n, err = fromB.Read(buf[:])
+	if err != nil {
+		t.Fatalf("Error on read: %v", err)
+	}
+	if string(buf[:n]) != "b" {
+		t.Fatalf("Unexpected result: %q", buf[:n])
+	}
+
 	// Write empty message should not go out
 	if n, err := bToA.Write(nil); err != nil || n != 0 {
 		t.Fatalf("Write nil should return 0, nil, got %v and %v", n, err)
@@ -741,7 +782,7 @@ func TestRAFTTransportConnReader(t *testing.T) {
 	}
 
 	// Consume all at once
-	n, err := fromB.Read(buf[:])
+	n, err = fromB.Read(buf[:])
 	if err != nil || n != 3 {
 		t.Fatalf("Unexpected error on read, n=%v err=%v", n, err)
 	}

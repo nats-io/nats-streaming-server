@@ -1005,20 +1005,24 @@ func TestProtocolOrder(t *testing.T) {
 
 			// Mix pub and subscribe calls
 			ch = make(chan bool)
-			errCh = make(chan error)
+			errCh = make(chan error, 1)
 			startSubAt := 50
 			var sub stan.Subscription
 			var err error
+			first := true
 			for i := 1; i <= 100; i++ {
 				if err := sc.Publish("foo", []byte("hello")); err != nil {
 					t.Fatalf("Unexpected error on publish: %v", err)
 				}
 				if i == startSubAt {
 					sub, err = sc.Subscribe("foo", func(m *stan.Msg) {
-						if m.Sequence == uint64(startSubAt)+1 {
-							ch <- true
-						} else if len(errCh) == 0 {
-							errCh <- fmt.Errorf("Received message %v instead of %v", m.Sequence, startSubAt+1)
+						if first {
+							if m.Sequence == uint64(startSubAt)+1 {
+								ch <- true
+							} else {
+								errCh <- fmt.Errorf("Received message %v instead of %v", m.Sequence, startSubAt+1)
+							}
+							first = false
 						}
 					})
 					if err != nil {
@@ -1037,6 +1041,7 @@ func TestProtocolOrder(t *testing.T) {
 			sub.Unsubscribe()
 
 			// Acks should be processed before Connection close
+			errCh = make(chan error, 1)
 			for i := 0; i < total; i++ {
 				rcv := int32(0)
 				sc2, err := stan.Connect(clusterName, "otherclient")
