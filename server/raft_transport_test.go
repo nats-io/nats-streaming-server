@@ -840,6 +840,24 @@ func TestRAFTTransportConnReader(t *testing.T) {
 		t.Fatal("Stream connection should not have been closed")
 	}
 
+	// Again, create a temp connection and make sure what we break out of
+	// a Read() if we close the connection.
+	tmp, err = stream1.newNATSConn("c")
+	if err != nil {
+		t.Fatalf("Error on create: %v", err)
+	}
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		tmp.Close()
+		wg.Done()
+	}()
+	if n, err := tmp.Read(buf[:]); err != io.EOF || n > 0 {
+		t.Fatalf("Expected n=0 err=io.EOF, got n=%v err=%v", n, err)
+	}
+	wg.Wait()
+
 	// Now create a stream that will create a new NATS connection.
 	nc3 := newNatsConnection(t)
 	defer nc3.Close()
