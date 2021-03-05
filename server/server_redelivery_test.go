@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -114,6 +115,10 @@ func TestMultipleRedeliveries(t *testing.T) {
 	ackWait := int64(15 * time.Millisecond)
 	lowBound := int64(float64(ackWait) * 0.5)
 	highBound := int64(float64(ackWait) * 1.7)
+	// On Windows (especially Travis), be more generous
+	if runtime.GOOS == "windows" {
+		highBound = int64(35 * time.Millisecond)
+	}
 	errCh := make(chan error)
 	cb := func(m *stan.Msg) {
 		now := time.Now().UnixNano()

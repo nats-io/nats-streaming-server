@@ -49,6 +49,7 @@ type Serverz struct {
 	GoVersion     string    `json:"go"`
 	State         string    `json:"state"`
 	Role          string    `json:"role,omitempty"`
+	NodeID        string    `json:"node_id,omitempty"`
 	Now           time.Time `json:"now"`
 	Start         time.Time `json:"start_time"`
 	Uptime        string    `json:"uptime"`
@@ -198,10 +199,12 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var role string
+	var nodeID string
 	s.mu.RLock()
 	state := s.state
 	if s.raft != nil {
 		role = s.raft.State().String()
+		nodeID = s.info.NodeID
 	}
 	s.mu.RUnlock()
 
@@ -231,6 +234,7 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 		GoVersion:     runtime.Version(),
 		State:         state.String(),
 		Role:          role,
+		NodeID:        nodeID,
 		Now:           now,
 		Start:         s.startTime,
 		Uptime:        myUptime(now.Sub(s.startTime)),
