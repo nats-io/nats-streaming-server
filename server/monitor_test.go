@@ -1250,7 +1250,7 @@ func TestMonitorClusterRole(t *testing.T) {
 			s2 := runServerWithOpts(t, s2sOpts, test.n2Opts)
 			defer s2.Shutdown()
 
-			getLeader(t, 10*time.Second, s1, s2)
+			l := getLeader(t, 10*time.Second, s1, s2)
 
 			resp, body := getBody(t, ServerPath, expectedJSON)
 			resp.Body.Close()
@@ -1260,6 +1260,17 @@ func TestMonitorClusterRole(t *testing.T) {
 			}
 			if sz.Role != test.expectedRole {
 				t.Fatalf("Expected role to be %v, got %v", test.expectedRole, sz.Role)
+			}
+			var nodeID string
+			if test.name == "leader" {
+				nodeID = l.info.NodeID
+			} else if l == s1 {
+				nodeID = s2.info.NodeID
+			} else {
+				nodeID = s1.info.NodeID
+			}
+			if sz.NodeID != nodeID {
+				t.Fatalf("Expected nodeID to be %q, got %q", nodeID, sz.NodeID)
 			}
 		})
 	}
