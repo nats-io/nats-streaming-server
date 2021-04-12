@@ -4,6 +4,10 @@ NATS Streaming is an extremely performant, lightweight reliable streaming platfo
 
 [![License][License-Image]][License-Url] [![ReportCard][ReportCard-Image]][ReportCard-Url] [![Build][Build-Status-Image]][Build-Status-Url] [![Release][Release-Image]][Release-Url] [![Coverage][Coverage-Image]][Coverage-Url]
 
+# WARNING:  Deprecation Notice :warning:
+
+The NATS Streaming Server is being deprecated.  Critical bug fixes and security fixes will be applied until June of 2023.  NATS enabled applications requiring persistence should use [JetStream](https://docs.nats.io/jetstream/jetstream).
+
 ## Documentation
 
 * [Official documentation](https://docs.nats.io/nats-streaming-concepts)
