@@ -75,6 +75,7 @@ type natsConn struct {
 	pendingH   *pendingBuf   // head of pending buffers list
 	pendingT   *pendingBuf   // tail of pending buffers list
 	ch         chan struct{} // to send notification that a buffer is available
+	tmr        *time.Timer
 	outbox     string
 	closed     bool
 	parent     *natsStreamLayer
@@ -134,6 +135,7 @@ func (n *natsConn) Read(b []byte) (int, error) {
 		if subTimeout == 0 {
 			subTimeout = time.Duration(0x7FFFFFFFFFFFFFFF)
 		}
+		n.tmr.Reset(subTimeout)
 	}
 	n.mu.RUnlock()
 
@@ -141,7 +143,7 @@ func (n *natsConn) Read(b []byte) (int, error) {
 	if pb == nil {
 	WAIT_FOR_BUFFER:
 		select {
-		case <-time.After(subTimeout):
+		case <-n.tmr.C:
 			return 0, nats.ErrTimeout
 		case _, ok := <-n.ch:
 			if !ok {
@@ -159,6 +161,7 @@ func (n *natsConn) Read(b []byte) (int, error) {
 		}
 		// We have been notified, so get the reference to the head of the list.
 		pb = n.pendingH
+		n.tmr.Stop()
 		n.mu.RUnlock()
 	}
 
@@ -258,6 +261,7 @@ func (n *natsConn) close(signalRemote bool) error {
 	n.closed = true
 	stream := n.parent
 	close(n.ch)
+	n.tmr.Stop()
 	n.mu.Unlock()
 
 	stream.mu.Lock()
@@ -342,6 +346,7 @@ func (n *natsStreamLayer) newNATSConn(address string) (*natsConn, error) {
 		remoteAddr: natsAddr(address),
 		parent:     n,
 		ch:         make(chan struct{}, 1),
+		tmr:        time.NewTimer(time.Hour),
 	}
 	if n.makeConn == nil {
 		c.conn = n.conn
