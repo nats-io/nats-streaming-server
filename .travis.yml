@@ -46,7 +46,7 @@ script:
 deploy:
   provider: script
   cleanup: true
-  script: curl -sL http://git.io/goreleaser | bash
+  script: curl -sL http://git.io/goreleaser | VERSION=v0.160.0 bash
   on:
     tags: true
     condition: ("$TRAVIS_OS_NAME" = "linux") && ("$TRAVIS_GO_VERSION" =~ "1.16")
