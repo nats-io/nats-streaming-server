@@ -100,22 +100,20 @@ func (n *natsConn) onMsg(msg *nats.Msg) {
 		return
 	}
 	pb.buf = msg.Data
-	var notify bool
 	if n.pendingT != nil {
 		n.pendingT.next = pb
 	} else {
 		n.pendingH = pb
-		notify = true
-	}
-	n.pendingT = pb
-	n.mu.Unlock()
-
-	if notify {
+		// Need to notify under the lock since this channel gets closed
+		// on natsConn.close(), which could then cause a panic of
+		// "send on closed channel".
 		select {
 		case n.ch <- struct{}{}:
 		default:
 		}
 	}
+	n.pendingT = pb
+	n.mu.Unlock()
 }
 
 func (n *natsConn) Read(b []byte) (int, error) {
