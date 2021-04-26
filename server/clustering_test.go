@@ -7041,6 +7041,88 @@ func TestClusteringQueueMemberPendingCount(t *testing.T) {
 	})
 }
 
+func TestClusteringQueueMemberStalled(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure second server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2, s3)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	ch := make(chan struct{}, 1)
+	if _, err := sc.QueueSubscribe("foo", "bar",
+		func(m *stan.Msg) {
+			// Don't ack the message. This member should be stalled right away
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		},
+		stan.DurableName("dur"),
+		stan.SetManualAckMode(),
+		stan.MaxInflight(1)); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	count := int32(0)
+	if _, err := sc.QueueSubscribe("foo", "bar",
+		func(m *stan.Msg) {
+			if string(m.Data) == "count_now" {
+				atomic.AddInt32(&count, 1)
+			}
+			m.Ack()
+		},
+		stan.DurableName("dur"),
+		stan.SetManualAckMode(),
+		stan.MaxInflight(10)); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	// Publish messages until we know that the queue member that stalls got a message.
+	for done := false; !done; {
+		sc.Publish("foo", []byte("msg"))
+		select {
+		case <-ch:
+			done = true
+		default:
+		}
+	}
+
+	// Now publish 10 messages asking the queue member 2 to count those.
+	for i := 0; i < 10; i++ {
+		sc.Publish("foo", []byte("count_now"))
+	}
+	// Make sure that those were received by the non-stalled queue member
+	waitFor(t, 5*time.Second, 15*time.Millisecond, func() error {
+		if n := atomic.LoadInt32(&count); n != 10 {
+			return fmt.Errorf("Did not get all messages: %v", n)
+		}
+		return nil
+	})
+}
+
 type captureRaftLogger struct {
 	dummyLogger
 	good map[string]struct{}
