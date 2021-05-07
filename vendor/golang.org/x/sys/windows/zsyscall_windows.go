@@ -146,8 +146,6 @@ var (
 	procCertDeleteCertificateFromStore                       = modcrypt32.NewProc("CertDeleteCertificateFromStore")
 	procCertDuplicateCertificateContext                      = modcrypt32.NewProc("CertDuplicateCertificateContext")
 	procCertEnumCertificatesInStore                          = modcrypt32.NewProc("CertEnumCertificatesInStore")
-	procCertFindCertificateInStore                           = modcrypt32.NewProc("CertFindCertificateInStore")
-	procCertFindChainInStore                                 = modcrypt32.NewProc("CertFindChainInStore")
 	procCertFindExtension                                    = modcrypt32.NewProc("CertFindExtension")
 	procCertFreeCertificateChain                             = modcrypt32.NewProc("CertFreeCertificateChain")
 	procCertFreeCertificateContext                           = modcrypt32.NewProc("CertFreeCertificateContext")
@@ -156,7 +154,6 @@ var (
 	procCertOpenStore                                        = modcrypt32.NewProc("CertOpenStore")
 	procCertOpenSystemStoreW                                 = modcrypt32.NewProc("CertOpenSystemStoreW")
 	procCertVerifyCertificateChainPolicy                     = modcrypt32.NewProc("CertVerifyCertificateChainPolicy")
-	procCryptAcquireCertificatePrivateKey                    = modcrypt32.NewProc("CryptAcquireCertificatePrivateKey")
 	procCryptDecodeObject                                    = modcrypt32.NewProc("CryptDecodeObject")
 	procCryptProtectData                                     = modcrypt32.NewProc("CryptProtectData")
 	procCryptQueryObject                                     = modcrypt32.NewProc("CryptQueryObject")
@@ -370,7 +367,6 @@ var (
 	procWSARecvFrom                                          = modws2_32.NewProc("WSARecvFrom")
 	procWSASend                                              = modws2_32.NewProc("WSASend")
 	procWSASendTo                                            = modws2_32.NewProc("WSASendTo")
-	procWSASocketW                                           = modws2_32.NewProc("WSASocketW")
 	procWSAStartup                                           = modws2_32.NewProc("WSAStartup")
 	procbind                                                 = modws2_32.NewProc("bind")
 	procclosesocket                                          = modws2_32.NewProc("closesocket")
@@ -1214,24 +1210,6 @@ func CertEnumCertificatesInStore(store Handle, prevContext *CertContext) (contex
 	return
 }
 
-func CertFindCertificateInStore(store Handle, certEncodingType uint32, findFlags uint32, findType uint32, findPara unsafe.Pointer, prevCertContext *CertContext) (cert *CertContext, err error) {
-	r0, _, e1 := syscall.Syscall6(procCertFindCertificateInStore.Addr(), 6, uintptr(store), uintptr(certEncodingType), uintptr(findFlags), uintptr(findType), uintptr(findPara), uintptr(unsafe.Pointer(prevCertContext)))
-	cert = (*CertContext)(unsafe.Pointer(r0))
-	if cert == nil {
-		err = errnoErr(e1)
-	}
-	return
-}
-
-func CertFindChainInStore(store Handle, certEncodingType uint32, findFlags uint32, findType uint32, findPara unsafe.Pointer, prevChainContext *CertChainContext) (certchain *CertChainContext, err error) {
-	r0, _, e1 := syscall.Syscall6(procCertFindChainInStore.Addr(), 6, uintptr(store), uintptr(certEncodingType), uintptr(findFlags), uintptr(findType), uintptr(findPara), uintptr(unsafe.Pointer(prevChainContext)))
-	certchain = (*CertChainContext)(unsafe.Pointer(r0))
-	if certchain == nil {
-		err = errnoErr(e1)
-	}
-	return
-}
-
 func CertFindExtension(objId *byte, countExtensions uint32, extensions *CertExtension) (ret *CertExtension) {
 	r0, _, _ := syscall.Syscall(procCertFindExtension.Addr(), 3, uintptr(unsafe.Pointer(objId)), uintptr(countExtensions), uintptr(unsafe.Pointer(extensions)))
 	ret = (*CertExtension)(unsafe.Pointer(r0))
@@ -1285,19 +1263,6 @@ func CertOpenSystemStore(hprov Handle, name *uint16) (store Handle, err error) {
 
 func CertVerifyCertificateChainPolicy(policyOID uintptr, chain *CertChainContext, para *CertChainPolicyPara, status *CertChainPolicyStatus) (err error) {
 	r1, _, e1 := syscall.Syscall6(procCertVerifyCertificateChainPolicy.Addr(), 4, uintptr(policyOID), uintptr(unsafe.Pointer(chain)), uintptr(unsafe.Pointer(para)), uintptr(unsafe.Pointer(status)), 0, 0)
-	if r1 == 0 {
-		err = errnoErr(e1)
-	}
-	return
-}
-
-func CryptAcquireCertificatePrivateKey(cert *CertContext, flags uint32, parameters unsafe.Pointer, cryptProvOrNCryptKey *Handle, keySpec *uint32, callerFreeProvOrNCryptKey *bool) (err error) {
-	var _p0 uint32
-	if *callerFreeProvOrNCryptKey {
-		_p0 = 1
-	}
-	r1, _, e1 := syscall.Syscall6(procCryptAcquireCertificatePrivateKey.Addr(), 6, uintptr(unsafe.Pointer(cert)), uintptr(flags), uintptr(parameters), uintptr(unsafe.Pointer(cryptProvOrNCryptKey)), uintptr(unsafe.Pointer(keySpec)), uintptr(unsafe.Pointer(&_p0)))
-	*callerFreeProvOrNCryptKey = _p0 != 0
 	if r1 == 0 {
 		err = errnoErr(e1)
 	}
@@ -1481,7 +1446,7 @@ func CreateHardLink(filename *uint16, existingfilename *uint16, reserved uintptr
 	return
 }
 
-func CreateIoCompletionPort(filehandle Handle, cphandle Handle, key uintptr, threadcnt uint32) (handle Handle, err error) {
+func CreateIoCompletionPort(filehandle Handle, cphandle Handle, key uint32, threadcnt uint32) (handle Handle, err error) {
 	r0, _, e1 := syscall.Syscall6(procCreateIoCompletionPort.Addr(), 4, uintptr(filehandle), uintptr(cphandle), uintptr(key), uintptr(threadcnt), 0, 0)
 	handle = Handle(r0)
 	if handle == 0 {
@@ -2067,7 +2032,7 @@ func GetProcessWorkingSetSizeEx(hProcess Handle, lpMinimumWorkingSetSize *uintpt
 	return
 }
 
-func GetQueuedCompletionStatus(cphandle Handle, qty *uint32, key *uintptr, overlapped **Overlapped, timeout uint32) (err error) {
+func GetQueuedCompletionStatus(cphandle Handle, qty *uint32, key *uint32, overlapped **Overlapped, timeout uint32) (err error) {
 	r1, _, e1 := syscall.Syscall6(procGetQueuedCompletionStatus.Addr(), 5, uintptr(cphandle), uintptr(unsafe.Pointer(qty)), uintptr(unsafe.Pointer(key)), uintptr(unsafe.Pointer(overlapped)), uintptr(timeout), 0)
 	if r1 == 0 {
 		err = errnoErr(e1)
@@ -2399,7 +2364,7 @@ func OpenThread(desiredAccess uint32, inheritHandle bool, threadId uint32) (hand
 	return
 }
 
-func PostQueuedCompletionStatus(cphandle Handle, qty uint32, key uintptr, overlapped *Overlapped) (err error) {
+func PostQueuedCompletionStatus(cphandle Handle, qty uint32, key uint32, overlapped *Overlapped) (err error) {
 	r1, _, e1 := syscall.Syscall6(procPostQueuedCompletionStatus.Addr(), 4, uintptr(cphandle), uintptr(qty), uintptr(key), uintptr(unsafe.Pointer(overlapped)), 0, 0)
 	if r1 == 0 {
 		err = errnoErr(e1)
@@ -3151,15 +3116,6 @@ func WSASend(s Handle, bufs *WSABuf, bufcnt uint32, sent *uint32, flags uint32, 
 func WSASendTo(s Handle, bufs *WSABuf, bufcnt uint32, sent *uint32, flags uint32, to *RawSockaddrAny, tolen int32, overlapped *Overlapped, croutine *byte) (err error) {
 	r1, _, e1 := syscall.Syscall9(procWSASendTo.Addr(), 9, uintptr(s), uintptr(unsafe.Pointer(bufs)), uintptr(bufcnt), uintptr(unsafe.Pointer(sent)), uintptr(flags), uintptr(unsafe.Pointer(to)), uintptr(tolen), uintptr(unsafe.Pointer(overlapped)), uintptr(unsafe.Pointer(croutine)))
 	if r1 == socket_error {
-		err = errnoErr(e1)
-	}
-	return
-}
-
-func WSASocket(af int32, typ int32, protocol int32, protoInfo *WSAProtocolInfo, group uint32, flags uint32) (handle Handle, err error) {
-	r0, _, e1 := syscall.Syscall6(procWSASocketW.Addr(), 6, uintptr(af), uintptr(typ), uintptr(protocol), uintptr(unsafe.Pointer(protoInfo)), uintptr(group), uintptr(flags))
-	handle = Handle(r0)
-	if handle == InvalidHandle {
 		err = errnoErr(e1)
 	}
 	return

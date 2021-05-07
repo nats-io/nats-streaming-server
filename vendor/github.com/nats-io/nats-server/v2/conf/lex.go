@@ -413,6 +413,8 @@ func lexIncludeQuotedString(lx *lexer) stateFn {
 		lx.next()
 		lx.ignore()
 		return lx.pop()
+	case r == eof:
+		return lx.errorf("Unexpected EOF in quoted include")
 	}
 	return lexIncludeQuotedString
 }
@@ -429,6 +431,8 @@ func lexIncludeDubQuotedString(lx *lexer) stateFn {
 		lx.next()
 		lx.ignore()
 		return lx.pop()
+	case r == eof:
+		return lx.errorf("Unexpected EOF in double quoted include")
 	}
 	return lexIncludeDubQuotedString
 }
@@ -666,8 +670,9 @@ func lexMapKeyStart(lx *lexer) stateFn {
 
 // lexMapQuotedKey consumes the text of a key between quotes.
 func lexMapQuotedKey(lx *lexer) stateFn {
-	r := lx.peek()
-	if r == sqStringEnd {
+	if r := lx.peek(); r == eof {
+		return lx.errorf("Unexpected EOF processing quoted map key.")
+	} else if r == sqStringEnd {
 		lx.emit(itemKey)
 		lx.next()
 		return lexSkip(lx, lexMapKeyEnd)
@@ -678,8 +683,9 @@ func lexMapQuotedKey(lx *lexer) stateFn {
 
 // lexMapQuotedKey consumes the text of a key between quotes.
 func lexMapDubQuotedKey(lx *lexer) stateFn {
-	r := lx.peek()
-	if r == dqStringEnd {
+	if r := lx.peek(); r == eof {
+		return lx.errorf("Unexpected EOF processing double quoted map key.")
+	} else if r == dqStringEnd {
 		lx.emit(itemKey)
 		lx.next()
 		return lexSkip(lx, lexMapKeyEnd)
@@ -691,8 +697,9 @@ func lexMapDubQuotedKey(lx *lexer) stateFn {
 // lexMapKey consumes the text of a key. Assumes that the first character (which
 // is not whitespace) has already been consumed.
 func lexMapKey(lx *lexer) stateFn {
-	r := lx.peek()
-	if unicode.IsSpace(r) {
+	if r := lx.peek(); r == eof {
+		return lx.errorf("Unexpected EOF processing map key.")
+	} else if unicode.IsSpace(r) {
 		// Spaces signal we could be looking at a keyword, e.g. include.
 		// Keywords will eat the keyword and set the appropriate return stateFn.
 		return lx.keyCheckKeyword(lexMapKeyEnd, lexMapValueEnd)
@@ -783,6 +790,9 @@ func (lx *lexer) isBool() bool {
 
 // Check if the unquoted string is a variable reference, starting with $.
 func (lx *lexer) isVariable() bool {
+	if lx.start >= len(lx.input) {
+		return false
+	}
 	if lx.input[lx.start] == '$' {
 		lx.start += 1
 		return true
@@ -984,6 +994,7 @@ func lexNumberOrDateOrStringOrIP(lx *lexer) stateFn {
 	case !(isNL(r) || r == eof || r == mapEnd || r == optValTerm || r == mapValTerm || isWhitespace(r) || unicode.IsDigit(r)):
 		// Treat it as a string value once we get a rune that
 		// is not a number.
+		lx.stringStateFn = lexString
 		return lexString
 	}
 	lx.backup()
@@ -995,7 +1006,7 @@ func lexNumberOrDateOrStringOrIP(lx *lexer) stateFn {
 func lexConvenientNumber(lx *lexer) stateFn {
 	r := lx.next()
 	switch {
-	case r == 'b' || r == 'B':
+	case r == 'b' || r == 'B' || r == 'i' || r == 'I':
 		return lexConvenientNumber
 	}
 	lx.backup()
@@ -1132,7 +1143,7 @@ func lexSkip(lx *lexer, nextState stateFn) stateFn {
 
 // Tests to see if we have a number suffix
 func isNumberSuffix(r rune) bool {
-	return r == 'k' || r == 'K' || r == 'm' || r == 'M' || r == 'g' || r == 'G'
+	return r == 'k' || r == 'K' || r == 'm' || r == 'M' || r == 'g' || r == 'G' || r == 't' || r == 'T' || r == 'p' || r == 'P' || r == 'e' || r == 'E'
 }
 
 // Tests for both key separators

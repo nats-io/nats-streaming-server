@@ -215,7 +215,13 @@ func (s *StanServer) createServerRaftNode(hasStreamingState bool) error {
 		for i := 0; i < 5; i++ {
 			r, err := s.ncr.Request(fmt.Sprintf("%s.%s.join", defaultRaftPrefix, name), req, joinRaftGroupTimeout)
 			if err != nil {
-				time.Sleep(20 * time.Millisecond)
+				waitTime := 20 * time.Millisecond
+				if err == nats.ErrNoResponders {
+					// wait the equivalent of the Request() timeout, so that our
+					// loop does not fail too fast.
+					waitTime += joinRaftGroupTimeout
+				}
+				time.Sleep(waitTime)
 				continue
 			}
 			if err := resp.Unmarshal(r.Data); err != nil {
