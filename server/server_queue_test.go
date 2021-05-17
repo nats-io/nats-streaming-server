@@ -1281,6 +1281,7 @@ func TestQueueRedeliveryCount(t *testing.T) {
 	defer sc.Close()
 
 	errCh := make(chan error, 2)
+	ch := make(chan bool, 1)
 	var mu sync.Mutex
 	var prev uint32
 	cb := func(m *stan.Msg) {
@@ -1293,6 +1294,10 @@ func TestQueueRedeliveryCount(t *testing.T) {
 				return
 			}
 			prev = m.RedeliveryCount
+			if m.RedeliveryCount == 5 {
+				m.Ack()
+				ch <- true
+			}
 			mu.Unlock()
 		}
 	}
@@ -1308,7 +1313,20 @@ func TestQueueRedeliveryCount(t *testing.T) {
 	select {
 	case e := <-errCh:
 		t.Fatal(e.Error())
-	case <-time.After(500 * time.Millisecond):
-		// ok!
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("Timedout")
 	}
+
+	// Make sure that deliver count map gets cleaned-up once messages are acknowledged.
+	sub := s.clients.getSubs(clientName)[0]
+	sub.RLock()
+	qs := sub.qstate
+	sub.RUnlock()
+	waitForCount(t, 0, func() (string, int) {
+		qs.RLock()
+		l := len(qs.rdlvCount)
+		qs.RUnlock()
+		return "queue redelivery map size", l
+	})
 }

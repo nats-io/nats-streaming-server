@@ -7808,7 +7808,7 @@ func TestClusteringRedeliveryCount(t *testing.T) {
 	atomic.StoreInt32(&restarted, 1)
 	s1 = runServerWithOpts(t, s1sOpts, nil)
 	defer s1.Shutdown()
-	getLeader(t, 10*time.Second, s1, s2, s3)
+	leader := getLeader(t, 10*time.Second, s1, s2, s3)
 
 	select {
 	case e := <-errCh:
@@ -7839,6 +7839,15 @@ func TestClusteringRedeliveryCount(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatalf("Timedout")
 	}
+
+	// Make sure that deliver count map gets cleaned-up once messages are acknowledged.
+	sub := leader.clients.getSubs(clientName)[0]
+	waitForCount(t, 0, func() (string, int) {
+		sub.RLock()
+		l := len(sub.rdlvCount)
+		sub.RUnlock()
+		return "redelivery map size", l
+	})
 }
 
 func testRemoveNode(t *testing.T, nc *nats.Conn, node string, timeoutExpected bool) {

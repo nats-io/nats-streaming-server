@@ -5428,6 +5428,15 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64, from
 			return
 		}
 		delete(sub.acksPending, sequence)
+		// Remove from redelivery count map only if processing an ACK from the user,
+		// not simply when reassigning to a new member of a queue group.
+		if fromUser {
+			if qs != nil {
+				delete(qs.rdlvCount, sequence)
+			} else {
+				delete(sub.rdlvCount, sequence)
+			}
+		}
 	} else if qs != nil && fromUser {
 		// For queue members, if this is not an internally generated ACK
 		// and we don't find the sequence in this sub's pending, we are
@@ -5438,13 +5447,19 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64, from
 				continue
 			}
 			qsub.Lock()
-			if _, found := qsub.acksPending[sequence]; found {
+			_, found := qsub.acksPending[sequence]
+			if found {
 				delete(qsub.acksPending, sequence)
 				persistAck(qsub)
-				qsub.Unlock()
-				break
 			}
 			qsub.Unlock()
+			if found {
+				// We are still under the qstate lock. Since we found this message
+				// in one of the member of the group, remove it from the redelivery
+				// count map now.
+				delete(qs.rdlvCount, sequence)
+				break
+			}
 		}
 		sub.Lock()
 		// Proceed with original sub (regardless if member was found

@@ -1748,6 +1748,15 @@ func TestPersistentStoreRedeliveryCount(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatalf("Timedout")
 	}
+
+	// Make sure that deliver count map gets cleaned-up once messages are acknowledged.
+	sub := s.clients.getSubs(clientName)[0]
+	waitForCount(t, 0, func() (string, int) {
+		sub.RLock()
+		l := len(sub.rdlvCount)
+		sub.RUnlock()
+		return "redelivery map size", l
+	})
 }
 
 type testRdlvRaceWithAck struct {
