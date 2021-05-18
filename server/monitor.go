@@ -159,17 +159,17 @@ func (s *StanServer) startMonitoring(nOpts *natsd.Options) error {
 	}
 
 	mux := hh.(*http.ServeMux)
-	mux.HandleFunc(RootPath, s.handleRootz)
-	mux.HandleFunc(ServerPath, s.handleServerz)
-	mux.HandleFunc(StorePath, s.handleStorez)
-	mux.HandleFunc(ClientsPath, s.handleClientsz)
-	mux.HandleFunc(ChannelsPath, s.handleChannelsz)
-	mux.HandleFunc(IsFTActivePath, s.handleIsFTActivez)
+	mux.HandleFunc(RootPath, s.HandleRootz)
+	mux.HandleFunc(ServerPath, s.HandleServerz)
+	mux.HandleFunc(StorePath, s.HandleStorez)
+	mux.HandleFunc(ClientsPath, s.HandleClientsz)
+	mux.HandleFunc(ChannelsPath, s.HandleChannelsz)
+	mux.HandleFunc(IsFTActivePath, s.HandleIsFTActivez)
 
 	return nil
 }
 
-func (s *StanServer) handleRootz(w http.ResponseWriter, r *http.Request) {
+func (s *StanServer) HandleRootz(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `<html lang="en">
    <head>
     <link rel="shortcut icon" href="http://nats.io/img/favicon.ico">
@@ -191,7 +191,7 @@ func (s *StanServer) handleRootz(w http.ResponseWriter, r *http.Request) {
 </html>`, ServerPath, StorePath, ClientsPath, ChannelsPath)
 }
 
-func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
+func (s *StanServer) HandleServerz(w http.ResponseWriter, r *http.Request) {
 	numChannels := s.channels.count()
 	count, bytes, err := s.channels.msgsState("")
 	if err != nil {
@@ -253,7 +253,7 @@ func (s *StanServer) handleServerz(w http.ResponseWriter, r *http.Request) {
 	s.sendResponse(w, r, serverz)
 }
 
-func (s *StanServer) handleIsFTActivez(w http.ResponseWriter, r *http.Request) {
+func (s *StanServer) HandleIsFTActivez(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	state := s.state
 	s.mu.RUnlock()
@@ -287,7 +287,7 @@ func myUptime(d time.Duration) string {
 	return fmt.Sprintf("%ds", tsecs)
 }
 
-func (s *StanServer) handleStorez(w http.ResponseWriter, r *http.Request) {
+func (s *StanServer) HandleStorez(w http.ResponseWriter, r *http.Request) {
 	count, bytes, err := s.channels.msgsState("")
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error getting information about channels state: %v", err), http.StatusInternalServerError)
@@ -311,7 +311,7 @@ func (c byClientID) Len() int           { return len(c) }
 func (c byClientID) Swap(i, j int)      { c[i], c[j] = c[j], c[i] }
 func (c byClientID) Less(i, j int) bool { return c[i].ID < c[j].ID }
 
-func (s *StanServer) handleClientsz(w http.ResponseWriter, r *http.Request) {
+func (s *StanServer) HandleClientsz(w http.ResponseWriter, r *http.Request) {
 	singleClient := r.URL.Query().Get("client")
 	subsOption, _ := strconv.Atoi(r.URL.Query().Get("subs"))
 	if singleClient != "" {
@@ -489,7 +489,7 @@ func (a byChannelName) Len() int           { return (len(a)) }
 func (a byChannelName) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a byChannelName) Less(i, j int) bool { return a[i].Name < a[j].Name }
 
-func (s *StanServer) handleChannelsz(w http.ResponseWriter, r *http.Request) {
+func (s *StanServer) HandleChannelsz(w http.ResponseWriter, r *http.Request) {
 	channelName := r.URL.Query().Get("channel")
 	subsOption, _ := strconv.Atoi(r.URL.Query().Get("subs"))
 	if channelName != "" {
