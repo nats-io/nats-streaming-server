@@ -2481,7 +2481,7 @@ func (s *StanServer) ensureRunningStandAlone() error {
 	req := &pb.ConnectRequest{ClientID: clusterID, HeartbeatInbox: hbInbox}
 	b, _ := req.Marshal()
 	reply, err := s.nc.Request(s.info.Discovery, b, timeout)
-	if err == nats.ErrTimeout {
+	if err == nats.ErrTimeout || err == nats.ErrNoResponders {
 		s.log.Debugf("Did not detect another server instance")
 		return nil
 	}

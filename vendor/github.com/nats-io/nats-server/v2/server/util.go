@@ -14,8 +14,10 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"reflect"
@@ -23,6 +25,10 @@ import (
 	"strings"
 	"time"
 )
+
+// This map is used to store URLs string as the key with a reference count as
+// the value. This is used to handle gossiped URLs such as connect_urls, etc..
+type refCountedUrlSet map[string]int
 
 // Ascii numbers 0-9
 const (
@@ -33,8 +39,10 @@ const (
 // parseSize expects decimal positive numbers. We
 // return -1 to signal error.
 func parseSize(d []byte) (n int) {
+	const maxParseSizeLen = 9 //999M
+
 	l := len(d)
-	if l == 0 {
+	if l == 0 || l > maxParseSizeLen {
 		return -1
 	}
 	var (
@@ -85,8 +93,7 @@ func secondsToDuration(seconds float64) time.Duration {
 func parseHostPort(hostPort string, defaultPort int) (host string, port int, err error) {
 	if hostPort != "" {
 		host, sPort, err := net.SplitHostPort(hostPort)
-		switch err.(type) {
-		case *net.AddrError:
+		if ae, ok := err.(*net.AddrError); ok && strings.Contains(ae.Err, "missing port") {
 			// try appending the current port
 			host, sPort, err = net.SplitHostPort(fmt.Sprintf("%s:%d", hostPort, defaultPort))
 		}
@@ -109,4 +116,108 @@ func parseHostPort(hostPort string, defaultPort int) (host string, port int, err
 // false otherwise.
 func urlsAreEqual(u1, u2 *url.URL) bool {
 	return reflect.DeepEqual(u1, u2)
+}
+
+// comma produces a string form of the given number in base 10 with
+// commas after every three orders of magnitude.
+//
+// e.g. comma(834142) -> 834,142
+//
+// This function was copied from the github.com/dustin/go-humanize
+// package and is Copyright Dustin Sallings <dustin@spy.net>
+func comma(v int64) string {
+	sign := ""
+
+	// Min int64 can't be negated to a usable value, so it has to be special cased.
+	if v == math.MinInt64 {
+		return "-9,223,372,036,854,775,808"
+	}
+
+	if v < 0 {
+		sign = "-"
+		v = 0 - v
+	}
+
+	parts := []string{"", "", "", "", "", "", ""}
+	j := len(parts) - 1
+
+	for v > 999 {
+		parts[j] = strconv.FormatInt(v%1000, 10)
+		switch len(parts[j]) {
+		case 2:
+			parts[j] = "0" + parts[j]
+		case 1:
+			parts[j] = "00" + parts[j]
+		}
+		v = v / 1000
+		j--
+	}
+	parts[j] = strconv.Itoa(int(v))
+	return sign + strings.Join(parts[j:], ",")
+}
+
+// Adds urlStr to the given map. If the string was already present, simply
+// bumps the reference count.
+// Returns true only if it was added for the first time.
+func (m refCountedUrlSet) addUrl(urlStr string) bool {
+	m[urlStr]++
+	return m[urlStr] == 1
+}
+
+// Removes urlStr from the given map. If the string is not present, nothing
+// is done and false is returned.
+// If the string was present, its reference count is decreased. Returns true
+// if this was the last reference, false otherwise.
+func (m refCountedUrlSet) removeUrl(urlStr string) bool {
+	removed := false
+	if ref, ok := m[urlStr]; ok {
+		if ref == 1 {
+			removed = true
+			delete(m, urlStr)
+		} else {
+			m[urlStr]--
+		}
+	}
+	return removed
+}
+
+// Returns the unique URLs in this map as a slice
+func (m refCountedUrlSet) getAsStringSlice() []string {
+	a := make([]string, 0, len(m))
+	for u := range m {
+		a = append(a, u)
+	}
+	return a
+}
+
+// natsListenConfig provides a common configuration to match the one used by
+// net.Listen() but with our own defaults.
+// Go 1.13 introduced default-on TCP keepalives with aggressive timings and
+// there's no sane portable way in Go with stdlib to split the initial timer
+// from the retry timer.  Linux/BSD defaults are 2hrs/75s and Go sets both
+// to 15s; the issue re making them indepedently tunable has been open since
+// 2014 and this code here is being written in 2020.
+// The NATS protocol has its own L7 PING/PONG keepalive system and the Go
+// defaults are inappropriate for IoT deployment scenarios.
+// Replace any NATS-protocol calls to net.Listen(...) with
+// natsListenConfig.Listen(ctx,...) or use natsListen(); leave calls for HTTP
+// monitoring, etc, on the default.
+var natsListenConfig = &net.ListenConfig{
+	KeepAlive: -1,
+}
+
+// natsListen() is the same as net.Listen() except that TCP keepalives are
+// disabled (to match Go's behavior before Go 1.13).
+func natsListen(network, address string) (net.Listener, error) {
+	return natsListenConfig.Listen(context.Background(), network, address)
+}
+
+// natsDialTimeout is the same as net.DialTimeout() except the TCP keepalives
+// are disabled (to match Go's behavior before Go 1.13).
+func natsDialTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
+	d := net.Dialer{
+		Timeout:   timeout,
+		KeepAlive: -1,
+	}
+	return d.Dial(network, address)
 }

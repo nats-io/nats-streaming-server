@@ -4,7 +4,6 @@
 
 // illumos system calls not present on Solaris.
 
-//go:build amd64 && illumos
 // +build amd64,illumos
 
 package unix

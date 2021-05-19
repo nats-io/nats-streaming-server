@@ -446,6 +446,7 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 
 	ncOpts1 := natsdTest.DefaultTestOptions
 	ncOpts1.Host = "127.0.0.1"
+	ncOpts1.Cluster.Name = "abc"
 	ncOpts1.Cluster.Host = "127.0.0.1"
 	ncOpts1.Cluster.Port = 6222
 	ncOpts1.Routes = natsd.RoutesFromStr("nats://127.0.0.1:6223")
@@ -506,6 +507,7 @@ func TestPartitionsSendListAfterRouteEstablished(t *testing.T) {
 	ncOpts2 := natsdTest.DefaultTestOptions
 	ncOpts2.Host = "127.0.0.1"
 	ncOpts2.Port = 4223
+	ncOpts2.Cluster.Name = "abc"
 	ncOpts2.Cluster.Host = "127.0.0.1"
 	ncOpts2.Cluster.Port = 6223
 	ns2 := natsdTest.RunServer(&ncOpts2)

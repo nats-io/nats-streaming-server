@@ -1,4 +1,4 @@
-// Copyright 2012-2019 The NATS Authors
+// Copyright 2012-2021 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -29,6 +29,7 @@ const (
 
 	// private for now
 	commandLDMode = Command("ldm")
+	commandTerm   = Command("term")
 )
 
 var (
@@ -40,7 +41,7 @@ var (
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "2.1.9"
+	VERSION = "2.2.4"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
@@ -74,10 +75,10 @@ const (
 	DEFAULT_MAX_CONNECTIONS = (64 * 1024)
 
 	// TLS_TIMEOUT is the TLS wait time.
-	TLS_TIMEOUT = 500 * time.Millisecond
+	TLS_TIMEOUT = 2 * time.Second
 
 	// AUTH_TIMEOUT is the authorization wait time.
-	AUTH_TIMEOUT = 2 * TLS_TIMEOUT
+	AUTH_TIMEOUT = 2 * time.Second
 
 	// DEFAULT_PING_INTERVAL is how often pings are sent to clients and routes.
 	DEFAULT_PING_INTERVAL = 2 * time.Minute
@@ -92,7 +93,7 @@ const (
 	LEN_CR_LF = len(CR_LF)
 
 	// DEFAULT_FLUSH_DEADLINE is the write/flush deadlines.
-	DEFAULT_FLUSH_DEADLINE = 2 * time.Second
+	DEFAULT_FLUSH_DEADLINE = 10 * time.Second
 
 	// DEFAULT_HTTP_PORT is the default monitoring port.
 	DEFAULT_HTTP_PORT = 8222
@@ -124,28 +125,34 @@ const (
 	// PROTO_SNIPPET_SIZE is the default size of proto to print on parse errors.
 	PROTO_SNIPPET_SIZE = 32
 
+	// MAX_CONTROL_LINE_SNIPPET_SIZE is the default size of proto to print on max control line errors.
+	MAX_CONTROL_LINE_SNIPPET_SIZE = 128
+
 	// MAX_MSG_ARGS Maximum possible number of arguments from MSG proto.
 	MAX_MSG_ARGS = 4
+
+	// MAX_RMSG_ARGS Maximum possible number of arguments from RMSG proto.
+	MAX_RMSG_ARGS = 6
+
+	// MAX_HMSG_ARGS Maximum possible number of arguments from HMSG proto.
+	MAX_HMSG_ARGS = 7
 
 	// MAX_PUB_ARGS Maximum possible number of arguments from PUB proto.
 	MAX_PUB_ARGS = 3
 
+	// MAX_HPUB_ARGS Maximum possible number of arguments from HPUB proto.
+	MAX_HPUB_ARGS = 4
+
 	// DEFAULT_MAX_CLOSED_CLIENTS is the maximum number of closed connections we hold onto.
 	DEFAULT_MAX_CLOSED_CLIENTS = 10000
-
-	// DEFAULT_MAX_ACCOUNT_AE_RESPONSE_MAPS is for auto-expire response maps for imports.
-	DEFAULT_MAX_ACCOUNT_AE_RESPONSE_MAPS = 100000
-
-	// DEFAULT_MAX_ACCOUNT_INTERNAL_RESPONSE_MAPS is for non auto-expire response maps for imports.
-	// These are present for non-singleton response types.
-	DEFAULT_MAX_ACCOUNT_INTERNAL_RESPONSE_MAPS = 100000
-
-	// DEFAULT_TTL_AE_RESPONSE_MAP is the default time to expire auto-response map entries.
-	DEFAULT_TTL_AE_RESPONSE_MAP = 10 * time.Minute
 
 	// DEFAULT_LAME_DUCK_DURATION is the time in which the server spreads
 	// the closing of clients when signaled to go in lame duck mode.
 	DEFAULT_LAME_DUCK_DURATION = 2 * time.Minute
+
+	// DEFAULT_LAME_DUCK_GRACE_PERIOD is the duration the server waits, after entering
+	// lame duck mode, before starting closing client connections.
+	DEFAULT_LAME_DUCK_GRACE_PERIOD = 10 * time.Second
 
 	// DEFAULT_LEAFNODE_INFO_WAIT Route dial timeout.
 	DEFAULT_LEAFNODE_INFO_WAIT = 1 * time.Second
@@ -179,7 +186,21 @@ const (
 	// dynamic response permission.
 	DEFAULT_ALLOW_RESPONSE_EXPIRATION = 2 * time.Minute
 
+	// DEFAULT_SERVICE_EXPORT_RESPONSE_THRESHOLD is the default time that the system will
+	// expect a service export response to be delivered. This is used in corner cases for
+	// time based cleanup of reverse mapping structures.
+	DEFAULT_SERVICE_EXPORT_RESPONSE_THRESHOLD = 2 * time.Minute
+
 	// DEFAULT_SERVICE_LATENCY_SAMPLING is the default sampling rate for service
 	// latency metrics
 	DEFAULT_SERVICE_LATENCY_SAMPLING = 100
+
+	// DEFAULT_SYSTEM_ACCOUNT
+	DEFAULT_SYSTEM_ACCOUNT = "$SYS"
+
+	// DEFAULT GLOBAL_ACCOUNT
+	DEFAULT_GLOBAL_ACCOUNT = "$G"
+
+	// DEFAULT_FETCH_TIMEOUT is the default time that the system will wait for an account fetch to return.
+	DEFAULT_ACCOUNT_FETCH_TIMEOUT = 2 * time.Second
 )

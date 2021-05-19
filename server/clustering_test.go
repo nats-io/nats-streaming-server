@@ -569,6 +569,7 @@ func TestClusteringBootstrapMisconfiguration(t *testing.T) {
 	n1Opts := natsdTest.DefaultTestOptions
 	n1Opts.Host = "127.0.0.1"
 	n1Opts.Port = 4222
+	n1Opts.Cluster.Name = "abc"
 	n1Opts.Cluster.Host = "127.0.0.1"
 	n1Opts.Cluster.Port = 6222
 	n1Opts.Routes = natsd.RoutesFromStr("nats://127.0.0.1:6223")
@@ -587,6 +588,7 @@ func TestClusteringBootstrapMisconfiguration(t *testing.T) {
 	n2Opts := natsdTest.DefaultTestOptions
 	n2Opts.Host = "127.0.0.1"
 	n2Opts.Port = 4223
+	n2Opts.Cluster.Name = "abc"
 	n2Opts.Cluster.Host = "127.0.0.1"
 	n2Opts.Cluster.Port = 6223
 	s2sOpts := getTestDefaultOptsForClustering("b", true)
@@ -4844,6 +4846,7 @@ func TestClusteringNoPanicOnChannelDelete(t *testing.T) {
 	// For this test, we need 2 NATS Servers
 	do := natsdTest.DefaultTestOptions
 	ns1Opts := do.Clone()
+	ns1Opts.Cluster.Name = "abc"
 	ns1Opts.Cluster.Host = "127.0.0.1"
 	ns1Opts.Cluster.Port = -1
 	ns1 := natsdTest.RunServer(ns1Opts)
@@ -4861,6 +4864,7 @@ func TestClusteringNoPanicOnChannelDelete(t *testing.T) {
 
 	ns2Opts := do.Clone()
 	ns2Opts.Port = 4223
+	ns2Opts.Cluster.Name = "abc"
 	ns2Opts.Cluster.Host = "127.0.0.1"
 	ns2Opts.Cluster.Port = -1
 	ns2Opts.Routes = natsd.RoutesFromStr(proxy.getAddr())
@@ -7330,6 +7334,7 @@ func TestClusteringRestoreSnapshotGapInSeq(t *testing.T) {
 	n1Opts := natsdTest.DefaultTestOptions
 	n1Opts.Host = "127.0.0.1"
 	n1Opts.Port = 4222
+	n1Opts.Cluster.Name = "abc"
 	n1Opts.Cluster.Host = "127.0.0.1"
 	n1Opts.Cluster.Port = 6222
 	ns1 := natsdTest.RunServer(&n1Opts)
@@ -7338,6 +7343,7 @@ func TestClusteringRestoreSnapshotGapInSeq(t *testing.T) {
 	n2Opts := natsdTest.DefaultTestOptions
 	n2Opts.Host = "127.0.0.1"
 	n2Opts.Port = 4223
+	n2Opts.Cluster.Name = "abc"
 	n2Opts.Cluster.Host = "127.0.0.1"
 	n2Opts.Cluster.Port = 6223
 	n2Opts.Routes = natsd.RoutesFromStr("nats://127.0.0.1:6222")
@@ -7347,6 +7353,7 @@ func TestClusteringRestoreSnapshotGapInSeq(t *testing.T) {
 	n3Opts := natsdTest.DefaultTestOptions
 	n3Opts.Host = "127.0.0.1"
 	n3Opts.Port = 4224
+	n3Opts.Cluster.Name = "abc"
 	n3Opts.Cluster.Host = "127.0.0.1"
 	n3Opts.Cluster.Port = 6224
 	n3Opts.Routes = natsd.RoutesFromStr("nats://127.0.0.1:6222, nats://127.0.0.1:6223")
@@ -7594,6 +7601,7 @@ func TestClusteringSubStateProperlyResetOnLeadershipAcquired(t *testing.T) {
 	// when shuting one down.
 	nsAopts := natsdTest.DefaultTestOptions
 	nsAopts.Port = 4222
+	nsAopts.Cluster.Name = "abc"
 	nsAopts.Cluster.Host = "127.0.0.1"
 	nsAopts.Cluster.Port = -1
 	nsAopts.Cluster.NoAdvertise = true
@@ -7602,6 +7610,7 @@ func TestClusteringSubStateProperlyResetOnLeadershipAcquired(t *testing.T) {
 
 	nsBCopts := natsdTest.DefaultTestOptions
 	nsBCopts.Port = 4223
+	nsBCopts.Cluster.Name = "abc"
 	nsBCopts.Cluster.Host = "127.0.0.1"
 	nsBCopts.Cluster.Port = -1
 	nsBCopts.Routes = natsd.RoutesFromStr(fmt.Sprintf("nats://127.0.0.1:%v", nsAopts.Cluster.Port))
@@ -7858,7 +7867,7 @@ func testRemoveNode(t *testing.T, nc *nats.Conn, node string, timeoutExpected bo
 	}
 	resp, err := nc.Request(fmt.Sprintf(removeClusterNodeSubj, clusterName), []byte(node), timeout)
 	if timeoutExpected {
-		if err != nats.ErrTimeout {
+		if err != nats.ErrTimeout && err != nats.ErrNoResponders {
 			t.Fatalf("Expected timeout, got %v", err)
 		}
 		return

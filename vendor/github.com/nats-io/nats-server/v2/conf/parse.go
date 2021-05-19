@@ -253,16 +253,28 @@ func (p *parser) processItem(it item, fp string) error {
 			setValue(it, num)
 		case "k":
 			setValue(it, num*1000)
-		case "kb":
+		case "kb", "ki", "kib":
 			setValue(it, num*1024)
 		case "m":
 			setValue(it, num*1000*1000)
-		case "mb":
+		case "mb", "mi", "mib":
 			setValue(it, num*1024*1024)
 		case "g":
 			setValue(it, num*1000*1000*1000)
-		case "gb":
+		case "gb", "gi", "gib":
 			setValue(it, num*1024*1024*1024)
+		case "t":
+			setValue(it, num*1000*1000*1000*1000)
+		case "tb", "ti", "tib":
+			setValue(it, num*1024*1024*1024*1024)
+		case "p":
+			setValue(it, num*1000*1000*1000*1000*1000)
+		case "pb", "pi", "pib":
+			setValue(it, num*1024*1024*1024*1024*1024)
+		case "e":
+			setValue(it, num*1000*1000*1000*1000*1000*1000)
+		case "eb", "ei", "eib":
+			setValue(it, num*1024*1024*1024*1024*1024*1024)
 		}
 	case itemFloat:
 		num, err := strconv.ParseFloat(it.val, 64)

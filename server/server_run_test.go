@@ -74,7 +74,7 @@ func TestRunServerFailureLogsCause(t *testing.T) {
 	}
 
 	// We should get a trace in the log
-	if !strings.Contains(d.fatal, "available for connection") {
+	if !strings.Contains(d.fatal, "Failed to start") {
 		t.Fatalf("Expected to get a cause as invalid connection, got: %v", d.msg)
 	}
 }
@@ -142,6 +142,7 @@ func TestEnsureStandAlone(t *testing.T) {
 
 	// Start a streaming server, and setup a route
 	nOpts := DefaultNatsServerOptions
+	nOpts.Cluster.Name = "abc"
 	nOpts.Cluster.ListenStr = "nats://127.0.0.1:5550"
 	nOpts.RoutesStr = "nats://127.0.0.1:5551"
 
@@ -155,6 +156,7 @@ func TestEnsureStandAlone(t *testing.T) {
 	// same cluster ID.  It should fail
 	nOpts2 := DefaultNatsServerOptions
 	nOpts2.Port = 4333
+	nOpts2.Cluster.Name = "abc"
 	nOpts2.Cluster.ListenStr = "nats://127.0.0.1:5551"
 	nOpts2.RoutesStr = "nats://127.0.0.1:5550"
 	s2, err := RunServerWithOpts(sOpts, &nOpts2)
@@ -1297,7 +1299,7 @@ func TestReopenLogFileStopsNATSDebugTrace(t *testing.T) {
 	nOpts.Debug = true
 	nOpts.Trace = true
 	nOpts.Logtime = true
-	nOpts.LogSizeLimit = 10 * 1024
+	nOpts.LogSizeLimit = 20 * 1024
 
 	sOpts := GetDefaultOptions()
 	// Ensure STAN debug and trace are set to false. This was the issue
