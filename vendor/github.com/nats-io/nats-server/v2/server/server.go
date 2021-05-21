@@ -26,6 +26,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"regexp"
 
 	// Allow dynamic profiling.
 	_ "net/http/pprof"
@@ -343,6 +344,7 @@ func NewServer(opts *Options) (*Server, error) {
 		httpBasePath: httpBasePath,
 		eventIds:     nuid.New(),
 		routesToSelf: make(map[string]struct{}),
+		httpReqStats: make(map[string]uint64), // Used to track HTTP requests
 	}
 
 	// Trusted root operator keys.
@@ -548,7 +550,10 @@ func (s *Server) ClientURL() string {
 	return fmt.Sprintf("%s%s:%d", scheme, opts.Host, opts.Port)
 }
 
-func validateClusterName(o *Options) error {
+func validateCluster(o *Options) error {
+	if err := validatePinnedCerts(o.Cluster.TLSPinnedCerts); err != nil {
+		return fmt.Errorf("cluster: %v", err)
+	}
 	// Check that cluster name if defined matches any gateway name.
 	if o.Gateway.Name != "" && o.Gateway.Name != o.Cluster.Name {
 		if o.Cluster.Name != "" {
@@ -556,6 +561,17 @@ func validateClusterName(o *Options) error {
 		}
 		// Set this here so we do not consider it dynamic.
 		o.Cluster.Name = o.Gateway.Name
+	}
+	return nil
+}
+
+func validatePinnedCerts(pinned PinnedCertSet) error {
+	re := regexp.MustCompile("^[a-f0-9]{64}$")
+	for certId := range pinned {
+		entry := strings.ToLower(certId)
+		if !re.MatchString(entry) {
+			return fmt.Errorf("error parsing 'pinned_certs' key %s does not look like lower case hex-encoded sha256 of DER encoded SubjectPublicKeyInfo", entry)
+		}
 	}
 	return nil
 }
@@ -584,7 +600,7 @@ func validateOptions(o *Options) error {
 		return err
 	}
 	// Check that cluster name if defined matches any gateway name.
-	if err := validateClusterName(o); err != nil {
+	if err := validateCluster(o); err != nil {
 		return err
 	}
 	if err := validateMQTTOptions(o); err != nil {
@@ -2080,16 +2096,6 @@ func (s *Server) basePath(p string) string {
 func (s *Server) startMonitoring(secure bool) error {
 	// Snapshot server options.
 	opts := s.getOpts()
-
-	// Used to track HTTP requests
-	s.httpReqStats = map[string]uint64{
-		RootPath:     0,
-		VarzPath:     0,
-		ConnzPath:    0,
-		RoutezPath:   0,
-		GatewayzPath: 0,
-		SubszPath:    0,
-	}
 
 	var (
 		hp           string
