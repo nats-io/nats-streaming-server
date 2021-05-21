@@ -20,6 +20,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"os"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -603,6 +604,7 @@ var (
 	jsClusterNotAvailErr   = &ApiError{Code: 503, Description: "JetStream system temporarily unavailable"}
 	jsClusterRequiredErr   = &ApiError{Code: 503, Description: "JetStream clustering support required"}
 	jsPeerNotMemberErr     = &ApiError{Code: 400, Description: "peer not a member"}
+	jsPeerRemapErr         = &ApiError{Code: 503, Description: "peer remap failed"}
 	jsClusterIncompleteErr = &ApiError{Code: 503, Description: "incomplete results"}
 	jsClusterTagsErr       = &ApiError{Code: 400, Description: "tags placement not supported for operation"}
 	jsClusterNoPeersErr    = &ApiError{Code: 400, Description: "no suitable peers for placement"}
@@ -1289,7 +1291,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, subject, re
 	// check prefix overlap with subjects
 	for _, pfx := range deliveryPrefixes {
 		if !IsValidPublishSubject(pfx) {
-			resp.Error = &ApiError{Code: 400, Description: fmt.Sprintf("stream external delivery prefix %q must not contain wildcards", pfx)}
+			resp.Error = &ApiError{Code: 400, Description: fmt.Sprintf("stream external delivery prefix %q must be a valid subject without wildcards", pfx)}
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 			return
 		}
@@ -1303,6 +1305,11 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, subject, re
 	}
 	// check if api prefixes overlap
 	for _, apiPfx := range apiPrefixes {
+		if !IsValidPublishSubject(apiPfx) {
+			resp.Error = &ApiError{Code: 400, Description: fmt.Sprintf("stream external api prefix %q must be a valid subject without wildcards", apiPfx)}
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			return
+		}
 		if SubjectsCollide(apiPfx, JSApiPrefix) {
 			resp.Error = &ApiError{Code: 400, Description: fmt.Sprintf("stream external api prefix %q must not overlap with %s", apiPfx, JSApiPrefix)}
 			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
@@ -2014,9 +2021,11 @@ func (s *Server) jsStreamRemovePeerRequest(sub *subscription, c *client, subject
 	}
 
 	// If we are here we have a valid peer member set for removal.
-	js.mu.Lock()
-	js.removePeerFromStream(sa, nodeName)
-	js.mu.Unlock()
+	if !js.removePeerFromStream(sa, nodeName) {
+		resp.Error = jsPeerRemapErr
+		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+		return
+	}
 
 	resp.Success = true
 	s.sendAPIResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(resp))
@@ -2629,9 +2638,16 @@ func (s *Server) processStreamRestore(ci *ClientInfo, acc *Account, cfg *StreamC
 
 	var resp = JSApiStreamRestoreResponse{ApiResponse: ApiResponse{Type: JSApiStreamRestoreResponseType}}
 
-	// FIXME(dlc) - Need to close these up if we fail for some reason.
-	// TODO(dlc) - Might need to make configurable or stream direct to storage dir.
-	tfile, err := ioutil.TempFile("", "jetstream-restore-")
+	snapDir := path.Join(js.config.StoreDir, snapStagingDir)
+	if _, err := os.Stat(snapDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(snapDir, defaultDirPerms); err != nil {
+			resp.Error = &ApiError{Code: 503, Description: "JetStream unable to create temp storage for restore"}
+			s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
+			return nil
+		}
+	}
+
+	tfile, err := ioutil.TempFile(snapDir, "js-restore-")
 	if err != nil {
 		resp.Error = &ApiError{Code: 500, Description: "JetStream unable to open temp storage for restore"}
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
@@ -2668,7 +2684,7 @@ func (s *Server) processStreamRestore(ci *ClientInfo, acc *Account, cfg *StreamC
 
 	var total int
 
-	// FIXM(dlc) - Probably take out of network path eventually do to disk I/O?
+	// FIXM(dlc) - Probably take out of network path eventually due to disk I/O?
 	processChunk := func(sub *subscription, c *client, subject, reply string, msg []byte) {
 		// We require reply subjects to communicate back failures, flow etc. If they do not have one log and cancel.
 		if reply == _EMPTY_ {
@@ -2723,6 +2739,8 @@ func (s *Server) processStreamRestore(ci *ClientInfo, acc *Account, cfg *StreamC
 
 	sub, err := acc.subscribeInternal(restoreSubj, processChunk)
 	if err != nil {
+		tfile.Close()
+		os.Remove(tfile.Name())
 		resp.Error = &ApiError{Code: 500, Description: "JetStream unable to subscribe to restore snapshot " + restoreSubj + ": " + err.Error()}
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return nil
@@ -2730,7 +2748,7 @@ func (s *Server) processStreamRestore(ci *ClientInfo, acc *Account, cfg *StreamC
 
 	// Mark the subject so the end user knows where to send the snapshot chunks.
 	resp.DeliverSubject = restoreSubj
-	s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(resp))
+	s.sendAPIResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(resp))
 
 	doneCh := make(chan error, 1)
 
