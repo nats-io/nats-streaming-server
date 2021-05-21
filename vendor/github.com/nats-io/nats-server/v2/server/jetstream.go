@@ -477,8 +477,8 @@ func (s *Server) enableJetStreamAccounts() error {
 	return nil
 }
 
-// enableAllJetStreamServiceImports turns on all service imports for jetstream for this account.
-func (a *Account) enableAllJetStreamServiceImports() error {
+// enableAllJetStreamServiceImportsAndMappings turns on all service imports and mappings for jetstream for this account.
+func (a *Account) enableAllJetStreamServiceImportsAndMappings() error {
 	a.mu.RLock()
 	s := a.srv
 	a.mu.RUnlock()
@@ -490,6 +490,26 @@ func (a *Account) enableAllJetStreamServiceImports() error {
 	if !a.serviceImportExists(jsAllAPI) {
 		if err := a.AddServiceImport(s.SystemAccount(), jsAllAPI, _EMPTY_); err != nil {
 			return fmt.Errorf("Error setting up jetstream service imports for account: %v", err)
+		}
+	}
+
+	// Check if we have a Domain specified.
+	// If so add in a subject mapping that will allow local connected clients to reach us here as well.
+	if opts := s.getOpts(); opts.JetStreamDomain != _EMPTY_ {
+		src := fmt.Sprintf(jsDomainAPI, opts.JetStreamDomain)
+		found := false
+		a.mu.RLock()
+		for _, m := range a.mappings {
+			if src == m.src {
+				found = true
+				break
+			}
+		}
+		a.mu.RUnlock()
+		if !found {
+			if err := a.AddMapping(src, jsAllAPI); err != nil {
+				s.Errorf("Error adding JetStream domain mapping: %v", err)
+			}
 		}
 	}
 
@@ -505,7 +525,7 @@ func (a *Account) enableJetStreamInfoServiceImportOnly() error {
 		return nil
 	}
 
-	return a.enableAllJetStreamServiceImports()
+	return a.enableAllJetStreamServiceImportsAndMappings()
 }
 
 func (s *Server) configJetStream(acc *Account) error {
@@ -515,7 +535,7 @@ func (s *Server) configJetStream(acc *Account) error {
 	if acc.jsLimits != nil {
 		// Check if already enabled. This can be during a reload.
 		if acc.JetStreamEnabled() {
-			if err := acc.enableAllJetStreamServiceImports(); err != nil {
+			if err := acc.enableAllJetStreamServiceImportsAndMappings(); err != nil {
 				return err
 			}
 			if err := acc.UpdateJetStreamLimits(acc.jsLimits); err != nil {
@@ -843,23 +863,13 @@ func (a *Account) EnableJetStream(limits *JetStreamAccountLimits) error {
 	a.mu.Unlock()
 
 	// Create the proper imports here.
-	if err := a.enableAllJetStreamServiceImports(); err != nil {
+	if err := a.enableAllJetStreamServiceImportsAndMappings(); err != nil {
 		return err
 	}
 
 	s.Debugf("Enabled JetStream for account %q", a.Name)
 	s.Debugf("  Max Memory:      %s", friendlyBytes(limits.MaxMemory))
 	s.Debugf("  Max Storage:     %s", friendlyBytes(limits.MaxStore))
-
-	// Check if we have a Domain specified.
-	// If so add in a subject mapping that will allow local connected clients to reach us here as well.
-	opts := s.getOpts()
-	if opts.JetStreamDomain != _EMPTY_ {
-		src := fmt.Sprintf(jsDomainAPI, opts.JetStreamDomain)
-		if err := a.AddMapping(src, jsAllAPI); err != nil {
-			s.Debugf("Error adding JetStream domain mapping: %v", err)
-		}
-	}
 
 	// Clean up any old snapshots that were orphaned while staging.
 	os.RemoveAll(path.Join(js.config.StoreDir, snapStagingDir))
@@ -1528,7 +1538,7 @@ func (js *jetStream) dynamicAccountLimits() *JetStreamAccountLimits {
 	return limits
 }
 
-// Report on JetStream stats and usage.
+// Report on JetStream stats and usage for this server.
 func (js *jetStream) usageStats() *JetStreamStats {
 	var stats JetStreamStats
 
@@ -1546,10 +1556,10 @@ func (js *jetStream) usageStats() *JetStreamStats {
 	// Collect account information.
 	for _, jsa := range accounts {
 		jsa.mu.RLock()
-		stats.Memory += uint64(jsa.memTotal)
-		stats.Store += uint64(jsa.storeTotal)
-		stats.API.Total += jsa.apiTotal
-		stats.API.Errors += jsa.apiErrors
+		stats.Memory += uint64(jsa.usage.mem)
+		stats.Store += uint64(jsa.usage.store)
+		stats.API.Total += jsa.usage.api
+		stats.API.Errors += jsa.usage.err
 		jsa.mu.RUnlock()
 	}
 	return &stats

@@ -301,7 +301,8 @@ func (sc *conn) subscribe(subject, qgroup string, cb MsgHandler, options ...Subs
 			b, _ := scr.Marshal()
 			// Send to the subscription close request, not the unsubscribe subject.
 			sc.nc.Publish(sc.subCloseRequests, b)
-
+		}
+		if err == nats.ErrTimeout || err == nats.ErrNoResponders {
 			// Report this error to the user.
 			err = ErrSubReqTimeout
 		}
@@ -451,7 +452,7 @@ func (sub *subscription) closeOrUnsubscribe(doClose bool) error {
 	b, _ := usr.Marshal()
 	reply, err := sc.nc.Request(reqSubject, b, sc.opts.ConnectTimeout)
 	if err != nil {
-		if err == nats.ErrTimeout {
+		if err == nats.ErrTimeout || err == nats.ErrNoResponders {
 			if doClose {
 				return ErrCloseReqTimeout
 			}
