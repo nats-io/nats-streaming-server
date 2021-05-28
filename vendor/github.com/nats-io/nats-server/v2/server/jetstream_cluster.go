@@ -1190,6 +1190,10 @@ func (js *jetStream) createRaftGroup(rg *raftGroup, storage StorageType) error {
 
 	s, cc := js.srv, js.cluster
 
+	if cc == nil || cc.meta == nil {
+		return ErrJetStreamNotClustered
+	}
+
 	// If this is a single peer raft group or we are not a member return.
 	if len(rg.Peers) <= 1 || !rg.isMember(cc.meta.ID()) {
 		// Nothing to do here.
@@ -2846,7 +2850,7 @@ func (o *consumer) processReplicatedAck(dseq, sseq uint64) {
 	o.mu.RLock()
 
 	mset := o.mset
-	if mset == nil || mset.cfg.Retention != InterestPolicy {
+	if mset == nil || mset.cfg.Retention == LimitsPolicy {
 		o.mu.RUnlock()
 		return
 	}

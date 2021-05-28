@@ -3634,14 +3634,13 @@ func removeHeaderIfPresent(hdr []byte, key string) []byte {
 // Generate a new header based on optional original header and key value.
 // More used in JetStream layers.
 func genHeader(hdr []byte, key, value string) []byte {
-	var bb *bytes.Buffer
+	var bb bytes.Buffer
 	if len(hdr) > LEN_CR_LF {
-		bb = bytes.NewBuffer(hdr[:len(hdr)-LEN_CR_LF])
+		bb.Write(hdr[:len(hdr)-LEN_CR_LF])
 	} else {
-		bb = &bytes.Buffer{}
 		bb.WriteString(hdrLine)
 	}
-	http.Header{key: []string{value}}.Write(bb)
+	http.Header{key: []string{value}}.Write(&bb)
 	bb.WriteString(CR_LF)
 	return bb.Bytes()
 }
@@ -4930,21 +4929,21 @@ func (c *client) getClientInfo(detailed bool) *ClientInfo {
 	return &ci
 }
 
-func (c *client) doTLSServerHandshake(typ string, tlsConfig *tls.Config, timeout float64) error {
-	_, err := c.doTLSHandshake(typ, false, nil, tlsConfig, _EMPTY_, timeout)
+func (c *client) doTLSServerHandshake(typ string, tlsConfig *tls.Config, timeout float64, pCerts PinnedCertSet) error {
+	_, err := c.doTLSHandshake(typ, false, nil, tlsConfig, _EMPTY_, timeout, pCerts)
 	return err
 }
 
-func (c *client) doTLSClientHandshake(typ string, url *url.URL, tlsConfig *tls.Config, tlsName string, timeout float64) (bool, error) {
-	return c.doTLSHandshake(typ, true, url, tlsConfig, tlsName, timeout)
+func (c *client) doTLSClientHandshake(typ string, url *url.URL, tlsConfig *tls.Config, tlsName string, timeout float64, pCerts PinnedCertSet) (bool, error) {
+	return c.doTLSHandshake(typ, true, url, tlsConfig, tlsName, timeout, pCerts)
 }
 
-// Performs eithe server or client side (if solicit is true) TLS Handshake.
+// Performs either server or client side (if solicit is true) TLS Handshake.
 // On error, the TLS handshake error has been logged and the connection
 // has been closed.
 //
 // Lock is held on entry.
-func (c *client) doTLSHandshake(typ string, solicit bool, url *url.URL, tlsConfig *tls.Config, tlsName string, timeout float64) (bool, error) {
+func (c *client) doTLSHandshake(typ string, solicit bool, url *url.URL, tlsConfig *tls.Config, tlsName string, timeout float64, pCerts PinnedCertSet) (bool, error) {
 	var host string
 	var resetTLSName bool
 	var err error
@@ -4993,6 +4992,11 @@ func (c *client) doTLSHandshake(typ string, solicit bool, url *url.URL, tlsConfi
 				}
 			}
 		}
+	} else if !c.matchesPinnedCert(pCerts) {
+		err = ErrCertNotPinned
+	}
+
+	if err != nil {
 		if kind == CLIENT {
 			c.Errorf("TLS handshake error: %v", err)
 		} else {
