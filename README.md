@@ -48,6 +48,6 @@ under the Apache Version 2.0 license found in the LICENSE file.
 [Coverage-image]: https://coveralls.io/repos/github/nats-io/nats-streaming-server/badge.svg?branch=master&t=kIxrDE
 [ReportCard-Url]: http://goreportcard.com/report/nats-io/nats-streaming-server
 [ReportCard-Image]: http://goreportcard.com/badge/github.com/nats-io/nats-streaming-server
-[Release-Url]: https://github.com/nats-io/nats-streaming-server/releases/tag/v0.21.2
-[Release-image]: https://img.shields.io/badge/release-v0.21.2-1eb0fc.svg
+[Release-Url]: https://github.com/nats-io/nats-streaming-server/releases/tag/v0.22.0
+[Release-image]: https://img.shields.io/badge/release-v0.22.0-1eb0fc.svg
 [github-release]: https://github.com/nats-io/nats-streaming-server/releases/
