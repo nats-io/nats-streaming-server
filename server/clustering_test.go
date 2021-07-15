@@ -8186,3 +8186,91 @@ func TestClusteringDurableReplaced(t *testing.T) {
 		t.Fatalf("Expected 1 durable, got %v", lenDur)
 	}
 }
+
+func TestClusteringRaceCausesFollowerToRedeliverMsgs(t *testing.T) {
+	testRaceLeaderTransfer = true
+	defer func() { testRaceLeaderTransfer = false }()
+
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.ReplaceDurable = true
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Wait for it to bootstrap
+	getLeader(t, 10*time.Second, s1)
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.ReplaceDurable = true
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.ReplaceDurable = true
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	ch := make(chan bool, 10)
+	errCh := make(chan error, 1)
+	prev := uint32(0)
+	if _, err := sc.Subscribe("foo",
+		func(m *stan.Msg) {
+			if !m.Redelivered {
+				ch <- true
+			} else {
+				if m.RedeliveryCount != prev+1 {
+					select {
+					case errCh <- fmt.Errorf("Received duplicate redelivered msg: %+v", m):
+					default:
+					}
+				}
+				prev = m.RedeliveryCount
+			}
+		},
+		stan.AckWait(ackWaitInMs(500)),
+		stan.DeliverAllAvailable(),
+		stan.DurableName("dur"),
+		stan.SetManualAckMode()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	if err := sc.Publish("foo", []byte("hello")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+
+	// Wait for message to be delivered
+	if err := WaitTime(ch, time.Second); err != nil {
+		t.Fatalf("Did not get message: %v", err)
+	}
+
+	// Stop the leader
+	s1.Shutdown()
+
+	// Wait for new leader
+	leader := getLeader(t, 10*time.Second, s2, s3)
+
+	// Stepdown
+	if err := leader.raft.LeadershipTransfer().Error(); err != nil {
+		t.Fatalf("Error stepping down: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(4 * time.Second):
+		// ok
+	}
+}

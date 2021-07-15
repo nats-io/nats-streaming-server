@@ -182,6 +182,7 @@ var (
 	lazyReplicationInterval    = defaultLazyReplicationInterval
 	testDeleteChannel          bool
 	testSubSentAndAckSlowApply bool
+	testRaceLeaderTransfer     bool
 )
 
 var (
@@ -2298,10 +2299,7 @@ func (s *StanServer) leadershipAcquired() error {
 		}
 	}
 	if len(allSubs) > 0 {
-		s.startGoRoutine(func() {
-			s.performRedeliveryOnStartup(allSubs)
-			s.wg.Done()
-		})
+		s.performRedeliveryOnStartup(allSubs)
 	}
 
 	if err := s.nc.Flush(); err != nil {
@@ -2661,6 +2659,9 @@ func (s *StanServer) postRecoveryProcessing(recoveredClients []*stores.Client, r
 // Redelivers unacknowledged messages, releases the hold for new messages delivery,
 // and kicks delivery of available messages.
 func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
+	if testRaceLeaderTransfer {
+		time.Sleep(time.Second)
+	}
 	queues := make(map[*queueState]*channel)
 
 	for _, sub := range recoveredSubs {
@@ -2673,6 +2674,9 @@ func (s *StanServer) performRedeliveryOnStartup(recoveredSubs []*subState) {
 			sub.newOnHold = false
 			sub.Unlock()
 			continue
+		}
+		if sub.ackTimer == nil {
+			s.setupAckTimer(sub, sub.ackWait)
 		}
 		// Unlock in order to call function below
 		sub.Unlock()
@@ -3689,14 +3693,13 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 	qs := sub.qstate
 	clientID := sub.ClientID
 	subID := sub.ID
-	if sub.ackTimer == nil {
-		s.setupAckTimer(sub, sub.ackWait)
-	}
 	if qs == nil {
 		// If the client has some failed heartbeats, ignore this request.
 		if sub.hasFailedHB {
 			// Reset the timer
-			sub.ackTimer.Reset(sub.ackWait)
+			if s.isStandaloneOrLeader() {
+				sub.ackTimer.Reset(sub.ackWait)
+			}
 			sub.Unlock()
 			if s.debug {
 				s.log.Debugf("[Client:%s] Skipping redelivery to subid=%d due to missed client heartbeat", clientID, subID)
