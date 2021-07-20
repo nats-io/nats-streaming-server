@@ -38,6 +38,8 @@ const (
 	natsLogAppName         = "raft-nats"
 )
 
+var errTransportShutdown = errors.New("raft-nats: transport is being shutdown")
+
 type natsRaftConnCreator func(name string) (*nats.Conn, error)
 
 // natsAddr implements the net.Addr interface. An address for the NATS
@@ -305,6 +307,7 @@ type natsStreamLayer struct {
 	logger    hclog.Logger
 	conns     map[*natsConn]struct{}
 	mu        sync.Mutex
+	closed    bool
 	// This is the timeout we will use for flush and dial (request timeout),
 	// not the timeout that RAFT will use to call SetDeadline.
 	dfTimeout time.Duration
@@ -417,6 +420,11 @@ func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration
 	}
 
 	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
+		peerConn.Close()
+		return nil, errTransportShutdown
+	}
 	n.conns[peerConn] = struct{}{}
 	n.mu.Unlock()
 	return peerConn, nil
@@ -486,6 +494,11 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 			continue
 		}
 		n.mu.Lock()
+		if n.closed {
+			n.mu.Unlock()
+			peerConn.Close()
+			return nil, errTransportShutdown
+		}
 		n.conns[peerConn] = struct{}{}
 		n.mu.Unlock()
 		return peerConn, nil
@@ -494,6 +507,11 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 
 func (n *natsStreamLayer) Close() error {
 	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
+		return nil
+	}
+	n.closed = true
 	nc := n.conn
 	// Do not set nc.conn to nil since it is accessed in some functions
 	// without the stream layer lock

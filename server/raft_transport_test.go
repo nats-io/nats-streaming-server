@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"reflect"
 	"strings"
 	"sync"
@@ -922,5 +923,90 @@ func TestRAFTTransportConnReader(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Accept() did not exit")
+	}
+}
+
+func TestRAFTTransportDialAcceptCloseConnOnTransportClosed(t *testing.T) {
+	s := runRaftTportServer()
+	defer s.Shutdown()
+
+	nc1 := newNatsConnection(t)
+	defer nc1.Close()
+	stream1, err := newNATSStreamLayer("a", nc1, newTestLogger(t), 2*time.Second, nil)
+	if err != nil {
+		t.Fatalf("Error creating stream: %v", err)
+	}
+	defer stream1.Close()
+
+	nc2 := newNatsConnection(t)
+	defer nc2.Close()
+	stream2, err := newNATSStreamLayer("b", nc2, newTestLogger(t), 2*time.Second, nil)
+	if err != nil {
+		t.Fatalf("Error creating stream: %v", err)
+	}
+	defer stream2.Close()
+
+	accepted := make(chan *natsConn, 101)
+	go func() {
+		for {
+			c, err := stream2.Accept()
+			if err != nil {
+				accepted <- nil
+				return
+			}
+			accepted <- c.(*natsConn)
+		}
+	}()
+
+	ch := make(chan bool)
+	dialed := make(chan net.Conn, 101)
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			c, err := stream1.Dial("b", 250*time.Millisecond)
+			if err != nil {
+				return
+			}
+			dialed <- c
+			select {
+			case <-ch:
+				return
+			default:
+			}
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	stream1.Close()
+	stream2.Close()
+	close(ch)
+	wg.Wait()
+
+	stream1.mu.Lock()
+	l1 := len(stream1.conns)
+	stream1.mu.Unlock()
+	stream2.mu.Lock()
+	l2 := len(stream2.conns)
+	stream2.mu.Unlock()
+
+	for i := 0; i < 100; i++ {
+		select {
+		case c := <-dialed:
+			if c != nil {
+				c.Close()
+			}
+		default:
+		}
+		select {
+		case c := <-accepted:
+			if c != nil {
+				c.Close()
+			}
+		default:
+		}
+	}
+	if l1 > 0 || l2 > 0 {
+		t.Fatalf("Connections were added after streams were closed: %v/%v", l1, l2)
 	}
 }
