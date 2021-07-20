@@ -164,6 +164,9 @@ func (s *serverSnapshot) snapshotChannels(snap *spb.RaftSnapshot) error {
 				i++
 			}
 		}
+		if sub.qstate != nil && sub.qstate.lastSent > state.LastSent {
+			state.LastSent = sub.qstate.lastSent
+		}
 		return snapSub
 	}
 
