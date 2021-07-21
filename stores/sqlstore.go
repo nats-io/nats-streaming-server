@@ -909,12 +909,6 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 		msgStore.last = last
 		msgStore.totalCount = totalCount
 		msgStore.totalBytes = totalBytes
-		// Since messages may have been removed due to limits, update first/last
-		// based on known max sequence.
-		if maxseq > msgStore.last {
-			msgStore.first = maxseq + 1
-			msgStore.last = maxseq
-		}
 
 		subStore := s.newSQLSubStore(channelID, &channelLimits.SubStoreLimits)
 		// Prevent scheduling to flusher while we are recovering
@@ -988,10 +982,23 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 				}
 
 				// Add to the recovered subscriptions
+				if sub.LastSent > maxseq {
+					maxseq = sub.LastSent
+				}
 				subscriptions = append(subscriptions, &RecoveredSubscription{Sub: sub, Pending: pendingAcks})
+			} else if lastSent > maxseq {
+				maxseq = lastSent
 			}
 		}
 		subRows.Close()
+
+		// Since messages may have been removed due to limits, or having a higher
+		// last_sent in some of the subscription, update first/last based on known
+		// max sequence.
+		if maxseq > msgStore.last {
+			msgStore.first = maxseq + 1
+			msgStore.last = maxseq
+		}
 
 		if !s.opts.NoCaching {
 			// Clear but also allow scheduling now that the recovery is complete.
