@@ -84,7 +84,7 @@ var (
 	testSQLSource       = testDefaultMySQLSource
 	testSQLSourceAdmin  = testDefaultMySQLSourceAdmin
 	testSQLDatabaseName = testDefaultDatabaseName
-	testDBSuffixes      = []string{"", "_a", "_b", "_c"}
+	testDBSuffixes      = []string{"", "_a", "_b", "_c", "_d", "_e"}
 	doSQL               = false
 )
 

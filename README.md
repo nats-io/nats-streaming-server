@@ -43,11 +43,11 @@ under the Apache Version 2.0 license found in the LICENSE file.
 [License-Url]: https://www.apache.org/licenses/LICENSE-2.0
 [License-Image]: https://img.shields.io/badge/License-Apache2-blue.svg
 [Build-Status-Url]: https://travis-ci.com/github/nats-io/nats-streaming-server
-[Build-Status-Image]: https://travis-ci.com/nats-io/nats-streaming-server.svg?branch=master
-[Coverage-Url]: https://coveralls.io/r/nats-io/nats-streaming-server?branch=master
-[Coverage-image]: https://coveralls.io/repos/github/nats-io/nats-streaming-server/badge.svg?branch=master&t=kIxrDE
+[Build-Status-Image]: https://travis-ci.com/nats-io/nats-streaming-server.svg?branch=main
+[Coverage-Url]: https://coveralls.io/r/nats-io/nats-streaming-server?branch=main
+[Coverage-image]: https://coveralls.io/repos/github/nats-io/nats-streaming-server/badge.svg?branch=main&t=kIxrDE
 [ReportCard-Url]: http://goreportcard.com/report/nats-io/nats-streaming-server
 [ReportCard-Image]: http://goreportcard.com/badge/github.com/nats-io/nats-streaming-server
-[Release-Url]: https://github.com/nats-io/nats-streaming-server/releases/tag/v0.22.0
-[Release-image]: https://img.shields.io/badge/release-v0.22.0-1eb0fc.svg
+[Release-Url]: https://github.com/nats-io/nats-streaming-server/releases/tag/v0.22.1
+[Release-image]: https://img.shields.io/badge/release-v0.22.1-1eb0fc.svg
 [github-release]: https://github.com/nats-io/nats-streaming-server/releases/

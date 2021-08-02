@@ -1333,6 +1333,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 		}
 		// Perform (server or client side) TLS handshake.
 		if _, err := c.doTLSHandshake("route", didSolicit, rURL, tlsConfig, _EMPTY_, opts.Cluster.TLSTimeout, opts.Cluster.TLSPinnedCerts); err != nil {
+			c.mu.Unlock()
 			return nil
 		}
 	}
@@ -1419,7 +1420,10 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 	if !exists {
 		s.routes[c.cid] = c
 		s.remotes[id] = c
-		s.nodeToInfo.Store(c.route.hash, nodeInfo{c.route.remoteName, s.info.Cluster, id, false, info.JetStream})
+		// check to be consistent and future proof. but will be same domain
+		if s.sameDomain(info.Domain) {
+			s.nodeToInfo.Store(c.route.hash, nodeInfo{c.route.remoteName, s.info.Cluster, info.Domain, id, false, info.JetStream})
+		}
 		c.mu.Lock()
 		c.route.connectURLs = info.ClientConnectURLs
 		c.route.wsConnURLs = info.WSConnectURLs
@@ -1690,6 +1694,7 @@ func (s *Server) startRouteAcceptLoop() {
 		GatewayURL:   s.getGatewayURL(),
 		Headers:      s.supportsHeaders(),
 		Cluster:      s.info.Cluster,
+		Domain:       s.info.Domain,
 		Dynamic:      s.isClusterNameDynamic(),
 		LNOC:         true,
 	}

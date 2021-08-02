@@ -53,8 +53,8 @@ const (
 	serverStatsSubj          = "$SYS.SERVER.%s.STATSZ"
 	serverDirectReqSubj      = "$SYS.REQ.SERVER.%s.%s"
 	serverPingReqSubj        = "$SYS.REQ.SERVER.PING.%s"
-	serverStatsPingReqSubj   = "$SYS.REQ.SERVER.PING" // use $SYS.REQ.SERVER.PING.STATSZ instead
-	leafNodeConnectEventSubj = "$SYS.ACCOUNT.%s.LEAFNODE.CONNECT"
+	serverStatsPingReqSubj   = "$SYS.REQ.SERVER.PING"             // use $SYS.REQ.SERVER.PING.STATSZ instead
+	leafNodeConnectEventSubj = "$SYS.ACCOUNT.%s.LEAFNODE.CONNECT" // for internal use only
 	remoteLatencyEventSubj   = "$SYS.LATENCY.M2.%s"
 	inboxRespSubj            = "$SYS._INBOX.%s.%s"
 
@@ -157,6 +157,7 @@ type ServerInfo struct {
 	Host      string    `json:"host"`
 	ID        string    `json:"id"`
 	Cluster   string    `json:"cluster,omitempty"`
+	Domain    string    `json:"domain,omitempty"`
 	Version   string    `json:"ver"`
 	Seq       uint64    `json:"seq"`
 	JetStream bool      `json:"jetstream"`
@@ -165,23 +166,25 @@ type ServerInfo struct {
 
 // ClientInfo is detailed information about the client forming a connection.
 type ClientInfo struct {
-	Start     *time.Time    `json:"start,omitempty"`
-	Host      string        `json:"host,omitempty"`
-	ID        uint64        `json:"id,omitempty"`
-	Account   string        `json:"acc"`
-	Service   string        `json:"svc,omitempty"`
-	User      string        `json:"user,omitempty"`
-	Name      string        `json:"name,omitempty"`
-	Lang      string        `json:"lang,omitempty"`
-	Version   string        `json:"ver,omitempty"`
-	RTT       time.Duration `json:"rtt,omitempty"`
-	Server    string        `json:"server,omitempty"`
-	Cluster   string        `json:"cluster,omitempty"`
-	Stop      *time.Time    `json:"stop,omitempty"`
-	Jwt       string        `json:"jwt,omitempty"`
-	IssuerKey string        `json:"issuer_key,omitempty"`
-	NameTag   string        `json:"name_tag,omitempty"`
-	Tags      jwt.TagList   `json:"tags,omitempty"`
+	Start      *time.Time    `json:"start,omitempty"`
+	Host       string        `json:"host,omitempty"`
+	ID         uint64        `json:"id,omitempty"`
+	Account    string        `json:"acc"`
+	Service    string        `json:"svc,omitempty"`
+	User       string        `json:"user,omitempty"`
+	Name       string        `json:"name,omitempty"`
+	Lang       string        `json:"lang,omitempty"`
+	Version    string        `json:"ver,omitempty"`
+	RTT        time.Duration `json:"rtt,omitempty"`
+	Server     string        `json:"server,omitempty"`
+	Cluster    string        `json:"cluster,omitempty"`
+	Stop       *time.Time    `json:"stop,omitempty"`
+	Jwt        string        `json:"jwt,omitempty"`
+	IssuerKey  string        `json:"issuer_key,omitempty"`
+	NameTag    string        `json:"name_tag,omitempty"`
+	Tags       jwt.TagList   `json:"tags,omitempty"`
+	Kind       string        `json:"kind,omitempty"`
+	ClientType string        `json:"client_type,omitempty"`
 }
 
 // ServerStats hold various statistics that we will periodically send out.
@@ -199,6 +202,8 @@ type ServerStats struct {
 	SlowConsumers    int64          `json:"slow_consumers"`
 	Routes           []*RouteStat   `json:"routes,omitempty"`
 	Gateways         []*GatewayStat `json:"gateways,omitempty"`
+	ActiveServers    int            `json:"active_servers,omitempty"`
+	JetStream        *JetStreamVarz `json:"jetstream,omitempty"`
 }
 
 // RouteStat holds route statistics.
@@ -266,6 +271,7 @@ RESET:
 	id := s.info.ID
 	host := s.info.Host
 	servername := s.info.Name
+	domain := s.info.Domain
 	seqp := &s.sys.seq
 	js := s.info.JetStream
 	cluster := s.info.Cluster
@@ -290,6 +296,7 @@ RESET:
 		case pm := <-sendq:
 			if pm.si != nil {
 				pm.si.Name = servername
+				pm.si.Domain = domain
 				pm.si.Host = host
 				pm.si.Cluster = cluster
 				pm.si.ID = id
@@ -489,7 +496,6 @@ func (s *Server) checkRemoteServers() {
 			s.Debugf("Detected orphan remote server: %q", sid)
 			// Simulate it going away.
 			s.processRemoteServerShutdown(sid)
-			delete(s.sys.servers, sid)
 		}
 	}
 	if s.sys.sweeper != nil {
@@ -535,7 +541,7 @@ func routeStat(r *client) *RouteStat {
 // Actual send method for statz updates.
 // Lock should be held.
 func (s *Server) sendStatsz(subj string) {
-	m := ServerStatsMsg{}
+	var m ServerStatsMsg
 	s.updateServerUsage(&m.Stats)
 	m.Stats.Start = s.start
 	m.Stats.Connections = len(s.clients)
@@ -547,10 +553,11 @@ func (s *Server) sendStatsz(subj string) {
 	m.Stats.Sent.Bytes = atomic.LoadInt64(&s.outBytes)
 	m.Stats.SlowConsumers = atomic.LoadInt64(&s.slowConsumers)
 	m.Stats.NumSubs = s.numSubscriptions()
-
+	// Routes
 	for _, r := range s.routes {
 		m.Stats.Routes = append(m.Stats.Routes, routeStat(r))
 	}
+	// Gateways
 	if s.gateway.enabled {
 		gw := s.gateway
 		gw.RLock()
@@ -578,6 +585,36 @@ func (s *Server) sendStatsz(subj string) {
 		}
 		gw.RUnlock()
 	}
+	// Active Servers
+	m.Stats.ActiveServers = 1
+	if s.sys != nil {
+		m.Stats.ActiveServers += len(s.sys.servers)
+	}
+	// JetStream
+	if js := s.js; js != nil {
+		jStat := &JetStreamVarz{}
+		s.mu.Unlock()
+		js.mu.RLock()
+		c := js.config
+		c.StoreDir = _EMPTY_
+		jStat.Config = &c
+		js.mu.RUnlock()
+		jStat.Stats = js.usageStats()
+		if mg := js.getMetaGroup(); mg != nil {
+			if mg.Leader() {
+				jStat.Meta = s.raftNodeToClusterInfo(mg)
+			} else {
+				// non leader only include a shortened version without peers
+				jStat.Meta = &ClusterInfo{
+					Name:   s.ClusterName(),
+					Leader: s.serverNameForNode(mg.GroupLeader()),
+				}
+			}
+		}
+		m.Stats.JetStream = jStat
+		s.mu.Lock()
+	}
+	// Send message.
 	s.sendInternalMsg(subj, _EMPTY_, &m.Server, &m)
 }
 
@@ -595,11 +632,17 @@ func (s *Server) heartbeatStatsz() {
 	s.sendStatsz(fmt.Sprintf(serverStatsSubj, s.info.ID))
 }
 
+func (s *Server) sendStatszUpdate() {
+	s.mu.Lock()
+	s.sendStatsz(fmt.Sprintf(serverStatsSubj, s.info.ID))
+	s.mu.Unlock()
+}
+
 // This should be wrapChk() to setup common locking.
 func (s *Server) startStatszTimer() {
 	// We will start by sending out more of these and trail off to the statsz being the max.
-	s.sys.cstatsz = time.Second
-	// Send out the first one only after a second.
+	s.sys.cstatsz = 250 * time.Millisecond
+	// Send out the first one after 250ms.
 	s.sys.stmr = time.AfterFunc(s.sys.cstatsz, s.wrapChk(s.heartbeatStatsz))
 }
 
@@ -689,37 +732,37 @@ func (s *Server) initEventTracking() {
 	}
 	monSrvc := map[string]msgHandler{
 		"STATSZ": s.statszReq,
-		"VARZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"VARZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &VarzEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Varz(&optz.VarzOptions) })
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Varz(&optz.VarzOptions) })
 		},
-		"SUBSZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"SUBSZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &SubszEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Subsz(&optz.SubszOptions) })
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Subsz(&optz.SubszOptions) })
 		},
-		"CONNZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"CONNZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &ConnzEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Connz(&optz.ConnzOptions) })
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Connz(&optz.ConnzOptions) })
 		},
-		"ROUTEZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"ROUTEZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &RoutezEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Routez(&optz.RoutezOptions) })
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Routez(&optz.RoutezOptions) })
 		},
-		"GATEWAYZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"GATEWAYZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &GatewayzEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Gatewayz(&optz.GatewayzOptions) })
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Gatewayz(&optz.GatewayzOptions) })
 		},
-		"LEAFZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"LEAFZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &LeafzEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Leafz(&optz.LeafzOptions) })
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Leafz(&optz.LeafzOptions) })
 		},
-		"ACCOUNTZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"ACCOUNTZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &AccountzEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Accountz(&optz.AccountzOptions) })
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Accountz(&optz.AccountzOptions) })
 		},
-		"JSZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"JSZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &JszEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Jsz(&optz.JSzOptions) })
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) { return s.Jsz(&optz.JSzOptions) })
 		},
 	}
 	for name, req := range monSrvc {
@@ -740,9 +783,9 @@ func (s *Server) initEventTracking() {
 		}
 	}
 	monAccSrvc := map[string]msgHandler{
-		"SUBSZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"SUBSZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &SubszEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
 				if acc, err := extractAccount(subject); err != nil {
 					return nil, err
 				} else {
@@ -752,9 +795,9 @@ func (s *Server) initEventTracking() {
 				}
 			})
 		},
-		"CONNZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"CONNZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &ConnzEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
 				if acc, err := extractAccount(subject); err != nil {
 					return nil, err
 				} else {
@@ -763,9 +806,9 @@ func (s *Server) initEventTracking() {
 				}
 			})
 		},
-		"LEAFZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"LEAFZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &LeafzEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
 				if acc, err := extractAccount(subject); err != nil {
 					return nil, err
 				} else {
@@ -774,9 +817,9 @@ func (s *Server) initEventTracking() {
 				}
 			})
 		},
-		"JSZ": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"JSZ": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &JszEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
 				if acc, err := extractAccount(subject); err != nil {
 					return nil, err
 				} else {
@@ -785,9 +828,9 @@ func (s *Server) initEventTracking() {
 				}
 			})
 		},
-		"INFO": func(sub *subscription, _ *client, subject, reply string, msg []byte) {
+		"INFO": func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 			optz := &AccInfoEventOptions{}
-			s.zReq(reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
+			s.zReq(c, reply, msg, &optz.EventFilterOptions, optz, func() (interface{}, error) {
 				if acc, err := extractAccount(subject); err != nil {
 					return nil, err
 				} else {
@@ -834,11 +877,11 @@ func (s *Server) addSystemAccountExports(sacc *Account) {
 }
 
 // accountClaimUpdate will receive claim updates for accounts.
-func (s *Server) accountClaimUpdate(sub *subscription, _ *client, subject, resp string, msg []byte) {
+func (s *Server) accountClaimUpdate(sub *subscription, _ *client, _ *Account, subject, resp string, msg []byte) {
 	if !s.EventsEnabled() {
 		return
 	}
-	pubKey := ""
+	var pubKey string
 	toks := strings.Split(subject, tsep)
 	if len(toks) == accUpdateTokensNew {
 		pubKey = toks[accReqAccIndex]
@@ -880,10 +923,15 @@ func (s *Server) processRemoteServerShutdown(sid string) {
 		}
 		return true
 	})
+	delete(s.sys.servers, sid)
+}
+
+func (s *Server) sameDomain(domain string) bool {
+	return domain == _EMPTY_ || s.info.Domain == _EMPTY_ || domain == s.info.Domain
 }
 
 // remoteServerShutdownEvent is called when we get an event from another server shutting down.
-func (s *Server) remoteServerShutdown(sub *subscription, _ *client, subject, reply string, msg []byte) {
+func (s *Server) remoteServerShutdown(sub *subscription, _ *client, _ *Account, subject, reply string, msg []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.eventsEnabled() {
@@ -894,13 +942,8 @@ func (s *Server) remoteServerShutdown(sub *subscription, _ *client, subject, rep
 		s.Debugf("Received remote server shutdown on bad subject %q", subject)
 		return
 	}
-
-	sid := toks[serverSubjectIndex]
-	if su := s.sys.servers[sid]; su != nil {
-		s.processRemoteServerShutdown(sid)
-	}
-
 	if len(msg) == 0 {
+		s.Errorf("Remote server sent invalid (empty) shutdown message to %q", subject)
 		return
 	}
 
@@ -911,26 +954,31 @@ func (s *Server) remoteServerShutdown(sub *subscription, _ *client, subject, rep
 		return
 	}
 	// Additional processing here.
+	if !s.sameDomain(si.Domain) {
+		return
+	}
 	node := string(getHash(si.Name))
-	s.nodeToInfo.Store(node, nodeInfo{si.Name, si.Cluster, si.ID, true, true})
+	s.nodeToInfo.Store(node, nodeInfo{si.Name, si.Cluster, si.Domain, si.ID, true, true})
+
+	sid := toks[serverSubjectIndex]
+	if su := s.sys.servers[sid]; su != nil {
+		s.processRemoteServerShutdown(sid)
+	}
 }
 
 // remoteServerUpdate listens for statsz updates from other servers.
-func (s *Server) remoteServerUpdate(sub *subscription, _ *client, subject, reply string, msg []byte) {
+func (s *Server) remoteServerUpdate(sub *subscription, _ *client, _ *Account, subject, reply string, msg []byte) {
 	var ssm ServerStatsMsg
 	if err := json.Unmarshal(msg, &ssm); err != nil {
 		s.Debugf("Received bad server info for remote server update")
 		return
 	}
 	si := ssm.Server
-	node := string(getHash(si.Name))
-	if _, ok := s.nodeToInfo.Load(node); !ok {
-		// Since we have not seen this one they probably have not seen us so send out our update.
-		s.mu.Lock()
-		s.sendStatsz(fmt.Sprintf(serverStatsSubj, s.info.ID))
-		s.mu.Unlock()
+	if !s.sameDomain(si.Domain) {
+		return
 	}
-	s.nodeToInfo.Store(node, nodeInfo{si.Name, si.Cluster, si.ID, false, si.JetStream})
+	node := string(getHash(si.Name))
+	s.nodeToInfo.Store(node, nodeInfo{si.Name, si.Cluster, si.Domain, si.ID, false, si.JetStream})
 }
 
 // updateRemoteServer is called when we have an update from a remote server.
@@ -960,8 +1008,12 @@ func (s *Server) processNewServer(ms *ServerInfo) {
 	// connect update to make sure they switch this account to interest only mode.
 	s.ensureGWsInterestOnlyForLeafNodes()
 	// Add to our nodeToName
-	node := string(getHash(ms.Name))
-	s.nodeToInfo.Store(node, nodeInfo{ms.Name, ms.Cluster, ms.ID, false, ms.JetStream})
+	if s.sameDomain(ms.Domain) {
+		node := string(getHash(ms.Name))
+		s.nodeToInfo.Store(node, nodeInfo{ms.Name, ms.Cluster, ms.Domain, ms.ID, false, ms.JetStream})
+	}
+	// Announce ourselves..
+	s.sendStatsz(fmt.Sprintf(serverStatsSubj, s.info.ID))
 }
 
 // If GW is enabled on this server and there are any leaf node connections,
@@ -1014,7 +1066,7 @@ func (s *Server) shutdownEventing() {
 }
 
 // Request for our local connection count.
-func (s *Server) connsRequest(sub *subscription, _ *client, subject, reply string, msg []byte) {
+func (s *Server) connsRequest(sub *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	if !s.eventsRunning() {
 		return
 	}
@@ -1025,9 +1077,11 @@ func (s *Server) connsRequest(sub *subscription, _ *client, subject, reply strin
 	}
 	a := tk[accReqAccIndex]
 	m := accNumConnsReq{Account: a}
-	if err := json.Unmarshal(msg, &m); err != nil {
-		s.sys.client.Errorf("Error unmarshalling account connections request message: %v", err)
-		return
+	if _, msg := c.msgParts(rmsg); len(msg) > 0 {
+		if err := json.Unmarshal(msg, &m); err != nil {
+			s.sys.client.Errorf("Error unmarshalling account connections request message: %v", err)
+			return
+		}
 	}
 	if m.Account != a {
 		s.sys.client.Errorf("Error unmarshalled account does not match subject")
@@ -1051,7 +1105,7 @@ func (s *Server) connsRequest(sub *subscription, _ *client, subject, reply strin
 }
 
 // leafNodeConnected is an event we will receive when a leaf node for a given account connects.
-func (s *Server) leafNodeConnected(sub *subscription, _ *client, subject, reply string, msg []byte) {
+func (s *Server) leafNodeConnected(sub *subscription, _ *client, _ *Account, subject, reply string, msg []byte) {
 	m := accNumConnsReq{}
 	if err := json.Unmarshal(msg, &m); err != nil {
 		s.sys.client.Errorf("Error unmarshalling account connections request message: %v", err)
@@ -1059,7 +1113,7 @@ func (s *Server) leafNodeConnected(sub *subscription, _ *client, subject, reply 
 	}
 
 	s.mu.Lock()
-	na := m.Account == "" || !s.eventsEnabled() || !s.gateway.enabled
+	na := m.Account == _EMPTY_ || !s.eventsEnabled() || !s.gateway.enabled
 	s.mu.Unlock()
 
 	if na {
@@ -1172,7 +1226,7 @@ func (s *Server) filterRequest(fOpts *EventFilterOptions) bool {
 }
 
 // statszReq is a request for us to respond with current statsz.
-func (s *Server) statszReq(sub *subscription, _ *client, subject, reply string, msg []byte) {
+func (s *Server) statszReq(sub *subscription, _ *client, _ *Account, subject, reply string, msg []byte) {
 	if !s.EventsEnabled() || reply == _EMPTY_ {
 		return
 	}
@@ -1198,7 +1252,7 @@ func (s *Server) statszReq(sub *subscription, _ *client, subject, reply string, 
 
 var errSkipZreq = errors.New("filtered response")
 
-func (s *Server) zReq(reply string, msg []byte, fOpts *EventFilterOptions, optz interface{}, respf func() (interface{}, error)) {
+func (s *Server) zReq(c *client, reply string, rmsg []byte, fOpts *EventFilterOptions, optz interface{}, respf func() (interface{}, error)) {
 	if !s.EventsEnabled() || reply == _EMPTY_ {
 		return
 	}
@@ -1206,6 +1260,7 @@ func (s *Server) zReq(reply string, msg []byte, fOpts *EventFilterOptions, optz 
 	response := map[string]interface{}{"server": server}
 	var err error
 	status := 0
+	_, msg := c.msgParts(rmsg)
 	if len(msg) != 0 {
 		if err = json.Unmarshal(msg, optz); err != nil {
 			status = http.StatusBadRequest // status is only included on error, so record how far execution got
@@ -1230,7 +1285,7 @@ func (s *Server) zReq(reply string, msg []byte, fOpts *EventFilterOptions, optz 
 }
 
 // remoteConnsUpdate gets called when we receive a remote update from another server.
-func (s *Server) remoteConnsUpdate(sub *subscription, _ *client, subject, reply string, msg []byte) {
+func (s *Server) remoteConnsUpdate(sub *subscription, _ *client, _ *Account, subject, reply string, msg []byte) {
 	if !s.eventsRunning() {
 		return
 	}
@@ -1408,18 +1463,20 @@ func (s *Server) accountConnectEvent(c *client) {
 			Time: time.Now().UTC(),
 		},
 		Client: ClientInfo{
-			Start:     &c.start,
-			Host:      c.host,
-			ID:        c.cid,
-			Account:   accForClient(c),
-			User:      c.getRawAuthUser(),
-			Name:      c.opts.Name,
-			Lang:      c.opts.Lang,
-			Version:   c.opts.Version,
-			Jwt:       c.opts.JWT,
-			IssuerKey: issuerForClient(c),
-			Tags:      c.tags,
-			NameTag:   c.nameTag,
+			Start:      &c.start,
+			Host:       c.host,
+			ID:         c.cid,
+			Account:    accForClient(c),
+			User:       c.getRawAuthUser(),
+			Name:       c.opts.Name,
+			Lang:       c.opts.Lang,
+			Version:    c.opts.Version,
+			Jwt:        c.opts.JWT,
+			IssuerKey:  issuerForClient(c),
+			Tags:       c.tags,
+			NameTag:    c.nameTag,
+			Kind:       c.kindString(),
+			ClientType: c.clientTypeString(),
 		},
 	}
 	c.mu.Unlock()
@@ -1455,20 +1512,22 @@ func (s *Server) accountDisconnectEvent(c *client, now time.Time, reason string)
 			Time: now,
 		},
 		Client: ClientInfo{
-			Start:     &c.start,
-			Stop:      &now,
-			Host:      c.host,
-			ID:        c.cid,
-			Account:   accForClient(c),
-			User:      c.getRawAuthUser(),
-			Name:      c.opts.Name,
-			Lang:      c.opts.Lang,
-			Version:   c.opts.Version,
-			RTT:       c.getRTT(),
-			Jwt:       c.opts.JWT,
-			IssuerKey: issuerForClient(c),
-			Tags:      c.tags,
-			NameTag:   c.nameTag,
+			Start:      &c.start,
+			Stop:       &now,
+			Host:       c.host,
+			ID:         c.cid,
+			Account:    accForClient(c),
+			User:       c.getRawAuthUser(),
+			Name:       c.opts.Name,
+			Lang:       c.opts.Lang,
+			Version:    c.opts.Version,
+			RTT:        c.getRTT(),
+			Jwt:        c.opts.JWT,
+			IssuerKey:  issuerForClient(c),
+			Tags:       c.tags,
+			NameTag:    c.nameTag,
+			Kind:       c.kindString(),
+			ClientType: c.clientTypeString(),
 		},
 		Sent: DataStats{
 			Msgs:  atomic.LoadInt64(&c.inMsgs),
@@ -1504,20 +1563,22 @@ func (s *Server) sendAuthErrorEvent(c *client) {
 			Time: now,
 		},
 		Client: ClientInfo{
-			Start:     &c.start,
-			Stop:      &now,
-			Host:      c.host,
-			ID:        c.cid,
-			Account:   accForClient(c),
-			User:      c.getRawAuthUser(),
-			Name:      c.opts.Name,
-			Lang:      c.opts.Lang,
-			Version:   c.opts.Version,
-			RTT:       c.getRTT(),
-			Jwt:       c.opts.JWT,
-			IssuerKey: issuerForClient(c),
-			Tags:      c.tags,
-			NameTag:   c.nameTag,
+			Start:      &c.start,
+			Stop:       &now,
+			Host:       c.host,
+			ID:         c.cid,
+			Account:    accForClient(c),
+			User:       c.getRawAuthUser(),
+			Name:       c.opts.Name,
+			Lang:       c.opts.Lang,
+			Version:    c.opts.Version,
+			RTT:        c.getRTT(),
+			Jwt:        c.opts.JWT,
+			IssuerKey:  issuerForClient(c),
+			Tags:       c.tags,
+			NameTag:    c.nameTag,
+			Kind:       c.kindString(),
+			ClientType: c.clientTypeString(),
 		},
 		Sent: DataStats{
 			Msgs:  c.inMsgs,
@@ -1537,9 +1598,10 @@ func (s *Server) sendAuthErrorEvent(c *client) {
 	s.mu.Unlock()
 }
 
-// Internal message callback. If the msg is needed past the callback it is
-// required to be copied.
-type msgHandler func(sub *subscription, client *client, subject, reply string, msg []byte)
+// Internal message callback.
+// If the msg is needed past the callback it is required to be copied.
+// rmsg contains header and the message. use client.msgParts(rmsg) to split them apart
+type msgHandler func(sub *subscription, client *client, acc *Account, subject, reply string, rmsg []byte)
 
 // Create an internal subscription. sysSubscribeQ for queue groups.
 func (s *Server) sysSubscribe(subject string, cb msgHandler) (*subscription, error) {
@@ -1615,7 +1677,7 @@ func remoteLatencySubjectForResponse(subject []byte) string {
 }
 
 // remoteLatencyUpdate is used to track remote latency measurements for tracking on exported services.
-func (s *Server) remoteLatencyUpdate(sub *subscription, _ *client, subject, _ string, msg []byte) {
+func (s *Server) remoteLatencyUpdate(sub *subscription, _ *client, _ *Account, subject, _ string, msg []byte) {
 	if !s.eventsRunning() {
 		return
 	}
@@ -1678,7 +1740,7 @@ func (s *Server) remoteLatencyUpdate(sub *subscription, _ *client, subject, _ st
 
 // This is used for all inbox replies so that we do not send supercluster wide interest
 // updates for every request. Same trick used in modern NATS clients.
-func (s *Server) inboxReply(sub *subscription, c *client, subject, reply string, msg []byte) {
+func (s *Server) inboxReply(sub *subscription, c *client, acc *Account, subject, reply string, msg []byte) {
 	s.mu.Lock()
 	if !s.eventsEnabled() || s.sys.replies == nil {
 		s.mu.Unlock()
@@ -1688,7 +1750,7 @@ func (s *Server) inboxReply(sub *subscription, c *client, subject, reply string,
 	s.mu.Unlock()
 
 	if ok && cb != nil {
-		cb(sub, c, subject, reply, msg)
+		cb(sub, c, acc, subject, reply, msg)
 	}
 }
 
@@ -1751,7 +1813,7 @@ func totalSubs(rr *SublistResult, qg []byte) (nsubs int32) {
 
 // Allows users of large systems to debug active subscribers for a given subject.
 // Payload should be the subject of interest.
-func (s *Server) debugSubscribers(sub *subscription, c *client, subject, reply string, rmsg []byte) {
+func (s *Server) debugSubscribers(sub *subscription, c *client, _ *Account, subject, reply string, rmsg []byte) {
 	// Even though this is an internal only subscription, meaning interest was not forwarded, we could
 	// get one here from a GW in optimistic mode. Ignore for now.
 	// FIXME(dlc) - Should we send no interest here back to the GW?
@@ -1818,7 +1880,7 @@ func (s *Server) debugSubscribers(sub *subscription, c *client, subject, reply s
 	// Create direct reply inbox that we multiplex under the WC replies.
 	replySubj := s.newRespInbox()
 	// Store our handler.
-	s.sys.replies[replySubj] = func(sub *subscription, _ *client, subject, _ string, msg []byte) {
+	s.sys.replies[replySubj] = func(sub *subscription, _ *client, _ *Account, subject, _ string, msg []byte) {
 		if n, err := strconv.Atoi(string(msg)); err == nil {
 			atomic.AddInt32(&nsubs, int32(n))
 		}
@@ -1861,7 +1923,7 @@ func (s *Server) debugSubscribers(sub *subscription, c *client, subject, reply s
 
 // Request for our local subscription count. This will come from a remote origin server
 // that received the initial request.
-func (s *Server) nsubsRequest(sub *subscription, _ *client, subject, reply string, msg []byte) {
+func (s *Server) nsubsRequest(sub *subscription, _ *client, _ *Account, subject, reply string, msg []byte) {
 	if !s.eventsRunning() {
 		return
 	}
@@ -1911,7 +1973,7 @@ func issuerForClient(c *client) (issuerKey string) {
 		return
 	}
 	issuerKey = c.user.SigningKey
-	if issuerKey == "" && c.user.Account != nil {
+	if issuerKey == _EMPTY_ && c.user.Account != nil {
 		issuerKey = c.user.Account.Name
 	}
 	return

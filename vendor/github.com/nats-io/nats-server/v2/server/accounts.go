@@ -39,6 +39,10 @@ import (
 // account will be grouped in the default global account.
 const globalAccountName = DEFAULT_GLOBAL_ACCOUNT
 
+const defaultMaxSubLimitReportThreshold = int64(2 * time.Second)
+
+var maxSubLimitReportThreshold = defaultMaxSubLimitReportThreshold
+
 // Account are subject namespace definitions. By default no messages are shared between accounts.
 // You can share via Exports and Imports of Streams and Services.
 type Account struct {
@@ -84,6 +88,7 @@ type Account struct {
 	defaultPerms *Permissions
 	tags         jwt.TagList
 	nameTag      string
+	lastLimErr   int64
 }
 
 // Account based limits.
@@ -503,6 +508,22 @@ func (a *Account) TotalSubs() int {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return int(a.sl.Count())
+}
+
+func (a *Account) shouldLogMaxSubErr() bool {
+	if a == nil {
+		return true
+	}
+	a.mu.RLock()
+	last := a.lastLimErr
+	a.mu.RUnlock()
+	if now := time.Now().UnixNano(); now-last >= maxSubLimitReportThreshold {
+		a.mu.Lock()
+		a.lastLimErr = now
+		a.mu.Unlock()
+		return true
+	}
+	return false
 }
 
 // MapDest is for mapping published subjects for clients.
@@ -1604,9 +1625,8 @@ func (a *Account) checkForReverseEntries(reply string, checkInterest bool) {
 		return
 	}
 
-	var _rs [32]string
+	var _rs [64]string
 	rs := _rs[:0]
-
 	for k := range a.imports.rrMap {
 		if subjectIsSubsetMatch(k, reply) {
 			rs = append(rs, k)
@@ -1629,8 +1649,14 @@ func (a *Account) checkForReverseEntry(reply string, si *serviceImport, checkInt
 	}
 
 	if subjectHasWildcard(reply) {
+		doInline := len(a.imports.rrMap) <= 64
 		a.mu.RUnlock()
-		go a.checkForReverseEntries(reply, checkInterest)
+
+		if doInline {
+			a.checkForReverseEntries(reply, checkInterest)
+		} else {
+			go a.checkForReverseEntries(reply, checkInterest)
+		}
 		return
 	}
 
@@ -1843,12 +1869,19 @@ func (a *Account) addServiceImportSub(si *serviceImport) error {
 	subject := si.from
 	a.mu.Unlock()
 
-	cb := func(sub *subscription, c *client, subject, reply string, msg []byte) {
-		c.processServiceImport(si, a, msg)
+	cb := func(sub *subscription, c *client, acc *Account, subject, reply string, msg []byte) {
+		c.processServiceImport(si, acc, msg)
 	}
-	_, err := c.processSubEx([]byte(subject), nil, []byte(sid), cb, true, true, false)
-
-	return err
+	sub, err := c.processSubEx([]byte(subject), nil, []byte(sid), cb, true, true, false)
+	if err != nil {
+		return err
+	}
+	// Leafnodes introduce a new way to introduce messages into the system. Therefore forward import subscription
+	// This is similar to what initLeafNodeSmapAndSendSubs does
+	// TODO we need to consider performing this update as we get client subscriptions.
+	//      This behavior would result in subscription propagation only where actually used.
+	a.srv.updateLeafNodes(a, sub, 1)
+	return nil
 }
 
 // Remove all the subscriptions associated with service imports.
@@ -2005,7 +2038,7 @@ const (
 )
 
 // This is where all service export responses are handled.
-func (a *Account) processServiceImportResponse(sub *subscription, c *client, subject, reply string, msg []byte) {
+func (a *Account) processServiceImportResponse(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 	a.mu.RLock()
 	if a.expired || len(a.exports.responses) == 0 {
 		a.mu.RUnlock()
@@ -2032,7 +2065,7 @@ func (a *Account) createRespWildcard() []byte {
 		a.prand = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
 	var b = [baseServerLen]byte{'_', 'R', '_', '.'}
-	rn := a.prand.Int63()
+	rn := a.prand.Uint64()
 	for i, l := replyPrefixLen, rn; i < len(b); i++ {
 		b[i] = digits[l%base]
 		l /= base
@@ -2060,17 +2093,19 @@ func isTrackedReply(reply []byte) bool {
 // Generate a new service reply from the wildcard prefix.
 // FIXME(dlc) - probably do not have to use rand here. about 25ns per.
 func (a *Account) newServiceReply(tracking bool) []byte {
-	a.mu.RLock()
-	replyPre := a.siReply
-	s := a.srv
-	a.mu.RUnlock()
+	a.mu.Lock()
+	s, replyPre := a.srv, a.siReply
+	if a.prand == nil {
+		a.prand = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
+	rn := a.prand.Uint64()
+	a.mu.Unlock()
 
 	if replyPre == nil {
 		replyPre = a.createRespWildcard()
 	}
 
 	var b [replyLen]byte
-	rn := a.prand.Int63()
 	for i, l := 0, rn; i < len(b); i++ {
 		b[i] = digits[l%base]
 		l /= base
@@ -2822,6 +2857,16 @@ func (s *Server) UpdateAccountClaims(a *Account, ac *jwt.AccountClaims) {
 	s.updateAccountClaimsWithRefresh(a, ac, true)
 }
 
+func (a *Account) traceLabel() string {
+	if a == nil {
+		return _EMPTY_
+	}
+	if a.nameTag != _EMPTY_ {
+		return fmt.Sprintf("%s/%s", a.Name, a.nameTag)
+	}
+	return a.Name
+}
+
 // updateAccountClaimsWithRefresh will update an existing account with new claims.
 // If refreshImportingAccounts is true it will also update incomplete dependent accounts
 // This will replace any exports or imports previously defined.
@@ -2926,25 +2971,19 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 
 	jsEnabled := s.JetStreamEnabled()
 	if jsEnabled && a == s.SystemAccount() {
-		for _, export := range allJsExports {
-			s.Debugf("Adding jetstream service export %q for %s", export, a.Name)
-			if err := a.AddServiceExport(export, nil); err != nil {
-				s.Errorf("Error setting up jetstream service exports: %v", err)
-			}
-		}
 		s.checkJetStreamExports()
 	}
 
 	for _, e := range ac.Exports {
 		switch e.Type {
 		case jwt.Stream:
-			s.Debugf("Adding stream export %q for %s", e.Subject, a.Name)
+			s.Debugf("Adding stream export %q for %s", e.Subject, a.traceLabel())
 			if err := a.addStreamExportWithAccountPos(
 				string(e.Subject), authAccounts(e.TokenReq), e.AccountTokenPosition); err != nil {
-				s.Debugf("Error adding stream export to account [%s]: %v", a.Name, err.Error())
+				s.Debugf("Error adding stream export to account [%s]: %v", a.traceLabel(), err.Error())
 			}
 		case jwt.Service:
-			s.Debugf("Adding service export %q for %s", e.Subject, a.Name)
+			s.Debugf("Adding service export %q for %s", e.Subject, a.traceLabel())
 			rt := Singleton
 			switch e.ResponseType {
 			case jwt.ResponseTypeStream:
@@ -2954,7 +2993,7 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 			}
 			if err := a.addServiceExportWithResponseAndAccountPos(
 				string(e.Subject), rt, authAccounts(e.TokenReq), e.AccountTokenPosition); err != nil {
-				s.Debugf("Error adding service export to account [%s]: %v", a.Name, err)
+				s.Debugf("Error adding service export to account [%s]: %v", a.traceLabel(), err)
 				continue
 			}
 			sub := string(e.Subject)
@@ -2964,13 +3003,13 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 					if e.Latency.Sampling == jwt.Headers {
 						hdrNote = " (using headers)"
 					}
-					s.Debugf("Error adding latency tracking%s for service export to account [%s]: %v", hdrNote, a.Name, err)
+					s.Debugf("Error adding latency tracking%s for service export to account [%s]: %v", hdrNote, a.traceLabel(), err)
 				}
 			}
 			if e.ResponseThreshold != 0 {
 				// Response threshold was set in options.
 				if err := a.SetServiceExportResponseThreshold(sub, e.ResponseThreshold); err != nil {
-					s.Debugf("Error adding service export response threshold for [%s]: %v", a.Name, err)
+					s.Debugf("Error adding service export response threshold for [%s]: %v", a.traceLabel(), err)
 				}
 			}
 		}
@@ -3008,14 +3047,14 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 			if i.LocalSubject != _EMPTY_ {
 				// set local subject implies to is empty
 				to = string(i.LocalSubject)
-				s.Debugf("Adding stream import %s:%q for %s:%q", acc.Name, from, a.Name, to)
+				s.Debugf("Adding stream import %s:%q for %s:%q", acc.traceLabel(), from, a.traceLabel(), to)
 				err = a.AddMappedStreamImportWithClaim(acc, from, to, i)
 			} else {
-				s.Debugf("Adding stream import %s:%q for %s:%q", acc.Name, from, a.Name, to)
+				s.Debugf("Adding stream import %s:%q for %s:%q", acc.traceLabel(), from, a.traceLabel(), to)
 				err = a.AddStreamImportWithClaim(acc, from, to, i)
 			}
 			if err != nil {
-				s.Debugf("Error adding stream import to account [%s]: %v", a.Name, err.Error())
+				s.Debugf("Error adding stream import to account [%s]: %v", a.traceLabel(), err.Error())
 				incompleteImports = append(incompleteImports, i)
 			}
 		case jwt.Service:
@@ -3023,9 +3062,9 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 				from = string(i.LocalSubject)
 				to = string(i.Subject)
 			}
-			s.Debugf("Adding service import %s:%q for %s:%q", acc.Name, from, a.Name, to)
+			s.Debugf("Adding service import %s:%q for %s:%q", acc.traceLabel(), from, a.traceLabel(), to)
 			if err := a.AddServiceImportWithClaim(acc, from, to, i); err != nil {
-				s.Debugf("Error adding service import to account [%s]: %v", a.Name, err.Error())
+				s.Debugf("Error adding service import to account [%s]: %v", a.traceLabel(), err.Error())
 				incompleteImports = append(incompleteImports, i)
 			}
 		}
@@ -3168,7 +3207,7 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 	// regardless of enabled or disabled. It handles both cases.
 	if jsEnabled {
 		if err := s.configJetStream(a); err != nil {
-			s.Errorf("Error configuring jetstream for account [%s]: %v", a.Name, err.Error())
+			s.Errorf("Error configuring jetstream for account [%s]: %v", a.traceLabel(), err.Error())
 			a.mu.Lock()
 			// Absent reload of js server cfg, this is going to be broken until js is disabled
 			a.incomplete = true
@@ -3235,6 +3274,7 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 			acc.mu.RLock()
 			incomplete := acc.incomplete
 			name := acc.Name
+			label := acc.traceLabel()
 			// Must use jwt in account or risk failing on fetch
 			// This jwt may not be the same that caused exportingAcc to be in incompleteAccExporterMap
 			claimJWT := acc.claimJWT
@@ -3250,7 +3290,7 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 					// Since this account just got updated, the import itself may be in error. So trace that.
 					if _, ok := s.incompleteAccExporterMap.Load(old.Name); ok {
 						s.incompleteAccExporterMap.Delete(old.Name)
-						s.Errorf("Account %s has issues importing account %s", name, old.Name)
+						s.Errorf("Account %s has issues importing account %s", label, old.Name)
 					}
 				}
 			}
@@ -3639,7 +3679,7 @@ func (dr *DirAccResolver) Start(s *Server) error {
 	packRespIb := s.newRespInbox()
 	for _, reqSub := range []string{accUpdateEventSubjOld, accUpdateEventSubjNew} {
 		// subscribe to account jwt update requests
-		if _, err := s.sysSubscribe(fmt.Sprintf(reqSub, "*"), func(_ *subscription, _ *client, subj, resp string, msg []byte) {
+		if _, err := s.sysSubscribe(fmt.Sprintf(reqSub, "*"), func(_ *subscription, _ *client, _ *Account, subj, resp string, msg []byte) {
 			pubKey := ""
 			tk := strings.Split(subj, tsep)
 			if len(tk) == accUpdateTokensNew {
@@ -3669,7 +3709,7 @@ func (dr *DirAccResolver) Start(s *Server) error {
 			return fmt.Errorf("error setting up update handling: %v", err)
 		}
 	}
-	if _, err := s.sysSubscribe(accClaimsReqSubj, func(_ *subscription, _ *client, subj, resp string, msg []byte) {
+	if _, err := s.sysSubscribe(accClaimsReqSubj, func(_ *subscription, _ *client, _ *Account, subj, resp string, msg []byte) {
 		if claim, err := jwt.DecodeAccountClaims(string(msg)); err != nil {
 			respondToUpdate(s, resp, "n/a", "jwt update resulted in error", err)
 		} else if claim.Issuer == op && strict {
@@ -3686,7 +3726,7 @@ func (dr *DirAccResolver) Start(s *Server) error {
 		return fmt.Errorf("error setting up update handling: %v", err)
 	}
 	// respond to lookups with our version
-	if _, err := s.sysSubscribe(fmt.Sprintf(accLookupReqSubj, "*"), func(_ *subscription, _ *client, subj, reply string, msg []byte) {
+	if _, err := s.sysSubscribe(fmt.Sprintf(accLookupReqSubj, "*"), func(_ *subscription, _ *client, _ *Account, subj, reply string, msg []byte) {
 		if reply == "" {
 			return
 		}
@@ -3704,7 +3744,7 @@ func (dr *DirAccResolver) Start(s *Server) error {
 	}
 	// respond to pack requests with one or more pack messages
 	// an empty message signifies the end of the response responder
-	if _, err := s.sysSubscribeQ(accPackReqSubj, "responder", func(_ *subscription, _ *client, _, reply string, theirHash []byte) {
+	if _, err := s.sysSubscribeQ(accPackReqSubj, "responder", func(_ *subscription, _ *client, _ *Account, _, reply string, theirHash []byte) {
 		if reply == "" {
 			return
 		}
@@ -3725,18 +3765,18 @@ func (dr *DirAccResolver) Start(s *Server) error {
 		return fmt.Errorf("error setting up pack request handling: %v", err)
 	}
 	// respond to list requests with one message containing all account ids
-	if _, err := s.sysSubscribe(accListReqSubj, func(_ *subscription, _ *client, _, reply string, _ []byte) {
+	if _, err := s.sysSubscribe(accListReqSubj, func(_ *subscription, _ *client, _ *Account, _, reply string, _ []byte) {
 		handleListRequest(dr.DirJWTStore, s, reply)
 	}); err != nil {
 		return fmt.Errorf("error setting up list request handling: %v", err)
 	}
-	if _, err := s.sysSubscribe(accDeleteReqSubj, func(_ *subscription, _ *client, _, reply string, msg []byte) {
+	if _, err := s.sysSubscribe(accDeleteReqSubj, func(_ *subscription, _ *client, _ *Account, _, reply string, msg []byte) {
 		handleDeleteRequest(dr.DirJWTStore, s, msg, reply)
 	}); err != nil {
 		return fmt.Errorf("error setting up delete request handling: %v", err)
 	}
 	// embed pack responses into store
-	if _, err := s.sysSubscribe(packRespIb, func(_ *subscription, _ *client, _, _ string, msg []byte) {
+	if _, err := s.sysSubscribe(packRespIb, func(_ *subscription, _ *client, _ *Account, _, _ string, msg []byte) {
 		hash := dr.DirJWTStore.Hash()
 		if len(msg) == 0 { // end of response stream
 			s.Debugf("Merging Finished and resulting in: %x", dr.DirJWTStore.Hash())
@@ -3854,7 +3894,7 @@ func (s *Server) fetch(res AccountResolver, name string, timeout time.Duration) 
 	replySubj := s.newRespInbox()
 	replies := s.sys.replies
 	// Store our handler.
-	replies[replySubj] = func(sub *subscription, _ *client, subject, _ string, msg []byte) {
+	replies[replySubj] = func(sub *subscription, _ *client, _ *Account, subject, _ string, msg []byte) {
 		clone := make([]byte, len(msg))
 		copy(clone, msg)
 		s.mu.Lock()
@@ -3925,7 +3965,7 @@ func (dr *CacheDirAccResolver) Start(s *Server) error {
 	}
 	for _, reqSub := range []string{accUpdateEventSubjOld, accUpdateEventSubjNew} {
 		// subscribe to account jwt update requests
-		if _, err := s.sysSubscribe(fmt.Sprintf(reqSub, "*"), func(_ *subscription, _ *client, subj, resp string, msg []byte) {
+		if _, err := s.sysSubscribe(fmt.Sprintf(reqSub, "*"), func(_ *subscription, _ *client, _ *Account, subj, resp string, msg []byte) {
 			pubKey := ""
 			tk := strings.Split(subj, tsep)
 			if len(tk) == accUpdateTokensNew {
@@ -3957,7 +3997,7 @@ func (dr *CacheDirAccResolver) Start(s *Server) error {
 			return fmt.Errorf("error setting up update handling: %v", err)
 		}
 	}
-	if _, err := s.sysSubscribe(accClaimsReqSubj, func(_ *subscription, _ *client, subj, resp string, msg []byte) {
+	if _, err := s.sysSubscribe(accClaimsReqSubj, func(_ *subscription, _ *client, _ *Account, subj, resp string, msg []byte) {
 		if claim, err := jwt.DecodeAccountClaims(string(msg)); err != nil {
 			respondToUpdate(s, resp, "n/a", "jwt update cache resulted in error", err)
 		} else if claim.Issuer == op && strict {
@@ -3976,12 +4016,12 @@ func (dr *CacheDirAccResolver) Start(s *Server) error {
 		return fmt.Errorf("error setting up update handling: %v", err)
 	}
 	// respond to list requests with one message containing all account ids
-	if _, err := s.sysSubscribe(accListReqSubj, func(_ *subscription, _ *client, _, reply string, _ []byte) {
+	if _, err := s.sysSubscribe(accListReqSubj, func(_ *subscription, _ *client, _ *Account, _, reply string, _ []byte) {
 		handleListRequest(dr.DirJWTStore, s, reply)
 	}); err != nil {
 		return fmt.Errorf("error setting up list request handling: %v", err)
 	}
-	if _, err := s.sysSubscribe(accDeleteReqSubj, func(_ *subscription, _ *client, _, reply string, msg []byte) {
+	if _, err := s.sysSubscribe(accDeleteReqSubj, func(_ *subscription, _ *client, _ *Account, _, reply string, msg []byte) {
 		handleDeleteRequest(dr.DirJWTStore, s, msg, reply)
 	}); err != nil {
 		return fmt.Errorf("error setting up list request handling: %v", err)
