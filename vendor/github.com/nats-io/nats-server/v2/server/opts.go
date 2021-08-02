@@ -79,6 +79,8 @@ type ClusterOpts struct {
 
 	// Not exported (used in tests)
 	resolver netResolver
+	// Snapshot of configured TLS options.
+	tlsConfigOpts *TLSConfigOpts
 }
 
 // GatewayOpts are options for gateways.
@@ -104,16 +106,20 @@ type GatewayOpts struct {
 	// Not exported, for tests.
 	resolver         netResolver
 	sendQSubsBufSize int
+
+	// Snapshot of configured TLS options.
+	tlsConfigOpts *TLSConfigOpts
 }
 
 // RemoteGatewayOpts are options for connecting to a remote gateway
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
 type RemoteGatewayOpts struct {
-	Name       string      `json:"name"`
-	TLSConfig  *tls.Config `json:"-"`
-	TLSTimeout float64     `json:"tls_timeout,omitempty"`
-	URLs       []*url.URL  `json:"urls,omitempty"`
+	Name          string      `json:"name"`
+	TLSConfig     *tls.Config `json:"-"`
+	TLSTimeout    float64     `json:"tls_timeout,omitempty"`
+	URLs          []*url.URL  `json:"urls,omitempty"`
+	tlsConfigOpts *TLSConfigOpts
 }
 
 // LeafNodeOpts are options for a given server to accept leaf node connections and/or connect to a remote cluster.
@@ -140,6 +146,9 @@ type LeafNodeOpts struct {
 	resolver    netResolver
 	dialTimeout time.Duration
 	connDelay   time.Duration
+
+	// Snapshot of configured TLS options.
+	tlsConfigOpts *TLSConfigOpts
 }
 
 // RemoteLeafOpts are options for connecting to a remote server as a leaf node.
@@ -163,6 +172,8 @@ type RemoteLeafOpts struct {
 		Compression bool `json:"-"`
 		NoMasking   bool `json:"-"`
 	}
+
+	tlsConfigOpts *TLSConfigOpts
 }
 
 // Options block for nats-server.
@@ -212,6 +223,7 @@ type Options struct {
 	JetStreamMaxMemory    int64         `json:"-"`
 	JetStreamMaxStore     int64         `json:"-"`
 	JetStreamDomain       string        `json:"-"`
+	JetStreamKey          string        `json:"-"`
 	StoreDir              string        `json:"-"`
 	Websocket             WebsocketOpts `json:"-"`
 	MQTT                  MQTTOpts      `json:"-"`
@@ -267,6 +279,10 @@ type Options struct {
 	// Tags describing the server. They will be included in varz
 	// and used as a filter criteria for some system requests
 	Tags jwt.TagList `json:"-"`
+
+	// OCSPConfig enables OCSP Stapling in the server.
+	OCSPConfig    *OCSPConfig
+	tlsConfigOpts *TLSConfigOpts
 
 	// private fields, used to know if bool options are explicitly
 	// defined in config and/or command line params.
@@ -483,6 +499,15 @@ type TLSConfigOpts struct {
 	Ciphers           []uint16
 	CurvePreferences  []tls.CurveID
 	PinnedCerts       PinnedCertSet
+}
+
+// OCSPConfig represents the options of OCSP stapling options.
+type OCSPConfig struct {
+	// Mode defines the policy for OCSP stapling.
+	Mode OCSPMode
+
+	// OverrideURLs is the http URL endpoint used to get OCSP staples.
+	OverrideURLs []string
 }
 
 var tlsUsage = `
@@ -780,6 +805,13 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			*errors = append(*errors, err)
 			return
 		}
+	case "store_dir", "storedir":
+		// Check if JetStream configuration is also setting the storage directory.
+		if o.StoreDir != "" {
+			*errors = append(*errors, &configErr{tk, "Duplicate 'store_dir' configuration"})
+			return
+		}
+		o.StoreDir = v.(string)
 	case "jetstream":
 		err := parseJetStream(tk, o, errors, warnings)
 		if err != nil {
@@ -841,6 +873,57 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		o.TLSTimeout = tc.Timeout
 		o.TLSMap = tc.Map
 		o.TLSPinnedCerts = tc.PinnedCerts
+
+		// Need to keep track of path of the original TLS config
+		// and certs path for OCSP Stapling monitoring.
+		o.tlsConfigOpts = tc
+	case "ocsp":
+		switch vv := v.(type) {
+		case bool:
+			if vv {
+				// Default is Auto which honors Must Staple status request
+				// but does not shutdown the server in case it is revoked,
+				// letting the client choose whether to trust or not the server.
+				o.OCSPConfig = &OCSPConfig{Mode: OCSPModeAuto}
+			} else {
+				o.OCSPConfig = &OCSPConfig{Mode: OCSPModeNever}
+			}
+		case map[string]interface{}:
+			ocsp := &OCSPConfig{Mode: OCSPModeAuto}
+
+			for kk, kv := range vv {
+				_, v = unwrapValue(kv, &tk)
+				switch kk {
+				case "mode":
+					mode := v.(string)
+					switch {
+					case strings.EqualFold(mode, "always"):
+						ocsp.Mode = OCSPModeAlways
+					case strings.EqualFold(mode, "must"):
+						ocsp.Mode = OCSPModeMust
+					case strings.EqualFold(mode, "never"):
+						ocsp.Mode = OCSPModeNever
+					case strings.EqualFold(mode, "auto"):
+						ocsp.Mode = OCSPModeAuto
+					default:
+						*errors = append(*errors, &configErr{tk, fmt.Sprintf("error parsing ocsp config: unsupported ocsp mode %T", mode)})
+					}
+				case "urls":
+					urls := v.([]string)
+					ocsp.OverrideURLs = urls
+				case "url":
+					url := v.(string)
+					ocsp.OverrideURLs = []string{url}
+				default:
+					*errors = append(*errors, &configErr{tk, fmt.Sprintf("error parsing ocsp config: unsupported field %T", kk)})
+					return
+				}
+			}
+			o.OCSPConfig = ocsp
+		default:
+			*errors = append(*errors, &configErr{tk, fmt.Sprintf("error parsing ocsp config: unsupported type %T", v)})
+			return
+		}
 	case "allow_non_tls":
 		o.AllowNonTLS = v.(bool)
 	case "write_deadline":
@@ -1287,6 +1370,7 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 			opts.Cluster.TLSMap = tlsopts.Map
 			opts.Cluster.TLSPinnedCerts = tlsopts.PinnedCerts
 			opts.Cluster.TLSCheckKnownURLs = tlsopts.TLSCheckKnownURLs
+			opts.Cluster.tlsConfigOpts = tlsopts
 		case "cluster_advertise", "advertise":
 			opts.Cluster.Advertise = mv.(string)
 		case "no_advertise":
@@ -1404,6 +1488,7 @@ func parseGateway(v interface{}, o *Options, errors *[]error, warnings *[]error)
 			o.Gateway.TLSMap = tlsopts.Map
 			o.Gateway.TLSCheckKnownURLs = tlsopts.TLSCheckKnownURLs
 			o.Gateway.TLSPinnedCerts = tlsopts.PinnedCerts
+			o.Gateway.tlsConfigOpts = tlsopts
 		case "advertise":
 			o.Gateway.Advertise = mv.(string)
 		case "connect_retries":
@@ -1529,7 +1614,11 @@ func parseJetStream(v interface{}, opts *Options, errors *[]error, warnings *[]e
 		for mk, mv := range vv {
 			tk, mv = unwrapValue(mv, &lt)
 			switch strings.ToLower(mk) {
-			case "store_dir", "storedir":
+			case "store", "store_dir", "storedir":
+				// StoreDir can be set at the top level as well so have to prevent ambiguous declarations.
+				if opts.StoreDir != "" {
+					return &configErr{tk, "Duplicate 'store_dir' configuration"}
+				}
 				opts.StoreDir = mv.(string)
 			case "max_memory_store", "max_mem_store", "max_mem":
 				opts.JetStreamMaxMemory = mv.(int64)
@@ -1539,6 +1628,8 @@ func parseJetStream(v interface{}, opts *Options, errors *[]error, warnings *[]e
 				opts.JetStreamDomain = mv.(string)
 			case "enable", "enabled":
 				doEnable = mv.(bool)
+			case "key", "ek", "encryption_key":
+				opts.JetStreamKey = mv.(string)
 			default:
 				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{
@@ -1628,6 +1719,7 @@ func parseLeafNodes(v interface{}, opts *Options, errors *[]error, warnings *[]e
 			opts.LeafNode.TLSTimeout = tc.Timeout
 			opts.LeafNode.TLSMap = tc.Map
 			opts.LeafNode.TLSPinnedCerts = tc.PinnedCerts
+			opts.LeafNode.tlsConfigOpts = tc
 		case "leafnode_advertise", "advertise":
 			opts.LeafNode.Advertise = mv.(string)
 		case "no_advertise":
@@ -1834,6 +1926,7 @@ func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]
 				} else {
 					remote.TLSTimeout = float64(DEFAULT_LEAF_TLS_TIMEOUT)
 				}
+				remote.tlsConfigOpts = tc
 			case "hub":
 				remote.Hub = v.(bool)
 			case "deny_imports", "deny_import":
@@ -1925,6 +2018,7 @@ func parseGateways(v interface{}, errors *[]error, warnings *[]error) ([]*Remote
 				}
 				gateway.TLSConfig = tls
 				gateway.TLSTimeout = tlsopts.Timeout
+				gateway.tlsConfigOpts = tlsopts
 			case "url":
 				url, err := parseURL(v.(string), "gateway")
 				if err != nil {
@@ -3458,6 +3552,14 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 				at = float64(mv)
 			case float64:
 				at = mv
+			case string:
+				d, err := time.ParseDuration(mv)
+				if err != nil {
+					return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, 'timeout' %s", err)}
+				}
+				at = d.Seconds()
+			default:
+				return nil, &configErr{tk, "error parsing tls config, 'timeout' wrong type"}
 			}
 			tc.Timeout = at
 		case "pinned_certs":

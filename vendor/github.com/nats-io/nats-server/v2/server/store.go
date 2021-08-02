@@ -45,10 +45,12 @@ var (
 	ErrMaxMsgs = errors.New("maximum messages exceeded")
 	// ErrMaxBytes is returned when we have discard new as a policy and we reached the bytes limit.
 	ErrMaxBytes = errors.New("maximum bytes exceeded")
+	// ErrMaxMsgsPerSubject is returned when we have discard new as a policy and we reached the message limit per subject.
+	ErrMaxMsgsPerSubject = errors.New("maximum messages per subject exceeded")
 	// ErrStoreSnapshotInProgress is returned when RemoveMsg or EraseMsg is called
 	// while a snapshot is in progress.
 	ErrStoreSnapshotInProgress = errors.New("snapshot in progress")
-	// ErrMsgTooBig is returned when a message is considered too large.
+	// ErrMsgTooLarge is returned when a message is considered too large.
 	ErrMsgTooLarge = errors.New("message to large")
 	// ErrStoreWrongType is for when you access the wrong storage type.
 	ErrStoreWrongType = errors.New("wrong storage type")
@@ -69,13 +71,16 @@ type StreamStore interface {
 	StoreRawMsg(subject string, hdr, msg []byte, seq uint64, ts int64) error
 	SkipMsg() uint64
 	LoadMsg(seq uint64) (subject string, hdr, msg []byte, ts int64, err error)
+	LoadLastMsg(subject string) (subj string, seq uint64, hdr, msg []byte, ts int64, err error)
 	RemoveMsg(seq uint64) (bool, error)
 	EraseMsg(seq uint64) (bool, error)
 	Purge() (uint64, error)
+	PurgeEx(subject string, seq, keep uint64) (uint64, error)
 	Compact(seq uint64) (uint64, error)
 	Truncate(seq uint64) error
 	GetSeqFromTime(t time.Time) uint64
-	NumFilteredPending(sseq uint64, subject string) uint64
+	FilteredState(seq uint64, subject string) SimpleState
+	SubjectsState(filterSubject string) map[string]SimpleState
 	State() StreamState
 	FastState(*StreamState)
 	Type() StorageType
@@ -107,7 +112,7 @@ type DiscardPolicy int
 const (
 	// DiscardOld will remove older messages to return to the limits.
 	DiscardOld = iota
-	//DiscardNew will error on a StoreMsg call
+	// DiscardNew will error on a StoreMsg call
 	DiscardNew
 )
 
@@ -123,6 +128,13 @@ type StreamState struct {
 	Deleted    []uint64        `json:"deleted,omitempty"`
 	Lost       *LostStreamData `json:"lost,omitempty"`
 	Consumers  int             `json:"consumer_count"`
+}
+
+// SimpleState for filtered subject specific state.
+type SimpleState struct {
+	Msgs  uint64 `json:"messages"`
+	First uint64 `json:"first_seq"`
+	Last  uint64 `json:"last_seq"`
 }
 
 // LostStreamData indicates msgs that have been lost.
@@ -145,6 +157,7 @@ type ConsumerStore interface {
 	State() (*ConsumerState, error)
 	Stop() error
 	Delete() error
+	StreamDelete() error
 }
 
 // SequencePair has both the consumer and the stream sequence. They point to same message.
@@ -377,6 +390,7 @@ const (
 	deliverNewPolicyString       = "new"
 	deliverByStartSequenceString = "by_start_sequence"
 	deliverByStartTimeString     = "by_start_time"
+	deliverLastPerPolicyString   = "last_per_subject"
 	deliverUndefinedString       = "undefined"
 )
 
@@ -386,6 +400,8 @@ func (p *DeliverPolicy) UnmarshalJSON(data []byte) error {
 		*p = DeliverAll
 	case jsonString(deliverLastPolicyString):
 		*p = DeliverLast
+	case jsonString(deliverLastPerPolicyString):
+		*p = DeliverLastPerSubject
 	case jsonString(deliverNewPolicyString):
 		*p = DeliverNew
 	case jsonString(deliverByStartSequenceString):
@@ -405,6 +421,8 @@ func (p DeliverPolicy) MarshalJSON() ([]byte, error) {
 		return json.Marshal(deliverAllPolicyString)
 	case DeliverLast:
 		return json.Marshal(deliverLastPolicyString)
+	case DeliverLastPerSubject:
+		return json.Marshal(deliverLastPerPolicyString)
 	case DeliverNew:
 		return json.Marshal(deliverNewPolicyString)
 	case DeliverByStartSequence:

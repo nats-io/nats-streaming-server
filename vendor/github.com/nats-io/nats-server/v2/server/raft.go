@@ -1245,11 +1245,15 @@ func (n *raft) Peers() []*Peer {
 
 	var peers []*Peer
 	for id, ps := range n.peers {
+		var lag uint64
+		if n.commit > ps.li {
+			lag = n.commit - ps.li
+		}
 		p := &Peer{
 			ID:      id,
 			Current: id == n.leader || ps.li >= n.applied,
 			Last:    time.Unix(0, ps.ts),
-			Lag:     n.commit - ps.li,
+			Lag:     lag,
 		}
 		peers = append(peers, p)
 	}
@@ -1647,7 +1651,7 @@ func (n *raft) decodeAppendEntryResponse(msg []byte) *appendEntryResponse {
 }
 
 // Called when a remove peer proposal has been forwarded
-func (n *raft) handleForwardedRemovePeerProposal(sub *subscription, c *client, _, reply string, msg []byte) {
+func (n *raft) handleForwardedRemovePeerProposal(sub *subscription, c *client, _ *Account, _, reply string, msg []byte) {
 	n.debug("Received forwarded remove peer proposal: %q", msg)
 
 	if !n.Leader() {
@@ -1678,7 +1682,7 @@ func (n *raft) handleForwardedRemovePeerProposal(sub *subscription, c *client, _
 }
 
 // Called when a peer has forwarded a proposal.
-func (n *raft) handleForwardedProposal(sub *subscription, c *client, _, reply string, msg []byte) {
+func (n *raft) handleForwardedProposal(sub *subscription, c *client, _ *Account, _, reply string, msg []byte) {
 	if !n.Leader() {
 		n.debug("Ignoring forwarded proposal, not leader")
 		return
@@ -1960,9 +1964,7 @@ func (n *raft) catchupFollower(ar *appendEntryResponse) {
 	n.Lock()
 	if n.progress == nil {
 		n.progress = make(map[string]chan uint64)
-	}
-
-	if ch, ok := n.progress[ar.peer]; ok {
+	} else if ch, ok := n.progress[ar.peer]; ok {
 		n.debug("Will cancel existing entry for catching up %q", ar.peer)
 		delete(n.progress, ar.peer)
 		// Try to pop them out but make sure to not block.
@@ -2332,7 +2334,7 @@ func (n *raft) runAsCandidate() {
 }
 
 // handleAppendEntry handles an append entry from the wire.
-func (n *raft) handleAppendEntry(sub *subscription, c *client, subject, reply string, msg []byte) {
+func (n *raft) handleAppendEntry(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 	if n.outOfResources() {
 		n.debug("AppendEntry not processing inbound, no resources")
 		return
@@ -2565,6 +2567,9 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 			if ae.pindex == n.pindex {
 				n.truncateWal(ae)
 				n.cancelCatchup()
+				// Make sure pterms match and we take on the leader's.
+				// This prevents constant spinning.
+				n.pterm = ae.pterm
 				n.Unlock()
 				return
 			}
@@ -2728,7 +2733,7 @@ func (n *raft) processAppendEntryResponse(ar *appendEntryResponse) {
 }
 
 // handleAppendEntryResponse processes responses to append entries.
-func (n *raft) handleAppendEntryResponse(sub *subscription, c *client, subject, reply string, msg []byte) {
+func (n *raft) handleAppendEntryResponse(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 	// Ignore if not the leader.
 	if !n.Leader() {
 		return
@@ -3067,7 +3072,7 @@ func (n *raft) decodeVoteResponse(msg []byte) *voteResponse {
 	return vr
 }
 
-func (n *raft) handleVoteResponse(sub *subscription, c *client, _, reply string, msg []byte) {
+func (n *raft) handleVoteResponse(sub *subscription, c *client, _ *Account, _, reply string, msg []byte) {
 	vr := n.decodeVoteResponse(msg)
 	n.debug("Received a voteResponse %+v", vr)
 	if vr == nil {
@@ -3132,7 +3137,7 @@ func (n *raft) processVoteRequest(vr *voteRequest) error {
 	return nil
 }
 
-func (n *raft) handleVoteRequest(sub *subscription, c *client, subject, reply string, msg []byte) {
+func (n *raft) handleVoteRequest(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 	vr := n.decodeVoteRequest(msg, reply)
 	if vr == nil {
 		n.error("Received malformed vote request for %q", n.group)
