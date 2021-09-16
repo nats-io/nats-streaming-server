@@ -453,6 +453,7 @@ func TestParseWrongTypes(t *testing.T) {
 	expectFailureFor(t, "partitioning: 123", wrongTypeErr)
 	expectFailureFor(t, "syslog_name: 123", wrongTypeErr)
 	expectFailureFor(t, "replace_durable: 123", wrongTypeErr)
+	expectFailureFor(t, "async_msg_processing: 123", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_channels:false}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_msgs:false}", wrongTypeErr)
 	expectFailureFor(t, "store_limits:{max_bytes:false}", wrongTypeErr)

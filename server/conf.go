@@ -204,6 +204,11 @@ func ProcessConfigFile(configFile string, opts *Options) error {
 				return err
 			}
 			opts.ReplaceDurable = v.(bool)
+		case "async_msg_processing", "async_message_processing":
+			if err := checkType(k, reflect.Bool, v); err != nil {
+				return err
+			}
+			opts.AsyncMsgProcessing = v.(bool)
 		}
 	}
 	return nil
@@ -714,6 +719,7 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.StringVar(&sopts.EncryptionCipher, "encryption_cipher", stores.CryptoCipherAutoSelect, "Encryption cipher. Supported are AES and CHACHA (default is AES)")
 	fs.StringVar(&encryptionKey, "encryption_key", "", "Encryption Key. It is recommended to specify it through the NATS_STREAMING_ENCRYPTION_KEY environment variable instead")
 	fs.BoolVar(&sopts.ReplaceDurable, "replace_durable", false, "Replace the existing durable subscription instead of reporting a duplicate durable error")
+	fs.BoolVar(&sopts.AsyncMsgProcessing, "async_msg_processing", false, "Trigger message processing (find subscription and do delivery) outside of the io loop")
 
 	// First, we need to call NATS's ConfigureOptions() with above flag set.
 	// It will be augmented with NATS specific flags and call fs.Parse(args) for us.
