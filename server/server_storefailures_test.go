@@ -165,6 +165,7 @@ func (l *checkErrorLogger) Errorf(format string, args ...interface{}) {
 func TestMsgLookupFailures(t *testing.T) {
 	logger := &checkErrorLogger{checkErrorStr: "looking up"}
 	opts := GetDefaultOptions()
+	opts.AsyncMsgProcessing = false
 	opts.CustomLogger = logger
 	s, err := RunServerWithOpts(opts, nil)
 	if err != nil {

@@ -354,6 +354,9 @@ func (cs *channelStore) createChannelLocked(s *StanServer, name string, id uint6
 // Lock is held on entry or not needed.
 func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (*channel, error) {
 	c := &channel{name: name, store: sc, ss: s.createSubStore(), stan: s, nextSubID: 1}
+	if s.opts.AsyncMsgProcessing {
+		c.ic = &channelInboundCache{msgs: make(map[uint64]*channelMsg, 64)}
+	}
 	lastSequence, err := c.store.Msgs.LastSequence()
 	if err != nil {
 		return nil, err
@@ -447,6 +450,7 @@ type channel struct {
 	name         string
 	id           uint64
 	store        *stores.Channel
+	ic           *channelInboundCache
 	ss           *subStore
 	lTimestamp   int64
 	stan         *StanServer
@@ -457,6 +461,18 @@ type channel struct {
 	// last sequence should be checked before storing a message in
 	// Apply(). Protected by the raft's FSM lock.
 	lSeqChecked bool
+}
+
+type channelMsg struct {
+	msg  *pb.MsgProto
+	next *channelMsg
+}
+
+type channelInboundCache struct {
+	mu   sync.RWMutex
+	msgs map[uint64]*channelMsg
+	head *channelMsg
+	tail *channelMsg
 }
 
 type channelActivity struct {
@@ -774,9 +790,8 @@ type StanServer struct {
 
 type asyncMsgProcessing struct {
 	mu       sync.Mutex
-	cond     *sync.Cond
+	ch       chan struct{}
 	channels map[*channel]struct{}
-	inWait   bool
 	closed   bool
 }
 
@@ -4261,89 +4276,124 @@ func (s *StanServer) startIOLoop() {
 		s.ioChannelWG.Add(1)
 		ready.Add(1)
 		s.amp.channels = make(map[*channel]struct{}, 64)
-		s.amp.cond = sync.NewCond(&s.amp.mu)
+		s.amp.ch = make(chan struct{}, 1)
 		go s.asyncMsgProcessing(ready)
 	}
 	go s.ioLoop(ready)
 	ready.Wait()
 }
 
+type future struct {
+	batch *spb.Batch
+	iopms []*ioPendingMsg
+}
+
 func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 	defer s.ioChannelWG.Done()
 
-	storesToFlush := make(map[*channel]struct{}, 64)
-
 	var (
-		_pendingMsgs [ioChannelSize]*ioPendingMsg
-		pendingMsgs  = _pendingMsgs[:0]
+		storesToFlush = make(map[*channel]struct{}, 64)
+		_pendingMsgs  [DefaultIOBatchSize]*ioPendingMsg
+		pendingMsgs   = _pendingMsgs[:0]
+		doamp         = s.opts.AsyncMsgProcessing
+		amp           = &s.amp
+		clustered     = s.isClustered
+	)
+
+	// These following const/vars are for clustered mode.
+	const futuresSize = 64
+	var (
+		// Futures map
+		futuresMap = make(map[*channel]*future, futuresSize)
+		// Following is some objects on stack that we may be able to reuse.
+		// We will keep track of a usage and if over, simply allocate.
+		futures       = [futuresSize]future{}
+		raftBatches   = [futuresSize]spb.Batch{}
+		raftBatchMsgs = [futuresSize][DefaultIOBatchSize]*pb.MsgProto{}
+		futuresIOPms  = [futuresSize][DefaultIOBatchSize]*ioPendingMsg{}
 	)
 
 	storeIOPendingMsgs := func(iopms []*ioPendingMsg) {
 		var (
-			futuresMap map[*channel]raft.Future
-			err        error
+			c    *channel
+			lc   *channel
+			lcn  string
+			msg  *pb.MsgProto
+			fIdx int
 		)
-		if s.isClustered {
-			futuresMap, err = s.replicate(iopms)
-			// If replicate() returns an error, it means that no future
-			// was applied, so we can fail all published messages.
-			if err != nil {
-				for _, iopm := range iopms {
-					s.logErrAndSendPublishErr(iopm, err)
+		for _, iopm := range iopms {
+			var err error
+
+			pm := &iopm.pm
+			if lcn != pm.Subject {
+				c, err = s.lookupOrCreateChannel(pm.Subject)
+				if err == nil {
+					lc = c
+					lcn = pm.Subject
 				}
 			} else {
-				for c, f := range futuresMap {
-					// Wait for the replication result.
-					// We know that we panic in StanServer.Apply() if storing
-					// of messages fail. So the only reason f.Error() would
-					// return an error (we are not using timeout in Apply())
-					// is if raft fails to store its log, but it would have
-					// then switched follower state. On leadership acquisition
-					// we do reset nextSequence based on lastSequence on store.
-					// Regardless, do reset here in case of error.
-
-					// Note that each future contains a batch of messages for
-					// a given channel. All futures in the map are for different
-					// channels.
-					if err := f.Error(); err != nil {
-						lastSeq, lerr := c.store.Msgs.LastSequence()
-						if lerr != nil {
-							panic(fmt.Errorf("error during message replication (%v), unable to get store last sequence: %v", err, lerr))
-						}
-						c.nextSequence = lastSeq + 1
-					} else {
-						storesToFlush[c] = struct{}{}
-					}
-				}
-				// We have 1 future per channel. However, the array of iopms
-				// may be from different channels. For each iopm we look
-				// up its corresponding future and if there was an error
-				// (same for all iopms of the same channel) we fail the
-				// corresponding publishers.
-				for _, iopm := range iopms {
-					// We can call Error() again, this is not a problem.
-					if err := futuresMap[iopm.c].Error(); err != nil {
-						s.logErrAndSendPublishErr(iopm, err)
-					} else {
-						pendingMsgs = append(pendingMsgs, iopm)
-					}
-				}
+				c = lc
 			}
-		} else {
-			for _, iopm := range iopms {
-				pm := &iopm.pm
-				c, err := s.lookupOrCreateChannel(pm.Subject)
-				if err == nil {
-					msg := c.pubMsgToMsgProto(pm, c.nextSequence)
+			if err == nil {
+				msg = c.pubMsgToMsgProto(pm, c.nextSequence)
+				if clustered {
+					f := futuresMap[c]
+					if f == nil {
+						if fIdx == futuresSize {
+							f = &future{batch: &spb.Batch{}}
+						} else {
+							f = &futures[fIdx]
+							f.batch = &raftBatches[fIdx]
+							f.batch.Messages = raftBatchMsgs[fIdx][:0]
+							f.iopms = futuresIOPms[fIdx][:0]
+							fIdx++
+						}
+						futuresMap[c] = f
+					}
+					f.batch.Messages = append(f.batch.Messages, msg)
+					f.iopms = append(f.iopms, iopm)
+				} else {
 					_, err = c.store.Msgs.Store(msg)
 				}
-				if err != nil {
-					s.logErrAndSendPublishErr(iopm, err)
-				} else {
-					c.nextSequence++
+			}
+			if err != nil {
+				s.logErrAndSendPublishErr(iopm, err)
+			} else {
+				c.nextSequence++
+				if !clustered {
 					pendingMsgs = append(pendingMsgs, iopm)
-					storesToFlush[c] = struct{}{}
 				}
+				storesToFlush[c] = struct{}{}
+				if doamp {
+					c.ic.add(msg)
+				}
+			}
+		}
+
+		if clustered {
+			for c, f := range futuresMap {
+				op := &spb.RaftOperation{
+					OpType:       spb.RaftOperation_Publish,
+					PublishBatch: f.batch,
+					ChannelID:    c.id,
+				}
+				data, err := op.Marshal()
+				if err != nil {
+					panic(err)
+				}
+				if err := s.raft.Apply(data, 0).Error(); err != nil {
+					lastSeq, lerr := c.store.Msgs.LastSequence()
+					if lerr != nil {
+						panic(fmt.Errorf("error during message replication (%v), unable to get store last sequence: %v", err, lerr))
+					}
+					c.nextSequence = lastSeq + 1
+					for _, iopm := range f.iopms {
+						s.logErrAndSendPublishErr(iopm, err)
+					}
+				} else {
+					pendingMsgs = append(pendingMsgs, f.iopms...)
+				}
+				delete(futuresMap, c)
 			}
 		}
 	}
@@ -4355,8 +4405,6 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 		max       = 0
 		batch     = make([]*ioPendingMsg, 0, batchSize)
 		dciopm    *ioPendingMsg
-		doamp     = s.opts.AsyncMsgProcessing
-		amp       = &s.amp
 	)
 
 	synchronizationRequest := func(iopm *ioPendingMsg) {
@@ -4436,10 +4484,8 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 					panic(fmt.Errorf("unable to flush msg store: %v", err))
 				}
 				if doamp {
-					amp.mu.Lock()
-					amp.channels[c] = struct{}{}
+					amp.add(c)
 					notifyAMP = true
-					amp.mu.Unlock()
 				} else {
 					// Call this here, so messages are sent to subscribers,
 					// which means that msg seq is added to subscription file
@@ -4485,7 +4531,6 @@ func (s *StanServer) ioLoop(ready *sync.WaitGroup) {
 func (s *StanServer) asyncMsgProcessing(ready *sync.WaitGroup) {
 	defer s.ioChannelWG.Done()
 
-	var closed bool
 	var channelsa [64]*channel
 	var channels = channelsa[:0]
 
@@ -4493,12 +4538,11 @@ func (s *StanServer) asyncMsgProcessing(ready *sync.WaitGroup) {
 
 	ready.Done()
 
-	for {
+	for range a.ch {
 		a.mu.Lock()
-		for closed = a.closed; !closed && len(a.channels) == 0; closed = a.closed {
-			a.inWait = true
-			a.cond.Wait()
-			a.inWait = false
+		if a.closed {
+			a.mu.Unlock()
+			return
 		}
 		for c := range a.channels {
 			channels = append(channels, c)
@@ -4507,25 +4551,28 @@ func (s *StanServer) asyncMsgProcessing(ready *sync.WaitGroup) {
 		a.mu.Unlock()
 
 		for _, c := range channels {
+			last := c.ic.getLast()
 			s.processMsg(c)
 			if err := c.store.Subs.Flush(); err != nil {
 				s.log.Errorf("Error flushing subscription store for channel %q: %v", c.name, err)
 			}
+			c.ic.removeUpTo(last)
 		}
 		channels = channels[:0]
-
-		if closed {
-			return
-		}
 	}
 }
 
-func (a *asyncMsgProcessing) notify() {
+func (a *asyncMsgProcessing) add(c *channel) {
 	a.mu.Lock()
-	if a.inWait {
-		a.cond.Signal()
-	}
+	a.channels[c] = struct{}{}
 	a.mu.Unlock()
+}
+
+func (a *asyncMsgProcessing) notify() {
+	select {
+	case a.ch <- struct{}{}:
+	default:
+	}
 }
 
 func (a *asyncMsgProcessing) done() {
@@ -4535,7 +4582,56 @@ func (a *asyncMsgProcessing) done() {
 		return
 	}
 	a.closed = true
-	a.cond.Signal()
+	a.notify()
+}
+
+func (c *channelInboundCache) add(m *pb.MsgProto) {
+	cm := &channelMsg{msg: m}
+	c.mu.Lock()
+	if c.tail != nil {
+		c.tail.next = cm
+	} else {
+		c.head = cm
+	}
+	c.tail = cm
+	c.msgs[m.Sequence] = cm
+	c.mu.Unlock()
+}
+
+func (c *channelInboundCache) get(seq uint64) *pb.MsgProto {
+	var m *pb.MsgProto
+	c.mu.RLock()
+	cm := c.msgs[seq]
+	if cm != nil {
+		m = cm.msg
+	}
+	c.mu.RUnlock()
+	return m
+}
+
+func (c *channelInboundCache) getLast() *channelMsg {
+	c.mu.RLock()
+	l := c.tail
+	c.mu.RUnlock()
+	return l
+}
+
+func (c *channelInboundCache) removeUpTo(cm *channelMsg) {
+	if cm == nil {
+		return
+	}
+	c.mu.Lock()
+	for h := c.head; h != nil; h = h.next {
+		delete(c.msgs, h.msg.Sequence)
+		if h == cm {
+			break
+		}
+	}
+	c.head = cm.next
+	if c.head == nil {
+		c.tail = nil
+	}
+	c.mu.Unlock()
 }
 
 func (s *StanServer) logErrAndSendPublishErr(iopm *ioPendingMsg, err error) {
@@ -4549,46 +4645,6 @@ func (s *StanServer) logErrAndSendPublishErr(iopm *ioPendingMsg, err error) {
 func (s *StanServer) sendDeleteChannelRequest(c *channel) {
 	iopm := &ioPendingMsg{c: c, dc: true}
 	s.ioChannel <- iopm
-}
-
-// replicate will replicate the batch of messages to followers and return
-// futures (one for each channel messages were replicated for) which, when
-// waited upon, will indicate if the replication was successful or not. This
-// should only be called if running in clustered mode.
-func (s *StanServer) replicate(iopms []*ioPendingMsg) (map[*channel]raft.Future, error) {
-	var (
-		futures = make(map[*channel]raft.Future)
-		batches = make(map[*channel]*spb.Batch)
-	)
-	for _, iopm := range iopms {
-		pm := &iopm.pm
-		c, err := s.lookupOrCreateChannel(pm.Subject)
-		if err != nil {
-			return nil, err
-		}
-		msg := c.pubMsgToMsgProto(pm, c.nextSequence)
-		batch := batches[c]
-		if batch == nil {
-			batch = &spb.Batch{}
-			batches[c] = batch
-		}
-		batch.Messages = append(batch.Messages, msg)
-		iopm.c = c
-		c.nextSequence++
-	}
-	for c, batch := range batches {
-		op := &spb.RaftOperation{
-			OpType:       spb.RaftOperation_Publish,
-			PublishBatch: batch,
-			ChannelID:    c.id,
-		}
-		data, err := op.Marshal()
-		if err != nil {
-			panic(err)
-		}
-		futures[c] = s.raft.Apply(data, 0)
-	}
-	return futures, nil
 }
 
 // ackPublisher sends the ack for a message.
@@ -5653,6 +5709,11 @@ func (s *StanServer) sendAvailableMessages(c *channel, sub *subState) {
 
 func (s *StanServer) getNextMsg(c *channel, nextSeq, lastSent *uint64) *pb.MsgProto {
 	for i := 0; ; i++ {
+		if c.ic != nil {
+			if m := c.ic.get(*nextSeq); m != nil {
+				return m
+			}
+		}
 		nextMsg, err := c.store.Msgs.Lookup(*nextSeq)
 		if err != nil {
 			s.log.Errorf("Error looking up message %v:%v (%v)", c.name, *nextSeq, err)
