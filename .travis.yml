@@ -42,6 +42,10 @@ script:
     go test -v -p=1 ./... -count=1 -sql=false -failfast;
   fi
 - set +e
+after_success:
+- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
+    if [[ ! $TRAVIS_TAG ]]; then if [[ "$TRAVIS_GO_VERSION" =~ 1.15 ]]; then $HOME/gopath/bin/goveralls -coverprofile=acc.out -service travis-ci; fi; fi;
+  fi
 
 deploy:
   provider: script
