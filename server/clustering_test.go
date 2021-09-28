@@ -21,6 +21,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -8381,4 +8382,123 @@ func TestClusteringSnapshotQSubLastSent(t *testing.T) {
 	case <-time.After(250 * time.Millisecond):
 		// OK
 	}
+}
+
+func TestClusteringMonitorQueueLastSentAfterHBTimeout(t *testing.T) {
+	resetPreviousHTTPConnections()
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.ClientHBInterval = 100 * time.Millisecond
+	s1sOpts.ClientHBTimeout = 100 * time.Millisecond
+	s1sOpts.ClientHBFailCount = 5
+	s1nOpts := defaultMonitorOptions
+	s1 := runServerWithOpts(t, s1sOpts, &s1nOpts)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.ClientHBInterval = 100 * time.Millisecond
+	s2sOpts.ClientHBTimeout = 100 * time.Millisecond
+	s2sOpts.ClientHBFailCount = 5
+	s2nOpts := defaultMonitorOptions
+	s2nOpts.HTTPPort = monitorPort + 1
+	s2 := runServerWithOpts(t, s2sOpts, &s2nOpts)
+	defer s2.Shutdown()
+
+	// Configure third server.
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.ClientHBInterval = 100 * time.Millisecond
+	s3sOpts.ClientHBTimeout = 100 * time.Millisecond
+	s3sOpts.ClientHBFailCount = 5
+	s3nOpts := defaultMonitorOptions
+	s3nOpts.HTTPPort = monitorPort + 2
+	s3 := runServerWithOpts(t, s3sOpts, &s3nOpts)
+	defer s3.Shutdown()
+
+	getLeader(t, 10*time.Second, s1, s2, s3)
+
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		t.Fatalf("Unexpected error on connect: %v", err)
+	}
+	defer nc.Close()
+	sc, err := stan.Connect(clusterName, "instance1", stan.NatsConn(nc))
+	if err != nil {
+		t.Fatalf("Expected to connect correctly, got err %v", err)
+	}
+	defer sc.Close()
+
+	ch := make(chan bool, 1)
+	count := 0
+	if _, err := sc.QueueSubscribe("foo", "bar", func(m *stan.Msg) {
+		count++
+		if count == 3 {
+			ch <- true
+		}
+	}, stan.DurableName("dur"), stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		sc.Publish("foo", []byte("msg"))
+	}
+
+	if err := Wait(ch); err != nil {
+		t.Fatalf("Did not get all messages: %v", err)
+	}
+
+	checkLastSent := func() {
+		t.Helper()
+		waitFor(t, 2*time.Second, 100*time.Millisecond, func() error {
+			for _, port := range []int{monitorPort, monitorPort + 1, monitorPort + 2} {
+				resp, body := getBodyEx(t, http.DefaultClient, "http", ChannelsPath+"?channel=foo&subs=1", port, http.StatusOK, expectedJSON)
+				defer resp.Body.Close()
+
+				cz := Channelz{}
+				if err := json.Unmarshal(body, &cz); err != nil {
+					return fmt.Errorf("Got an error unmarshalling the body: %v", err)
+				}
+				resp.Body.Close()
+
+				sub := cz.Subscriptions[0]
+				if sub.LastSent != 3 {
+					return fmt.Errorf("Unexpected last_sent: %v", sub.LastSent)
+				}
+			}
+			return nil
+		})
+	}
+
+	// Check that all see last_sent == 3
+	checkLastSent()
+
+	// Start a new connection and create the same queue durable
+	sc2 := NewDefaultConnection(t)
+	defer sc2.Close()
+	if _, err := sc2.QueueSubscribe("foo", "bar", func(m *stan.Msg) {},
+		stan.DurableName("dur"), stan.DeliverAllAvailable()); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	// Now close the underlying NATS connection to simulate loss of HB
+	// and for the server to close the connection.
+	nc.Close()
+
+	// Wait for the server to close the old client
+	waitForNumClients(t, s1, 1)
+	waitForNumClients(t, s2, 1)
+	waitForNumClients(t, s3, 1)
+
+	// Now make sure that all servers reflect that the sole queue member's
+	// last_sent is set to 3.
+	checkLastSent()
 }

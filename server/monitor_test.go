@@ -67,8 +67,8 @@ func runMonitorServer(t *testing.T, sOpts *Options) *StanServer {
 	return runServerWithOpts(t, sOpts, &nOpts)
 }
 
-func getBodyEx(t *testing.T, client *http.Client, scheme, endpoint string, expectedStatus int, expectedContentType string) (*http.Response, []byte) {
-	url := fmt.Sprintf("%s://%s:%d%s", scheme, monitorHost, monitorPort, endpoint)
+func getBodyEx(t *testing.T, client *http.Client, scheme, endpoint string, mp, expectedStatus int, expectedContentType string) (*http.Response, []byte) {
+	url := fmt.Sprintf("%s://%s:%d%s", scheme, monitorHost, mp, endpoint)
 	resp, err := client.Get(url)
 	if err != nil {
 		stackFatalf(t, "Expected no error: Got %v\n", err)
@@ -89,7 +89,7 @@ func getBodyEx(t *testing.T, client *http.Client, scheme, endpoint string, expec
 }
 
 func getBody(t *testing.T, endpoint, expectedContentType string) (*http.Response, []byte) {
-	return getBodyEx(t, http.DefaultClient, "http", endpoint, http.StatusOK, expectedContentType)
+	return getBodyEx(t, http.DefaultClient, "http", endpoint, monitorPort, http.StatusOK, expectedContentType)
 }
 
 func monitorExpectStatusEx(t *testing.T, client *http.Client, scheme, endpoint string, expectedStatus int) {
@@ -164,7 +164,7 @@ func TestMonitorStartOwnHTTPSServer(t *testing.T) {
 	transport := &http.Transport{TLSClientConfig: tlsConfig}
 	httpClient := &http.Client{Transport: transport}
 
-	r, _ := getBodyEx(t, httpClient, "https", RootPath, http.StatusOK, expectedText)
+	r, _ := getBodyEx(t, httpClient, "https", RootPath, monitorPort, http.StatusOK, expectedText)
 	r.Body.Close()
 }
 
@@ -413,7 +413,7 @@ func TestMonitorIsFTActiveFTServer(t *testing.T) {
 			standby := runServerWithOpts(t, opts, sNOpts)
 			defer standby.Shutdown()
 
-			resp, _ := getBodyEx(t, http.DefaultClient, "http", IsFTActivePath, test.expectedStatus, "")
+			resp, _ := getBodyEx(t, http.DefaultClient, "http", IsFTActivePath, monitorPort, test.expectedStatus, "")
 			defer resp.Body.Close()
 		})
 	}
