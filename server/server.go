@@ -47,7 +47,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.22.1"
+	VERSION = "0.22.2-beta.1"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -1241,6 +1241,13 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 			qsub.Lock()
 			qsub.LastSent = qs.lastSent
 			qsub.store.UpdateSub(&qsub.SubState)
+			// In cluster mode, let send a "sent" event for this queue sub so that
+			// followers can have an updated version of the last sent, which otherwise
+			// may stay at 0 until new messages are delivered in some cases.
+			// See https://github.com/nats-io/nats-streaming-server/issues/1189
+			if s.isClustered {
+				s.collectSentOrAck(qsub, true, qs.lastSent)
+			}
 			qsub.Unlock()
 		}
 		qs.Unlock()
