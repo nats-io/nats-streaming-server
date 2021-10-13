@@ -51,9 +51,13 @@ var (
 	tportTimeout                = defaultTPortTimeout
 )
 
+const (
+	testLazyReplicationInterval = 250 * time.Millisecond
+)
+
 func clusterSetupForTest() {
 	runningInTests = true
-	lazyReplicationInterval = 250 * time.Millisecond
+	lazyReplicationInterval = testLazyReplicationInterval
 	joinRaftGroupTimeout = 250 * time.Millisecond
 	tportTimeout = 250 * time.Millisecond
 }
