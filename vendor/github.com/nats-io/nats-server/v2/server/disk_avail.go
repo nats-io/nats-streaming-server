@@ -12,6 +12,7 @@
 // limitations under the License.
 
 // +build !windows
+// +build !openbsd
 
 package server
 

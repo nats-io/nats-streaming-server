@@ -58,6 +58,8 @@ const (
 	wsMaxFrameHeaderSize    = 14 // Since LeafNode may need to behave as a client
 	wsMaxControlPayloadSize = 125
 	wsFrameSizeForBrowsers  = 4096 // From experiment, webrowsers behave better with limited frame size
+	wsCompressThreshold     = 64   // Don't compress for small buffer(s)
+	wsCloseSatusSize        = 2
 
 	// From https://tools.ietf.org/html/rfc6455#section-11.7
 	wsCloseStatusNormalClosure      = 1000
@@ -106,6 +108,7 @@ type websocket struct {
 	compress   bool
 	closeSent  bool
 	browser    bool
+	nocompfrag bool // No fragment for compressed frames
 	maskread   bool
 	maskwrite  bool
 	compressor *flate.Writer
@@ -412,7 +415,6 @@ func (c *client) wsHandleControlFrame(r *wsReadInfo, frameType wsOpCode, nc io.R
 	var payload []byte
 	var err error
 
-	statusPos := pos
 	if r.rem > 0 {
 		payload, pos, err = wsGet(nc, buf, pos, r.rem)
 		if err != nil {
@@ -426,17 +428,24 @@ func (c *client) wsHandleControlFrame(r *wsReadInfo, frameType wsOpCode, nc io.R
 	switch frameType {
 	case wsCloseMessage:
 		status := wsCloseStatusNoStatusReceived
-		body := ""
-		// If there is a payload, it should contain 2 unsigned bytes
-		// that represent the status code and then optional payload.
-		if len(payload) >= 2 {
-			status = int(binary.BigEndian.Uint16(buf[statusPos : statusPos+2]))
-			body = string(buf[statusPos+2 : statusPos+len(payload)])
-			if body != "" && !utf8.ValidString(body) {
-				// https://tools.ietf.org/html/rfc6455#section-5.5.1
-				// If body is present, it must be a valid utf8
-				status = wsCloseStatusInvalidPayloadData
-				body = "invalid utf8 body in close frame"
+		var body string
+		lp := len(payload)
+		// If there is a payload, the status is represented as a 2-byte
+		// unsigned integer (in network byte order). Then, there may be an
+		// optional body.
+		hasStatus, hasBody := lp >= wsCloseSatusSize, lp > wsCloseSatusSize
+		if hasStatus {
+			// Decode the status
+			status = int(binary.BigEndian.Uint16(payload[:wsCloseSatusSize]))
+			// Now if there is a body, capture it and make sure this is a valid UTF-8.
+			if hasBody {
+				body = string(payload[wsCloseSatusSize:])
+				if !utf8.ValidString(body) {
+					// https://tools.ietf.org/html/rfc6455#section-5.5.1
+					// If body is present, it must be a valid utf8
+					status = wsCloseStatusInvalidPayloadData
+					body = "invalid utf8 body in close frame"
+				}
 			}
 		}
 		c.wsEnqueueControlMessage(wsCloseMessage, wsCreateCloseMessage(status, body))
@@ -686,7 +695,7 @@ func (s *Server) wsUpgrade(w http.ResponseWriter, r *http.Request) (*wsUpgradeRe
 		return nil, wsReturnHTTPError(w, http.StatusMethodNotAllowed, "request method must be GET")
 	}
 	// Point 2.
-	if r.Host == "" {
+	if r.Host == _EMPTY_ {
 		return nil, wsReturnHTTPError(w, http.StatusBadRequest, "'Host' missing in request")
 	}
 	// Point 3.
@@ -699,7 +708,7 @@ func (s *Server) wsUpgrade(w http.ResponseWriter, r *http.Request) (*wsUpgradeRe
 	}
 	// Point 5.
 	key := r.Header.Get("Sec-Websocket-Key")
-	if key == "" {
+	if key == _EMPTY_ {
 		return nil, wsReturnHTTPError(w, http.StatusBadRequest, "key missing")
 	}
 	// Point 6.
@@ -764,10 +773,16 @@ func (s *Server) wsUpgrade(w http.ResponseWriter, r *http.Request) (*wsUpgradeRe
 	ws := &websocket{compress: compress, maskread: !noMasking}
 	if kind == CLIENT {
 		// Indicate if this is likely coming from a browser.
-		if ua := r.Header.Get("User-Agent"); ua != "" && strings.HasPrefix(ua, "Mozilla/") {
+		if ua := r.Header.Get("User-Agent"); ua != _EMPTY_ && strings.HasPrefix(ua, "Mozilla/") {
 			ws.browser = true
+			// Disable fragmentation of compressed frames for Safari browsers.
+			// Unfortunately, you could be running Chrome on macOS and this
+			// string will contain "Safari/" (along "Chrome/"). However, what
+			// I have found is that actual Safari browser also have "Version/".
+			// So make the combination of the two.
+			ws.nocompfrag = ws.compress && strings.Contains(ua, "Version/") && strings.Contains(ua, "Safari/")
 		}
-		if opts.Websocket.JWTCookie != "" {
+		if opts.Websocket.JWTCookie != _EMPTY_ {
 			if c, err := r.Cookie(opts.Websocket.JWTCookie); err == nil && c != nil {
 				ws.cookieJwt = c.Value
 			}
@@ -919,7 +934,7 @@ func wsAcceptKey(key string) string {
 func wsMakeChallengeKey() (string, error) {
 	p := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, p); err != nil {
-		return "", err
+		return _EMPTY_, err
 	}
 	return base64.StdEncoding.EncodeToString(p), nil
 }
@@ -958,7 +973,7 @@ func validateWebsocketOptions(o *Options) error {
 		}
 	}
 	// Using JWT requires Trusted Keys
-	if wo.JWTCookie != "" {
+	if wo.JWTCookie != _EMPTY_ {
 		if len(o.TrustedOperators) == 0 && len(o.TrustedKeys) == 0 {
 			return fmt.Errorf("trusted operators or trusted keys configuration is required for JWT authentication via cookie %q", wo.JWTCookie)
 		}
@@ -1097,7 +1112,7 @@ func (s *Server) startWebsocketServer() {
 		Addr:        hp,
 		Handler:     mux,
 		ReadTimeout: o.HandshakeTimeout,
-		ErrorLog:    log.New(&wsCaptureHTTPServerLog{s}, "", 0),
+		ErrorLog:    log.New(&wsCaptureHTTPServerLog{s}, _EMPTY_, 0),
 	}
 	s.websocket.server = hs
 	s.websocket.listener = hl
@@ -1244,8 +1259,8 @@ func (cl *wsCaptureHTTPServerLog) Write(p []byte) (int, error) {
 
 func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 	var nb net.Buffers
-	var total = 0
-	var mfs = 0
+	var mfs int
+	var usz int
 	if c.ws.browser {
 		mfs = wsFrameSizeForBrowsers
 	}
@@ -1260,7 +1275,21 @@ func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 	// Start with possible already framed buffers (that we could have
 	// got from partials or control messages such as ws pings or pongs).
 	bufs := c.ws.frames
-	if c.ws.compress && len(nb) > 0 {
+	compress := c.ws.compress
+	if compress && len(nb) > 0 {
+		// First, make sure we don't compress for very small cumulative buffers.
+		for _, b := range nb {
+			usz += len(b)
+		}
+		if usz <= wsCompressThreshold {
+			compress = false
+		}
+	}
+	if compress && len(nb) > 0 {
+		// Overwrite mfs if this connection does not support fragmented compressed frames.
+		if mfs > 0 && c.ws.nocompfrag {
+			mfs = 0
+		}
 		buf := &bytes.Buffer{}
 
 		cp := c.ws.compressor
@@ -1270,13 +1299,15 @@ func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 		} else {
 			cp.Reset(buf)
 		}
-		var usz int
 		var csz int
 		for _, b := range nb {
-			usz += len(b)
 			cp.Write(b)
 		}
-		cp.Close()
+		if err := cp.Flush(); err != nil {
+			c.Errorf("Error during compression: %v", err)
+			c.markConnAsClosed(WriteError)
+			return nil, 0
+		}
 		b := buf.Bytes()
 		p := b[:len(b)-4]
 		if mfs > 0 && len(p) > mfs {
@@ -1312,6 +1343,7 @@ func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 		c.out.pb += int64(csz) - int64(usz)
 		c.ws.fs += int64(csz)
 	} else if len(nb) > 0 {
+		var total int
 		if mfs > 0 {
 			// We are limiting the frame size.
 			startFrame := func() int {
@@ -1383,4 +1415,8 @@ func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 
 func isWSURL(u *url.URL) bool {
 	return strings.HasPrefix(strings.ToLower(u.Scheme), wsSchemePrefix)
+}
+
+func isWSSURL(u *url.URL) bool {
+	return strings.HasPrefix(strings.ToLower(u.Scheme), wsSchemePrefixTLS)
 }

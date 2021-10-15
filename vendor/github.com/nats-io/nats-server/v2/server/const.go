@@ -41,7 +41,7 @@ var (
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "2.3.3"
+	VERSION = "2.6.2"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
@@ -67,6 +67,11 @@ const (
 	// MAX_PAYLOAD_SIZE is the maximum allowed payload size. Should be using
 	// something different if > 1MB payloads are needed.
 	MAX_PAYLOAD_SIZE = (1024 * 1024)
+
+	// MAX_PAYLOAD_MAX_SIZE is the size at which the server will warn about
+	// max_payload being too high. In the future, the server may enforce/reject
+	// max_payload above this value.
+	MAX_PAYLOAD_MAX_SIZE = (8 * 1024 * 1024)
 
 	// MAX_PENDING_SIZE is the maximum outbound pending bytes per client.
 	MAX_PENDING_SIZE = (64 * 1024 * 1024)
