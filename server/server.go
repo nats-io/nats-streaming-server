@@ -47,7 +47,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.22.2-beta.1"
+	VERSION = "0.23.0-beta.1"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -126,6 +126,10 @@ const (
 
 	// Log statement printed when server is considered ready
 	streamingReadyLog = "Streaming Server is ready"
+
+	// This is the max number of sequences for sent and ack arrays in
+	// the RaftOperation_SendAndAck protocol.
+	maxSentOrAckSequences = 100
 )
 
 // Constant to indicate that sendMsgToSub() should check number of acks pending
@@ -770,7 +774,6 @@ type StanServer struct {
 type subsSentAndAckReplication struct {
 	ready    *sync.Map
 	waiting  *sync.Map
-	gates    *sync.Map
 	notifyCh chan struct{}
 }
 
@@ -828,7 +831,6 @@ type subState struct {
 	savedClientID string // Used only for closed durables in Clustering mode and monitoring endpoints.
 
 	replicate *subSentAndAck // Used in Clustering mode
-	norepl    bool           // When a sub is being closed, prevents collectSentOrAck to recreate `replicate`.
 
 	rdlvCount map[uint64]uint32 // Used only when not a queue sub, otherwise queueState's rldvCount is used.
 
@@ -841,9 +843,13 @@ type subState struct {
 }
 
 type subSentAndAck struct {
-	sent     []uint64
-	ack      []uint64
-	applying bool
+	sent      map[uint64]struct{}
+	ack       map[uint64]struct{}
+	hiSentSeq uint64
+	hiAckSeq  uint64
+	applying  bool
+	stopped   bool
+	ch        chan struct{}
 }
 
 // Returns the total number of subscriptions (including offline (queue) durables).
@@ -2077,7 +2083,6 @@ func (s *StanServer) start(runningState State) error {
 		s.ssarepl = &subsSentAndAckReplication{
 			ready:    &sync.Map{},
 			waiting:  &sync.Map{},
-			gates:    &sync.Map{},
 			notifyCh: make(chan struct{}, 1),
 		}
 		s.wg.Add(1)
@@ -3725,11 +3730,6 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 		return
 	}
 
-	// In cluster mode we will always redeliver to the same queue member.
-	// This is to avoid to have to replicated sent/ack when a message would
-	// be redelivered (removed from one member to be sent to another member)
-	isClustered := s.isClustered
-
 	now := time.Now().UnixNano()
 	// limit is now plus a buffer of 15ms to avoid repeated timer callbacks.
 	limit := now + int64(15*time.Millisecond)
@@ -3778,7 +3778,7 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 		// to redeliver to, not necessarily the same one.
 		// However, on startup, resends only to member that had previously this message
 		// otherwise this could cause a message to be redelivered to multiple members.
-		if !isClustered && qs != nil && !isStartup {
+		if qs != nil && !isStartup {
 			qs.Lock()
 			sub.Lock()
 			msgPending := sub.isMsgStillPending(m)
@@ -3850,7 +3850,9 @@ func signalCh(c chan struct{}) {
 
 func (s *StanServer) subChangesOnLeadershipAcquired(sub *subState) {
 	sub.Lock()
-	sub.norepl = false
+	if r := sub.replicate; r != nil {
+		r.stopped = false
+	}
 	sub.Unlock()
 }
 
@@ -3869,29 +3871,47 @@ func (s *StanServer) subChangesOnLeadershipLost(sub *subState) {
 // This call does not do actual RAFT replication and should not block.
 // Caller holds the sub's Lock.
 func (s *StanServer) collectSentOrAck(sub *subState, sent bool, sequence uint64) {
-	if sub.norepl {
+	r := sub.replicate
+	if r != nil && r.stopped {
 		return
 	}
-	sr := s.ssarepl
-	if sub.replicate == nil {
-		sub.replicate = &subSentAndAck{
-			sent: make([]uint64, 0, 100),
-			ack:  make([]uint64, 0, 100),
+	if r == nil {
+		r = &subSentAndAck{}
+		sub.replicate = r
+	}
+	// Need to create the maps when the subscription is first
+	// created or re-opened for durable subscriptions.
+	if r.sent == nil {
+		r.sent = make(map[uint64]struct{})
+		r.ack = make(map[uint64]struct{})
+	}
+	if sent {
+		r.sent[sequence] = struct{}{}
+		if sub.qstate != nil {
+			delete(r.ack, sequence)
+		}
+		if sequence >= r.hiSentSeq {
+			r.hiSentSeq = sequence
+			r.hiAckSeq = 0
+		}
+	} else {
+		if _, ok := r.sent[sequence]; ok {
+			delete(r.sent, sequence)
+			if sequence == r.hiSentSeq {
+				r.hiAckSeq = sequence
+			}
+		} else {
+			r.ack[sequence] = struct{}{}
 		}
 	}
-	r := sub.replicate
-	if sent {
-		r.sent = append(r.sent, sequence)
-	} else {
-		r.ack = append(r.ack, sequence)
-	}
+	sr := s.ssarepl
 	// This function is called with exactly one event at a time.
 	// Use exact count to decide when to add to given map. This
 	// avoid the need for booleans to not add more than once.
 	l := len(r.sent) + len(r.ack)
 	if l == 1 {
 		sr.waiting.Store(sub, struct{}{})
-	} else if l == 100 {
+	} else if l == maxSentOrAckSequences {
 		sr.waiting.Delete(sub)
 		sr.ready.Store(sub, struct{}{})
 		signalCh(sr.notifyCh)
@@ -3902,14 +3922,13 @@ func (s *StanServer) collectSentOrAck(sub *subState, sent bool, sequence uint64)
 func (s *StanServer) replicateSubSentAndAck(sub *subState) {
 	var data []byte
 
-	sr := s.ssarepl
 	sub.Lock()
 	r := sub.replicate
-	if r != nil && len(r.sent)+len(r.ack) > 0 {
+	if r != nil && (len(r.sent)+len(r.ack) > 0 || r.hiAckSeq > 0) {
+		// This will create the proto buf and also empty the
+		// r.sent and r.ack maps.
 		data = createSubSentAndAckProto(sub, r)
-		r.sent = r.sent[:0]
-		r.ack = r.ack[:0]
-		r.applying = true
+		r.hiSentSeq, r.hiAckSeq, r.applying = 0, 0, true
 	}
 	sub.Unlock()
 
@@ -3920,17 +3939,11 @@ func (s *StanServer) replicateSubSentAndAck(sub *subState) {
 		s.raft.Apply(data, 0)
 
 		sub.Lock()
-		r = sub.replicate
-		// If r is nil it means either that the leader lost leadrship,
-		// in which case we don't do anything, or the sub/conn is being
-		// closed and endSubSentAndAckReplication() is waiting on a
-		// channel stored in "gates" map. If we find it, signal.
-		if r == nil {
-			if c, ok := sr.gates.Load(sub); ok {
-				sr.gates.Delete(sub)
-				signalCh(c.(chan struct{}))
+		if r != nil {
+			if r.ch != nil {
+				signalCh(r.ch)
+				r.ch = nil
 			}
-		} else {
 			r.applying = false
 		}
 		sub.Unlock()
@@ -3940,13 +3953,25 @@ func (s *StanServer) replicateSubSentAndAck(sub *subState) {
 // Little helper function to create a RaftOperation_SendAndAck protocol
 // and serialize it.
 func createSubSentAndAckProto(sub *subState, r *subSentAndAck) []byte {
+	// Backward compatibility note:
+	// This protocol uses an array for sent and ack sequences.
+	// It was fine prior to supporting queue group redelivery
+	// to different members.
+	// We still use the arrays but make sure that we have a
+	// sent and ack for the last sequence if required.
+	var _sent [maxSentOrAckSequences]uint64
+	var _ack [maxSentOrAckSequences]uint64
+	sent := _sent[:0]
+	ack := _ack[:0]
+	fillSentOrAckSeqs(r, r.sent, &sent)
+	fillSentOrAckSeqs(r, r.ack, &ack)
 	op := &spb.RaftOperation{
 		OpType: spb.RaftOperation_SendAndAck,
 		SubSentAck: &spb.SubSentAndAck{
 			Channel:  sub.subject,
 			AckInbox: sub.AckInbox,
-			Sent:     r.sent,
-			Ack:      r.ack,
+			Sent:     sent,
+			Ack:      ack,
 		},
 	}
 	data, err := op.Marshal()
@@ -3954,6 +3979,21 @@ func createSubSentAndAckProto(sub *subState, r *subSentAndAck) []byte {
 		panic(err)
 	}
 	return data
+}
+
+// Fills an array of sequences for the subscription sent or acks.
+// Ensures that the array contains the sequence for the highest
+// ack'ed message if applicable.
+func fillSentOrAckSeqs(r *subSentAndAck, seqMap map[uint64]struct{}, seqs *[]uint64) {
+	// Order in which the sequences are added is not important.
+	for seq := range seqMap {
+		*seqs = append(*seqs, seq)
+		// Remove from map so they are ready for next round.
+		delete(seqMap, seq)
+	}
+	if r.hiAckSeq > 0 {
+		*seqs = append(*seqs, r.hiAckSeq)
+	}
 }
 
 // This is called when a subscription is closed or unsubscribed, or
@@ -3969,11 +4009,13 @@ func (s *StanServer) endSubSentAndAckReplication(sub *subState, unsub bool) {
 
 	sub.Lock()
 	r := sub.replicate
-	if r == nil {
+	if r == nil || r.stopped {
 		sub.Unlock()
 		return
 	}
-	if !unsub && (sub.IsDurable || sub.qstate != nil) && len(r.sent)+len(r.ack) > 0 {
+	if !unsub &&
+		(sub.IsDurable || sub.qstate != nil) &&
+		(len(r.sent)+len(r.ack) > 0 || r.hiAckSeq > 0) {
 		data = createSubSentAndAckProto(sub, r)
 	}
 	// If the replicator is about to apply, or in middle of it, we
@@ -3981,7 +4023,7 @@ func (s *StanServer) endSubSentAndAckReplication(sub *subState, unsub bool) {
 	// something or not. We are not expecting this situation to occur often.
 	if r.applying {
 		ch = make(chan struct{}, 1)
-		s.ssarepl.gates.Store(sub, ch)
+		r.ch = ch
 		subID = sub.ID
 		inbox = sub.Inbox
 	}
@@ -4008,8 +4050,9 @@ func (s *StanServer) clearSentAndAck(sub *subState) {
 	sr := s.ssarepl
 	sr.waiting.Delete(sub)
 	sr.ready.Delete(sub)
-	sub.replicate = nil
-	sub.norepl = true
+	if r := sub.replicate; r != nil {
+		r.sent, r.ack, r.hiSentSeq, r.hiAckSeq, r.stopped = nil, nil, 0, 0, true
+	}
 }
 
 // long-lived go-routine that performs RAFT replication of subscriptions'
@@ -5017,8 +5060,8 @@ func (s *StanServer) processSub(c *channel, sr *pb.SubscriptionRequest, ackInbox
 		// Clear the IsClosed flags that were set during a Close()
 		sub.IsClosed = false
 		// In cluster mode, need to reset this flag.
-		if s.isClustered {
-			sub.norepl = false
+		if r := sub.replicate; r != nil {
+			r.stopped = false
 		}
 		// Reset the hasFailedHB boolean since it may have been set
 		// if the client previously crashed and server set this
