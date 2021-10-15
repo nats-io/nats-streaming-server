@@ -985,22 +985,22 @@ func (c *client) writeLoop() {
 
 	// Used to check that we did flush from last wake up.
 	waitOk := true
-	var close bool
+	var closed bool
 
 	// Main loop. Will wait to be signaled and then will use
 	// buffered outbound structure for efficient writev to the underlying socket.
 	for {
 		c.mu.Lock()
-		if close = c.isClosed(); !close {
+		if closed = c.isClosed(); !closed {
 			owtf := c.out.fsp > 0 && c.out.pb < maxBufSize && c.out.fsp < maxFlushPending
 			if waitOk && (c.out.pb == 0 || owtf) {
 				c.out.sg.Wait()
 				// Check that connection has not been closed while lock was released
 				// in the conditional wait.
-				close = c.isClosed()
+				closed = c.isClosed()
 			}
 		}
-		if close {
+		if closed {
 			c.flushAndClose(false)
 			c.mu.Unlock()
 
@@ -1895,7 +1895,11 @@ func (c *client) authViolation() {
 	} else {
 		c.Errorf(ErrAuthentication.Error())
 	}
-	c.sendErr("Authorization Violation")
+	if c.isMqtt() {
+		c.mqttEnqueueConnAck(mqttConnAckRCNotAuthorized, false)
+	} else {
+		c.sendErr("Authorization Violation")
+	}
 	c.closeConnection(AuthenticationViolation)
 }
 
@@ -2654,6 +2658,12 @@ func (c *client) canSubscribe(subject string) bool {
 	if c.perms.sub.allow != nil {
 		r := c.perms.sub.allow.Match(subject)
 		allowed = len(r.psubs) != 0
+		// Leafnodes operate slightly differently in that they allow broader scoped subjects.
+		// They will prune based on publish perms before sending to a leafnode client.
+		if !allowed && c.kind == LEAF && subjectHasWildcard(subject) {
+			r := c.perms.sub.allow.ReverseMatch(subject)
+			allowed = len(r.psubs) != 0
+		}
 	}
 	// If we have a deny list and we think we are allowed, check that as well.
 	if allowed && c.perms.sub.deny != nil {
@@ -2667,8 +2677,7 @@ func (c *client) canSubscribe(subject string) bool {
 		if allowed && c.mperms == nil && subjectHasWildcard(subject) {
 			// Whip through the deny array and check if this wildcard subject is within scope.
 			for _, sub := range c.darray {
-				tokens := strings.Split(sub, tsep)
-				if isSubsetMatch(tokens, sub) {
+				if subjectIsSubsetMatch(sub, subject) {
 					c.loadMsgDenyFilter()
 					break
 				}
@@ -2799,14 +2808,14 @@ func (c *client) unsubscribe(acc *Account, sub *subscription, force, remove bool
 func (c *client) processUnsub(arg []byte) error {
 	args := splitArg(arg)
 	var sid []byte
-	max := -1
+	max := int64(-1)
 
 	switch len(args) {
 	case 1:
 		sid = args[0]
 	case 2:
 		sid = args[0]
-		max = parseSize(args[1])
+		max = int64(parseSize(args[1]))
 	default:
 		return fmt.Errorf("processUnsub Parse Error: '%s'", arg)
 	}
@@ -2827,8 +2836,8 @@ func (c *client) processUnsub(arg []byte) error {
 	updateGWs := false
 	if sub, ok = c.subs[string(sid)]; ok {
 		acc = c.acc
-		if max > 0 {
-			sub.max = int64(max)
+		if max > 0 && max > sub.nm {
+			sub.max = max
 		} else {
 			// Clear it here to override
 			sub.max = 0
@@ -3058,7 +3067,7 @@ func (c *client) deliverMsg(sub *subscription, acc *Account, subject, reply, mh,
 	if client.kind == LEAF && client.perms != nil {
 		if !client.pubAllowedFullCheck(string(subject), true, true) {
 			client.mu.Unlock()
-			client.Debugf("Not permitted to publish to %q", subject)
+			client.Debugf("Not permitted to deliver to %q", subject)
 			return false
 		}
 	}
@@ -3066,6 +3075,7 @@ func (c *client) deliverMsg(sub *subscription, acc *Account, subject, reply, mh,
 	srv := client.srv
 
 	sub.nm++
+
 	// Check if we should auto-unsubscribe.
 	if sub.max > 0 {
 		if client.kind == ROUTER && sub.nm >= sub.max {
@@ -3379,14 +3389,11 @@ func (c *client) pubAllowedFullCheck(subject string, fullCheck, hasLock bool) bo
 	if ok {
 		return v.(bool)
 	}
-	var allowed bool
+	allowed := true
 	// Cache miss, check allow then deny as needed.
 	if c.perms.pub.allow != nil {
 		r := c.perms.pub.allow.Match(subject)
 		allowed = len(r.psubs) != 0
-	} else {
-		// No entries means all are allowed. Deny will overrule as needed.
-		allowed = true
 	}
 	// If we have a deny list and are currently allowed, check that as well.
 	if allowed && c.perms.pub.deny != nil {
@@ -3495,7 +3502,7 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	}
 
 	// Now check for reserved replies. These are used for service imports.
-	if len(c.pa.reply) > 0 && isReservedReply(c.pa.reply) {
+	if c.kind == CLIENT && len(c.pa.reply) > 0 && isReservedReply(c.pa.reply) {
 		c.replySubjectViolation(c.pa.reply)
 		return false, true
 	}
@@ -4700,7 +4707,7 @@ func (c *client) closeConnection(reason ClosedState) {
 		srv.removeClient(c)
 
 		// Update remote subscriptions.
-		if acc != nil && (kind == CLIENT || kind == LEAF) {
+		if acc != nil && (kind == CLIENT || kind == LEAF || kind == JETSTREAM) {
 			qsubs := map[string]*qsub{}
 			for _, sub := range subs {
 				// Call unsubscribe here to cleanup shadow subscriptions and such.

@@ -90,6 +90,7 @@ type StreamStore interface {
 	Stop() error
 	ConsumerStore(name string, cfg *ConsumerConfig) (ConsumerStore, error)
 	Snapshot(deadline time.Duration, includeConsumers, checkMsgs bool) (*SnapshotResult, error)
+	Utilization() (total, reported uint64, err error)
 }
 
 // RetentionPolicy determines how messages in a set are retained.
@@ -155,6 +156,7 @@ type ConsumerStore interface {
 	UpdateAcks(dseq, sseq uint64) error
 	Update(*ConsumerState) error
 	State() (*ConsumerState, error)
+	Type() StorageType
 	Stop() error
 	Delete() error
 	StreamDelete() error

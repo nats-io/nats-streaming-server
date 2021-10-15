@@ -74,23 +74,29 @@ type JetStreamManager interface {
 // There are sensible defaults for most. If no subjects are
 // given the name will be used as the only subject.
 type StreamConfig struct {
-	Name         string          `json:"name"`
-	Subjects     []string        `json:"subjects,omitempty"`
-	Retention    RetentionPolicy `json:"retention"`
-	MaxConsumers int             `json:"max_consumers"`
-	MaxMsgs      int64           `json:"max_msgs"`
-	MaxBytes     int64           `json:"max_bytes"`
-	Discard      DiscardPolicy   `json:"discard"`
-	MaxAge       time.Duration   `json:"max_age"`
-	MaxMsgSize   int32           `json:"max_msg_size,omitempty"`
-	Storage      StorageType     `json:"storage"`
-	Replicas     int             `json:"num_replicas"`
-	NoAck        bool            `json:"no_ack,omitempty"`
-	Template     string          `json:"template_owner,omitempty"`
-	Duplicates   time.Duration   `json:"duplicate_window,omitempty"`
-	Placement    *Placement      `json:"placement,omitempty"`
-	Mirror       *StreamSource   `json:"mirror,omitempty"`
-	Sources      []*StreamSource `json:"sources,omitempty"`
+	Name              string          `json:"name"`
+	Description       string          `json:"description,omitempty"`
+	Subjects          []string        `json:"subjects,omitempty"`
+	Retention         RetentionPolicy `json:"retention"`
+	MaxConsumers      int             `json:"max_consumers"`
+	MaxMsgs           int64           `json:"max_msgs"`
+	MaxBytes          int64           `json:"max_bytes"`
+	Discard           DiscardPolicy   `json:"discard"`
+	MaxAge            time.Duration   `json:"max_age"`
+	MaxMsgsPerSubject int64           `json:"max_msgs_per_subject"`
+	MaxMsgSize        int32           `json:"max_msg_size,omitempty"`
+	Storage           StorageType     `json:"storage"`
+	Replicas          int             `json:"num_replicas"`
+	NoAck             bool            `json:"no_ack,omitempty"`
+	Template          string          `json:"template_owner,omitempty"`
+	Duplicates        time.Duration   `json:"duplicate_window,omitempty"`
+	Placement         *Placement      `json:"placement,omitempty"`
+	Mirror            *StreamSource   `json:"mirror,omitempty"`
+	Sources           []*StreamSource `json:"sources,omitempty"`
+	Sealed            bool            `json:"sealed,omitempty"`
+	DenyDelete        bool            `json:"deny_delete,omitempty"`
+	DenyPurge         bool            `json:"deny_purge,omitempty"`
+	AllowRollup       bool            `json:"allow_rollup_hdrs,omitempty"`
 }
 
 // Placement is used to guide placement of streams in clustered JetStream.
@@ -237,8 +243,8 @@ func (js *js) AddConsumer(stream string, cfg *ConsumerConfig, opts ...JSOpt) (*C
 
 	var ccSubj string
 	if cfg != nil && cfg.Durable != _EMPTY_ {
-		if strings.Contains(cfg.Durable, ".") {
-			return nil, ErrInvalidDurableName
+		if err := checkDurName(cfg.Durable); err != nil {
+			return nil, err
 		}
 		ccSubj = fmt.Sprintf(apiDurableCreateT, stream, cfg.Durable)
 	} else {
@@ -258,6 +264,9 @@ func (js *js) AddConsumer(stream string, cfg *ConsumerConfig, opts ...JSOpt) (*C
 		return nil, err
 	}
 	if info.Error != nil {
+		if info.Error.Code == 404 {
+			return nil, ErrConsumerNotFound
+		}
 		return nil, errors.New(info.Error.Description)
 	}
 	return info.ConsumerInfo, nil
@@ -292,7 +301,11 @@ func (js *js) DeleteConsumer(stream, consumer string, opts ...JSOpt) error {
 	if err := json.Unmarshal(r.Data, &resp); err != nil {
 		return err
 	}
+
 	if resp.Error != nil {
+		if resp.Error.Code == 404 {
+			return ErrConsumerNotFound
+		}
 		return errors.New(resp.Error.Description)
 	}
 	return nil
@@ -559,6 +572,7 @@ func (js *js) AddStream(cfg *StreamConfig, opts ...JSOpt) (*StreamInfo, error) {
 	if resp.Error != nil {
 		return nil, errors.New(resp.Error.Description)
 	}
+
 	return resp.StreamInfo, nil
 }
 
@@ -587,8 +601,12 @@ func (js *js) StreamInfo(stream string, opts ...JSOpt) (*StreamInfo, error) {
 		return nil, err
 	}
 	if resp.Error != nil {
+		if resp.Error.Code == 404 {
+			return nil, ErrStreamNotFound
+		}
 		return nil, errors.New(resp.Error.Description)
 	}
+
 	return resp.StreamInfo, nil
 }
 
@@ -701,14 +719,19 @@ func (js *js) DeleteStream(name string, opts ...JSOpt) error {
 	if err := json.Unmarshal(r.Data, &resp); err != nil {
 		return err
 	}
+
 	if resp.Error != nil {
+		if resp.Error.Code == 404 {
+			return ErrStreamNotFound
+		}
 		return errors.New(resp.Error.Description)
 	}
 	return nil
 }
 
 type apiMsgGetRequest struct {
-	Seq uint64 `json:"seq"`
+	Seq     uint64 `json:"seq,omitempty"`
+	LastFor string `json:"last_by_subj,omitempty"`
 }
 
 // RawStreamMsg is a raw message stored in JetStream.
@@ -733,11 +756,20 @@ type storedMsg struct {
 type apiMsgGetResponse struct {
 	apiResponse
 	Message *storedMsg `json:"message,omitempty"`
-	Success bool       `json:"success,omitempty"`
+}
+
+// GetLastMsg retrieves the last raw stream message stored in JetStream by subject.
+func (js *js) GetLastMsg(name, subject string, opts ...JSOpt) (*RawStreamMsg, error) {
+	return js.getMsg(name, &apiMsgGetRequest{LastFor: subject}, opts...)
 }
 
 // GetMsg retrieves a raw stream message stored in JetStream by sequence number.
 func (js *js) GetMsg(name string, seq uint64, opts ...JSOpt) (*RawStreamMsg, error) {
+	return js.getMsg(name, &apiMsgGetRequest{Seq: seq}, opts...)
+}
+
+// Low level getMsg
+func (js *js) getMsg(name string, mreq *apiMsgGetRequest, opts ...JSOpt) (*RawStreamMsg, error) {
 	o, cancel, err := getJSContextOpts(js.opts, opts...)
 	if err != nil {
 		return nil, err
@@ -750,7 +782,7 @@ func (js *js) GetMsg(name string, seq uint64, opts ...JSOpt) (*RawStreamMsg, err
 		return nil, ErrStreamNameRequired
 	}
 
-	req, err := json.Marshal(&apiMsgGetRequest{Seq: seq})
+	req, err := json.Marshal(mreq)
 	if err != nil {
 		return nil, err
 	}
@@ -766,13 +798,16 @@ func (js *js) GetMsg(name string, seq uint64, opts ...JSOpt) (*RawStreamMsg, err
 		return nil, err
 	}
 	if resp.Error != nil {
-		return nil, errors.New(resp.Error.Description)
+		if resp.Error.Code == 404 && strings.Contains(resp.Error.Description, "message") {
+			return nil, ErrMsgNotFound
+		}
+		return nil, fmt.Errorf("nats: %s", resp.Error.Description)
 	}
 
 	msg := resp.Message
 
 	var hdr Header
-	if msg.Header != nil {
+	if len(msg.Header) > 0 {
 		hdr, err = decodeHeadersMsg(msg.Header)
 		if err != nil {
 			return nil, err
@@ -832,6 +867,16 @@ func (js *js) DeleteMsg(name string, seq uint64, opts ...JSOpt) error {
 	return nil
 }
 
+// purgeRequest is optional request information to the purge API.
+type streamPurgeRequest struct {
+	// Purge up to but not including sequence.
+	Sequence uint64 `json:"seq,omitempty"`
+	// Subject to match against messages for the purge command.
+	Subject string `json:"filter,omitempty"`
+	// Number of messages to keep.
+	Keep uint64 `json:"keep,omitempty"`
+}
+
 type streamPurgeResponse struct {
 	apiResponse
 	Success bool   `json:"success,omitempty"`
@@ -839,7 +884,11 @@ type streamPurgeResponse struct {
 }
 
 // PurgeStream purges messages on a Stream.
-func (js *js) PurgeStream(name string, opts ...JSOpt) error {
+func (js *js) PurgeStream(stream string, opts ...JSOpt) error {
+	return js.purgeStream(stream, nil)
+}
+
+func (js *js) purgeStream(stream string, req *streamPurgeRequest, opts ...JSOpt) error {
 	o, cancel, err := getJSContextOpts(js.opts, opts...)
 	if err != nil {
 		return err
@@ -848,8 +897,15 @@ func (js *js) PurgeStream(name string, opts ...JSOpt) error {
 		defer cancel()
 	}
 
-	psSubj := js.apiSubj(fmt.Sprintf(apiStreamPurgeT, name))
-	r, err := js.nc.RequestWithContext(o.ctx, psSubj, nil)
+	var b []byte
+	if req != nil {
+		if b, err = json.Marshal(req); err != nil {
+			return err
+		}
+	}
+
+	psSubj := js.apiSubj(fmt.Sprintf(apiStreamPurgeT, stream))
+	r, err := js.nc.RequestWithContext(o.ctx, psSubj, b)
 	if err != nil {
 		return err
 	}
