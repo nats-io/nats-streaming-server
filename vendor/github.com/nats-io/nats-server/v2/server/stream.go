@@ -60,15 +60,15 @@ type StreamConfig struct {
 
 	// Optional qualifiers. These can not be modified after set to true.
 
-	// Sealed will seal a stream so no messages can get our or in.
-	Sealed bool `json:"sealed,omitempty"`
+	// Sealed will seal a stream so no messages can get out or in.
+	Sealed bool `json:"sealed"`
 	// DenyDelete will restrict the ability to delete messages.
-	DenyDelete bool `json:"deny_delete,omitempty"`
+	DenyDelete bool `json:"deny_delete"`
 	// DenyPurge will restrict the ability to purge messages.
-	DenyPurge bool `json:"deny_purge,omitempty"`
+	DenyPurge bool `json:"deny_purge"`
 	// AllowRollup allows messages to be placed into the system and purge
 	// all older messages using a special msg header.
-	AllowRollup bool `json:"allow_rollup_hdrs,omitempty"`
+	AllowRollup bool `json:"allow_rollup_hdrs"`
 }
 
 // JSPubAckResponse is a formal response to a publish operation.
@@ -201,6 +201,7 @@ type stream struct {
 	clMu     sync.Mutex
 	clseq    uint64
 	clfs     uint64
+	leader   string
 	lqsent   time.Time
 	catchups map[string]uint64
 }
@@ -234,12 +235,17 @@ const (
 	JSConsumerStalled     = "Nats-Consumer-Stalled"
 	JSMsgRollup           = "Nats-Rollup"
 	JSMsgSize             = "Nats-Msg-Size"
+	JSResponseType        = "Nats-Response-Type"
 )
 
 // Rollups, can be subject only or all messages.
 const (
 	JSMsgRollupSubject = "sub"
 	JSMsgRollupAll     = "all"
+)
+
+const (
+	jsCreateResponse = "create"
 )
 
 // Dedupe entry
@@ -500,6 +506,13 @@ func (mset *stream) setStreamAssignment(sa *streamAssignment) {
 	}
 }
 
+// IsLeader will return if we are the current leader.
+func (mset *stream) IsLeader() bool {
+	mset.mu.Lock()
+	defer mset.mu.Unlock()
+	return mset.isLeader()
+}
+
 // Lock should be held.
 func (mset *stream) isLeader() bool {
 	if mset.isClustered() {
@@ -521,6 +534,8 @@ func (mset *stream) setLeader(isLeader bool) error {
 			mset.mu.Unlock()
 			return err
 		}
+		// Clear and fixup state we had for last state.
+		mset.clfs = 0
 	} else {
 		// Stop responding to sync requests.
 		mset.stopClusterSubs()
@@ -528,6 +543,14 @@ func (mset *stream) setLeader(isLeader bool) error {
 		mset.unsubscribeToStream()
 		// Clear catchup state
 		mset.clearAllCatchupPeers()
+		// Check on any fixup state and optionally clear.
+		if mset.isClustered() && mset.leader != _EMPTY_ && mset.leader != mset.node.GroupLeader() {
+			mset.clfs = 0
+		}
+	}
+	// Track group leader.
+	if mset.isClustered() {
+		mset.leader = mset.node.GroupLeader()
 	}
 	mset.mu.Unlock()
 	return nil
@@ -928,6 +951,8 @@ func (jsa *jsAccount) configUpdateCheck(old, new *StreamConfig) (*StreamConfig, 
 	if cfg.Sealed {
 		cfg.MaxAge = 0
 		cfg.Discard = DiscardNew
+		cfg.DenyDelete, cfg.DenyPurge = true, true
+		cfg.AllowRollup = false
 	}
 
 	// Check limits.
@@ -2751,16 +2776,17 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		outq := mset.outq
 
 		// Dedupe detection.
-		msgId = getMsgId(hdr)
-		if dde := mset.checkMsgId(msgId); dde != nil {
-			mset.clfs++
-			mset.mu.Unlock()
-			if canRespond {
-				response := append(pubAck, strconv.FormatUint(dde.seq, 10)...)
-				response = append(response, ",\"duplicate\": true}"...)
-				outq.sendMsg(reply, response)
+		if msgId = getMsgId(hdr); msgId != _EMPTY_ {
+			if dde := mset.checkMsgId(msgId); dde != nil {
+				mset.clfs++
+				mset.mu.Unlock()
+				if canRespond {
+					response := append(pubAck, strconv.FormatUint(dde.seq, 10)...)
+					response = append(response, ",\"duplicate\": true}"...)
+					outq.sendMsg(reply, response)
+				}
+				return errMsgIdDuplicate
 			}
-			return errMsgIdDuplicate
 		}
 
 		// Expected stream.
@@ -2829,6 +2855,7 @@ func (mset *stream) processJetStreamMsg(subject, reply string, hdr, msg []byte, 
 		// Check for any rollups.
 		if rollup := getRollup(hdr); rollup != _EMPTY_ {
 			if !mset.cfg.AllowRollup || mset.cfg.DenyPurge {
+				mset.clfs++
 				mset.mu.Unlock()
 				if canRespond {
 					resp.PubAck = &PubAck{Stream: name}

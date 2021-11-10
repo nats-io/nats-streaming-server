@@ -14,7 +14,7 @@ builds:
 - main: ./nats-streaming-server.go
   binary: nats-streaming-server
   ldflags:
-    - -w -X github.com/nats-io/nats-streaming-server/server.gitCommit={{.ShortCommit}} -X github.com/nats-io/nats-streaming-server/vendor/github.com/nats-io/nats-server/v2/server.gitCommit=f7c3ac5
+    - -w -X github.com/nats-io/nats-streaming-server/server.gitCommit={{.ShortCommit}} -X github.com/nats-io/nats-streaming-server/vendor/github.com/nats-io/nats-server/v2/server.gitCommit=a27de5a
   env:
     - GO111MODULE=off
     - CGO_ENABLED=0

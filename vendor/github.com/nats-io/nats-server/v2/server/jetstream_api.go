@@ -270,7 +270,8 @@ type ApiResponse struct {
 	Error *ApiError `json:"error,omitempty"`
 }
 
-// ToError checks if the response has a error and if it does converts it to an error avoiding the pitfalls described by https://yourbasic.org/golang/gotcha-why-nil-error-not-equal-nil/
+// ToError checks if the response has a error and if it does converts it to an error avoiding
+// the pitfalls described by https://yourbasic.org/golang/gotcha-why-nil-error-not-equal-nil/
 func (r *ApiResponse) ToError() error {
 	if r.Error == nil {
 		return nil
@@ -600,14 +601,24 @@ type JSApiStreamTemplateNamesResponse struct {
 
 const JSApiStreamTemplateNamesResponseType = "io.nats.jetstream.api.v1.stream_template_names_response"
 
+// Default max API calls outstanding.
+const defaultMaxJSApiOut = int64(4096)
+
+// Max API calls outstanding.
+var maxJSApiOut = defaultMaxJSApiOut
+
 func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, subject, reply string, rmsg []byte) {
-	hdr, _ := c.msgParts(rmsg)
-	if len(getHeader(ClientInfoHdr, hdr)) == 0 {
-		return
-	}
 	js.mu.RLock()
 	s, rr := js.srv, js.apiSubs.Match(subject)
 	js.mu.RUnlock()
+
+	hdr, _ := c.msgParts(rmsg)
+	if len(getHeader(ClientInfoHdr, hdr)) == 0 {
+		// Check if this is the system account. We will let these through for the account info only.
+		if s.SystemAccount() != acc || subject != JSApiAccountInfo {
+			return
+		}
+	}
 
 	// Shortcircuit.
 	if len(rr.psubs)+len(rr.qsubs) == 0 {
@@ -631,7 +642,7 @@ func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, sub
 	// If we are here we have received this request over a non client connection.
 	// We need to make sure not to block. We will spin a Go routine per but also make
 	// sure we do not have too many outstanding.
-	if apiOut := atomic.AddInt64(&js.apiCalls, 1); apiOut > 1024 {
+	if apiOut := atomic.AddInt64(&js.apiCalls, 1); apiOut > maxJSApiOut {
 		atomic.AddInt64(&js.apiCalls, -1)
 		ci, acc, _, msg, err := s.getRequestInfo(c, rmsg)
 		if err == nil {
@@ -1583,7 +1594,7 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 	if c == nil || !s.JetStreamEnabled() {
 		return
 	}
-	ci, acc, _, msg, err := s.getRequestInfo(c, rmsg)
+	ci, acc, hdr, msg, err := s.getRequestInfo(c, rmsg)
 	if err != nil {
 		s.Warnf(badAPIRequestT, msg)
 		return
@@ -1592,6 +1603,12 @@ func (s *Server) jsStreamInfoRequest(sub *subscription, c *client, a *Account, s
 	streamName := streamNameFromSubject(subject)
 
 	var resp = JSApiStreamInfoResponse{ApiResponse: ApiResponse{Type: JSApiStreamInfoResponseType}}
+
+	// If someone creates a duplicate stream that is identical we will get this request forwarded to us.
+	// Make sure the response type is for a create call.
+	if rt := getHeader(JSResponseType, hdr); len(rt) > 0 && string(rt) == jsCreateResponse {
+		resp.ApiResponse.Type = JSApiStreamCreateResponseType
+	}
 
 	// If we are in clustered mode we need to be the stream leader to proceed.
 	if s.JetStreamIsClustered() {

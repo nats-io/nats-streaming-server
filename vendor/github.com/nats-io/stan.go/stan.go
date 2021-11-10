@@ -26,7 +26,7 @@ import (
 )
 
 // Version is the NATS Streaming Go Client version
-const Version = "0.10.0"
+const Version = "0.10.1"
 
 const (
 	// DefaultNatsURL is the default URL the client connects to
@@ -331,6 +331,7 @@ type conn struct {
 	pubNUID          *nuid.NUID // NUID generator for published messages.
 	connLostCB       ConnectionLostHandler
 	closed           bool
+	fullyClosed      bool
 	ping             pingInfo
 }
 
@@ -672,20 +673,16 @@ func (sc *conn) Close() error {
 	sc.Lock()
 	defer sc.Unlock()
 
-	if sc.closed {
-		// We are already closed.
+	// If we are fully closed, simply return.
+	if sc.fullyClosed {
 		return nil
 	}
-	// Signals we are closed.
-	sc.closed = true
-
-	// Capture for NATS calls below.
-	if sc.ncOwned {
-		defer sc.nc.Close()
+	// If this is the very first Close() call, do some internal cleanup,
+	// otherwise, simply send the close protocol message.
+	if !sc.closed {
+		sc.closed = true
+		sc.cleanupOnClose(ErrConnectionClosed)
 	}
-
-	// Now close ourselves.
-	sc.cleanupOnClose(ErrConnectionClosed)
 
 	req := &pb.CloseRequest{ClientID: sc.clientID}
 	b, _ := req.Marshal()
@@ -700,6 +697,11 @@ func (sc *conn) Close() error {
 	err = cr.Unmarshal(reply.Data)
 	if err != nil {
 		return err
+	}
+	// As long as we got a valid response, we consider the connection fully closed.
+	sc.fullyClosed = true
+	if sc.ncOwned {
+		sc.nc.Close()
 	}
 	if cr.Error != "" {
 		return errors.New(cr.Error)
@@ -900,14 +902,17 @@ func (sc *conn) processMsg(raw *nats.Msg) {
 	msg.Sub = sub
 
 	sub.RLock()
+	if sub.closed {
+		sub.RUnlock()
+		return
+	}
 	cb := sub.cb
 	ackSubject := sub.ackInbox
 	isManualAck := sub.opts.ManualAcks
-	subsc := sub.sc // Can be nil if sub has been unsubscribed.
 	sub.RUnlock()
 
 	// Perform the callback
-	if cb != nil && subsc != nil {
+	if cb != nil {
 		cb(msg)
 	}
 

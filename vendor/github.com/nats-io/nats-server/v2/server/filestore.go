@@ -910,8 +910,9 @@ func (fs *fileStore) recoverMsgs() error {
 
 // Will expire msgs that have aged out on restart.
 // We will treat this differently in case we have a recovery
-// that will expire alot of messages on startup. Should only be called
-// on startup. Lock should be held.
+// that will expire alot of messages on startup.
+// Should only be called on startup.
+// Lock should be held.
 func (fs *fileStore) expireMsgsOnRecover() {
 	if fs.state.Msgs == 0 {
 		return
@@ -920,10 +921,12 @@ func (fs *fileStore) expireMsgsOnRecover() {
 	var minAge = time.Now().UnixNano() - int64(fs.cfg.MaxAge)
 	var purged, bytes uint64
 	var deleted int
+	var nts int64
 
 	for _, mb := range fs.blks {
 		mb.mu.Lock()
 		if minAge < mb.first.ts {
+			nts = mb.first.ts
 			mb.mu.Unlock()
 			break
 		}
@@ -969,9 +972,10 @@ func (fs *fileStore) expireMsgsOnRecover() {
 			// No error and sm != nil from here onward.
 
 			// Check for done.
-			if sm.ts > minAge {
+			if minAge < sm.ts {
 				mb.first.seq = sm.seq
 				mb.first.ts = sm.ts
+				nts = sm.ts
 				break
 			}
 
@@ -1005,6 +1009,11 @@ func (fs *fileStore) expireMsgsOnRecover() {
 			mb.writeIndexInfo()
 		}
 		break
+	}
+
+	if nts > 0 {
+		// Make sure to set age check based on this value.
+		fs.resetAgeChk(nts - minAge)
 	}
 
 	if deleted > 0 {
@@ -1809,7 +1818,7 @@ func (fs *fileStore) removeMsg(seq uint64, secure, needFSLock bool) (bool, error
 		}
 	} else {
 		// Check if we are empty first, as long as not the last message block.
-		if isLast := mb != fs.lmb; isLast && mb.msgs == 0 {
+		if notLast := mb != fs.lmb; notLast && mb.msgs == 0 {
 			fs.removeMsgBlock(mb)
 			firstSeqNeedsUpdate = seq == fs.state.FirstSeq
 		} else {
@@ -1819,9 +1828,9 @@ func (fs *fileStore) removeMsg(seq uint64, secure, needFSLock bool) (bool, error
 				mb.dmap = make(map[uint64]struct{})
 			}
 			mb.dmap[seq] = struct{}{}
-			// Check if <50% utilization and minimum size met.
-			if mb.rbytes > compactMinimum && mb.rbytes>>1 > mb.bytes {
-				// FIXME(dlc) - Might want this out of band.
+			// Check if <25% utilization and minimum size met.
+
+			if notLast && mb.rbytes > compactMinimum && mb.rbytes>>2 > mb.bytes {
 				mb.compact()
 			}
 		}
@@ -3718,6 +3727,7 @@ func (fs *fileStore) PurgeEx(subject string, sequence, keep uint64) (purged uint
 		if sequence > 0 && sequence <= l {
 			l = sequence - 1
 		}
+
 		for seq := f; seq <= l; seq++ {
 			if sm, _ := mb.cacheLookup(seq); sm != nil && eq(sm.subj, subject) {
 				rl := fileStoreMsgSize(sm.subj, sm.hdr, sm.msg)
@@ -3760,6 +3770,11 @@ func (fs *fileStore) PurgeEx(subject string, sequence, keep uint64) (purged uint
 		mb.mu.Unlock()
 		// Update our index info on disk.
 		mb.writeIndexInfo()
+
+		// Check if we should break out of top level too.
+		if maxp > 0 && purged >= maxp {
+			break
+		}
 	}
 	if firstSeqNeedsUpdate {
 		fs.selectNextFirst()
@@ -5340,6 +5355,8 @@ func decodeConsumerState(buf []byte) (*ConsumerState, error) {
 		state.Redelivered = make(map[uint64]uint64, numRedelivered)
 		for i := 0; i < int(numRedelivered); i++ {
 			if seq, n := readSeq(), readCount(); seq > 0 && n > 0 {
+				// Adjust seq back.
+				seq += state.AckFloor.Stream
 				state.Redelivered[seq] = n
 			}
 		}
