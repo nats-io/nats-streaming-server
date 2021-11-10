@@ -1175,6 +1175,10 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 			if sub.stalled && qs.stalledSubCount > 0 {
 				qs.stalledSubCount--
 			}
+			sub.RLock()
+			// Need to update if this member was the one with the last
+			// message of the group.
+			storageUpdate = sub.LastSent == qs.lastSent
 			if standaloneOrLeader {
 				// Set expiration in the past to force redelivery
 				expirationTime := time.Now().UnixNano() - int64(time.Second)
@@ -1182,10 +1186,6 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 				// transferred to remaining queue subscribers.
 				numQSubs := len(qs.subs)
 				idx := 0
-				sub.RLock()
-				// Need to update if this member was the one with the last
-				// message of the group.
-				storageUpdate = sub.LastSent == qs.lastSent
 				sortedPendingMsgs := sub.makeSortedPendingMsgs()
 				for _, pm := range sortedPendingMsgs {
 					// Get one of the remaning queue subscribers.
@@ -1226,8 +1226,8 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 						idx = 0
 					}
 				}
-				sub.RUnlock()
 			}
+			sub.RUnlock()
 			// Even for durable queue subscribers, if this is not the last
 			// member, we need to delete from storage (we did that higher in
 			// that function for non durable case). Issue #215.
@@ -1247,13 +1247,6 @@ func (ss *subStore) Remove(c *channel, sub *subState, unsubscribe bool) {
 			qsub.Lock()
 			qsub.LastSent = qs.lastSent
 			qsub.store.UpdateSub(&qsub.SubState)
-			// In cluster mode, let send a "sent" event for this queue sub so that
-			// followers can have an updated version of the last sent, which otherwise
-			// may stay at 0 until new messages are delivered in some cases.
-			// See https://github.com/nats-io/nats-streaming-server/issues/1189
-			if s.isClustered {
-				s.collectSentOrAck(qsub, true, qs.lastSent)
-			}
 			qsub.Unlock()
 		}
 		qs.Unlock()
