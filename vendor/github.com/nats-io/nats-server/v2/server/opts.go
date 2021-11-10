@@ -21,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -196,6 +197,7 @@ type Options struct {
 	Logtime               bool          `json:"-"`
 	MaxConn               int           `json:"max_connections"`
 	MaxSubs               int           `json:"max_subscriptions,omitempty"`
+	MaxSubTokens          uint8         `json:"-"`
 	Nkeys                 []*NkeyUser   `json:"-"`
 	Users                 []*User       `json:"-"`
 	Accounts              []*Account    `json:"-"`
@@ -860,6 +862,18 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		o.MaxTracedMsgLen = int(v.(int64))
 	case "max_subscriptions", "max_subs":
 		o.MaxSubs = int(v.(int64))
+	case "max_sub_tokens", "max_subscription_tokens":
+		if n := v.(int64); n > math.MaxUint8 {
+			err := &configErr{tk, fmt.Sprintf("%s value is too big", k)}
+			*errors = append(*errors, err)
+			return
+		} else if n <= 0 {
+			err := &configErr{tk, fmt.Sprintf("%s value can not be negative", k)}
+			*errors = append(*errors, err)
+			return
+		} else {
+			o.MaxSubTokens = uint8(n)
+		}
 	case "ping_interval":
 		o.PingInterval = parseDuration("ping_interval", tk, v, errors, warnings)
 	case "ping_max":
@@ -1472,6 +1486,8 @@ func parseURL(u string, typ string) (*url.URL, error) {
 	urlStr := strings.TrimSpace(u)
 	url, err := url.Parse(urlStr)
 	if err != nil {
+		// Security note: if it's not well-formed but still reached us, then we're going to log as-is which might include password information here.
+		// If the URL parses, we don't log the credentials ever, but if it doesn't even parse we don't have a sane way to redact.
 		return nil, fmt.Errorf("error parsing %s url [%q]", typ, urlStr)
 	}
 	return url, nil
@@ -1972,7 +1988,7 @@ func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]
 				if tc.Timeout > 0 {
 					remote.TLSTimeout = tc.Timeout
 				} else {
-					remote.TLSTimeout = float64(DEFAULT_LEAF_TLS_TIMEOUT)
+					remote.TLSTimeout = float64(DEFAULT_LEAF_TLS_TIMEOUT) / float64(time.Second)
 				}
 				remote.tlsConfigOpts = tc
 			case "hub":

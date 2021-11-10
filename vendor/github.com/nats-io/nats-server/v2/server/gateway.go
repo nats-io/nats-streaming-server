@@ -164,6 +164,11 @@ type srvGateway struct {
 	// These are used for routing of mapped replies.
 	sIDHash        []byte   // Server ID hash (6 bytes)
 	routesIDByHash sync.Map // Route's server ID is hashed (6 bytes) and stored in this map.
+
+	// If a server has its own configuration in the "Gateways" remotes configuration
+	// we will keep track of the URLs that are defined in the config so they can
+	// be reported in monitoring.
+	ownCfgURLs []string
 }
 
 // Subject interest tally. Also indicates if the key in the map is a
@@ -371,6 +376,7 @@ func (s *Server) newGateway(opts *Options) error {
 	for _, rgo := range opts.Gateway.Gateways {
 		// Ignore if there is a remote gateway with our name.
 		if rgo.Name == gateway.name {
+			gateway.ownCfgURLs = getURLsAsString(rgo.URLs)
 			continue
 		}
 		cfg := &gatewayCfg{
@@ -1472,6 +1478,13 @@ func (g *gatewayCfg) updateURLs(infoURLs []string) {
 	}
 	// Then add the ones from the infoURLs array we got.
 	g.addURLs(infoURLs)
+	// The call above will set varzUpdateURLs only when finding ULRs in infoURLs
+	// that are not present in the config. That does not cover the case where
+	// previously "discovered" URLs are now gone. We could check "before" size
+	// of g.urls and if bigger than current size, set the boolean to true.
+	// Not worth it... simply set this to true to allow a refresh of gateway
+	// URLs in varz.
+	g.varzUpdateURLs = true
 	g.Unlock()
 }
 
@@ -3160,6 +3173,12 @@ func (s *Server) startGWReplyMapExpiration() {
 				}
 			case cttl := <-s.gwrm.ch:
 				ttl = cttl
+				if !t.Stop() {
+					select {
+					case <-t.C:
+					default:
+					}
+				}
 				t.Reset(ttl)
 			case <-s.quitCh:
 				return
