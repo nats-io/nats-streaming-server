@@ -26,7 +26,7 @@ import (
 )
 
 // Version is the NATS Streaming Go Client version
-const Version = "0.10.1"
+const Version = "0.10.2"
 
 const (
 	// DefaultNatsURL is the default URL the client connects to
@@ -179,6 +179,21 @@ type Options struct {
 	// ConnectionLostCB specifies the handler to be invoked when the connection
 	// is permanently lost.
 	ConnectionLostCB ConnectionLostHandler
+
+	// AllowCloseRetry specifies that a failed connection Close() can be retried.
+	//
+	// By default, after the first call to Close(), the underlying NATS connection
+	// is closed (when owned by the library), regardless if the library gets a
+	// response from the server or not, and calling Close() again is a no-op.
+	// With AllowCloseRetry set to true, if the library fails to get a response
+	// from the close protocol, calling Close() again is possible and the library
+	// will try to resend the protocol. It means that the underlying NATS connection
+	// won't be closed until the library successfully gets a response from the server.
+	// This behavior can have side effects in that the underlying NATS connection
+	// may stay open (or reconnect) when otherwise it would have been closed after
+	// calling Close(). So AllowCloseRetry is disabled by default to maintain
+	// expected default behavior in regard with the underlying NATS connection state.
+	AllowCloseRetry bool
 }
 
 // GetDefaultOptions returns default configuration options for the client.
@@ -304,6 +319,15 @@ func Pings(interval, maxOut int) Option {
 func SetConnectionLostHandler(handler ConnectionLostHandler) Option {
 	return func(o *Options) error {
 		o.ConnectionLostCB = handler
+		return nil
+	}
+}
+
+// AllowCloseRetry is an Option that allows a failed connection close to be retried.
+// See option AllowCloseRetry for more information.
+func AllowCloseRetry(allow bool) Option {
+	return func(o *Options) error {
+		o.AllowCloseRetry = allow
 		return nil
 	}
 }
@@ -682,6 +706,12 @@ func (sc *conn) Close() error {
 	if !sc.closed {
 		sc.closed = true
 		sc.cleanupOnClose(ErrConnectionClosed)
+		if !sc.opts.AllowCloseRetry {
+			sc.fullyClosed = true
+			if sc.ncOwned {
+				defer sc.nc.Close()
+			}
+		}
 	}
 
 	req := &pb.CloseRequest{ClientID: sc.clientID}
@@ -700,7 +730,7 @@ func (sc *conn) Close() error {
 	}
 	// As long as we got a valid response, we consider the connection fully closed.
 	sc.fullyClosed = true
-	if sc.ncOwned {
+	if sc.ncOwned && sc.opts.AllowCloseRetry {
 		sc.nc.Close()
 	}
 	if cr.Error != "" {
