@@ -47,7 +47,7 @@ import (
 // Server defaults.
 const (
 	// VERSION is the current version for the NATS Streaming server.
-	VERSION = "0.23.1"
+	VERSION = "0.23.2-beta01"
 
 	DefaultClusterID      = "test-cluster"
 	DefaultDiscoverPrefix = "_STAN.discover"
@@ -5495,6 +5495,9 @@ func (s *StanServer) processAck(c *channel, sub *subState, sequence uint64, from
 			qsub.Lock()
 			_, found := qsub.acksPending[sequence]
 			if found {
+				if s.isClustered {
+					s.collectSentOrAck(qsub, replicateAck, sequence)
+				}
 				delete(qsub.acksPending, sequence)
 				persistAck(qsub)
 			}
