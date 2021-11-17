@@ -8596,6 +8596,88 @@ func TestClusteringQueueRedelivery(t *testing.T) {
 	waitForAcks(t, s2, clientName, 2, 0)
 }
 
+func TestClusteringQueueRedeliveryPendingAndStalled(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	// For this test, use a central NATS server.
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	// Configure first server
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	// Configure second server.
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	servers := []*StanServer{s1, s2}
+	getLeader(t, 10*time.Second, servers...)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	ch := make(chan bool, 1)
+	if _, err := sc.QueueSubscribe("foo", "bar", func(m *stan.Msg) {
+		if m.Redelivered {
+			m.Ack()
+			return
+		}
+		// Wait for more than AckWait, then ack
+		time.Sleep(150 * time.Millisecond)
+		m.Ack()
+		ch <- true
+	}, stan.SetManualAckMode(), stan.AckWait(ackWaitInMs(100)), stan.MaxInflight(3)); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+	// Create second queue member that does not ack.
+	if _, err := sc.QueueSubscribe("foo", "bar", func(m *stan.Msg) {},
+		stan.SetManualAckMode(), stan.AckWait(ackWaitInMs(500)), stan.MaxInflight(3)); err != nil {
+		t.Fatalf("Error on subscribe: %v", err)
+	}
+
+	for count := 0; count < 5; {
+		if err := sc.Publish("foo", []byte("msg")); err != nil {
+			t.Fatalf("Error on publish: %v", err)
+		}
+		select {
+		case <-ch:
+			count++
+		case <-time.After(time.Second):
+			// Try another message
+		}
+	}
+
+	// Make sure that state is replicated
+	time.Sleep(testLazyReplicationInterval * 2)
+
+	// Ensure that the pending map and stalled are 0 and false
+	// on all servers for all subs.
+	waitFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		for _, s := range servers {
+			subs := s.clients.getSubs(clientName)
+			for _, sub := range subs {
+				var err error
+				sub.RLock()
+				if len(sub.acksPending) != 0 || sub.stalled {
+					err = fmt.Errorf("Invalid values: node=%s - acksPending=%v - stalled=%v",
+						s.opts.Clustering.NodeID, sub.acksPending, sub.stalled)
+				}
+				sub.RUnlock()
+				if err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
 func TestClusteringQueueRedeliverySentAndAck(t *testing.T) {
 	// Set this to something very large so we can manually cause the flush.
 	lazyReplicationInterval = time.Hour

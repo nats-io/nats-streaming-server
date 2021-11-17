@@ -12,7 +12,7 @@ require (
 	github.com/nats-io/nats-server/v2 v2.6.4
 	github.com/nats-io/nats.go v1.13.1-0.20211018182449-f2416a8b1483
 	github.com/nats-io/nuid v1.0.1
-	github.com/nats-io/stan.go v0.10.1
+	github.com/nats-io/stan.go v0.10.2
 	github.com/prometheus/procfs v0.7.3
 	go.etcd.io/bbolt v1.3.6
 	golang.org/x/crypto v0.0.0-20210921155107-089bfa567519
