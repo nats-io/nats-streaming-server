@@ -38,7 +38,7 @@ github.com/mattn/go-isatty
 github.com/minio/highwayhash
 # github.com/nats-io/jwt/v2 v2.1.0
 github.com/nats-io/jwt/v2
-# github.com/nats-io/nats-server/v2 v2.6.4
+# github.com/nats-io/nats-server/v2 v2.6.5
 ## explicit
 github.com/nats-io/nats-server/v2/conf
 github.com/nats-io/nats-server/v2/internal/ldap
