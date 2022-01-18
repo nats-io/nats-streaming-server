@@ -736,3 +736,23 @@ func TestDeleteChannelStoreError(t *testing.T) {
 		t.Fatalf("Timer should have been stopped")
 	}
 }
+
+func TestCreateChannelError(t *testing.T) {
+	opts := GetDefaultOptions()
+	logger := &checkErrorLogger{checkErrorStr: "Creating channel \"foo\" failed: " + errOnPurpose.Error()}
+	opts.CustomLogger = logger
+	s := runServerWithOpts(t, opts, nil)
+	defer s.Shutdown()
+
+	s.channels.Lock()
+	ms := &testChannelStoreFailStore{Store: s.channels.store}
+	s.channels.store = ms
+	s.channels.Unlock()
+
+	if _, err := s.channels.createChannel(s, "foo"); err == nil {
+		t.Fatal("Expected error, got none")
+	}
+	if !logger.gotError {
+		t.Fatal("Did not log the expected error")
+	}
+}
