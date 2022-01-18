@@ -1,4 +1,4 @@
-// Copyright 2016-2021 The NATS Authors
+// Copyright 2016-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -170,6 +170,7 @@ var (
 	ErrDupDurable         = errors.New("stan: duplicate durable registration")
 	ErrInvalidDurName     = errors.New("stan: durable name of a durable queue subscriber can't contain the character ':'")
 	ErrUnknownClient      = errors.New("stan: unknown clientID")
+	ErrUnknownChannel     = errors.New("stan: unknown channel")
 	ErrNoChannel          = errors.New("stan: no configured channel")
 	ErrClusteredRestart   = errors.New("stan: cannot restart server in clustered mode if it was not previously clustered")
 	ErrChanDelInProgress  = errors.New("stan: channel is being deleted")
@@ -4676,15 +4677,28 @@ func (s *StanServer) performUnsubOrCloseSubscription(m *nats.Msg, req *pb.Unsubs
 
 	s.barrier(func() {
 		var err error
+		c, sub := s.getChannelAndSubForSubCloseOrUnsub(req)
+		if c == nil {
+			s.log.Errorf("[Client:%s] %s request for unknown channel %s",
+				req.ClientID, getSubUnsubAction(isSubClose), req.Subject)
+			s.sendSubscriptionResponseErr(m.Reply, ErrUnknownChannel)
+			return
+		}
+		if sub == nil {
+			s.log.Errorf("[Client:%s] %s request for unknown inbox %s",
+				req.ClientID, getSubUnsubAction(isSubClose), req.Inbox)
+			s.sendSubscriptionResponseErr(m.Reply, ErrInvalidSub)
+			return
+		}
 		if s.isClustered {
+			op := spb.RaftOperation_RemoveSubscription
 			if isSubClose {
-				err = s.replicateCloseSubscription(req)
-			} else {
-				err = s.replicateRemoveSubscription(req)
+				op = spb.RaftOperation_CloseSubscription
 			}
+			err = s.replicateSubCloseOrUnsubscribe(req, op, sub)
 		} else {
 			s.closeMu.Lock()
-			err = s.unsubscribe(req, isSubClose)
+			err = s.unsubscribeSub(c, req.ClientID, sub, isSubClose, true)
 			s.closeMu.Unlock()
 		}
 		// If there was an error, it has been already logged.
@@ -4701,33 +4715,32 @@ func (s *StanServer) performUnsubOrCloseSubscription(m *nats.Msg, req *pb.Unsubs
 	})
 }
 
-func (s *StanServer) unsubscribe(req *pb.UnsubscribeRequest, isSubClose bool) error {
-	action := "unsub"
-	if isSubClose {
-		action = "sub close"
+func getSubUnsubAction(close bool) string {
+	if close {
+		return "sub close"
 	}
+	return "unsub"
+}
+
+func (s *StanServer) getChannelAndSubForSubCloseOrUnsub(req *pb.UnsubscribeRequest) (*channel, *subState) {
 	c := s.channels.get(req.Subject)
 	if c == nil {
-		s.log.Errorf("[Client:%s] %s request missing subject %s",
-			req.ClientID, action, req.Subject)
-		return ErrInvalidSub
+		return nil, nil
 	}
 	sub := c.ss.LookupByAckInbox(req.Inbox)
 	if sub == nil {
 		sub = c.ss.LookupByInbox(req.Inbox)
 	}
 	if sub == nil {
-		s.log.Errorf("[Client:%s] %s request for missing inbox %s",
-			req.ClientID, action, req.Inbox)
-		return ErrInvalidSub
+		return c, nil
 	}
-	return s.unsubscribeSub(c, req.ClientID, action, sub, isSubClose, true)
+	return c, sub
 }
 
-func (s *StanServer) unsubscribeSub(c *channel, clientID, action string, sub *subState, isSubClose, shouldFlush bool) error {
+func (s *StanServer) unsubscribeSub(c *channel, clientID string, sub *subState, isSubClose, shouldFlush bool) error {
 	// Remove from Client
 	if !s.clients.removeSub(clientID, sub) {
-		s.log.Errorf("[Client:%s] %s request for missing client", clientID, action)
+		s.log.Errorf("[Client:%s] %s request for unknown client", clientID, getSubUnsubAction(isSubClose))
 		return ErrUnknownClient
 	}
 	// Remove the subscription
@@ -4743,25 +4756,11 @@ func (s *StanServer) unsubscribeSub(c *channel, clientID, action string, sub *su
 	return err
 }
 
-func (s *StanServer) replicateRemoveSubscription(req *pb.UnsubscribeRequest) error {
-	return s.replicateUnsubscribe(req, spb.RaftOperation_RemoveSubscription)
-}
+func (s *StanServer) replicateSubCloseOrUnsubscribe(req *pb.UnsubscribeRequest,
+	opType spb.RaftOperation_Type, sub *subState) error {
 
-func (s *StanServer) replicateCloseSubscription(req *pb.UnsubscribeRequest) error {
-	return s.replicateUnsubscribe(req, spb.RaftOperation_CloseSubscription)
-}
-
-func (s *StanServer) replicateUnsubscribe(req *pb.UnsubscribeRequest, opType spb.RaftOperation_Type) error {
-	// When closing a subscription, we need to possibly "flush" the
-	// pending sent/ack that need to be replicated
-	c := s.channels.get(req.Subject)
-	if c != nil {
-		sub := c.ss.LookupByAckInbox(req.Inbox)
-		if sub != nil {
-			unsub := opType == spb.RaftOperation_RemoveSubscription
-			s.endSubSentAndAckReplication(sub, unsub)
-		}
-	}
+	// Possibly flush sent/ack replication
+	s.endSubSentAndAckReplication(sub, opType == spb.RaftOperation_RemoveSubscription)
 	op := &spb.RaftOperation{
 		OpType: opType,
 		Unsub:  req,
@@ -5315,17 +5314,17 @@ func (s *StanServer) closeDurableIfDuplicate(c *channel, sr *pb.SubscriptionRequ
 	if !duplicate {
 		return nil
 	}
-	creq := &pb.UnsubscribeRequest{
-		ClientID: sr.ClientID,
-		Subject:  sr.Subject,
-		Inbox:    ackInbox,
-	}
 	var err error
 	if s.isClustered {
-		err = s.replicateCloseSubscription(creq)
+		creq := &pb.UnsubscribeRequest{
+			ClientID: sr.ClientID,
+			Subject:  sr.Subject,
+			Inbox:    ackInbox,
+		}
+		err = s.replicateSubCloseOrUnsubscribe(creq, spb.RaftOperation_CloseSubscription, sub)
 	} else {
 		s.closeMu.Lock()
-		err = s.unsubscribe(creq, true)
+		err = s.unsubscribeSub(c, sr.ClientID, sub, true, true)
 		s.closeMu.Unlock()
 	}
 	return err

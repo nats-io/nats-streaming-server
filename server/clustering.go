@@ -1,4 +1,4 @@
-// Copyright 2017-2021 The NATS Authors
+// Copyright 2017-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -650,10 +650,15 @@ func (r *raftFSM) Apply(l *raft.Log) interface{} {
 	case spb.RaftOperation_RemoveSubscription:
 		fallthrough
 	case spb.RaftOperation_CloseSubscription:
+		c, sub := s.getChannelAndSubForSubCloseOrUnsub(op.Unsub)
+		// Could be that the channel has been removed due to inactivity, etc..
+		if c == nil || sub == nil {
+			return nil
+		}
 		// Close/Unsub subscription replication.
 		isSubClose := op.OpType == spb.RaftOperation_CloseSubscription
 		s.closeMu.Lock()
-		err := s.unsubscribe(op.Unsub, isSubClose)
+		err := s.unsubscribeSub(c, op.Unsub.ClientID, sub, isSubClose, true)
 		s.closeMu.Unlock()
 		return err
 	case spb.RaftOperation_SendAndAck:

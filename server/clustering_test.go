@@ -1,4 +1,4 @@
-// Copyright 2017-2021 The NATS Authors
+// Copyright 2017-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -8845,4 +8845,97 @@ func TestClusteringQueueNoPendingCountIfNoMsg(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+type captureSubCloseErrLogger struct {
+	dummyLogger
+	errCh chan string
+}
+
+func (l *captureSubCloseErrLogger) Errorf(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if strings.Contains(msg, "sub close request for unknown") {
+		select {
+		case l.errCh <- msg:
+		default:
+		}
+	}
+}
+
+func TestClusteringDoNotReportSubCloseMissingSubjectOnReplay(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	maxInactivity := 250 * time.Millisecond
+
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1sOpts.Clustering.TrailingLogs = 5
+	s1sOpts.MaxInactivity = maxInactivity
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2sOpts.Clustering.TrailingLogs = 5
+	s2sOpts.MaxInactivity = maxInactivity
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3sOpts.Clustering.TrailingLogs = 5
+	s3sOpts.MaxInactivity = maxInactivity
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	getLeader(t, 10*time.Second, servers...)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {})
+	if err != nil {
+		t.Fatalf("Error on sub: %v", err)
+	}
+	if _, err := sc.Subscribe("bar", func(_ *stan.Msg) {}); err != nil {
+		t.Fatalf("Error on sub: %v", err)
+	}
+	for i := 0; i < 100; i++ {
+		sc.Publish("bar", []byte("msg"))
+	}
+
+	// Do snapshot on all servers
+	for _, s := range servers {
+		if err := s.raft.Snapshot().Error(); err != nil {
+			t.Fatalf("Error on snapshot: %v", err)
+		}
+	}
+	// Close sub on "foo", and wait for more than channel expiration
+	sub.Close()
+	time.Sleep(2 * maxInactivity)
+	s3.Shutdown()
+
+	// Set a logger that'll collect errors
+	l := &captureSubCloseErrLogger{errCh: make(chan string, 1)}
+	s3sOpts.CustomLogger = l
+	s3 = runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	// Create a sub on a new channel. We will use that as a "marker"
+	if _, err := sc.Subscribe("baz", func(_ *stan.Msg) {}); err != nil {
+		// to know that s3 has processed the sub1.Close() request.
+		t.Fatalf("Error on sub: %v", err)
+	}
+	checkChannelsInAllServers(t, []string{"bar", "baz"}, 10*time.Second, s3)
+
+	select {
+	case e := <-l.errCh:
+		t.Fatalf("Got error: %s", e)
+	default:
+		// OK
+	}
 }
