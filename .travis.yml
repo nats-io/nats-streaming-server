@@ -3,21 +3,19 @@ os:
 - windows
 language: go
 go:
+- 1.17.x
 - 1.16.x
-- 1.15.x
 addons:
   apt:
     packages:
     - rpm
 env:
-- GO111MODULE=off
+- GO111MODULE=on
 go_import_path: github.com/nats-io/nats-streaming-server
 install:
-- go get -t ./...
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
-    go get -u honnef.co/go/tools/cmd/staticcheck;
-    go get -u github.com/client9/misspell/cmd/misspell;
-    go get -u github.com/go-sql-driver/mysql;
+    go install honnef.co/go/tools/cmd/staticcheck@latest;
+    go install github.com/client9/misspell/cmd/misspell@latest;
   fi
 services:
 - mysql
@@ -27,7 +25,7 @@ before_script:
     go install;
     $(exit $(go fmt $GO_LIST | wc -l));
     go vet $GO_LIST;
-    find . -type f -name "*.go" | grep -v "/vendor/" | grep -v "/spb/" | xargs misspell -error -locale US;
+    find . -type f -name "*.go" | grep -v "/spb/" | xargs misspell -error -locale US;
     staticcheck $GO_LIST;
   fi
 script:
@@ -36,8 +34,7 @@ script:
 - if [[ ! $TRAVIS_TAG ]]; then
     if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
         mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;";
-        go test -i ./...;
-        if [[ "$TRAVIS_GO_VERSION" =~ 1.15 ]]; then ./scripts/cov.sh TRAVIS; else go test -v -failfast -p=1 ./...; fi;
+        if [[ "$TRAVIS_GO_VERSION" =~ 1.16 ]]; then ./scripts/cov.sh TRAVIS; else go test -v -failfast -p=1 ./...; fi;
     fi;
   fi
 - if [[ ! $TRAVIS_TAG ]]; then
@@ -49,13 +46,13 @@ script:
 - set +e
 after_success:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
-    if [[ ! $TRAVIS_TAG ]]; then if [[ "$TRAVIS_GO_VERSION" =~ 1.15 ]]; then $HOME/gopath/bin/goveralls -coverprofile=acc.out -service travis-ci; fi; fi;
+    if [[ ! $TRAVIS_TAG ]]; then if [[ "$TRAVIS_GO_VERSION" =~ 1.16 ]]; then $HOME/gopath/bin/goveralls -coverprofile=acc.out -service travis-ci; fi; fi;
   fi
 
 deploy:
   provider: script
   cleanup: true
-  script: curl -sL http://git.io/goreleaser | VERSION=v0.160.0 bash
+  script: curl -sL http://git.io/goreleaser | bash
   on:
     tags: true
-    condition: ("$TRAVIS_OS_NAME" = "linux") && ("$TRAVIS_GO_VERSION" =~ "1.16")
+    condition: ("$TRAVIS_OS_NAME" = "linux") && ("$TRAVIS_GO_VERSION" =~ "1.17")
