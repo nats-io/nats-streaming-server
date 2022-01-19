@@ -313,7 +313,12 @@ func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, err
 	return c, err
 }
 
-func (cs *channelStore) createChannelLocked(s *StanServer, name string, id uint64) (*channel, error) {
+func (cs *channelStore) createChannelLocked(s *StanServer, name string, id uint64) (retChan *channel, retErr error) {
+	defer func() {
+		if retErr != nil {
+			cs.stan.log.Errorf("Creating channel %q failed: %v", name, retErr)
+		}
+	}()
 	// It is possible that there were 2 concurrent calls to lookupOrCreateChannel
 	// which first uses `channelStore.get()` and if not found, calls this function.
 	// So we need to check now that we have the write lock that the channel has
