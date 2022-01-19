@@ -1,4 +1,4 @@
-// Copyright 2017-2020 The NATS Authors
+// Copyright 2017-2022 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -297,7 +297,7 @@ func (r *raftFSM) Restore(snapshot io.ReadCloser) (retErr error) {
 			sub.RLock()
 			clientID := sub.ClientID
 			sub.RUnlock()
-			if err := s.unsubscribeSub(c, clientID, "unsub", sub, false, false); err != nil {
+			if err := s.unsubscribeSub(c, clientID, sub, false, false); err != nil {
 				return err
 			}
 		}
