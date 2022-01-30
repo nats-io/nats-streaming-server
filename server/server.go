@@ -3691,8 +3691,13 @@ func (s *StanServer) performAckExpirationRedelivery(sub *subState, isStartup boo
 		sub.Unlock()
 		return
 	}
-	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sub.Lock()
+	// Subscriber could have been closed
+	if sub.ackTimer == nil {
+		sub.Unlock()
+		return
+	}
+	// Sort our messages outstanding from acksPending, grab some state and unlock.
 	sortedPendingMsgs := sub.makeSortedPendingMsgs()
 	if len(sortedPendingMsgs) == 0 {
 		sub.clearAckTimer()
