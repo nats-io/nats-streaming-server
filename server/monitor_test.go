@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1447,4 +1448,68 @@ func TestMonitorInOutMsgs(t *testing.T) {
 	if sz.OutMsgs != 15 || sz.OutBytes == 0 {
 		t.Fatalf("Expected 15 outbound messages, got %v - %v", sz.InMsgs, sz.InBytes)
 	}
+}
+
+func TestMonitorNoPanicOnServerRestart(t *testing.T) {
+	resetPreviousHTTPConnections()
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	opts := getTestDefaultOptsForPersistentStore()
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	opts.NATSServerURL = "nats://127.0.0.1:4222"
+	s := runMonitorServer(t, opts)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	for i := 0; i < 100; i++ {
+		if _, err := sc.Subscribe(fmt.Sprintf("foo.%d", i+1),
+			func(_ *stan.Msg) {}, stan.DurableName("dur")); err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+	}
+
+	endpoints := []string{
+		"channelsz?subs=1",
+		"serverz",
+		"storez",
+		"clientsz",
+		"isFTActive",
+	}
+	for _, e := range endpoints {
+		s.Shutdown()
+
+		wg := sync.WaitGroup{}
+		wg.Add(1)
+		done := make(chan struct{})
+		go func() {
+			defer wg.Done()
+			url := fmt.Sprintf("http://%s:%d/streaming/", monitorHost, monitorPort)
+			for {
+				resp, err := http.DefaultClient.Get(url + e)
+				if err != nil {
+					continue
+				}
+				ioutil.ReadAll(resp.Body)
+				resp.Body.Close()
+				select {
+				case <-done:
+					return
+				default:
+				}
+			}
+		}()
+
+		s = runMonitorServer(t, opts)
+		defer s.Shutdown()
+
+		time.Sleep(100 * time.Millisecond)
+		close(done)
+		wg.Wait()
+	}
+	sc.Close()
 }
