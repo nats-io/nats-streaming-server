@@ -16,6 +16,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
 	"runtime"
 	"sync"
@@ -1713,4 +1714,36 @@ func TestRedeliveryRaceWithAck(t *testing.T) {
 		})
 	}
 
+}
+
+func TestNoPanicOnSubCloseWhileOnRedelivery(t *testing.T) {
+	s := runServer(t, clusterName)
+	defer s.Shutdown()
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	if err := sc.Publish("foo", []byte("msg")); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+
+	for i := 0; i < 100; i++ {
+		sub, err := sc.Subscribe("foo", func(_ *stan.Msg) {},
+			stan.AckWait(ackWaitInMs(5)),
+			stan.SetManualAckMode(),
+			stan.DeliverAllAvailable())
+		if err != nil {
+			t.Fatalf("Error on subscribe: %v", err)
+		}
+		// Artificially pretend that the client had failed hearbeat
+		srvSub := s.clients.getSubs(clientName)[0]
+		srvSub.Lock()
+		srvSub.hasFailedHB = true
+		srvSub.Unlock()
+
+		time.Sleep(time.Duration(rand.Intn(15)) * time.Millisecond)
+		sub.Close()
+
+		waitForNumSubs(t, s, clientName, 0)
+	}
 }
