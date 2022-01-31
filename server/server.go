@@ -2525,7 +2525,9 @@ func (s *StanServer) processRecoveredChannels(channels map[string]*stores.Recove
 	allSubs := make([]*subState, 0, 16)
 
 	for channelName, recoveredChannel := range channels {
+		s.channels.Lock()
 		channel, err := s.channels.create(s, channelName, recoveredChannel.Channel)
+		s.channels.Unlock()
 		if err != nil {
 			return nil, err
 		}

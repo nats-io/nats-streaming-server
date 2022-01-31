@@ -172,21 +172,21 @@ func (s *StanServer) startMonitoring(nOpts *natsd.Options) error {
 func (s *StanServer) HandleRootz(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `<html lang="en">
    <head>
-    <link rel="shortcut icon" href="http://nats.io/img/favicon.ico">
+    <link rel="shortcut icon" href="https://nats.io/img/favicon.ico">
     <style type="text/css">
       body { font-family: "Century Gothic", CenturyGothic, AppleGothic, sans-serif; font-size: 22; }
       a { margin-left: 32px; }
     </style>
   </head>
   <body>
-    <img src="http://nats.io/img/logo.png" alt="NATS Streaming">
+    <img src="https://nats.io/img/logo.png" alt="NATS Streaming">
     <br/>
 	<a href=.%s>server</a><br/>
 	<a href=.%s>store</a><br/>
 	<a href=.%s>clients</a><br/>
 	<a href=.%s>channels</a><br/>
     <br/>
-    <a href=http://nats.io/documentation/server/gnatsd-monitoring/>help</a>
+    <a href=https://docs.nats.io/legacy/stan/intro/monitoring/>help</a>
   </body>
 </html>`, ServerPath, StorePath, ClientsPath, ChannelsPath)
 }
@@ -198,15 +198,6 @@ func (s *StanServer) HandleServerz(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Error getting information about channels state: %v", err), http.StatusInternalServerError)
 		return
 	}
-	var role string
-	var nodeID string
-	s.mu.RLock()
-	state := s.state
-	if s.raft != nil {
-		role = s.raft.State().String()
-		nodeID = s.info.NodeID
-	}
-	s.mu.RUnlock()
 
 	numSubs := s.numSubs()
 	now := time.Now()
@@ -227,6 +218,15 @@ func (s *StanServer) HandleServerz(w http.ResponseWriter, r *http.Request) {
 		maxFDs = int(limits.OpenFiles)
 	}
 
+	var role string
+	var nodeID string
+
+	s.mu.RLock()
+	state := s.state
+	if s.raft != nil {
+		role = s.raft.State().String()
+		nodeID = s.info.NodeID
+	}
 	serverz := &Serverz{
 		ClusterID:     s.info.ClusterID,
 		ServerID:      s.serverID,
@@ -250,6 +250,7 @@ func (s *StanServer) HandleServerz(w http.ResponseWriter, r *http.Request) {
 		OpenFDs:       fds,
 		MaxFDs:        maxFDs,
 	}
+	s.mu.RUnlock()
 	s.sendResponse(w, r, serverz)
 }
 
@@ -293,6 +294,7 @@ func (s *StanServer) HandleStorez(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Error getting information about channels state: %v", err), http.StatusInternalServerError)
 		return
 	}
+	s.mu.RLock()
 	storez := &Storez{
 		ClusterID:  s.info.ClusterID,
 		ServerID:   s.serverID,
@@ -302,6 +304,7 @@ func (s *StanServer) HandleStorez(w http.ResponseWriter, r *http.Request) {
 		TotalMsgs:  count,
 		TotalBytes: bytes,
 	}
+	s.mu.RUnlock()
 	s.sendResponse(w, r, storez)
 }
 
@@ -353,6 +356,7 @@ func (s *StanServer) HandleClientsz(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		carr = carr[0:carrSize]
+		s.mu.RLock()
 		clientsz := &Clientsz{
 			ClusterID: s.info.ClusterID,
 			ServerID:  s.serverID,
@@ -363,6 +367,7 @@ func (s *StanServer) HandleClientsz(w http.ResponseWriter, r *http.Request) {
 			Count:     len(carr),
 			Clients:   carr,
 		}
+		s.mu.RUnlock()
 		s.sendResponse(w, r, clientsz)
 	}
 }
@@ -499,6 +504,7 @@ func (s *StanServer) HandleChannelsz(w http.ResponseWriter, r *http.Request) {
 		channels := s.channels.getAll()
 		totalChannels := len(channels)
 		minoff, maxoff := getMinMaxOffset(offset, limit, totalChannels)
+		s.mu.RLock()
 		channelsz := &Channelsz{
 			ClusterID: s.info.ClusterID,
 			ServerID:  s.serverID,
@@ -507,6 +513,7 @@ func (s *StanServer) HandleChannelsz(w http.ResponseWriter, r *http.Request) {
 			Limit:     limit,
 			Total:     totalChannels,
 		}
+		s.mu.RUnlock()
 		if subsOption == 1 {
 			carr := make([]*Channelz, 0, totalChannels)
 			for cn := range channels {
