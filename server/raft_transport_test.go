@@ -793,7 +793,6 @@ func TestRAFTTransportConnReader(t *testing.T) {
 
 	// Now wait for a timeout
 	fromB.SetDeadline(time.Now().Add(100 * time.Millisecond))
-	start = time.Now()
 	n, err = fromB.Read(buf[:])
 	if err == nil || n != 0 {
 		t.Fatalf("Expected timeout, got err=%v n=%v", err, n)

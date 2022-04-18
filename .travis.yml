@@ -14,7 +14,7 @@ env:
 go_import_path: github.com/nats-io/nats-streaming-server
 install:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
-    go install honnef.co/go/tools/cmd/staticcheck@latest;
+    go install honnef.co/go/tools/cmd/staticcheck@v0.2.2;
     go install github.com/client9/misspell/cmd/misspell@latest;
   fi
 services:
