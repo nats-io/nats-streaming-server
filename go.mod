@@ -15,6 +15,6 @@ require (
 	github.com/nats-io/stan.go v0.10.2
 	github.com/prometheus/procfs v0.7.3
 	go.etcd.io/bbolt v1.3.6
-	golang.org/x/crypto v0.0.0-20220411220226-7b82a4e95df4
+	golang.org/x/crypto v0.0.0-20220315160706-3147a52a75dd
 	golang.org/x/sys v0.0.0-20220412211240-33da011f77ad
 )
