@@ -7,10 +7,10 @@ require (
 	github.com/gogo/protobuf v1.3.2
 	github.com/hashicorp/go-hclog v1.1.0
 	github.com/hashicorp/go-msgpack v1.1.5
-	github.com/hashicorp/raft v1.3.7
+	github.com/hashicorp/raft v1.3.9
 	github.com/lib/pq v1.10.4
-	github.com/nats-io/nats-server/v2 v2.8.1
-	github.com/nats-io/nats.go v1.14.0
+	github.com/nats-io/nats-server/v2 v2.8.2
+	github.com/nats-io/nats.go v1.15.0
 	github.com/nats-io/nuid v1.0.1
 	github.com/nats-io/stan.go v0.10.2
 	github.com/prometheus/procfs v0.7.3
