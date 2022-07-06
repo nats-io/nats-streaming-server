@@ -4739,7 +4739,7 @@ type myProxy struct {
 	connectTo string
 	addr      string
 	c         net.Conn
-	doPause   bool
+	doPause   time.Duration
 }
 
 func newProxy(connectTo string) (*myProxy, error) {
@@ -4776,8 +4776,8 @@ func (p *myProxy) proxy(c net.Conn) {
 			p.Lock()
 			pause := p.doPause
 			p.Unlock()
-			if pause {
-				time.Sleep(10 * time.Millisecond)
+			if pause > 0 {
+				time.Sleep(pause)
 			} else {
 				break
 			}
@@ -4821,15 +4821,19 @@ func (p *myProxy) getAddr() string {
 }
 
 func (p *myProxy) pause() {
+	p.pauseFor(10 * time.Millisecond)
+}
+
+func (p *myProxy) pauseFor(dur time.Duration) {
 	p.Lock()
 	defer p.Unlock()
-	p.doPause = true
+	p.doPause = dur
 }
 
 func (p *myProxy) resume() {
 	p.Lock()
 	defer p.Unlock()
-	p.doPause = false
+	p.doPause = 0
 }
 
 func (p *myProxy) close() {
@@ -8937,5 +8941,107 @@ func TestClusteringDoNotReportSubCloseMissingSubjectOnReplay(t *testing.T) {
 		t.Fatalf("Got error: %s", e)
 	default:
 		// OK
+	}
+}
+
+func TestClusteringRaftSubsAndConnsLeak(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		nodesConnections bool
+	}{
+		{"subs", false},
+		{"conns", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cleanupDatastore(t)
+			defer cleanupDatastore(t)
+			cleanupRaftLog(t)
+			defer cleanupRaftLog(t)
+
+			// For this test, we need 2 NATS Servers
+			do := natsdTest.DefaultTestOptions
+			ns1Opts := do.Clone()
+			ns1Opts.Cluster.Name = "abc"
+			ns1Opts.Cluster.Host = "127.0.0.1"
+			ns1Opts.Cluster.Port = -1
+			ns1 := natsdTest.RunServer(ns1Opts)
+			defer ns1.Shutdown()
+
+			// Start a proxy to which ns2 will connect to.
+			// We want the two to be split at one point.
+			proxy, err := newProxy(fmt.Sprintf("%s:%d", ns1Opts.Cluster.Host, ns1Opts.Cluster.Port))
+			if err != nil {
+				t.Fatalf("Error creating proxy: %v", err)
+			}
+			defer proxy.close()
+			// Wait for it to be ready to accept connection.
+			time.Sleep(200 * time.Millisecond)
+
+			ns2Opts := do.Clone()
+			ns2Opts.Port = 4223
+			ns2Opts.Cluster.Name = "abc"
+			ns2Opts.Cluster.Host = "127.0.0.1"
+			ns2Opts.Cluster.Port = -1
+			ns2Opts.Routes = natsd.RoutesFromStr(proxy.getAddr())
+			ns2 := natsdTest.RunServer(ns2Opts)
+			defer ns2.Shutdown()
+
+			// Configure first server
+			s1sOpts := getTestDefaultOptsForClustering("a", true)
+			s1sOpts.Clustering.NodesConnections = test.nodesConnections
+			s1 := runServerWithOpts(t, s1sOpts, nil)
+			defer s1.Shutdown()
+
+			// Configure second server.
+			s2sOpts := getTestDefaultOptsForClustering("b", false)
+			s2sOpts.NATSServerURL = "nats://127.0.0.1:4223"
+			s2sOpts.Clustering.NodesConnections = test.nodesConnections
+			// Make it connect to ns2
+			s2 := runServerWithOpts(t, s2sOpts, ns2Opts)
+			defer s2.Shutdown()
+
+			// Configure a third server.
+			s3sOpts := getTestDefaultOptsForClustering("c", false)
+			s3sOpts.NATSServerURL = "nats://127.0.0.1:4223"
+			s3sOpts.Clustering.NodesConnections = test.nodesConnections
+			// Make it connect to ns2
+			s3 := runServerWithOpts(t, s3sOpts, ns2Opts)
+			defer s3.Shutdown()
+
+			getLeader(t, 10*time.Second, s1, s2, s3)
+
+			proxy.pauseFor(500 * time.Millisecond)
+
+			time.Sleep(2 * time.Second)
+
+			proxy.resume()
+
+			time.Sleep(time.Second)
+
+			conns, err := ns1.Connz(&natsd.ConnzOptions{Subscriptions: true})
+			if err != nil {
+				t.Fatalf("Error getting connz: %v", err)
+			}
+			num := uint32(0)
+			for _, conn := range conns.Conns {
+				if test.nodesConnections {
+					if strings.Contains(conn.Name, "-a-to-") {
+						num++
+					}
+				} else if strings.HasSuffix(conn.Name, "-raft") {
+					for _, sub := range conn.Subs {
+						if strings.Contains(sub, ".request.") {
+							num++
+						}
+					}
+					break
+				}
+			}
+			// If "num" is greater than, say, 10 (for any mode), then it is indicative
+			// of the issue.
+			if num >= 10 {
+				t.Fatalf("Unexpected number of subs/conns: %v", num)
+			}
+		})
 	}
 }

@@ -36,6 +36,8 @@ const (
 	natsRequestInbox       = "raft.%s.request.%s"
 	timeoutForDialAndFlush = 2 * time.Second
 	natsLogAppName         = "raft-nats"
+	dialInProgress         = "1"
+	dialComplete           = "2"
 )
 
 var errTransportShutdown = errors.New("raft-nats: transport is being shutdown")
@@ -57,6 +59,7 @@ func (n natsAddr) String() string {
 type connectRequestProto struct {
 	ID    string `json:"id"`
 	Inbox string `json:"inbox"`
+	Check string `json:"check"`
 }
 
 type connectResponseProto struct {
@@ -238,7 +241,7 @@ func (n *natsConn) close(signalRemote bool) error {
 		return nil
 	}
 
-	if signalRemote {
+	if signalRemote && n.outbox != "" {
 		// Send empty message to signal EOF for a graceful disconnect. Not
 		// concerned with errors here as this is best effort.
 		n.conn.Publish(n.outbox, nil)
@@ -250,11 +253,14 @@ func (n *natsConn) close(signalRemote bool) error {
 	// check for sub != nil because this can be called during setup where
 	// sub has not been attached.
 	var err error
-	if n.streamConn {
-		if n.sub != nil {
+	var inbox string
+	if n.sub != nil {
+		inbox = n.sub.Subject
+		if n.streamConn {
 			err = n.sub.Unsubscribe()
 		}
-	} else {
+	}
+	if !n.streamConn {
 		n.conn.Close()
 	}
 
@@ -266,6 +272,7 @@ func (n *natsConn) close(signalRemote bool) error {
 
 	stream.mu.Lock()
 	delete(stream.conns, n)
+	stream.dialInboxes.Delete(inbox)
 	stream.mu.Unlock()
 
 	return err
@@ -311,6 +318,10 @@ type natsStreamLayer struct {
 	// This is the timeout we will use for flush and dial (request timeout),
 	// not the timeout that RAFT will use to call SetDeadline.
 	dfTimeout time.Duration
+	// This is for dial connections so that accept side can check if the
+	// dial side has timed-out before receiving the response from accept-side.
+	csub        *nats.Subscription
+	dialInboxes sync.Map
 }
 
 func newNATSStreamLayer(id string, conn *nats.Conn, logger hclog.Logger, timeout time.Duration, makeConn natsRaftConnCreator) (*natsStreamLayer, error) {
@@ -322,19 +333,36 @@ func newNATSStreamLayer(id string, conn *nats.Conn, logger hclog.Logger, timeout
 		conns:     map[*natsConn]struct{}{},
 		dfTimeout: timeoutForDialAndFlush,
 	}
+	csub, err := conn.Subscribe(nats.NewInbox(), func(m *nats.Msg) {
+		di := string(m.Data)
+		if len(di) == 0 {
+			return
+		}
+		var resp string
+		if v, ok := n.dialInboxes.Load(di); ok {
+			resp = v.(string)
+		}
+		m.Respond([]byte(resp))
+	})
+	if err != nil {
+		return nil, err
+	}
 	// Could be the case in tests...
 	if timeout < n.dfTimeout {
 		n.dfTimeout = timeout
 	}
 	sub, err := conn.SubscribeSync(fmt.Sprintf(natsConnectInbox, id))
 	if err != nil {
+		csub.Unsubscribe()
 		return nil, err
 	}
 	if err := conn.FlushTimeout(n.dfTimeout); err != nil {
+		csub.Unsubscribe()
 		sub.Unsubscribe()
 		return nil, err
 	}
 	n.sub = sub
+	n.csub = csub
 	return n, nil
 }
 
@@ -373,6 +401,7 @@ func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration
 	connect := &connectRequestProto{
 		ID:    n.localAddr.String(),
 		Inbox: fmt.Sprintf(natsRequestInbox, n.localAddr.String(), nats.NewInbox()),
+		Check: n.csub.Subject,
 	}
 	data, err := json.Marshal(connect)
 	if err != nil {
@@ -385,17 +414,7 @@ func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration
 		timeout = n.dfTimeout
 	}
 
-	// Make connect request to peer.
-	msg, err := n.conn.Request(fmt.Sprintf(natsConnectInbox, address), data, timeout)
-	if err != nil {
-		return nil, err
-	}
-	var resp connectResponseProto
-	if err := json.Unmarshal(msg.Data, &resp); err != nil {
-		return nil, err
-	}
-
-	// Success, so now create a new NATS connection...
+	// Create a new NATS connection...
 	peerConn, err := n.newNATSConn(string(address))
 	if err != nil {
 		return nil, fmt.Errorf("raft-nats: unable to create connection to %q: %v", string(address), err)
@@ -403,6 +422,8 @@ func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration
 
 	// Setup inbox.
 	peerConn.mu.Lock()
+	// Need to prepare the subscription before sending the request
+	// in case the accept-side immediately closes the connection.
 	sub, err := peerConn.conn.Subscribe(connect.Inbox, peerConn.onMsg)
 	if err != nil {
 		peerConn.mu.Unlock()
@@ -411,13 +432,31 @@ func (n *natsStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration
 	}
 	sub.SetPendingLimits(-1, -1)
 	peerConn.sub = sub
-	peerConn.outbox = resp.Inbox
 	peerConn.mu.Unlock()
 
-	if err := peerConn.conn.FlushTimeout(timeout); err != nil {
+	n.dialInboxes.Store(connect.Inbox, dialInProgress)
+
+	// Make connect request to peer.
+	msg, err := n.conn.Request(fmt.Sprintf(natsConnectInbox, address), data, timeout)
+	if err != nil {
+		n.dialInboxes.Delete(connect.Inbox)
 		peerConn.Close()
 		return nil, err
 	}
+
+	var resp connectResponseProto
+	// Decode the response
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		n.dialInboxes.Delete(connect.Inbox)
+		peerConn.Close()
+		return nil, err
+	}
+	// Keep track of the remote's inbox
+	peerConn.mu.Lock()
+	peerConn.outbox = resp.Inbox
+	peerConn.mu.Unlock()
+
+	n.dialInboxes.Store(connect.Inbox, dialComplete)
 
 	n.mu.Lock()
 	if n.closed {
@@ -438,20 +477,17 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 			return nil, err
 		}
 		if msg.Reply == "" {
-			n.logger.Error("Invalid connect message (missing reply inbox)")
-			continue
+			return nil, fmt.Errorf("invalid connect message (missing reply inbox)")
 		}
 
 		var connect connectRequestProto
 		if err := json.Unmarshal(msg.Data, &connect); err != nil {
-			n.logger.Error("Invalid connect message (invalid data)")
-			continue
+			return nil, fmt.Errorf("invalid connect message: %v", err)
 		}
 
 		peerConn, err := n.newNATSConn(connect.ID)
 		if err != nil {
-			n.logger.Error("Unable to create connection to %q: %v", connect.ID, err)
-			continue
+			return nil, fmt.Errorf("unable to create connection to %s: %v", connect.ID, err)
 		}
 
 		// Setup inbox for peer.
@@ -460,9 +496,8 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 		sub, err := peerConn.conn.Subscribe(inbox, peerConn.onMsg)
 		if err != nil {
 			peerConn.mu.Unlock()
-			n.logger.Error("Failed to create inbox for remote peer", "error", err)
 			peerConn.Close()
-			continue
+			return nil, fmt.Errorf("unable to create inbox for remote peer %s: %v", connect.ID, err)
 		}
 		sub.SetPendingLimits(-1, -1)
 		peerConn.outbox = connect.Inbox
@@ -492,6 +527,29 @@ func (n *natsStreamLayer) Accept() (net.Conn, error) {
 			n.logger.Error("Failed to flush connect response to remote peer", "error", err)
 			peerConn.Close()
 			continue
+		}
+		if connect.Check != "" {
+			var retryAccept bool
+			for {
+				resp, err := n.conn.Request(connect.Check, []byte(connect.Inbox), n.dfTimeout)
+				if err != nil {
+					retryAccept = true
+					break
+				}
+				if s := string(resp.Data); s == dialInProgress {
+					continue
+				} else if s == dialComplete {
+					break
+				} else {
+					n.logger.Warn(fmt.Sprintf("retrying because dialed connection from remote %s is no longer valid", connect.ID))
+					retryAccept = true
+					break
+				}
+			}
+			if retryAccept {
+				peerConn.Close()
+				continue
+			}
 		}
 		n.mu.Lock()
 		if n.closed {
