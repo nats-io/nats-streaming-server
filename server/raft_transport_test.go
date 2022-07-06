@@ -1009,3 +1009,155 @@ func TestRAFTTransportDialAcceptCloseConnOnTransportClosed(t *testing.T) {
 		t.Fatalf("Connections were added after streams were closed: %v/%v", l1, l2)
 	}
 }
+
+func TestRAFTTransportNoLeakedSubscriptions(t *testing.T) {
+
+	var makeConnFunc natsRaftConnCreator
+
+	for _, test := range []struct {
+		name            string
+		makeConnections bool
+	}{
+		{"normal", false},
+		{"make connections", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s := runRaftTportServer()
+			defer s.Shutdown()
+
+			if test.makeConnections {
+				makeConnFunc = func(name string) (*nats.Conn, error) {
+					return nats.Connect(nats.DefaultURL)
+				}
+			}
+
+			nc1 := newNatsConnection(t)
+			defer nc1.Close()
+			stream1, err := newNATSStreamLayer("a", nc1, newTestLogger(t), 50*time.Millisecond, makeConnFunc)
+			if err != nil {
+				t.Fatalf("Error creating stream: %v", err)
+			}
+			defer stream1.Close()
+
+			nc2 := newNatsConnection(t)
+			defer nc2.Close()
+			stream2, err := newNATSStreamLayer("b", nc2, newTestLogger(t), 50*time.Millisecond, makeConnFunc)
+			if err != nil {
+				t.Fatalf("Error creating stream: %v", err)
+			}
+			defer stream2.Close()
+
+			for i := 0; i < 10; i++ {
+				if _, err := stream1.Dial("b", 50*time.Millisecond); err == nil {
+					t.Fatal("Expected error, did not get one")
+				}
+			}
+
+			wg := sync.WaitGroup{}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+
+				for {
+					if _, err := stream2.Accept(); err != nil {
+						return
+					}
+				}
+			}()
+			time.Sleep(250 * time.Millisecond)
+
+			numConns := func(s *natsStreamLayer) int {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				return len(s.conns)
+			}
+
+			waitForCount(t, 0, func() (string, int) {
+				return "dialed connections", numConns(stream1)
+			})
+			waitForCount(t, 0, func() (string, int) {
+				return "accepted connections", numConns(stream2)
+			})
+
+			stream2.Close()
+			wg.Wait()
+		})
+	}
+}
+
+func TestRAFTTransportNoOrphanedDialConnections(t *testing.T) {
+
+	var makeConnFunc natsRaftConnCreator
+
+	for _, test := range []struct {
+		name            string
+		makeConnections bool
+	}{
+		{"normal", false},
+		{"make connections", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s := runRaftTportServer()
+			defer s.Shutdown()
+
+			if test.makeConnections {
+				makeConnFunc = func(name string) (*nats.Conn, error) {
+					return nats.Connect(nats.DefaultURL)
+				}
+			}
+
+			nc1 := newNatsConnection(t)
+			defer nc1.Close()
+			stream1, err := newNATSStreamLayer("a", nc1, newTestLogger(t), 2*time.Second, makeConnFunc)
+			if err != nil {
+				t.Fatalf("Error creating stream: %v", err)
+			}
+			defer stream1.Close()
+
+			nc2 := newNatsConnection(t)
+			defer nc2.Close()
+			stream2, err := newNATSStreamLayer("b", nc2, newTestLogger(t), 2*time.Second, makeConnFunc)
+			if err != nil {
+				t.Fatalf("Error creating stream: %v", err)
+			}
+			defer stream2.Close()
+
+			wg := sync.WaitGroup{}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := 0; i < 10; i++ {
+					if c, _ := stream2.Accept(); c != nil {
+						c.Close()
+					}
+				}
+			}()
+
+			buf := [100]byte{}
+			for i := 0; i < 10; i++ {
+				c, err := stream1.Dial("b", 2*time.Second)
+				if err != nil {
+					t.Fatalf("Error on dial: %v", err)
+				}
+				defer c.Close()
+				// Possibly repeat reads until we get an EOF.
+				for j := 0; j < 5; j++ {
+					c.SetDeadline(time.Now().Add(50 * time.Millisecond))
+					// We expect to get an EOF since the dial'ed connection
+					// should have detected the close from the accept'ed one.
+					if _, err := c.Read(buf[:]); err == io.EOF {
+						// Ok
+						break
+					}
+				}
+			}
+
+			waitForCount(t, 0, func() (string, int) {
+				stream2.mu.Lock()
+				l := len(stream1.conns)
+				stream2.mu.Unlock()
+				return "dialed connections", l
+			})
+		})
+	}
+}
