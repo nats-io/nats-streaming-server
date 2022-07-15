@@ -196,6 +196,11 @@ type FileStoreOptions struct {
 	// by setting DoSync to false.
 	// Setting AutoSync to any value <= 0 will disable auto sync.
 	AutoSync time.Duration
+
+	// RecordSizeLimit defines the maxmimum size of a record that can be read
+	// from disk. Should a record corruption occur, this will prevent the server
+	// to allocate more memory than this value. Expressed in bytes.
+	RecordSizeLimit int
 }
 
 // This is an internal error to detect situations where we do
@@ -328,6 +333,15 @@ func DoSync(enableFileSync bool) FileStoreOption {
 func AutoSync(dur time.Duration) FileStoreOption {
 	return func(o *FileStoreOptions) error {
 		o.AutoSync = dur
+		return nil
+	}
+}
+
+// RecordSizeLimit is a FileStore option that defines the maximum size of a record
+// that can be read from disk.
+func RecordSizeLimit(limit int) FileStoreOption {
+	return func(o *FileStoreOptions) error {
+		o.RecordSizeLimit = limit
 		return nil
 	}
 }
@@ -797,7 +811,7 @@ func writeRecord(w io.Writer, buf []byte, recType recordType, rec record, recSiz
 // hold the payload (expanding if necessary). Therefore, this call always
 // return `buf`, regardless if there is an error or not.
 // The caller is indicating if the record is supposed to be typed or not.
-func readRecord(r io.Reader, buf []byte, recTyped bool, crcTable *crc32.Table, checkCRC bool) ([]byte, int, recordType, error) {
+func readRecord(r io.Reader, buf []byte, recTyped bool, crcTable *crc32.Table, checkCRC bool, limit int) ([]byte, int, recordType, error) {
 	_header := [recordHeaderSize]byte{}
 	header := _header[:]
 	if _, err := io.ReadFull(r, header); err != nil {
@@ -817,6 +831,9 @@ func readRecord(r io.Reader, buf []byte, recTyped bool, crcTable *crc32.Table, c
 		if crc == 0 {
 			return buf, 0, 0, errNeedRewind
 		}
+	}
+	if limit > 0 && recSize > limit {
+		return buf, 0, 0, fmt.Errorf("record size %v is greater than limit of %v bytes", recSize, limit)
 	}
 	// Now we are going to read the payload
 	buf = util.EnsureBufBigEnough(buf, recSize)
@@ -1564,6 +1581,10 @@ func (fs *FileStore) Init(info *spb.ServerInfo) error {
 	return nil
 }
 
+func (fs *FileStore) readRecord(r io.Reader, buf []byte, recTyped bool) ([]byte, int, recordType, error) {
+	return readRecord(r, buf, recTyped, fs.crcTable, fs.opts.DoCRC, fs.opts.RecordSizeLimit)
+}
+
 // recoverClients reads the client files and returns an array of RecoveredClient
 func (fs *FileStore) recoverClients() ([]*Client, error) {
 	var err error
@@ -1578,7 +1599,7 @@ func (fs *FileStore) recoverClients() ([]*Client, error) {
 	br := bufio.NewReaderSize(fs.clientsFile.handle, defaultBufSize)
 
 	for {
-		buf, recSize, recType, err = readRecord(br, buf, true, fs.crcTable, fs.opts.DoCRC)
+		buf, recSize, recType, err = fs.readRecord(br, buf, true)
 		if err != nil {
 			switch err {
 			case io.EOF:
@@ -1629,7 +1650,7 @@ func (fs *FileStore) recoverClients() ([]*Client, error) {
 // recoverServerInfo reads the server file and returns a ServerInfo structure
 func (fs *FileStore) recoverServerInfo() (*spb.ServerInfo, error) {
 	info := &spb.ServerInfo{}
-	buf, size, _, err := readRecord(fs.serverFile.handle, nil, false, fs.crcTable, fs.opts.DoCRC)
+	buf, size, _, err := fs.readRecord(fs.serverFile.handle, nil, false)
 	if err != nil {
 		if err == io.EOF {
 			// We are done, no state recovered
@@ -2372,10 +2393,6 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 	}
 	// No `else` here because in case of error recovering index file, we will do data file recovery
 	if !useIdxFile {
-		// Get these from the file store object
-		crcTable := ms.fstore.crcTable
-		doCRC := ms.fstore.opts.DoCRC
-
 		// Create a buffered reader from the data file to speed-up recovery
 		br := bufio.NewReaderSize(fslice.file.handle, defaultBufSize)
 
@@ -2386,7 +2403,7 @@ func (ms *FileMsgStore) recoverOneMsgFile(fslice *fileSlice, fseq int, useIdxFil
 		offset = int64(4)
 
 		for {
-			ms.tmpMsgBuf, msgSize, _, err = readRecord(br, ms.tmpMsgBuf, false, crcTable, doCRC)
+			ms.tmpMsgBuf, msgSize, _, err = ms.fstore.readRecord(br, ms.tmpMsgBuf, false)
 			if err != nil {
 				switch err {
 				case io.EOF:
@@ -2495,7 +2512,9 @@ func (ms *FileMsgStore) ensureLastMsgAndIndexMatch(fslice *fileSlice, seq uint64
 	if _, err := fd.Seek(index.offset, io.SeekStart); err != nil {
 		return fmt.Errorf("%s: unable to set position to %v", startErr, index.offset)
 	}
-	ms.tmpMsgBuf, msgSize, _, err = readRecord(fd, ms.tmpMsgBuf, false, ms.fstore.crcTable, true)
+	// Since we want to force the check of the CRC, we can't use ms.fstore.readRecord()
+	// here and have to call readRecord with appropriate options.
+	ms.tmpMsgBuf, msgSize, _, err = readRecord(fd, ms.tmpMsgBuf, false, ms.fstore.crcTable, true, ms.fstore.opts.RecordSizeLimit)
 	if err != nil {
 		return fmt.Errorf("%s: unable to read last record: %v", startErr, err)
 	}
@@ -4015,7 +4034,7 @@ func (ss *FileSubStore) recoverSubscriptions() error {
 	br := bufio.NewReaderSize(ss.file.handle, defaultBufSize)
 
 	for {
-		ss.tmpSubBuf, recSize, recType, err = readRecord(br, ss.tmpSubBuf, true, ss.crcTable, ss.opts.DoCRC)
+		ss.tmpSubBuf, recSize, recType, err = ss.fstore.readRecord(br, ss.tmpSubBuf, true)
 		if err != nil {
 			switch err {
 			case io.EOF:
