@@ -577,6 +577,11 @@ func parseFileOptions(itf interface{}, opts *Options) error {
 				return err
 			}
 			opts.FileStoreOpts.AutoSync = dur
+		case "record_size_limit":
+			if err := checkType(k, reflect.Int64, v); err != nil {
+				return err
+			}
+			opts.FileStoreOpts.RecordSizeLimit = int(v.(int64))
 		}
 	}
 	return nil
