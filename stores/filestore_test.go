@@ -578,6 +578,7 @@ func TestFSOptions(t *testing.T) {
 		ParallelRecovery:     5,
 		ReadBufferSize:       5 * 1024,
 		AutoSync:             2 * time.Minute,
+		RecordSizeLimit:      1024 * 1024,
 	}
 	// Create the file with custom options
 	fs, err := NewFileStore(testLogger, testFSDefaultDatastore, &testDefaultStoreLimits,
@@ -593,7 +594,9 @@ func TestFSOptions(t *testing.T) {
 		FileDescriptorsLimit(20),
 		ParallelRecovery(5),
 		ReadBufferSize(5*1024),
-		AutoSync(2*time.Minute))
+		AutoSync(2*time.Minute),
+		RecordSizeLimit(1024*1024),
+	)
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
 	}
