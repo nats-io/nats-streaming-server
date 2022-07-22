@@ -433,6 +433,9 @@ func AllOptions(opts *FileStoreOptions) FileStoreOption {
 		if err := AutoSync(opts.AutoSync)(o); err != nil {
 			return err
 		}
+		if err := RecordSizeLimit(opts.RecordSizeLimit)(o); err != nil {
+			return err
+		}
 		o.CompactEnabled = opts.CompactEnabled
 		o.DoCRC = opts.DoCRC
 		o.DoSync = opts.DoSync
