@@ -274,16 +274,18 @@ func (state State) String() string {
 
 type channelStore struct {
 	sync.RWMutex
-	channels map[string]*channel
-	store    stores.Store
-	stan     *StanServer
+	channels   map[string]*channel
+	channelsLC map[string]*channel
+	store      stores.Store
+	stan       *StanServer
 }
 
 func newChannelStore(srv *StanServer, s stores.Store) *channelStore {
 	cs := &channelStore{
-		channels: make(map[string]*channel),
-		store:    s,
-		stan:     srv,
+		channels:   make(map[string]*channel),
+		channelsLC: make(map[string]*channel),
+		store:      s,
+		stan:       srv,
 	}
 	return cs
 }
@@ -313,6 +315,13 @@ func (cs *channelStore) createChannel(s *StanServer, name string) (*channel, err
 	return c, err
 }
 
+func (cs *channelStore) checkCase(name string) error {
+	if c := cs.channelsLC[strings.ToLower(name)]; c != nil {
+		return fmt.Errorf("rejecting channel %q because channel %q alreay exists (different cases not allowed)", name, c.name)
+	}
+	return nil
+}
+
 func (cs *channelStore) createChannelLocked(s *StanServer, name string, id uint64) (retChan *channel, retErr error) {
 	defer func() {
 		if retErr != nil {
@@ -329,6 +338,8 @@ func (cs *channelStore) createChannelLocked(s *StanServer, name string, id uint6
 			return nil, ErrChanDelInProgress
 		}
 		return c, nil
+	} else if err := cs.checkCase(name); err != nil {
+		return nil, err
 	}
 	if s.isClustered {
 		if s.isLeader() && id == 0 {
@@ -370,6 +381,7 @@ func (cs *channelStore) create(s *StanServer, name string, sc *stores.Channel) (
 	}
 	c.nextSequence = lastSequence + 1
 	cs.channels[name] = c
+	cs.channelsLC[strings.ToLower(name)] = c
 	cl := cs.store.GetChannelLimits(name)
 	if cl.MaxInactivity > 0 {
 		c.activity = &channelActivity{maxInactivity: cl.MaxInactivity}
@@ -900,6 +912,9 @@ func (s *StanServer) lookupOrCreateChannel(name string) (*channel, error) {
 		}
 		cs.RUnlock()
 		return c, nil
+	} else if err := cs.checkCase(name); err != nil {
+		cs.RUnlock()
+		return nil, err
 	}
 	cs.RUnlock()
 	return cs.createChannel(s, name)
@@ -914,6 +929,9 @@ func (s *StanServer) lookupOrCreateChannelPreventDelete(name string) (*channel, 
 			cs.Unlock()
 			return nil, false, ErrChanDelInProgress
 		}
+	} else if err := cs.checkCase(name); err != nil {
+		cs.Unlock()
+		return nil, false, err
 	} else {
 		var err error
 		c, err = cs.createChannelLocked(s, name, 0)
@@ -3127,6 +3145,7 @@ func (s *StanServer) processDeleteChannel(channel string) {
 		return
 	}
 	delete(s.channels.channels, channel)
+	delete(s.channels.channelsLC, strings.ToLower(channel))
 	s.log.Noticef("Channel %q has been deleted", channel)
 }
 
@@ -5287,6 +5306,7 @@ func (s *StanServer) processSubscriptionRequest(m *nats.Msg) {
 		}
 	}
 	if err != nil {
+		s.log.Errorf("Unable to create subscription on %q: %v", sr.Subject, err)
 		s.channels.turnOffPreventDelete(c)
 		s.channels.maybeStartChannelDeleteTimer(sr.Subject, c)
 		s.sendSubscriptionResponseErr(m.Reply, err)
