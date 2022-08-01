@@ -578,7 +578,6 @@ func TestFSOptions(t *testing.T) {
 		ParallelRecovery:     5,
 		ReadBufferSize:       5 * 1024,
 		AutoSync:             2 * time.Minute,
-		RecordSizeLimit:      1024 * 1024,
 	}
 	// Create the file with custom options
 	fs, err := NewFileStore(testLogger, testFSDefaultDatastore, &testDefaultStoreLimits,
@@ -595,7 +594,6 @@ func TestFSOptions(t *testing.T) {
 		ParallelRecovery(5),
 		ReadBufferSize(5*1024),
 		AutoSync(2*time.Minute),
-		RecordSizeLimit(1024*1024),
 	)
 	if err != nil {
 		t.Fatalf("Unexpected error on file store create: %v", err)
@@ -1527,9 +1525,9 @@ func TestFSReadRecord(t *testing.T) {
 	copy(b[recordHeaderSize:], payload)
 	r.setErrToReturn(nil)
 	r.setContent(b)
-	_, recSize, _, err = readRecord(r, buf, false, crc32.IEEETable, true, 2)
-	if err == nil || !strings.Contains(err.Error(), "than limit of 2 bytes") {
-		t.Fatalf("Expected limit of 2 bytes error, got %v", err)
+	_, recSize, _, err = readRecord(r, buf, false, crc32.IEEETable, true, 5)
+	if err == nil || !strings.Contains(err.Error(), "expected record size to be 5 bytes, got 10 bytes") {
+		t.Fatalf("Expected record size of 5 bytes error, got %v", err)
 	}
 	if recSize != 0 {
 		t.Fatalf("Expected recSize to be 0, got %v", recSize)
@@ -2104,30 +2102,5 @@ func TestFSServerAndClientFilesVersionError(t *testing.T) {
 				t.Fatalf("Unexpected error: %v", err)
 			}
 		})
-	}
-}
-
-func TestFSRecordSizeLimit(t *testing.T) {
-	cleanupFSDatastore(t)
-	defer cleanupFSDatastore(t)
-
-	s := createDefaultFileStore(t)
-	defer s.Close()
-
-	c := storeCreateChannel(t, s, "foo")
-	// Big payload
-	payload := make([]byte, 10*1024)
-	storeMsg(t, c, "foo", 1, payload)
-
-	s.Close()
-
-	limits := testDefaultStoreLimits
-	s, err := NewFileStore(testLogger, testFSDefaultDatastore, &limits, RecordSizeLimit(1024))
-	if err != nil {
-		t.Fatalf("Error creating file store: %v", err)
-	}
-	defer s.Close()
-	if _, err = s.Recover(); err == nil || !strings.Contains(err.Error(), "limit of 1024 bytes") {
-		t.Fatalf("Expected error about limit, got %v", err)
 	}
 }
