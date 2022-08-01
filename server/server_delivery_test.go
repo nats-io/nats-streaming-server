@@ -262,20 +262,18 @@ func TestPersistentStoreSQLSubsPendingRows(t *testing.T) {
 		t.SkipNow()
 	}
 	source := testSQLSource
+	sourceAdmin := testSQLSourceAdmin
+	// If not running tests with `-persistent_store sql`,
+	// initialize few things and default to MySQL.
 	if persistentStoreType != stores.TypeSQL {
-		// If not running tests with `-persistent_store sql`,
-		// initialize few things and default to MySQL.
 		source = testDefaultMySQLSource
-		sourceAdmin := testDefaultMySQLSourceAdmin
+		sourceAdmin = testDefaultMySQLSourceAdmin
 		if err := test.CreateSQLDatabase(testSQLDriver, sourceAdmin,
 			source, testSQLDatabaseName); err != nil {
 			t.Fatalf("Error setting up test for SQL: %v", err)
 		}
-		defer test.DeleteSQLDatabase(testSQLDriver, sourceAdmin, testSQLDatabaseName)
 	}
-
-	cleanupDatastore(t)
-	defer cleanupDatastore(t)
+	defer test.DeleteSQLDatabase(testSQLDriver, sourceAdmin, testSQLDatabaseName)
 
 	ns := natsdTest.RunDefaultServer()
 	defer ns.Shutdown()

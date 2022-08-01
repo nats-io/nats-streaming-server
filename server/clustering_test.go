@@ -6915,7 +6915,7 @@ func TestClusteringRestoreSnapshotWithDifferentVersionsOfSameChannel(t *testing.
 }
 
 func TestClusteringSQLMsgStoreFlushed(t *testing.T) {
-	if !doSQL {
+	if persistentStoreType != stores.TypeSQL {
 		t.SkipNow()
 	}
 

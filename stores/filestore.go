@@ -1361,8 +1361,22 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to recover server file %q: %v", fs.serverFile.name, err)
 	}
+
+	// Get the channels (they are subdirectories of rootDir).
+	// We used to do that after checking for serverInfo and recovering clients.
+	// However, we want to know if there are channles in case serverInfo is nil,
+	// but to maintain behavior on when errors were returned, capture possible
+	// error under a different error variable and return that error (if any)
+	// at the location where we used to.
+	channels, cerr := fs.getChannelsDir()
+
 	// If the server file is empty, then we are done
 	if serverInfo == nil {
+		// If there is no server info stored, we expect no state to be stored,
+		// so if there are possible channles, return an error.
+		if len(channels) > 0 {
+			return nil, ErrNoSrvButChannels
+		}
 		// We return the file store instance, but no recovered state.
 		return nil, nil
 	}
@@ -1373,19 +1387,15 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 		return nil, fmt.Errorf("unable to recover client file %q: %v", fs.clientsFile.name, err)
 	}
 
-	// Get the channels (there are subdirectories of rootDir)
-	channels, err = ioutil.ReadDir(fs.fm.rootDir)
-	if err != nil {
+	// If there was an error reading the channels, return the error now.
+	if cerr != nil {
 		return nil, err
 	}
 	if len(channels) > 0 {
 		wg, poolCh, errCh, recoverCh := initParalleRecovery(fs.opts.ParallelRecovery, len(channels))
 		ctx := &channelRecoveryCtx{wg: wg, poolCh: poolCh, errCh: errCh, recoverCh: recoverCh}
 		for _, c := range channels {
-			// Channels are directories. Ignore simple files
-			if !c.IsDir() {
-				continue
-			}
+			// We know that c is a directory (see getChannelsDir())
 			channel := c.Name()
 			channelDirName := filepath.Join(fs.fm.rootDir, channel)
 			limits := fs.genericStore.getChannelLimits(channel)
@@ -1430,6 +1440,21 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 		Channels: recoveredChannels,
 	}
 	return recoveredState, nil
+}
+
+func (fs *FileStore) getChannelsDir() ([]os.FileInfo, error) {
+	files, err := ioutil.ReadDir(fs.fm.rootDir)
+	if err != nil {
+		return nil, err
+	}
+	channels := make([]os.FileInfo, 0, len(files))
+	for _, f := range files {
+		if !f.IsDir() {
+			continue
+		}
+		channels = append(channels, f)
+	}
+	return channels, nil
 }
 
 func initParalleRecovery(maxGoRoutines, foundChannels int) (*sync.WaitGroup, chan struct{}, chan error, chan *recoveredChannel) {

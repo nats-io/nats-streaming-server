@@ -34,11 +34,12 @@ const (
 
 // Errors.
 var (
-	ErrTooManyChannels = errors.New("too many channels")
-	ErrTooManySubs     = errors.New("too many subscriptions per channel")
-	ErrNotSupported    = errors.New("not supported")
-	ErrAlreadyExists   = errors.New("already exists")
-	ErrNotFound        = errors.New("not found")
+	ErrTooManyChannels  = errors.New("too many channels")
+	ErrTooManySubs      = errors.New("too many subscriptions per channel")
+	ErrNotSupported     = errors.New("not supported")
+	ErrAlreadyExists    = errors.New("already exists")
+	ErrNotFound         = errors.New("not found")
+	ErrNoSrvButChannels = errors.New("no server state recovered but channels present")
 )
 
 // StoreLimits define limits for a store.
