@@ -638,7 +638,7 @@ func TestCSFirstAndLastMsg(t *testing.T) {
 			defer s.Close()
 
 			limit := testDefaultStoreLimits
-			limit.MaxAge = 100 * time.Millisecond
+			limit.MaxAge = 250 * time.Millisecond
 			if err := s.SetLimits(&limit); err != nil {
 				t.Fatalf("Error setting limits: %v", err)
 			}

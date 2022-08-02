@@ -97,9 +97,7 @@ func TestMain(m *testing.M) {
 	)
 	flag.StringVar(&bst, "bench_store", "", "store type for bench tests (mem, file)")
 	flag.StringVar(&pst, "persistent_store", "", "store type for server recovery related tests (file)")
-	// This one is added here so that if we want to disable sql for stores tests
-	// we can use the same param for all packages as in "go test -v ./... -sql=false"
-	flag.Bool("sql", false, "Not used for server tests")
+	flag.BoolVar(&doSQL, "sql", true, "Enable/disable SQL tests in server package")
 	// Those 2 sql related flags are handled here, not in AddSQLFlags
 	flag.BoolVar(&sqlCreateDb, "sql_create_db", true, "create sql database on startup")
 	flag.BoolVar(&sqlDeleteDb, "sql_delete_db", true, "delete sql database on exit")
@@ -131,7 +129,7 @@ func TestMain(m *testing.M) {
 
 	// If either (or both) bench or tests select an SQL store, we need to do
 	// so initializing and cleaning at the end of the test.
-	doSQL = benchStoreType == stores.TypeSQL || persistentStoreType == stores.TypeSQL
+	doSQL = doSQL || benchStoreType == stores.TypeSQL || persistentStoreType == stores.TypeSQL
 
 	if doSQL {
 		defaultSources := make(map[string][]string)

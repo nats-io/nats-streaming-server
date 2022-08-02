@@ -1976,22 +1976,31 @@ func (s *StanServer) start(runningState State) error {
 	s.state = runningState
 
 	var (
-		err            error
-		recoveredState *stores.RecoveredState
-		recoveredSubs  []*subState
-		callStoreInit  bool
+		err             error
+		recoveredState  *stores.RecoveredState
+		recoveredSubs   []*subState
+		callStoreInit   bool
+		initThenRecover bool
 	)
 
+RECOVER:
 	// Recover the state.
 	s.log.Noticef("Recovering the state...")
 	recoveredState, err = s.store.Recover()
 	if err != nil {
-		return err
-	}
-	if recoveredState != nil {
-		s.log.Noticef("Recovered %v channel(s)", len(recoveredState.Channels))
+		if err == stores.ErrNoSrvButChannels {
+			err = nil
+			initThenRecover = true
+			s.log.Warnf("Server information was not recovered, however channels are present. Will initialize server and restart recovery!")
+		} else {
+			return err
+		}
 	} else {
-		s.log.Noticef("No recovered state")
+		if recoveredState != nil {
+			s.log.Noticef("Recovered %v channel(s)", len(recoveredState.Channels))
+		} else {
+			s.log.Noticef("No recovered state")
+		}
 	}
 	// We used to use a NUID as part of the internal subjects in standalone mode
 	// without channel partitioning. In all other cases, we used the cluster ID.
@@ -2066,6 +2075,10 @@ func (s *StanServer) start(runningState State) error {
 		// Initialize the store with the server info
 		if err := s.store.Init(&s.info); err != nil {
 			return fmt.Errorf("unable to initialize the store: %v", err)
+		}
+		if initThenRecover {
+			callStoreInit = false
+			goto RECOVER
 		}
 	}
 

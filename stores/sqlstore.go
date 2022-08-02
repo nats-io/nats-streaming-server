@@ -793,6 +793,13 @@ func (s *SQLStore) Recover() (*RecoveredState, error) {
 		// If there is no row, that means nothing to recover. Return nil for the
 		// state and no error.
 		if err == sql.ErrNoRows {
+			// If there are channels, we should return an error.
+			var maxChannelID int64
+			r := s.db.QueryRow(sqlStmts[sqlRecoverMaxChannelID])
+			r.Scan(&maxChannelID)
+			if maxChannelID > 0 {
+				return nil, ErrNoSrvButChannels
+			}
 			return nil, nil
 		}
 		return nil, sqlStmtError(sqlRecoverServerInfo, err)
