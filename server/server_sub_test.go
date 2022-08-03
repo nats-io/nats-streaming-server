@@ -732,6 +732,11 @@ func TestAckTimerSetOnStalledSub(t *testing.T) {
 }
 
 func TestPersistentStoreNonDurableSubRemovedOnConnClose(t *testing.T) {
+	// If user doesn't want to run any SQL tests, we will do the filestore only
+	// and need to bail if the persistent store type is set to SQL.
+	if !doSQL && persistentStoreType == stores.TypeSQL {
+		t.Skip()
+	}
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
 

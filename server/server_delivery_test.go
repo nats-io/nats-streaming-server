@@ -22,7 +22,6 @@ import (
 
 	natsdTest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats-streaming-server/stores"
-	"github.com/nats-io/nats-streaming-server/test"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/stan.go"
 	"github.com/nats-io/stan.go/pb"
@@ -258,31 +257,23 @@ func TestDeliveryWithGapsInSequence(t *testing.T) {
 }
 
 func TestPersistentStoreSQLSubsPendingRows(t *testing.T) {
+	// If user doesn't want to run any SQL tests, we need to bail.
 	if !doSQL {
-		t.SkipNow()
+		t.Skip()
 	}
-	source := testSQLSource
-	sourceAdmin := testSQLSourceAdmin
-	// If not running tests with `-persistent_store sql`,
-	// initialize few things and default to MySQL.
-	if persistentStoreType != stores.TypeSQL {
-		source = testDefaultMySQLSource
-		sourceAdmin = testDefaultMySQLSourceAdmin
-		if err := test.CreateSQLDatabase(testSQLDriver, sourceAdmin,
-			source, testSQLDatabaseName); err != nil {
-			t.Fatalf("Error setting up test for SQL: %v", err)
-		}
-	}
-	defer test.DeleteSQLDatabase(testSQLDriver, sourceAdmin, testSQLDatabaseName)
+	// Force persistent store to be SQL for this test.
+	orgps := persistentStoreType
+	persistentStoreType = stores.TypeSQL
+	defer func() { persistentStoreType = orgps }()
+
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
 
 	ns := natsdTest.RunDefaultServer()
 	defer ns.Shutdown()
 
-	opts := GetDefaultOptions()
+	opts := getTestDefaultOptsForPersistentStore()
 	opts.NATSServerURL = "nats://127.0.0.1:4222"
-	opts.StoreType = stores.TypeSQL
-	opts.SQLStoreOpts.Driver = testSQLDriver
-	opts.SQLStoreOpts.Source = source
 	s := runServerWithOpts(t, opts, nil)
 	defer shutdownRestartedServerOnTestExit(&s)
 

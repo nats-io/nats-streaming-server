@@ -6915,9 +6915,14 @@ func TestClusteringRestoreSnapshotWithDifferentVersionsOfSameChannel(t *testing.
 }
 
 func TestClusteringSQLMsgStoreFlushed(t *testing.T) {
-	if persistentStoreType != stores.TypeSQL {
-		t.SkipNow()
+	// If user doesn't want to run any SQL tests, we need to bail.
+	if !doSQL {
+		t.Skip()
 	}
+	// Force persistent store to be SQL for this test.
+	orgps := persistentStoreType
+	persistentStoreType = stores.TypeSQL
+	defer func() { persistentStoreType = orgps }()
 
 	cleanupDatastore(t)
 	defer cleanupDatastore(t)
@@ -6965,19 +6970,22 @@ func TestClusteringSQLMsgStoreFlushed(t *testing.T) {
 		t.Fatalf("Did not get all our acks")
 	}
 
-	db, err := sql.Open(testSQLDriver, testSQLSource+"_b")
-	if err != nil {
-		t.Fatalf("Error opening db: %v", err)
-	}
-	defer db.Close()
-	r := db.QueryRow("SELECT COUNT(seq) FROM Messages")
-	count = 0
-	if err := r.Scan(&count); err != nil {
-		t.Fatalf("Error on scan: %v", err)
-	}
-	if count == 0 {
-		t.Fatalf("Expected some messages, got none")
-	}
+	waitFor(t, time.Second, 15*time.Millisecond, func() error {
+		db, err := sql.Open(testSQLDriver, testSQLSource+"_b")
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		r := db.QueryRow("SELECT COUNT(seq) FROM Messages")
+		count = 0
+		if err := r.Scan(&count); err != nil {
+			return fmt.Errorf("Error on scan: %v", err)
+		}
+		if count == 0 {
+			return fmt.Errorf("Expected some messages, got none")
+		}
+		return nil
+	})
 }
 
 func TestClusteringQueueMemberPendingCount(t *testing.T) {
