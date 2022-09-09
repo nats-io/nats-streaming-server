@@ -10,11 +10,11 @@ require (
 	github.com/hashicorp/raft v1.3.9
 	github.com/lib/pq v1.10.4
 	github.com/nats-io/nats-server/v2 v2.8.2
-	github.com/nats-io/nats.go v1.15.0
+	github.com/nats-io/nats.go v1.16.1-0.20220906180156-a1017eec10b0
 	github.com/nats-io/nuid v1.0.1
 	github.com/nats-io/stan.go v0.10.2
 	github.com/prometheus/procfs v0.7.3
 	go.etcd.io/bbolt v1.3.6
 	golang.org/x/crypto v0.0.0-20220315160706-3147a52a75dd
-	golang.org/x/sys v0.0.0-20220412211240-33da011f77ad
+	golang.org/x/sys v0.0.0-20220906135438-9e1f76180b77
 )
