@@ -1,10 +1,12 @@
 os:
 - linux
 - windows
+vm:
+  size: 2x-large
 language: go
 go:
-- 1.17.x
-- 1.16.x
+- 1.19.x
+- 1.18.x
 addons:
   apt:
     packages:
@@ -14,7 +16,7 @@ env:
 go_import_path: github.com/nats-io/nats-streaming-server
 install:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
-    go install honnef.co/go/tools/cmd/staticcheck@v0.2.2;
+    go install honnef.co/go/tools/cmd/staticcheck@latest;
     go install github.com/client9/misspell/cmd/misspell@latest;
   fi
 services:
@@ -33,21 +35,25 @@ script:
 - if [[ $TRAVIS_TAG ]]; then go test -v -run=TestVersionMatchesTag ./server; fi
 - if [[ ! $TRAVIS_TAG ]]; then
     if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
+      if [[ "$TRAVIS_GO_VERSION" =~ 1.18 ]]; then
+        go build;
+      else
         mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;";
-        if [[ "$TRAVIS_GO_VERSION" =~ 1.16 ]]; then ./scripts/cov.sh TRAVIS; else go test -v -failfast -p=1 ./...; fi;
+        go test -v -p=1 ./... -count=1 -vet=off -failfast;
+      fi;
     fi;
   fi
 - if [[ ! $TRAVIS_TAG ]]; then
     if [[ "$TRAVIS_OS_NAME" == "windows" ]]; then
-      go install;
-      go test -v -p=1 ./... -count=1 -sql=false -failfast;
+      if [[ "$TRAVIS_GO_VERSION" =~ 1.18 ]]; then
+        go build;
+      else
+        go install;
+        go test -v -p=1 ./... -count=1 -vet=off -sql=false -failfast;
+      fi;
     fi;
   fi
 - set +e
-after_success:
-- if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
-    if [[ ! $TRAVIS_TAG ]]; then if [[ "$TRAVIS_GO_VERSION" =~ 1.16 ]]; then $HOME/gopath/bin/goveralls -coverprofile=acc.out -service travis-ci; fi; fi;
-  fi
 
 deploy:
   provider: script
@@ -55,4 +61,4 @@ deploy:
   script: curl -sL http://git.io/goreleaser | bash
   on:
     tags: true
-    condition: ("$TRAVIS_OS_NAME" = "linux") && ("$TRAVIS_GO_VERSION" =~ "1.17")
+    condition: ("$TRAVIS_OS_NAME" = "linux") && ("$TRAVIS_GO_VERSION" =~ "1.19")
