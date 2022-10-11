@@ -738,6 +738,7 @@ func (r *raftFSM) lookupOrCreateChannel(name string, id uint64) (*channel, error
 			return nil, err
 		}
 		delete(cs.channels, name)
+		delete(s.channels.channelsLC, strings.ToLower(name))
 	}
 	// Channel does exist or has been deleted. Create now with given ID.
 	return cs.createChannelLocked(s, name, id)
