@@ -32,7 +32,7 @@ before_script:
   fi
 script:
 - set -e
-- if [[ $TRAVIS_TAG ]]; then go test -v -run=TestVersionMatchesTag ./server; fi
+- if [[ $TRAVIS_TAG ]]; then go test -v -run=TestVersionMatchesTag ./server -sql=false; fi
 - if [[ ! $TRAVIS_TAG ]]; then
     if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
       mysql -u root -e "CREATE USER 'nss'@'localhost' IDENTIFIED BY 'password'; GRANT ALL PRIVILEGES ON *.* TO 'nss'@'localhost'; CREATE DATABASE test_nats_streaming;";
