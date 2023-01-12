@@ -14,7 +14,7 @@ builds:
 - main: ./nats-streaming-server.go
   binary: nats-streaming-server
   ldflags:
-    - -w -X github.com/nats-io/nats-streaming-server/server.gitCommit={{.ShortCommit}} -X github.com/nats-io/nats-server/v2/server.gitCommit=25e82d7
+    - -w -X github.com/nats-io/nats-streaming-server/server.gitCommit={{.ShortCommit}} -X github.com/nats-io/nats-server/v2/server.gitCommit=23ffc16
   env:
     - GO111MODULE=on
     - CGO_ENABLED=0
@@ -47,12 +47,14 @@ nfpms:
 
 archives:
   - name_template: '{{.ProjectName}}-{{.Tag}}-{{.Os}}-{{.Arch}}{{if .Arm}}{{.Arm}}{{end}}'
+    rlcp: true
     wrap_in_directory: true
     format: zip
     files:
       - README.md
       - LICENSE
   - name_template: '{{.ProjectName}}-{{.Tag}}-{{.Os}}-{{.Arch}}{{if .Arm}}{{.Arm}}{{end}}'
+    rlcp: true
     id: targz-archives
     wrap_in_directory: true
     format: tar.gz
