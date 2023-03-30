@@ -9053,3 +9053,102 @@ func TestClusteringRaftSubsAndConnsLeak(t *testing.T) {
 		})
 	}
 }
+
+func TestClusteringLeaderChangeInLeadershipAcquired(t *testing.T) {
+	cleanupDatastore(t)
+	defer cleanupDatastore(t)
+	cleanupRaftLog(t)
+	defer cleanupRaftLog(t)
+
+	ns := natsdTest.RunDefaultServer()
+	defer ns.Shutdown()
+
+	s1sOpts := getTestDefaultOptsForClustering("a", true)
+	s1 := runServerWithOpts(t, s1sOpts, nil)
+	defer s1.Shutdown()
+
+	s2sOpts := getTestDefaultOptsForClustering("b", false)
+	s2 := runServerWithOpts(t, s2sOpts, nil)
+	defer s2.Shutdown()
+
+	s3sOpts := getTestDefaultOptsForClustering("c", false)
+	s3 := runServerWithOpts(t, s3sOpts, nil)
+	defer s3.Shutdown()
+
+	servers := []*StanServer{s1, s2, s3}
+	leader := getLeader(t, 10*time.Second, servers...)
+
+	sc := NewDefaultConnection(t)
+	defer sc.Close()
+
+	ch := make(chan struct{}, 1)
+	if _, err := sc.Subscribe("foo", func(m *stan.Msg) {
+		m.Ack()
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}); err != nil {
+		t.Fatalf("Error on sub: %v", err)
+	}
+	sc.Publish("foo", []byte("hello"))
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("Failed to get the message")
+	}
+
+	var channels []chan struct{}
+	for _, s := range servers {
+		if s == leader {
+			continue
+		}
+		// Block the ioLoop of the two followers
+		ch1, ch2 := s.sendSynchronziationRequest()
+		select {
+		case <-ch1:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Did not get notification from ioLoop")
+		}
+		channels = append(channels, ch2)
+	}
+
+	servers = removeServer(servers, leader)
+	leader.Shutdown()
+	time.Sleep(500 * time.Millisecond)
+	leader = nil
+	waitFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		for _, s := range servers {
+			s.mu.RLock()
+			raftState := s.raft.Raft.State()
+			s.mu.RUnlock()
+			if raftState == raft.Leader {
+				leader = s
+				return nil
+			}
+		}
+		return fmt.Errorf("No leader elected yet")
+	})
+	var li int
+	for i, s := range servers {
+		if s != leader {
+			close(channels[i])
+			s.Shutdown()
+		} else {
+			li = i
+		}
+	}
+	time.Sleep(time.Second)
+	for _, s := range servers {
+		if s != leader {
+			s.mu.RLock()
+			opts := s.opts
+			s.mu.RUnlock()
+			s = runServerWithOpts(t, opts, nil)
+			defer s.Shutdown()
+		}
+	}
+	time.Sleep(time.Second)
+	close(channels[li])
+	getLeader(t, 10*time.Second, servers...)
+}

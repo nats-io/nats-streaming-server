@@ -2223,12 +2223,12 @@ func (s *StanServer) startRaftNode(hasStreamingState bool) error {
 					leaderReady()
 					if err != nil {
 						s.log.Errorf("Error on leadership acquired: %v", err)
-						switch {
-						case err == raft.ErrRaftShutdown:
+						switch err {
+						case raft.ErrRaftShutdown:
 							// Node shutdown, just return.
 							return
-						case err == raft.ErrLeadershipLost:
-						case err == raft.ErrNotLeader:
+						case raft.ErrLeadershipLost:
+						case raft.ErrNotLeader:
 							// Node lost leadership, continue loop.
 							continue
 						default:
