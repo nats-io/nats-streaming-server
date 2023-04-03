@@ -16,8 +16,10 @@ env:
 go_import_path: github.com/nats-io/nats-streaming-server
 install:
 - if [[ "$TRAVIS_OS_NAME" == "linux" ]]; then
-    go install honnef.co/go/tools/cmd/staticcheck@latest;
-    go install github.com/client9/misspell/cmd/misspell@latest;
+    if [[ "$TRAVIS_GO_VERSION" =~ 1.19 ]]; then
+      go install honnef.co/go/tools/cmd/staticcheck@latest;
+      go install github.com/client9/misspell/cmd/misspell@latest;
+    fi;
   fi
 services:
 - mysql
@@ -27,8 +29,10 @@ before_script:
     go install;
     $(exit $(go fmt $GO_LIST | wc -l));
     go vet $GO_LIST;
-    find . -type f -name "*.go" | grep -v "/spb/" | xargs misspell -error -locale US;
-    staticcheck $GO_LIST;
+    if [[ "$TRAVIS_GO_VERSION" =~ 1.19 ]]; then
+      find . -type f -name "*.go" | grep -v "/spb/" | xargs misspell -error -locale US;
+      staticcheck $GO_LIST;
+    fi;
   fi
 script:
 - set -e

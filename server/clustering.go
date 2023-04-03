@@ -416,7 +416,9 @@ func (s *StanServer) createRaftNode(name string) (bool, error) {
 	transport.TimeoutScale = 1
 
 	// Set up a channel for reliable leader notifications.
-	raftNotifyCh := make(chan bool, 1)
+	// Make the buffer big enough so that we can sustain leader flapping while still
+	// inside the leadershipAcquired() function.
+	raftNotifyCh := make(chan bool, 64)
 	config.NotifyCh = raftNotifyCh
 
 	fsm := &raftFSM{server: s}
