@@ -15,7 +15,6 @@ package stores
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"testing"
@@ -27,7 +26,7 @@ import (
 var testRSDefaultDatastore string
 
 func init() {
-	tmpDir, err := ioutil.TempDir(".", "raft_data_stores_")
+	tmpDir, err := os.MkdirTemp(".", "raft_data_stores_")
 	if err != nil {
 		panic("Could not create tmp dir")
 	}

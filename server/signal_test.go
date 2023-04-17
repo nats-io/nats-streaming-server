@@ -19,7 +19,6 @@ package server
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
@@ -77,7 +76,7 @@ func TestSignalToReOpenLogFile(t *testing.T) {
 			// Add a trace
 			expectedStr := "This is a Notice"
 			s.log.Noticef(expectedStr)
-			buf, err := ioutil.ReadFile(logFile)
+			buf, err := os.ReadFile(logFile)
 			if err != nil {
 				t.Fatalf("Error reading file: %v", err)
 			}
@@ -92,7 +91,7 @@ func TestSignalToReOpenLogFile(t *testing.T) {
 			syscall.Kill(syscall.Getpid(), syscall.SIGUSR1)
 			// Wait a bit for action to be performed
 			waitFor(t, 2*time.Second, 15*time.Millisecond, func() error {
-				buf, err = ioutil.ReadFile(logFile)
+				buf, err = os.ReadFile(logFile)
 				if err != nil {
 					return fmt.Errorf("Error reading file: %v", err)
 				}
@@ -105,7 +104,7 @@ func TestSignalToReOpenLogFile(t *testing.T) {
 			// Make sure that new traces are added
 			expectedStr = "This is a new notice"
 			s.log.Noticef(expectedStr)
-			buf, err = ioutil.ReadFile(logFile)
+			buf, err = os.ReadFile(logFile)
 			if err != nil {
 				t.Fatalf("Error reading file: %v", err)
 			}
@@ -208,7 +207,7 @@ func TestNATSServerConfigReloadFollowedByReopen(t *testing.T) {
 	cmd.Start()
 	// Wait for it to print some startup trace
 	waitFor(t, 2*time.Second, 50*time.Millisecond, func() error {
-		content, err := ioutil.ReadFile(lfile)
+		content, err := os.ReadFile(lfile)
 		if err != nil {
 			return err
 		}
@@ -230,7 +229,7 @@ func TestNATSServerConfigReloadFollowedByReopen(t *testing.T) {
 	c.Close()
 	syscall.Kill(cmd.Process.Pid, syscall.SIGINT)
 	cmd.Wait()
-	content, err := ioutil.ReadFile(lfile)
+	content, err := os.ReadFile(lfile)
 	if err != nil {
 		t.Fatalf("Error reading log file: %v", err)
 	}

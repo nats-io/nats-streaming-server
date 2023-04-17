@@ -17,7 +17,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"runtime"
@@ -1283,12 +1282,12 @@ func TestStreamingServerReadyLog(t *testing.T) {
 }
 
 func TestReopenLogFileStopsNATSDebugTrace(t *testing.T) {
-	tmpDir, err := ioutil.TempDir("", "nats-streaming-server")
+	tmpDir, err := os.MkdirTemp("", "nats-streaming-server")
 	if err != nil {
 		t.Fatal("Could not create tmp dir")
 	}
 	defer os.RemoveAll(tmpDir)
-	file, err := ioutil.TempFile(tmpDir, "log_")
+	file, err := os.CreateTemp(tmpDir, "log_")
 	if err != nil {
 		t.Fatalf("Could not create the temp file: %v", err)
 	}
@@ -1311,7 +1310,7 @@ func TestReopenLogFileStopsNATSDebugTrace(t *testing.T) {
 
 	check := func(str string, expected bool) {
 		t.Helper()
-		buf, err := ioutil.ReadFile(nOpts.LogFile)
+		buf, err := os.ReadFile(nOpts.LogFile)
 		if err != nil {
 			t.Fatalf("Error reading file: %v", err)
 		}
@@ -1352,7 +1351,7 @@ func TestReopenLogFileStopsNATSDebugTrace(t *testing.T) {
 		s.log.Noticef(pstr)
 	}
 	// Check that size limit has been applied.
-	files, err := ioutil.ReadDir(tmpDir)
+	files, err := os.ReadDir(tmpDir)
 	if err != nil {
 		t.Fatalf("Error reading directory: %v", err)
 	}

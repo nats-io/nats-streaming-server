@@ -16,7 +16,6 @@ package stores
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"strings"
@@ -240,7 +239,7 @@ func TestCryptoStoreUseEnvKey(t *testing.T) {
 
 	cs.Close()
 
-	datContent, err := ioutil.ReadFile(datFile)
+	datContent, err := os.ReadFile(datFile)
 	if err != nil {
 		t.Fatalf("Error reading file: %v", err)
 	}
@@ -399,7 +398,7 @@ func TestCryptoStoreCheckEncryptedStore(t *testing.T) {
 
 			s.Close()
 
-			datContent, err := ioutil.ReadFile(datFile)
+			datContent, err := os.ReadFile(datFile)
 			if err != nil {
 				t.Fatalf("Error reading file: %v", err)
 			}
@@ -411,7 +410,7 @@ func TestCryptoStoreCheckEncryptedStore(t *testing.T) {
 			}
 			// Only message store is encrypted, so subscription file
 			// should be in plain text.
-			subContent, err := ioutil.ReadFile(subFile)
+			subContent, err := os.ReadFile(subFile)
 			if err != nil {
 				t.Fatalf("Error reading file: %v", err)
 			}

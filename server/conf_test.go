@@ -16,7 +16,6 @@ package server
 import (
 	"bytes"
 	"flag"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"runtime"
@@ -314,11 +313,11 @@ func TestParsePermError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.SkipNow()
 	}
-	tmpDir, err := ioutil.TempDir("", "streaming")
+	tmpDir, err := os.MkdirTemp("", "streaming")
 	if err != nil {
 		t.Fatalf("Could not create tmp dir: %v", err)
 	}
-	file, err := ioutil.TempFile(tmpDir, "config.conf")
+	file, err := os.CreateTemp(tmpDir, "config.conf")
 	if err != nil {
 		t.Fatalf("Could not create tmp file: %v", err)
 	}
@@ -339,7 +338,7 @@ func TestParsePermError(t *testing.T) {
 
 func TestParseParserError(t *testing.T) {
 	confFile := "wrong_config.conf"
-	if err := ioutil.WriteFile(confFile, []byte("x=."), 0660); err != nil {
+	if err := os.WriteFile(confFile, []byte("x=."), 0660); err != nil {
 		t.Fatalf("Unexpected error creating conf file: %v", err)
 	}
 	defer os.Remove(confFile)
@@ -351,7 +350,7 @@ func TestParseParserError(t *testing.T) {
 
 func TestParseStoreType(t *testing.T) {
 	confFile := "wrong_config.conf"
-	if err := ioutil.WriteFile(confFile, []byte("store=memory"), 0660); err != nil {
+	if err := os.WriteFile(confFile, []byte("store=memory"), 0660); err != nil {
 		t.Fatalf("Unexpected error creating conf file: %v", err)
 	}
 	defer os.Remove(confFile)
@@ -364,7 +363,7 @@ func TestParseStoreType(t *testing.T) {
 	}
 	os.Remove(confFile)
 
-	if err := ioutil.WriteFile(confFile, []byte("store=xyz"), 0660); err != nil {
+	if err := os.WriteFile(confFile, []byte("store=xyz"), 0660); err != nil {
 		t.Fatalf("Unexpected error creating conf file: %v", err)
 	}
 	defer os.Remove(confFile)
@@ -380,7 +379,7 @@ func TestParseStoreType(t *testing.T) {
 		stores.TypeSQL,
 	}
 	for _, gs := range goodStores {
-		if err := ioutil.WriteFile(confFile, []byte("store="+gs), 0660); err != nil {
+		if err := os.WriteFile(confFile, []byte("store="+gs), 0660); err != nil {
 			t.Fatalf("Unexpected error creating conf file: %v", err)
 		}
 		defer os.Remove(confFile)
@@ -398,7 +397,7 @@ func TestParseStoreType(t *testing.T) {
 func TestParsePerChannelLimitsSetToZero(t *testing.T) {
 	confFile := "config.conf"
 	defer os.Remove(confFile)
-	if err := ioutil.WriteFile(confFile,
+	if err := os.WriteFile(confFile,
 		[]byte("store_limits: {channels: {foo: {max_msgs: 0, max_bytes: 0, max_age: \"0\", max_subs: 0, max_inactivity: \"0\"}}}"), 0660); err != nil {
 		t.Fatalf("Unexpected error creating conf file: %v", err)
 	}
@@ -532,7 +531,7 @@ func TestParseWrongTypes(t *testing.T) {
 
 func expectFailureFor(t *testing.T, content, errorMatch string) {
 	confFile := "wrong_config.conf"
-	if err := ioutil.WriteFile(confFile, []byte(content), 0660); err != nil {
+	if err := os.WriteFile(confFile, []byte(content), 0660); err != nil {
 		t.Fatalf("Unexpected error creating conf file: %v", err)
 	}
 	defer os.Remove(confFile)
@@ -637,7 +636,7 @@ func TestParseConfigureOptions(t *testing.T) {
 		streaming: {
 			cluster_id: my_cluster
 		}`)
-	if err := ioutil.WriteFile(sconf, scontent, 0660); err != nil {
+	if err := os.WriteFile(sconf, scontent, 0660); err != nil {
 		t.Fatalf("Error creating conf file: %v", err)
 	}
 	ncontent := []byte(`
@@ -645,7 +644,7 @@ func TestParseConfigureOptions(t *testing.T) {
 		streaming: {
 			cluster_id: my_cluster_2
 		}`)
-	if err := ioutil.WriteFile(nconf, ncontent, 0660); err != nil {
+	if err := os.WriteFile(nconf, ncontent, 0660); err != nil {
 		t.Fatalf("Error creating conf file: %v", err)
 	}
 	sopts, nopts := mustNotFail([]string{"-sc", sconf, "-c", nconf})
@@ -700,7 +699,7 @@ func TestParseConfigureOptions(t *testing.T) {
 		} else {
 			ncontent = []byte(`logtime: true`)
 		}
-		if err := ioutil.WriteFile(nconf, ncontent, 0660); err != nil {
+		if err := os.WriteFile(nconf, ncontent, 0660); err != nil {
 			t.Fatalf("Error creating conf file: %v", err)
 		}
 		_, nopts = mustNotFail([]string{"-c", nconf})

@@ -17,7 +17,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"regexp"
@@ -162,7 +161,7 @@ func TestMain(m *testing.M) {
 }
 
 func init() {
-	tmpDir, err := ioutil.TempDir(".", "data_server_")
+	tmpDir, err := os.MkdirTemp(".", "data_server_")
 	if err != nil {
 		panic("Could not create tmp dir")
 	}
@@ -409,13 +408,13 @@ func createConnectionWithNatsOpts(t tLogger, clientName string,
 
 func createConfFile(t *testing.T, content []byte) string {
 	t.Helper()
-	conf, err := ioutil.TempFile("", "")
+	conf, err := os.CreateTemp("", "")
 	if err != nil {
 		t.Fatalf("Error creating conf file: %v", err)
 	}
 	fName := conf.Name()
 	conf.Close()
-	if err := ioutil.WriteFile(fName, content, 0666); err != nil {
+	if err := os.WriteFile(fName, content, 0666); err != nil {
 		os.Remove(fName)
 		t.Fatalf("Error writing conf file: %v", err)
 	}
@@ -424,7 +423,7 @@ func createConfFile(t *testing.T, content []byte) string {
 
 func changeCurrentConfigContentWithNewContent(t *testing.T, curConfig string, content []byte) {
 	t.Helper()
-	if err := ioutil.WriteFile(curConfig, content, 0666); err != nil {
+	if err := os.WriteFile(curConfig, content, 0666); err != nil {
 		t.Fatalf("Error writing config: %v", err)
 	}
 }

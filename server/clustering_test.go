@@ -18,7 +18,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"net"
 	"net/http"
@@ -46,7 +45,7 @@ import (
 var defaultRaftLog string
 
 func init() {
-	tmpDir, err := ioutil.TempDir("", "raft_logs_")
+	tmpDir, err := os.MkdirTemp("", "raft_logs_")
 	if err != nil {
 		panic("Could not create tmp dir")
 	}
@@ -3679,7 +3678,7 @@ func TestClusteringRaftLogReplayDoesNotDeleteLatestVersionOfChannel(t *testing.T
 	follower := removeServer(servers, leader)[0]
 	follower.Shutdown()
 	witnessFile := filepath.Join(follower.opts.FilestoreDir, channel, "deleted.txt")
-	if err := ioutil.WriteFile(witnessFile, []byte("if present, channel has not been deleted then recreated"), 0666); err != nil {
+	if err := os.WriteFile(witnessFile, []byte("if present, channel has not been deleted then recreated"), 0666); err != nil {
 		t.Fatalf("Error creating file: %v", err)
 	}
 	// Now restart..
@@ -4551,7 +4550,7 @@ func TestClusteringWithCryptoStore(t *testing.T) {
 
 	check := func(t *testing.T, name, fname string) {
 		t.Helper()
-		content, err := ioutil.ReadFile(fname)
+		content, err := os.ReadFile(fname)
 		if err != nil {
 			t.Fatalf("Error reading file %q: %v", fname1, err)
 		}
@@ -6770,7 +6769,7 @@ func TestClusteringRestoreSnapshotMsgsBailIfNoLeader(t *testing.T) {
 		return nil
 	})
 
-	snaps, err := ioutil.ReadDir(filepath.Join(defaultRaftLog, "c", clusterName, "snapshots"))
+	snaps, err := os.ReadDir(filepath.Join(defaultRaftLog, "c", clusterName, "snapshots"))
 	if err != nil {
 		t.Fatalf("Error reading snapshots directory: %v", err)
 	}

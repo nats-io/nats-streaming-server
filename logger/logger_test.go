@@ -17,7 +17,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,7 +176,7 @@ func TestLogger(t *testing.T) {
 	checkLogger("Unable to close logger: dummy error")
 
 	// Switch to file log
-	tmpDir, err := ioutil.TempDir("", "")
+	tmpDir, err := os.MkdirTemp("", "")
 	if err != nil {
 		t.Fatalf("Unable to create temp dir: %v", err)
 	}
@@ -188,7 +187,7 @@ func TestLogger(t *testing.T) {
 	logger.SetFileSizeLimit(1000)
 	// Reopen and check file content
 	logger.ReopenLogFile()
-	buf, err := ioutil.ReadFile(fname)
+	buf, err := os.ReadFile(fname)
 	if err != nil {
 		t.Fatalf("Error reading file: %v", err)
 	}
@@ -201,7 +200,7 @@ func TestLogger(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		logger.Noticef(notice)
 	}
-	files, err := ioutil.ReadDir(tmpDir)
+	files, err := os.ReadDir(tmpDir)
 	if err != nil {
 		t.Fatalf("Unable to read temp dir: %v", err)
 	}
