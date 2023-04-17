@@ -16,7 +16,6 @@ package stores
 import (
 	"fmt"
 	"hash/crc32"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -83,11 +82,11 @@ func TestFSBadMsgFile(t *testing.T) {
 	// Corrupt data file. Index's last message will not match
 	// data file, so idx file will be removed and recovery from
 	// data file will be done, which should report failure.
-	datContent, err := ioutil.ReadFile(firstSliceFileName)
+	datContent, err := os.ReadFile(firstSliceFileName)
 	if err != nil {
 		t.Fatalf("Error reading %v: %v", firstSliceFileName, err)
 	}
-	if err := ioutil.WriteFile(firstSliceFileName, datContent[:len(datContent)-5], 0666); err != nil {
+	if err := os.WriteFile(firstSliceFileName, datContent[:len(datContent)-5], 0666); err != nil {
 		t.Fatalf("Error writing file %v: %v", firstSliceFileName, err)
 	}
 	// So we should fail to create the filestore
@@ -778,7 +777,7 @@ func TestFSArchiveScript(t *testing.T) {
 	cleanupFSDatastore(t)
 	defer cleanupFSDatastore(t)
 
-	tmpDir, err := ioutil.TempDir(".", "")
+	tmpDir, err := os.MkdirTemp(".", "")
 	if err != nil {
 		t.Fatalf("Unable to create temp dir: %v", err)
 	}
@@ -797,7 +796,7 @@ func TestFSArchiveScript(t *testing.T) {
 		scriptFile = fmt.Sprintf("%s/script_%v.sh", pwd, time.Now().UnixNano())
 		content = fmt.Sprintf("#!/bin/bash\nmkdir -p %s/%s/$1\nmv $2 $3 %s/%s/$1\n", pwd, tmpDir, pwd, tmpDir)
 	}
-	if err := ioutil.WriteFile(scriptFile, []byte(content), 0777); err != nil {
+	if err := os.WriteFile(scriptFile, []byte(content), 0777); err != nil {
 		t.Fatalf("Error creating script: %v", err)
 	}
 	defer os.Remove(scriptFile)
@@ -857,7 +856,7 @@ func TestFSArchiveScript(t *testing.T) {
 	// Create a script that will error out
 	os.Remove(scriptFile)
 	content = "xxx"
-	if err := ioutil.WriteFile(scriptFile, []byte(content), 0777); err != nil {
+	if err := os.WriteFile(scriptFile, []byte(content), 0777); err != nil {
 		t.Fatalf("Error creating script: %v", err)
 	}
 	defer os.Remove(scriptFile)
@@ -1347,7 +1346,7 @@ func TestFSPanicOnMsgExpireWithClosedDatFile(t *testing.T) {
 	ms.Lock()
 	idxFileName := ms.files[1].idxFile.name
 	os.Remove(idxFileName)
-	err := ioutil.WriteFile(idxFileName, []byte("xxxxxxx"), 0666)
+	err := os.WriteFile(idxFileName, []byte("xxxxxxx"), 0666)
 	ms.Unlock()
 	if err != nil {
 		t.Fatalf("Error rewriting index file: %v", err)
@@ -1698,11 +1697,11 @@ func TestFSExpirationWithTruncatedNonLastSlice(t *testing.T) {
 
 	s.Close()
 
-	datContent, err := ioutil.ReadFile(fname)
+	datContent, err := os.ReadFile(fname)
 	if err != nil {
 		t.Fatalf("Error reading %v: %v", fname, err)
 	}
-	if err := ioutil.WriteFile(fname, datContent[:len(datContent)-5], 0666); err != nil {
+	if err := os.WriteFile(fname, datContent[:len(datContent)-5], 0666); err != nil {
 		t.Fatalf("Error writing file %v: %v", fname, err)
 	}
 
@@ -1929,12 +1928,12 @@ func TestFSNoPanicOnRemoveMsg(t *testing.T) {
 	ms.Lock()
 	idxFile := ms.files[1].idxFile
 	ms.fm.closeLockedOrOpenedFile(idxFile)
-	content, err := ioutil.ReadFile(idxFile.name)
+	content, err := os.ReadFile(idxFile.name)
 	if err != nil {
 		t.Fatalf("Error reading file: %v", err)
 	}
 	copy(content[4:], []byte("xxx"))
-	if err := ioutil.WriteFile(idxFile.name, content, 0600); err != nil {
+	if err := os.WriteFile(idxFile.name, content, 0600); err != nil {
 		t.Fatalf("Error writing file: %v", err)
 	}
 	ms.Unlock()
@@ -2331,12 +2330,12 @@ func TestFSExpirationError(t *testing.T) {
 	ms.Lock()
 	idxFile := ms.files[1].idxFile
 	ms.fm.closeLockedOrOpenedFile(idxFile)
-	content, err := ioutil.ReadFile(idxFile.name)
+	content, err := os.ReadFile(idxFile.name)
 	if err != nil {
 		t.Fatalf("Error reading file: %v", err)
 	}
 	copy(content[4:], []byte("xxx"))
-	if err := ioutil.WriteFile(idxFile.name, content, 0600); err != nil {
+	if err := os.WriteFile(idxFile.name, content, 0600); err != nil {
 		t.Fatalf("Error writing file: %v", err)
 	}
 	ms.Unlock()
@@ -2385,7 +2384,7 @@ func TestFSMsgsFileVersionError(t *testing.T) {
 			s.Close()
 
 			os.Remove(fname)
-			if err := ioutil.WriteFile(fname, []byte(""), 0666); err != nil {
+			if err := os.WriteFile(fname, []byte(""), 0666); err != nil {
 				t.Fatalf("Error writing file: %v", err)
 			}
 

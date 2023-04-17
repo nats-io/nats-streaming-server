@@ -18,9 +18,10 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"net/http"
+	"os"
 	"reflect"
 	"runtime"
 	"strings"
@@ -81,7 +82,7 @@ func getBodyEx(t *testing.T, client *http.Client, scheme, endpoint string, mp, e
 	if ct != expectedContentType {
 		stackFatalf(t, "Expected %s content-type, got %s\n", expectedContentType, ct)
 	}
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		resp.Body.Close()
 		stackFatalf(t, "Got an error reading the body: %v\n", err)
@@ -155,7 +156,7 @@ func TestMonitorStartOwnHTTPSServer(t *testing.T) {
 	defer s.Shutdown()
 
 	tlsConfig := &tls.Config{}
-	caCert, err := ioutil.ReadFile("../test/certs/ca.pem")
+	caCert, err := os.ReadFile("../test/certs/ca.pem")
 	if err != nil {
 		t.Fatalf("Got error reading RootCA file: %s", err)
 	}
@@ -1494,7 +1495,7 @@ func TestMonitorNoPanicOnServerRestart(t *testing.T) {
 				if err != nil {
 					continue
 				}
-				ioutil.ReadAll(resp.Body)
+				io.ReadAll(resp.Body)
 				resp.Body.Close()
 				select {
 				case <-done:

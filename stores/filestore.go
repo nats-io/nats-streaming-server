@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -740,8 +739,10 @@ func checkFileVersion(r io.Reader) error {
 
 // writeRecord writes a record to `w`.
 // The record layout is as follows:
-// 8 bytes: 4 bytes for type and/or size combined
-//          4 bytes for CRC-32
+// 8 bytes:
+// - 4 bytes for type and/or size combined
+// - 4 bytes for CRC-32
+//
 // variable bytes: payload.
 // If a buffer is provided, this function uses it and expands it if necessary.
 // The function returns the buffer (possibly changed due to expansion) and the
@@ -793,7 +794,7 @@ func writeRecord(w io.Writer, buf []byte, recType recordType, rec record, recSiz
 }
 
 // readRecord reads a record from `r`, possibly checking the CRC-32 checksum.
-// When `buf`` is not nil, this function ensures the buffer is big enough to
+// When `buf` is not nil, this function ensures the buffer is big enough to
 // hold the payload (expanding if necessary). Therefore, this call always
 // return `buf`, regardless if there is an error or not.
 // The caller is indicating if the record is supposed to be typed or not.
@@ -1443,7 +1444,7 @@ func (fs *FileStore) Recover() (*RecoveredState, error) {
 }
 
 func (fs *FileStore) getChannelsDir() ([]os.FileInfo, error) {
-	files, err := ioutil.ReadDir(fs.fm.rootDir)
+	files, err := os.ReadDir(fs.fm.rootDir)
 	if err != nil {
 		return nil, err
 	}
@@ -1452,7 +1453,11 @@ func (fs *FileStore) getChannelsDir() ([]os.FileInfo, error) {
 		if !f.IsDir() {
 			continue
 		}
-		channels = append(channels, f)
+		finfo, err := f.Info()
+		if err != nil {
+			return nil, err
+		}
+		channels = append(channels, finfo)
 	}
 	return channels, nil
 }
@@ -1872,7 +1877,7 @@ func (fs *FileStore) compactClientFile(orgFileName string) error {
 
 // Return a temporary file (including file version)
 func getTempFile(rootDir, prefix string) (*os.File, error) {
-	tmpFile, err := ioutil.TempFile(rootDir, prefix)
+	tmpFile, err := os.CreateTemp(rootDir, prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -2048,15 +2053,20 @@ func (fs *FileStore) newFileMsgStore(channelDirName, channel string, limits *Msg
 
 	// Recovery case
 	if doRecover {
-		var dirFiles []os.FileInfo
+		var dirEntries []os.DirEntry
 		var fseq int64
 		var datFile, idxFile *file
 		var useIdxFile bool
 
-		dirFiles, err = ioutil.ReadDir(channelDirName)
-		for _, file := range dirFiles {
-			if file.IsDir() {
+		dirEntries, err = os.ReadDir(channelDirName)
+		for _, entry := range dirEntries {
+			if entry.IsDir() {
 				continue
+			}
+			file, ierr := entry.Info()
+			if ierr != nil {
+				err = ierr
+				break
 			}
 			fileName := file.Name()
 			if !strings.HasPrefix(fileName, msgFilesPrefix) || !strings.HasSuffix(fileName, datSuffix) {

@@ -143,7 +143,6 @@ type Channel struct {
 // If an implementation has a Store constructor with StoreLimits, it should be
 // noted that the limits don't apply to any state being recovered, for Store
 // implementations supporting recovery.
-//
 type Store interface {
 	// GetExclusiveLock is an advisory lock to prevent concurrent
 	// access to the store from multiple instances.

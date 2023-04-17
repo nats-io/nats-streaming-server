@@ -15,7 +15,6 @@ package stores
 
 import (
 	"hash/crc32"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -911,7 +910,7 @@ func TestFSSubscriptionsFileVersionError(t *testing.T) {
 	s.Close()
 
 	os.Remove(fname)
-	if err := ioutil.WriteFile(fname, []byte(""), 0666); err != nil {
+	if err := os.WriteFile(fname, []byte(""), 0666); err != nil {
 		t.Fatalf("Error writing file: %v", err)
 	}
 

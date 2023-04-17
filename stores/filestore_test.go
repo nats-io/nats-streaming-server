@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path"
@@ -46,7 +45,7 @@ var (
 var testFDsLimit = int64(5)
 
 func init() {
-	tmpDir, err := ioutil.TempDir(".", "data_stores_")
+	tmpDir, err := os.MkdirTemp(".", "data_stores_")
 	if err != nil {
 		panic("Could not create tmp dir")
 	}
@@ -1774,8 +1773,8 @@ func TestFSParallelRecovery(t *testing.T) {
 	numRoutines := runtime.NumGoroutine()
 	// Make several channels fail to recover
 	fname := fmt.Sprintf("%s.1.%s", msgFilesPrefix, datSuffix)
-	ioutil.WriteFile(filepath.Join(testFSDefaultDatastore, "foo.50", fname), []byte("dummy"), 0666)
-	ioutil.WriteFile(filepath.Join(testFSDefaultDatastore, "foo.51", fname), []byte("dummy"), 0666)
+	os.WriteFile(filepath.Join(testFSDefaultDatastore, "foo.50", fname), []byte("dummy"), 0666)
+	os.WriteFile(filepath.Join(testFSDefaultDatastore, "foo.51", fname), []byte("dummy"), 0666)
 	s, err := NewFileStore(testLogger, testFSDefaultDatastore, &testDefaultStoreLimits, ParallelRecovery(10))
 	if err == nil {
 		_, err = s.Recover()
@@ -2089,7 +2088,7 @@ func TestFSServerAndClientFilesVersionError(t *testing.T) {
 
 			s.Close()
 			os.Remove(fname)
-			if err := ioutil.WriteFile(fname, []byte(""), 0666); err != nil {
+			if err := os.WriteFile(fname, []byte(""), 0666); err != nil {
 				t.Fatalf("Error creating file: %v", err)
 			}
 
