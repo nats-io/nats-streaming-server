@@ -273,8 +273,11 @@ func TestRAFTTransportAppendEntriesPipeline(t *testing.T) {
 
 	ch := make(chan error, 1)
 
+	wg := sync.WaitGroup{}
+	wg.Add(2)
 	// Listen for a request
 	go func() {
+		defer wg.Done()
 		for i := 0; i < 10; i++ {
 			select {
 			case rpc := <-rpcCh:
@@ -291,7 +294,6 @@ func TestRAFTTransportAppendEntriesPipeline(t *testing.T) {
 				return
 			}
 		}
-		close(ch)
 	}()
 
 	// Transport 2 makes outbound request
@@ -308,6 +310,25 @@ func TestRAFTTransportAppendEntriesPipeline(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	defer pipeline.Close()
+
+	go func() {
+		defer wg.Done()
+		respCh := pipeline.Consumer()
+		for i := 0; i < 10; i++ {
+			select {
+			case ready := <-respCh:
+				// Verify the response
+				if !reflect.DeepEqual(&resp, ready.Response()) {
+					ch <- fmt.Errorf("command mismatch: %#v %#v", &resp, ready.Response())
+					return
+				}
+			case <-time.After(200 * time.Millisecond):
+				ch <- fmt.Errorf("timeout")
+				return
+			}
+		}
+	}()
+
 	for i := 0; i < 10; i++ {
 		out := new(raft.AppendEntriesResponse)
 		if _, err := pipeline.AppendEntries(&args, out); err != nil {
@@ -315,22 +336,11 @@ func TestRAFTTransportAppendEntriesPipeline(t *testing.T) {
 		}
 	}
 
-	err = <-ch
-	if err != nil {
+	wg.Wait()
+	select {
+	case err := <-ch:
 		t.Fatal(err)
-	}
-
-	respCh := pipeline.Consumer()
-	for i := 0; i < 10; i++ {
-		select {
-		case ready := <-respCh:
-			// Verify the response
-			if !reflect.DeepEqual(&resp, ready.Response()) {
-				t.Fatalf("command mismatch: %#v %#v", &resp, ready.Response())
-			}
-		case <-time.After(200 * time.Millisecond):
-			t.Fatalf("timeout")
-		}
+	default:
 	}
 }
 
