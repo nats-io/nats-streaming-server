@@ -15,8 +15,8 @@ require (
 	github.com/nats-io/stan.go v0.10.4
 	github.com/prometheus/procfs v0.11.0
 	go.etcd.io/bbolt v1.3.7
-	golang.org/x/crypto v0.12.0
-	golang.org/x/sys v0.11.0
+	golang.org/x/crypto v0.14.0
+	golang.org/x/sys v0.13.0
 )
 
 require (
@@ -30,6 +30,6 @@ require (
 	github.com/mattn/go-isatty v0.0.14 // indirect
 	github.com/minio/highwayhash v1.0.2 // indirect
 	github.com/nats-io/jwt/v2 v2.5.0 // indirect
-	github.com/nats-io/nkeys v0.4.4 // indirect
+	github.com/nats-io/nkeys v0.4.6 // indirect
 	golang.org/x/time v0.3.0 // indirect
 )
