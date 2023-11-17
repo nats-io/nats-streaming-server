@@ -198,7 +198,6 @@ func (s *StanServer) ftSetup() error {
 			ftHBInterval, ftHBMissedInterval)
 	}
 	// Set the HB and MissedHB intervals, using a bit of randomness
-	rand.Seed(time.Now().UnixNano())
 	s.ftHBInterval = ftGetRandomInterval(ftHBInterval)
 	s.ftHBMissedInterval = ftGetRandomInterval(ftHBMissedInterval)
 	// Subscribe to FT subject
