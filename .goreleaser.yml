@@ -16,7 +16,7 @@ builds:
   flags:
     - -trimpath
   ldflags:
-    - -w -X github.com/nats-io/nats-streaming-server/server.gitCommit={{.ShortCommit}} -X github.com/nats-io/nats-server/v2/server.gitCommit=f4f3cce
+    - -w -X github.com/nats-io/nats-streaming-server/server.gitCommit={{.ShortCommit}} -X github.com/nats-io/nats-server/v2/server.gitCommit=e43cfb4
   env:
     - GO111MODULE=on
     - CGO_ENABLED=0
