@@ -10,7 +10,7 @@ The NATS Streaming Server is being deprecated.  Critical bug fixes and security 
 
 ## Documentation
 
-* [Official documentation](https://docs.nats.io/legacy/stan)
+* [Official documentation](https://nats-io.gitbook.io/legacy-nats-docs/nats-streaming-server-aka-stan)
 
 ## Clients
 
